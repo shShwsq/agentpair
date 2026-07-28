@@ -189,7 +189,7 @@ def _stream_user_agent_llm(
 
     try:
         for chunk in client.chat_stream(messages, max_tokens=2048):
-            # 思考链增量
+            # 思考链增量(推给前端流式卡片显示)
             if chunk.reasoning_delta:
                 reasoning_full += chunk.reasoning_delta
                 publish(task_id, "thinking_delta", {
@@ -200,16 +200,12 @@ def _stream_user_agent_llm(
                     "delta": chunk.reasoning_delta,
                 })
 
-            # 正式回答增量(JSON 内容)
+            # 正式回答增量(JSON 结构化评估结果)
+            # 注意:content 是 JSON 原文,人类可读性差,且后端会把它格式化成
+            # evaluation 卡片落库展示。这里只累积不推送,避免前端流式卡片
+            # 重复显示同一份信息的 JSON 原文。
             if chunk.content_delta:
                 content_full += chunk.content_delta
-                publish(task_id, "thinking_delta", {
-                    "conv_id": conv_id,
-                    "round_idx": round_idx,
-                    "role": "user_agent",
-                    "phase": "content",
-                    "delta": chunk.content_delta,
-                })
 
             if chunk.finish_reason:
                 logger.debug(

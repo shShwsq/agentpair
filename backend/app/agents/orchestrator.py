@@ -167,7 +167,12 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
 def _record_user_agent(
     db: Session, task: Task, round_idx: int, ua_result: dict
 ) -> None:
-    """把 user_agent 的输出记录到 Conversation 表"""
+    """把 user_agent 的输出记录到 Conversation 表
+
+    一条 evaluation 卡片包含完整评估(覆盖情况 + 判断 + 追问),
+    不再单独记 followup 条目(避免与 evaluation 末尾的"追问: ..."重复)。
+    react_agent 接收追问是通过函数参数传递的,不依赖 Conversation 表。
+    """
     covered = ua_result.get("covered", [])
     missing = ua_result.get("missing", [])
     reasoning = ua_result.get("reasoning", "")
@@ -190,14 +195,6 @@ def _record_user_agent(
         role="user_agent", type="evaluation",
         content=content,
     )
-
-    # followup_query 单独记一条
-    if followup and not done:
-        _add_conversation(
-            db, task, round_idx=round_idx,
-            role="user_agent", type="followup",
-            content=followup,
-        )
 
 
 def _add_conversation(
