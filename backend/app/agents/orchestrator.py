@@ -57,8 +57,9 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         _publish_status(task)
 
         ua_result_0 = run_user_agent(
-            user_intent, [], scenario_id,
+            user_intent, [],
             task_id=task.id, round_idx=0,
+            scenario_id=scenario_id,
         )
         _record_user_agent(db, task, 0, ua_result_0)
 
@@ -93,8 +94,9 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             _publish_status(task)
 
             ua_result = run_user_agent(
-                user_intent, react_summaries, scenario_id,
+                user_intent, react_summaries,
                 task_id=task.id, round_idx=round_idx,
+                scenario_id=scenario_id,
             )
             _record_user_agent(db, task, round_idx, ua_result)
 
