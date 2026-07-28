@@ -231,21 +231,48 @@ const roundGroups = computed(() => {
 
   const groups = new Map<number, DisplayItem[]>()
 
-  // 加入正式对话
+  // 加入正式对话:
+  // - type=thinking 且有 reasoning → 转成流式卡片样式展示(只读,状态 done,reasoning 折叠)
+  //   这样刷新页面后历史的思考过程仍以流式卡片的形式展示,和实时流式视觉一致
+  // - 其他类型 → 正常对话项
   for (const c of task.value?.conversations ?? []) {
-    if (!groups.has(c.round_idx)) groups.set(c.round_idx, [])
-    groups.get(c.round_idx)!.push({
-      id: c.id,
-      round_idx: c.round_idx,
-      created_at: c.created_at,
-      is_streaming: false,
-      role: c.role,
-      type: c.type,
-      content: c.content,
-    })
+    if (c.type === 'thinking' && c.reasoning) {
+      // 还原为流式卡片(只读模式)
+      const streamingItem: StreamingItem = {
+        conv_id: `history:${c.id}`,
+        round_idx: c.round_idx,
+        role: c.role as 'react_agent' | 'user_agent',
+        reasoning: c.reasoning,
+        content: c.content,
+        status: 'done',
+        started_at: c.created_at,
+        finished_at: c.created_at,
+        reasoning_expanded: false,
+      }
+      if (!groups.has(c.round_idx)) groups.set(c.round_idx, [])
+      groups.get(c.round_idx)!.push({
+        id: `stream:history:${c.id}`,
+        round_idx: c.round_idx,
+        created_at: c.created_at,
+        is_streaming: true,
+        streaming: streamingItem,
+      })
+    } else {
+      // 正常对话项
+      if (!groups.has(c.round_idx)) groups.set(c.round_idx, [])
+      groups.get(c.round_idx)!.push({
+        id: c.id,
+        round_idx: c.round_idx,
+        created_at: c.created_at,
+        is_streaming: false,
+        role: c.role,
+        type: c.type,
+        content: c.content,
+      })
+    }
   }
 
-  // 加入流式思考项
+  // 加入实时流式思考项(SSE 期间)
   for (const item of streamingItems.values()) {
     if (!groups.has(item.round_idx)) groups.set(item.round_idx, [])
     groups.get(item.round_idx)!.push({

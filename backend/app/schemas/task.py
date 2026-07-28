@@ -51,6 +51,8 @@ class ConversationResponse(BaseModel):
     role: str
     type: str
     content: str
+    # 思考链(仅 type=thinking 有,模型 reasoning_content 输出)
+    reasoning: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

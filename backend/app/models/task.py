@@ -94,6 +94,9 @@ class Conversation(Base):
     #   error
     type: Mapped[str] = mapped_column(String(32), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    # 思考链(reasoning_content):仅 type=thinking 有,模型一边想一边输出的临时过程
+    # 落库以便刷新页面后仍可查看;其他 type 此字段为 None
+    reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

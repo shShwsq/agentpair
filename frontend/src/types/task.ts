@@ -49,6 +49,13 @@ export interface Conversation {
   /** 消息类型:evaluation/followup/thinking/tool_call/tool_result/submit/summary/error */
   type: string
   content: string
+  /**
+   * 思考链(仅 type=thinking 有,模型 reasoning_content 输出)
+   *
+   * 流式期间通过 thinking_delta 实时推送,完成后落库到此字段。
+   * 刷新页面后从 GET /tasks/{id} 拿到,用于还原流式卡片(只读模式,不再实时打字)。
+   */
+  reasoning?: string | null
   created_at: string
 }
 

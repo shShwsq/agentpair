@@ -127,14 +127,15 @@ def run_react_agent(
             ]
         messages.append(assistant_msg)
 
-        # 落库思考(content 部分),reasoning 不入 Conversation 表(只在 thinking_delta 实时显示)
+        # 落库思考(content + reasoning),供刷新页面后查看
         # 不推送 SSE!流式卡片已经完整展示了 content + reasoning,
         # 再推 conversation 事件会重复。迟到订阅者通过 GET /tasks/{id} 快照拿完整对话。
-        if content_full:
+        if content_full or reasoning_full:
             _add_conversation(
                 db, task, round_idx=round_idx,
                 role="react_agent", type="thinking",
                 content=content_full,
+                reasoning=reasoning_full,
                 publish_event=False,
             )
 
@@ -410,11 +411,13 @@ def _stream_llm_response(
 
 def _add_conversation(
     db: Session, task: Task, *, round_idx: int, role: str, type: str, content: str,
+    reasoning: str | None = None,
     publish_event: bool = True,
 ) -> None:
     """记录一条对话(带 round_idx),可选推送事件给前端 SSE
 
     参数:
+        reasoning: 思考链(仅 type=thinking 有,模型 reasoning_content 输出)
         publish_event: 是否推送 conversation 事件给前端。
             - True(默认):工具调用/结果/提交/用户指令/user_agent 评估等,
               前端通过 SSE 实时追加到对话列表
@@ -428,6 +431,7 @@ def _add_conversation(
         role=role,
         type=type,
         content=content,
+        reasoning=reasoning,
     )
     db.add(conv)
     db.commit()
