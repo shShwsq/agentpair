@@ -1,0 +1,330 @@
+"""认证授权路由
+
+路由:
+- POST   /auth/register              邮箱密码注册
+- POST   /auth/verify-email          验证邮箱
+- POST   /auth/resend-verification   重发验证邮件
+- POST   /auth/login                邮箱密码登录
+- POST   /auth/refresh               刷新 access token
+- GET    /auth/me                    当前用户信息(需登录)
+- POST   /auth/password/forgot       忘记密码(发重置邮件)
+- POST   /auth/password/reset        重置密码
+- POST   /auth/oauth/github          GitHub OAuth 登录
+"""
+import logging
+import uuid
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.deps import get_current_user
+from app.email_service import (
+    create_email_verification_token,
+    create_password_reset_token,
+    mark_token_used,
+    send_password_reset_email,
+    send_verification_email,
+    verify_token,
+)
+from app.github_oauth import GitHubOAuthError, github_oauth_login
+from app.models.email_token import EmailTokenType
+from app.models.user import User
+from app.schemas.user import (
+    ForgotPasswordRequest,
+    GitHubOAuthRequest,
+    LoginRequest,
+    MessageResponse,
+    RefreshRequest,
+    RefreshResponse,
+    RegisterRequest,
+    ResendVerificationRequest,
+    ResetPasswordRequest,
+    TokenResponse,
+    UserResponse,
+    VerifyEmailRequest,
+)
+from app.security import (
+    TokenExpiredError,
+    TokenInvalidError,
+    create_token_pair,
+    create_access_token,
+    extract_user_id_from_token,
+    hash_password,
+    verify_password,
+)
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+# ============================================================
+# 注册
+# ============================================================
+
+
+@router.post("/register", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
+def register(req: RegisterRequest, db: Session = Depends(get_db)) -> MessageResponse:
+    """邮箱密码注册
+
+    - 邮箱已存在 → 409
+    - 注册成功 → 自动发验证邮件,返回 201
+    """
+    existing = db.query(User).filter(User.email == req.email).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="该邮箱已注册",
+        )
+
+    user = User(
+        email=req.email,
+        password_hash=hash_password(req.password),
+    )
+    db.add(user)
+    db.flush()
+
+    # 生成验证 token + 发邮件
+    token_plain = create_email_verification_token(db, user.id)
+    db.commit()
+
+    # 发邮件(commit 后再发,避免事务失败但邮件已发)
+    send_verification_email(user, token_plain)
+
+    return MessageResponse(message="注册成功,请查收邮件验证邮箱")
+
+
+# ============================================================
+# 邮箱验证
+# ============================================================
+
+
+@router.post("/verify-email", response_model=MessageResponse)
+def verify_email(req: VerifyEmailRequest, db: Session = Depends(get_db)) -> MessageResponse:
+    """验证邮箱(token 来自注册邮件)"""
+    token_record = verify_token(db, req.token, EmailTokenType.VERIFY_EMAIL)
+    if not token_record:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="验证链接无效或已过期,请重新申请",
+        )
+
+    user = db.query(User).filter(User.id == token_record.user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="用户不存在",
+        )
+
+    if user.is_email_verified:
+        # 已验证,标记 token 已用(幂等)
+        mark_token_used(db, token_record)
+        db.commit()
+        return MessageResponse(message="邮箱已验证(此前已完成)")
+
+    user.email_verified_at = datetime.now(timezone.utc)
+    mark_token_used(db, token_record)
+    db.commit()
+
+    return MessageResponse(message="邮箱验证成功,现在可以登录")
+
+
+@router.post("/resend-verification", response_model=MessageResponse)
+def resend_verification(
+    req: ResendVerificationRequest, db: Session = Depends(get_db)
+) -> MessageResponse:
+    """重发验证邮件(若用户未验证)"""
+    user = db.query(User).filter(User.email == req.email).first()
+    if not user:
+        # 不暴露邮箱是否注册,统一返回成功
+        return MessageResponse(message="若该邮箱已注册且未验证,邮件已发送")
+    if user.is_email_verified:
+        return MessageResponse(message="若该邮箱已注册且未验证,邮件已发送")
+
+    token_plain = create_email_verification_token(db, user.id)
+    db.commit()
+    send_verification_email(user, token_plain)
+
+    return MessageResponse(message="若该邮箱已注册且未验证,邮件已发送")
+
+
+# ============================================================
+# 登录 / 刷新
+# ============================================================
+
+
+@router.post("/login", response_model=TokenResponse)
+def login(req: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
+    """邮箱密码登录
+
+    - 邮箱不存在 / 密码错 → 401(统一信息,防爆破枚举)
+    - 未验证邮箱 → 403
+    """
+    user = db.query(User).filter(User.email == req.email).first()
+    if not user or not verify_password(req.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="邮箱或密码错误",
+        )
+
+    if not user.is_email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="邮箱未验证,请先查收验证邮件",
+        )
+
+    access, refresh = create_token_pair(user.id)
+    return TokenResponse(
+        access_token=access,
+        refresh_token=refresh,
+        user=UserResponse.from_user(user),
+    )
+
+
+@router.post("/refresh", response_model=RefreshResponse)
+def refresh(req: RefreshRequest, db: Session = Depends(get_db)) -> RefreshResponse:
+    """用 refresh token 换新的 access token"""
+    try:
+        user_id = extract_user_id_from_token(req.refresh_token, expected_type="refresh")
+    except TokenExpiredError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="refresh token 已过期,请重新登录",
+        )
+    except TokenInvalidError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"refresh token 无效: {e}",
+        )
+
+    # 校验用户仍存在
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户不存在",
+        )
+
+    return RefreshResponse(access_token=create_access_token(user.id))
+
+
+# ============================================================
+# 当前用户
+# ============================================================
+
+
+@router.get("/me", response_model=UserResponse)
+def get_me(user: User = Depends(get_current_user)) -> UserResponse:
+    """获取当前登录用户信息"""
+    return UserResponse.from_user(user)
+
+
+# ============================================================
+# 忘记密码 / 重置密码
+# ============================================================
+
+
+@router.post("/password/forgot", response_model=MessageResponse)
+def forgot_password(
+    req: ForgotPasswordRequest, db: Session = Depends(get_db)
+) -> MessageResponse:
+    """忘记密码(发重置邮件)
+
+    - 邮箱不存在也返回成功(防爆破枚举)
+    """
+    user = db.query(User).filter(User.email == req.email).first()
+    if not user:
+        return MessageResponse(message="若该邮箱已注册,重置邮件已发送")
+
+    token_plain = create_password_reset_token(db, user.id)
+    db.commit()
+    send_password_reset_email(user, token_plain)
+
+    return MessageResponse(message="若该邮箱已注册,重置邮件已发送")
+
+
+@router.post("/password/reset", response_model=MessageResponse)
+def reset_password(
+    req: ResetPasswordRequest, db: Session = Depends(get_db)
+) -> MessageResponse:
+    """重置密码(token 来自重置邮件)"""
+    token_record = verify_token(db, req.token, EmailTokenType.RESET_PASSWORD)
+    if not token_record:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="重置链接无效或已过期,请重新申请",
+        )
+
+    user = db.query(User).filter(User.id == token_record.user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="用户不存在",
+        )
+
+    user.password_hash = hash_password(req.new_password)
+    mark_token_used(db, token_record)
+    db.commit()
+
+    return MessageResponse(message="密码重置成功,请用新密码登录")
+
+
+# ============================================================
+# GitHub OAuth
+# ============================================================
+
+
+@router.post("/oauth/github", response_model=TokenResponse)
+def github_oauth(
+    req: GitHubOAuthRequest, db: Session = Depends(get_db)
+) -> TokenResponse:
+    """GitHub OAuth 登录
+
+    - code 换 access_token 换用户信息
+    - github_id 已绑定 → 登录
+    - github_id 未绑定,email 已注册 → 关联 github_id
+    - github_id 未绑定,email 也未注册 → 自动创建账号(无密码)
+    """
+    try:
+        gh_user = github_oauth_login(req.code)
+    except GitHubOAuthError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    # 1. github_id 已绑定
+    user = db.query(User).filter(User.github_id == gh_user.github_id).first()
+    if not user and gh_user.email:
+        # 2. email 已注册,关联 github_id
+        user = db.query(User).filter(User.email == gh_user.email).first()
+        if user:
+            user.github_id = gh_user.github_id
+
+    if not user:
+        # 3. 完全新用户,自动创建(无密码,只走 OAuth)
+        if not gh_user.email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="GitHub 账号无可用邮箱,无法自动注册",
+            )
+        user = User(
+            email=gh_user.email,
+            password_hash="",  # OAuth 用户无密码
+            github_id=gh_user.github_id,
+            # OAuth 已隐含邮箱验证(GitHub 已 verified)
+            email_verified_at=datetime.now(timezone.utc),
+        )
+        db.add(user)
+        db.flush()
+
+    db.commit()
+
+    access, refresh = create_token_pair(user.id)
+    return TokenResponse(
+        access_token=access,
+        refresh_token=refresh,
+        user=UserResponse.from_user(user),
+    )

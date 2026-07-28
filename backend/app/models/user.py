@@ -1,12 +1,12 @@
 """用户模型
 
 邮箱密码注册登录,GitHub 关联后续作为可选绑定(见 spec 8.5)
-阶段 0 暂不实现登录逻辑,仅建表
+阶段 6 实现:JWT 鉴权 + 邮箱验证 + 重置密码 + GitHub OAuth
 """
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String, func
+from sqlalchemy import DateTime, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,9 +24,11 @@ class User(Base):
     )
     # bcrypt 加盐哈希
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    # 邮箱验证后激活,阶段 6 实现
-    is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    # GitHub 绑定相关(阶段 6 后续实现)
+    # 邮箱验证时间(为空表示未验证,登录受限)
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    # GitHub 绑定(为空表示未绑定)
     github_id: Mapped[str | None] = mapped_column(
         String(255), unique=True, nullable=True
     )
@@ -40,3 +42,8 @@ class User(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+    # 便捷属性(非数据库字段)
+    @property
+    def is_email_verified(self) -> bool:
+        return self.email_verified_at is not None

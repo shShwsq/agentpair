@@ -15,7 +15,9 @@ from sqlalchemy.orm import Session
 
 from app.agents.orchestrator import run_dual_agent_audit
 from app.database import get_db
+from app.deps import get_optional_user
 from app.models.task import Task, TaskStatus
+from app.models.user import User
 from app.scenarios.base import list_scenarios
 from app.schemas.task import (
     ScenarioInfo,
@@ -34,7 +36,11 @@ def list_all_scenarios() -> list[dict[str, str]]:
 
 
 @router.post("/tasks", response_model=TaskCreateResponse, status_code=status.HTTP_201_CREATED)
-def create_task(req: TaskCreateRequest, db: Session = Depends(get_db)) -> Task:
+def create_task(
+    req: TaskCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> Task:
     """提交任务
 
     阶段 4:双智能体协作(user_agent 驱动 react_agent 多轮追问)
@@ -42,6 +48,8 @@ def create_task(req: TaskCreateRequest, db: Session = Depends(get_db)) -> Task:
     支持两种提交方式:
     - 通用:scenario + user_input + params
     - 兼容旧 API:传 repo_url,自动转成 user_input + params
+
+    阶段 6:可选鉴权,有 token 则关联 user_id,无 token 也允许匿名提交
     """
     user_input, params = _normalize_request(req)
 
@@ -49,6 +57,7 @@ def create_task(req: TaskCreateRequest, db: Session = Depends(get_db)) -> Task:
         scenario=req.scenario,
         user_input=user_input,
         params=params,
+        user_id=current_user.id if current_user else None,
         status=TaskStatus.PENDING,
         current_stage="已提交,等待执行",
     )
@@ -63,11 +72,24 @@ def create_task(req: TaskCreateRequest, db: Session = Depends(get_db)) -> Task:
 
 
 @router.get("/tasks/{task_id}", response_model=TaskResponse)
-def get_task(task_id: uuid.UUID, db: Session = Depends(get_db)) -> Task:
-    """查询任务详情,包含对话记录与结果"""
+def get_task(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> Task:
+    """查询任务详情,包含对话记录与结果
+
+    阶段 6:若任务关联了 user_id,则只允许该用户访问;匿名任务任何人可访问
+    """
     task = db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+
+    # 权限:任务归属用户或匿名任务可访问
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权访问此任务")
+
     return task
 
 

@@ -5,7 +5,7 @@ from fastapi import FastAPI
 
 from app.config import settings
 from app.database import Base, engine
-from app.routers import health, skills, tasks
+from app.routers import auth, health, skills, tasks
 
 # 导入场景模块,触发注册
 from app.scenarios import security_audit  # noqa: F401
@@ -22,7 +22,7 @@ async def lifespan(app: FastAPI):
     开发期用 drop_all + create_all 快速重建(数据会丢)
     生产环境应切换到 Alembic 迁移管理 schema 变更
     """
-    from app.models import task, user  # noqa: F401
+    from app.models import email_token, task, user  # noqa: F401
 
     # 开发期:重建表(字段变更时需要)
     if settings.APP_DEBUG:
@@ -41,6 +41,7 @@ app = FastAPI(
 app.include_router(health.router)
 app.include_router(tasks.router)
 app.include_router(skills.router)
+app.include_router(auth.router)
 
 
 @app.get("/")

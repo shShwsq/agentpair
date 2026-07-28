@@ -20,11 +20,18 @@ class Settings(BaseSettings):
     APP_DEBUG: bool = True
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
+    # 邮件链接的基础 URL(开发期指向前端 dev server 或后端)
+    APP_BASE_URL: str = "http://localhost:5173"
 
     # JWT(阶段 6 用)
     JWT_SECRET: str = "change_me_in_production"
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 1440
+
+    # GitHub OAuth(阶段 6 用,留空则 /auth/oauth/github 报错)
+    GITHUB_OAUTH_CLIENT_ID: str = ""
+    GITHUB_OAUTH_CLIENT_SECRET: str = ""
+    GITHUB_OAUTH_REDIRECT_URI: str = "http://localhost:5173/auth/github/callback"
 
     # LLM(阶段 1:开发期单 provider 配置)
     LLM_PROVIDER: str = "dashscope"
