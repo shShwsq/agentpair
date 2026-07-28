@@ -14,6 +14,8 @@ class Settings(BaseSettings):
 
     # 数据库
     DATABASE_URL: str = "postgresql+psycopg://localhost/agentpair"
+    # 显式开启才会 drop_all + create_all 重建表,避免每次启动丢数据
+    DB_REBUILD_ON_START: bool = False
 
     # 应用
     APP_ENV: str = "development"

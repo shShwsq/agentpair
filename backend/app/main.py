@@ -19,13 +19,13 @@ reload_registry()
 async def lifespan(app: FastAPI):
     """应用生命周期:启动时建表
 
-    开发期用 drop_all + create_all 快速重建(数据会丢)
-    生产环境应切换到 Alembic 迁移管理 schema 变更
+    默认仅 create_all(幂等,不会重建已存在的表)。
+    需要 schema 变更时,在 .env 设置 DB_REBUILD_ON_START=true 触发 drop_all,
+    生产环境应切换到 Alembic 迁移管理 schema 变更。
     """
     from app.models import email_token, task, user  # noqa: F401
 
-    # 开发期:重建表(字段变更时需要)
-    if settings.APP_DEBUG:
+    if settings.DB_REBUILD_ON_START:
         Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     yield
