@@ -55,9 +55,17 @@ interface StreamingItem {
   finished_at?: string
   /** reasoning 是否展开(默认折叠,流式期间自动展开,完成后折叠) */
   reasoning_expanded: boolean
+  /** 全局递增序号(流式项到达顺序,用于调试) */
+  seq: number
+  /** 该流式 thinking 开始时,其所在 round 已收到的正式对话数(用于计算插入位置) */
+  insertSeq: number
 }
 
 const streamingItems = reactive<Map<string, StreamingItem>>(new Map())
+/** 全局序号计数器:流式项到达顺序 */
+let streamingSeqCounter = 0
+/** 每 round 已收到的正式对话数(用于给 streamingItem 计算插入位置 seq) */
+const convCountPerRound = reactive<Map<number, number>>(new Map())
 
 // ---- 加载 + SSE 订阅 ----
 
@@ -105,6 +113,11 @@ function connectSSE(taskId: string): void {
         created_at: data.created_at || new Date().toISOString(),
       }
       task.value.conversations.push(conv)
+      // 维护该 round 的正式对话计数(供 streamingItem 计算插入位置 seq)
+      convCountPerRound.set(
+        data.round_idx,
+        (convCountPerRound.get(data.round_idx) ?? 0) + 1,
+      )
       // 自动滚动到底部
       nextTick(scrollToBottom)
     },
@@ -142,6 +155,9 @@ function handleThinkingDelta(data: ThinkingDeltaEventData): void {
 
   if (phase === 'start') {
     // 创建新的流式项:流式期间 reasoning 默认展开(用户能看到模型在怎么想)
+    // 记录该 round 当前已收到的正式对话数,用于后续 seq 计算(让 thinking 排在
+    // 它之后的 tool_call 之前,而非所有 thinking 都挤在最前面)
+    const insertSeq = convCountPerRound.get(round_idx) ?? 0
     streamingItems.set(conv_id, {
       conv_id,
       round_idx,
@@ -152,6 +168,8 @@ function handleThinkingDelta(data: ThinkingDeltaEventData): void {
       status: 'streaming',
       started_at: new Date().toISOString(),
       reasoning_expanded: true,
+      seq: streamingSeqCounter++,
+      insertSeq,
     })
     return
   }
@@ -159,6 +177,7 @@ function handleThinkingDelta(data: ThinkingDeltaEventData): void {
   const item = streamingItems.get(conv_id)
   if (!item) {
     // 没收到 start 事件就来了 delta,创建一个
+    const insertSeq = convCountPerRound.get(round_idx) ?? 0
     streamingItems.set(conv_id, {
       conv_id,
       round_idx,
@@ -169,6 +188,8 @@ function handleThinkingDelta(data: ThinkingDeltaEventData): void {
       status: 'streaming',
       started_at: new Date().toISOString(),
       reasoning_expanded: true,
+      seq: streamingSeqCounter++,
+      insertSeq,
     })
   }
 
@@ -230,6 +251,8 @@ interface DisplayItem {
   created_at: string
   /** 是否流式思考项 */
   is_streaming: boolean
+  /** 稳定排序序号:正式对话用数组下标,流式项用全局计数器(避免跨来源 created_at 时钟漂移) */
+  seq: number
   /** 正式对话字段 */
   role?: string
   type?: string
@@ -348,8 +371,21 @@ const roundGroups = computed<RoundGroup[]>(() => {
   // 加入正式对话:
   // - type=thinking 且有 reasoning → 转成流式卡片样式展示(只读,状态 done,reasoning 折叠)
   //   这样刷新页面后历史的思考过程仍以流式卡片的形式展示,和实时流式视觉一致
+  // - role=user type=question(用户指令) → 跳过,单独提取到顶部 userDirective 显示
   // - 其他类型 → 正常对话项
-  for (const c of task.value?.conversations ?? []) {
+  //
+  // seq 计算:用"该 round 内的下标 * 1000"(每条间隔 1000,留出空间给实时流式 thinking 插入)
+  // 历史回放场景:thinking 和 tool_call 都在 convs,下标交替,顺序天然正确。
+  const convs = task.value?.conversations ?? []
+  const roundCounter = new Map<number, number>() // 每 round 内的下标计数
+  convs.forEach((c) => {
+    // 用户指令不进 round 分组,提到最顶部单独渲染
+    if (c.role === 'user' && c.type === 'question') return
+
+    const localIdx = roundCounter.get(c.round_idx) ?? 0
+    roundCounter.set(c.round_idx, localIdx + 1)
+    const seq = localIdx * 1000
+
     if (c.type === 'thinking' && c.reasoning) {
       // 还原为流式卡片(只读模式)
       const streamingItem: StreamingItem = {
@@ -362,6 +398,8 @@ const roundGroups = computed<RoundGroup[]>(() => {
         started_at: c.created_at,
         finished_at: c.created_at,
         reasoning_expanded: false,
+        seq: 0,
+        insertSeq: localIdx,
       }
       if (!groups.has(c.round_idx)) groups.set(c.round_idx, [])
       groups.get(c.round_idx)!.push({
@@ -369,6 +407,7 @@ const roundGroups = computed<RoundGroup[]>(() => {
         round_idx: c.round_idx,
         created_at: c.created_at,
         is_streaming: true,
+        seq,
         streaming: streamingItem,
       })
     } else {
@@ -379,14 +418,23 @@ const roundGroups = computed<RoundGroup[]>(() => {
         round_idx: c.round_idx,
         created_at: c.created_at,
         is_streaming: false,
+        seq,
         role: c.role,
         type: c.type,
         content: c.content,
       })
     }
-  }
+  })
 
   // 加入实时流式思考项(SSE 期间)
+  // 实时流式 thinking 不在 convs(后端 publish_event=False),只在 streamingItems 里。
+  // 用 insertSeq(该 thinking 开始时该 round 已收到的正式对话数)定位插入位置:
+  //   seq = insertSeq * 1000 - 500
+  // 排在 convs[insertSeq-1](seq=(insertSeq-1)*1000)之后、convs[insertSeq](seq=insertSeq*1000)之前。
+  // 例:thinking1 在 convCount=0 时开始(insertSeq=0),seq=-500,排在 tool_call1(seq=0)之前;
+  //     thinking2 在 convCount=2 时开始(insertSeq=2),seq=1500,排在 tool_result1(seq=1000)
+  //     之后、tool_call2(seq=2000)之前。这样每个 thinking 紧跟它之后的 tool_call/tool_result,
+  //     正确归入各自迭代,不会出现"所有 thinking 挤前面、所有 tool_call 堆最后"的错乱。
   for (const item of streamingItems.values()) {
     if (!groups.has(item.round_idx)) groups.set(item.round_idx, [])
     groups.get(item.round_idx)!.push({
@@ -394,6 +442,7 @@ const roundGroups = computed<RoundGroup[]>(() => {
       round_idx: item.round_idx,
       created_at: item.started_at,
       is_streaming: true,
+      seq: item.insertSeq * 1000 - 500,
       streaming: item,
     })
   }
@@ -401,13 +450,32 @@ const roundGroups = computed<RoundGroup[]>(() => {
   return [...groups.entries()]
     .sort(([a], [b]) => a - b)
     .map(([roundIdx, items]) => {
-      const sorted = items.sort((a, b) => a.created_at.localeCompare(b.created_at))
+      // 用 seq 排序(稳定,不依赖跨来源的 created_at)
+      const sorted = items.sort((a, b) => a.seq - b.seq)
       return {
         roundIdx,
         label: roundIdx === 0 ? '初始评估' : `第 ${roundIdx} 轮`,
         segments: segmentRoundItems(roundIdx, sorted),
       }
     })
+})
+
+/** 用户指令(从对话中提取,单独显示在最顶部) */
+const userDirective = computed<DisplayItem | null>(() => {
+  const c = task.value?.conversations?.find(
+    (x) => x.role === 'user' && x.type === 'question',
+  )
+  if (!c) return null
+  return {
+    id: c.id,
+    round_idx: c.round_idx,
+    created_at: c.created_at,
+    is_streaming: false,
+    seq: 0,
+    role: c.role,
+    type: c.type,
+    content: c.content,
+  }
 })
 
 // ---- 折叠状态查询/切换 ----
@@ -657,6 +725,17 @@ function formatTime(iso: string): string {
               <span class="live-dot" />实时
             </span>
           </div>
+          <!-- 用户指令(整个对话流最顶部,独立显示) -->
+          <div v-if="userDirective" class="round-group">
+            <div class="round-label">用户指令</div>
+            <div class="messages">
+              <ConversationMessage
+                :item="userDirective"
+                @toggle-reasoning="toggleReasoning"
+              />
+            </div>
+          </div>
+
           <div v-for="group in roundGroups" :key="group.roundIdx" class="round-group">
             <div class="round-label">{{ group.label }}</div>
             <div class="messages">
