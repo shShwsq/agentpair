@@ -7,58 +7,112 @@
  * 2. 结果清单:按 severity 分组(安全场景),展示 title/content/位置信息
  * 3. 协作对话流:按 round_idx 分组,展示 user_agent 与 react_agent 的来回
  *
- * 轮询:若任务处于 pending/running,每 3 秒刷新(为异步化预留,当前同步架构不触发)。
+ * 实时更新:SSE 接收每条对话/状态变更,实时追加到界面。
+ * 初始加载 GET /tasks/{id} 拿快照(补历史),然后 SSE 接收增量。
  */
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
 import { getTask } from '@/api/task'
+import { subscribeTaskStream } from '@/api/stream'
 import { extractErrorMessage } from '@/utils/error'
-import type { Conversation, TaskDetail, TaskResult, TaskStatus } from '@/types/task'
+import type {
+  Conversation,
+  TaskDetail,
+  TaskResult,
+  TaskStatus,
+} from '@/types/task'
 
 const route = useRoute()
 
 const task = ref<TaskDetail | null>(null)
 const loading = ref(true)
 const error = ref('')
-let pollTimer: ReturnType<typeof setInterval> | null = null
+let eventSource: EventSource | null = null
+/** 对话流容器引用,用于自动滚动到底部 */
+const conversationRef = ref<HTMLElement | null>(null)
 
-// ---- 加载 + 轮询 ----
+// ---- 加载 + SSE 订阅 ----
 
-async function loadTask(): Promise<void> {
+async function initTask(): Promise<void> {
   const taskId = route.params.id as string
   try {
+    // 1. 先 GET 拿任务快照(含历史对话)
     task.value = await getTask(taskId)
     error.value = ''
-    // 若任务仍在进行,继续轮询
+    loading.value = false
+
+    // 2. 若任务仍在进行,连接 SSE 接收实时事件
     if (task.value && (task.value.status === 'pending' || task.value.status === 'running')) {
-      startPolling()
-    } else {
-      stopPolling()
+      connectSSE(taskId)
     }
   } catch (err) {
     error.value = extractErrorMessage(err)
-    stopPolling()
-  } finally {
     loading.value = false
   }
 }
 
-function startPolling(): void {
-  if (pollTimer) return
-  pollTimer = setInterval(loadTask, 3000)
+function connectSSE(taskId: string): void {
+  // 关闭旧连接
+  if (eventSource) eventSource.close()
+
+  eventSource = subscribeTaskStream(taskId, {
+    onConnected: (data) => {
+      // 更新状态(可能任务已结束)
+      if (task.value) {
+        task.value.status = data.status
+        task.value.current_stage = data.current_stage
+      }
+    },
+    onConversation: (data) => {
+      if (!task.value) return
+      // 追加到对话列表
+      const conv: Conversation = {
+        id: data.id,
+        round_idx: data.round_idx,
+        role: data.role,
+        type: data.type,
+        content: data.content,
+        created_at: data.created_at || new Date().toISOString(),
+      }
+      task.value.conversations.push(conv)
+      // 自动滚动到底部
+      nextTick(scrollToBottom)
+    },
+    onStatus: (data) => {
+      if (task.value) {
+        task.value.status = data.status
+        task.value.current_stage = data.current_stage
+      }
+    },
+    onDone: async () => {
+      // 任务完成:拉取最终结果(含 results)
+      try {
+        task.value = await getTask(taskId)
+      } catch (err) {
+        console.error('拉取最终结果失败:', err)
+      }
+    },
+    onError: async (data) => {
+      if (task.value) {
+        task.value.status = 'failed'
+        task.value.error_message = data.error_message || '执行失败'
+      }
+    },
+  })
 }
 
-function stopPolling(): void {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
+function scrollToBottom(): void {
+  if (conversationRef.value) {
+    conversationRef.value.scrollTop = conversationRef.value.scrollHeight
   }
 }
 
-onMounted(loadTask)
-onUnmounted(stopPolling)
+onMounted(initTask)
+onUnmounted(() => {
+  if (eventSource) eventSource.close()
+})
 
 // ---- 对话流分组:按 round_idx ----
 
@@ -139,34 +193,33 @@ const severityGroups = computed<SeverityGroup[]>(() => {
 
 interface MessageMeta {
   label: string
-  icon: string
   variant: 'user-agent' | 'react-agent' | 'tool' | 'error' | 'summary'
 }
 
 function getMessageMeta(c: Conversation): MessageMeta {
   if (c.role === 'user_agent') {
     if (c.type === 'evaluation')
-      return { label: 'user_agent 评估', icon: 'eval', variant: 'user-agent' }
+      return { label: 'user_agent 评估', variant: 'user-agent' }
     if (c.type === 'followup')
-      return { label: 'user_agent 追问', icon: 'followup', variant: 'user-agent' }
+      return { label: 'user_agent 追问', variant: 'user-agent' }
     if (c.type === 'summary')
-      return { label: '最终总结', icon: 'summary', variant: 'summary' }
-    return { label: 'user_agent', icon: 'ua', variant: 'user-agent' }
+      return { label: '最终总结', variant: 'summary' }
+    return { label: 'user_agent', variant: 'user-agent' }
   }
   if (c.role === 'react_agent') {
     if (c.type === 'thinking')
-      return { label: 'react_agent 思考', icon: 'think', variant: 'react-agent' }
+      return { label: 'react_agent 思考', variant: 'react-agent' }
     if (c.type === 'tool_call')
-      return { label: '工具调用', icon: 'tool', variant: 'tool' }
+      return { label: '工具调用', variant: 'tool' }
     if (c.type === 'tool_result')
-      return { label: '工具结果', icon: 'result', variant: 'tool' }
+      return { label: '工具结果', variant: 'tool' }
     if (c.type === 'submit')
-      return { label: '提交结果', icon: 'submit', variant: 'react-agent' }
+      return { label: '提交结果', variant: 'react-agent' }
     if (c.type === 'error')
-      return { label: '错误', icon: 'error', variant: 'error' }
-    return { label: 'react_agent', icon: 'ra', variant: 'react-agent' }
+      return { label: '错误', variant: 'error' }
+    return { label: 'react_agent', variant: 'react-agent' }
   }
-  return { label: c.role, icon: 'msg', variant: 'react-agent' }
+  return { label: c.role, variant: 'react-agent' }
 }
 
 // ---- 状态徽章 ----
@@ -177,6 +230,12 @@ const statusConfig: Record<TaskStatus, { label: string; class: string }> = {
   completed: { label: '已完成', class: 'badge-completed' },
   failed: { label: '已失败', class: 'badge-failed' },
 }
+
+// ---- 是否运行中(控制滚动区域提示) ----
+
+const isRunning = computed(
+  () => task.value?.status === 'pending' || task.value?.status === 'running',
+)
 
 // ---- 结果卡片 metadata 提取 ----
 
@@ -293,8 +352,13 @@ function formatTime(iso: string): string {
         </section>
 
         <!-- 协作对话流 -->
-        <section v-if="roundGroups.length > 0" class="conversation-section">
-          <h2>协作对话流</h2>
+        <section v-if="roundGroups.length > 0 || isRunning" ref="conversationRef" class="conversation-section">
+          <div class="conv-header">
+            <h2>协作对话流</h2>
+            <span v-if="isRunning" class="live-indicator">
+              <span class="live-dot" />实时
+            </span>
+          </div>
           <div v-for="group in roundGroups" :key="group.roundIdx" class="round-group">
             <div class="round-label">{{ group.label }}</div>
             <div class="messages">
@@ -310,6 +374,13 @@ function formatTime(iso: string): string {
                 <div class="msg-content">{{ msg.content }}</div>
               </div>
             </div>
+          </div>
+          <!-- 运行中等待提示 -->
+          <div v-if="isRunning" class="waiting-hint">
+            <span class="typing-dots">
+              <span></span><span></span><span></span>
+            </span>
+            智能体思考中...
           </div>
         </section>
       </template>
@@ -658,5 +729,77 @@ function formatTime(iso: string): string {
   color: var(--color-text-secondary);
   max-height: 200px;
   overflow-y: auto;
+}
+
+/* ---- 对话区头部 + 实时指示器 ---- */
+.conv-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-5);
+}
+
+.conv-header h2 {
+  font-size: var(--fs-lg);
+  margin: 0;
+}
+
+.live-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--color-danger);
+  padding: var(--space-1) var(--space-3);
+  background: var(--color-danger-light);
+  border-radius: var(--radius-full);
+}
+
+.live-dot {
+  width: 8px;
+  height: 8px;
+  background: var(--color-danger);
+  border-radius: 50%;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+
+/* ---- 运行中等待提示 ---- */
+.waiting-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  color: var(--color-text-secondary);
+  font-size: var(--fs-sm);
+  background: var(--color-surface-alt);
+  border-radius: var(--radius-lg);
+}
+
+.typing-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.typing-dots span {
+  width: 6px;
+  height: 6px;
+  background: var(--color-text-muted);
+  border-radius: 50%;
+  animation: typing 1.4s infinite;
+}
+
+.typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes typing {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-4px); }
 }
 </style>

@@ -10,6 +10,8 @@
 
 react_agent 自己落库 results 和 conversations(带 round_idx),
 orchestrator 只管 task 状态 + user_agent 对话 + 沙箱清理
+
+阶段 7:接入事件总线,每条对话/状态变更实时推送,前端 SSE 可见每一步
 """
 import logging
 from datetime import datetime, timezone
@@ -18,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.react_agent import run_react_agent
 from app.agents.user_agent import MAX_ROUNDS, run_user_agent
+from app.event_bus import finish_task, publish
 from app.models.task import Conversation, Task, TaskStatus
 from app.tools import sandbox_tools
 
@@ -26,11 +29,13 @@ logger = logging.getLogger(__name__)
 
 def run_dual_agent_audit(task: Task, db: Session) -> None:
     """执行双智能体协作审计"""
+    task_id_str = str(task.id)
+
     task.status = TaskStatus.RUNNING
     task.current_stage = "双智能体协作启动"
     db.commit()
+    _publish_status(task)
 
-    task_id_str = str(task.id)
     scenario_id = task.scenario
 
     # 用户原始意图
@@ -49,6 +54,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         # ---------- 第 0 轮:user_agent 初始评估 ----------
         task.current_stage = "user_agent 初始评估"
         db.commit()
+        _publish_status(task)
 
         ua_result_0 = run_user_agent(user_intent, [], scenario_id)
         _record_user_agent(db, task, 0, ua_result_0)
@@ -59,6 +65,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         for round_idx in range(1, MAX_ROUNDS + 1):
             task.current_stage = f"第 {round_idx} 轮:react_agent 执行"
             db.commit()
+            _publish_status(task)
 
             # react_agent 跑一轮
             # 第 1 轮 followup_query=None(用初始指令,会 clone)
@@ -80,6 +87,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             # user_agent 评估
             task.current_stage = f"第 {round_idx} 轮:user_agent 评估"
             db.commit()
+            _publish_status(task)
 
             ua_result = run_user_agent(user_intent, react_summaries, scenario_id)
             _record_user_agent(db, task, round_idx, ua_result)
@@ -100,6 +108,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         )
         task.completed_at = datetime.now(timezone.utc)
         db.commit()
+        _publish_status(task)
 
         # user_agent 最终总结
         _add_conversation(
@@ -119,6 +128,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         task.error_message = str(e)[:1000]
         task.current_stage = "执行失败"
         db.commit()
+        _publish_status(task)
         _add_conversation(
             db, task, round_idx=0,
             role="user_agent", type="error",
@@ -130,6 +140,15 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             sandbox_tools.close_session(task_id_str)
         except Exception as cleanup_err:
             logger.warning(f"[task={task.id}] 关闭沙箱失败: {cleanup_err}")
+        # 通知事件总线:任务结束,推送 done/error 终止事件
+        if task.status == TaskStatus.COMPLETED:
+            publish(task.id, "done", {"status": "completed"})
+        else:
+            publish(task.id, "error", {
+                "status": "failed",
+                "error_message": task.error_message or "未知错误",
+            })
+        finish_task(task.id)
 
 
 # ============================================================
@@ -176,11 +195,31 @@ def _record_user_agent(
 def _add_conversation(
     db: Session, task: Task, *, round_idx: int, role: str, type: str, content: str
 ) -> None:
-    db.add(Conversation(
+    """落库一条对话,同时推送事件给前端 SSE"""
+    conv = Conversation(
         task_id=task.id,
         round_idx=round_idx,
         role=role,
         type=type,
         content=content,
-    ))
+    )
+    db.add(conv)
     db.commit()
+    db.refresh(conv)
+    # 推送给事件总线(前端 SSE 实时接收)
+    publish(task.id, "conversation", {
+        "id": str(conv.id),
+        "round_idx": conv.round_idx,
+        "role": conv.role,
+        "type": conv.type,
+        "content": conv.content,
+        "created_at": conv.created_at.isoformat() if conv.created_at else None,
+    })
+
+
+def _publish_status(task: Task) -> None:
+    """推送任务状态变更事件"""
+    publish(task.id, "status", {
+        "status": task.status.value if hasattr(task.status, 'value') else str(task.status),
+        "current_stage": task.current_stage,
+    })

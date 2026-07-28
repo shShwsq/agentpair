@@ -66,3 +66,46 @@ export interface TaskDetail {
   results: TaskResult[]
   conversations: Conversation[]
 }
+
+// ============================================================
+// SSE 事件类型(后端 event_bus.py publish 的事件格式)
+// ============================================================
+
+/** SSE 事件类型 */
+export type SSEEventType = 'connected' | 'conversation' | 'status' | 'done' | 'error'
+
+/** SSE 事件通用结构 */
+export interface SSEEvent {
+  type: SSEEventType
+  task_id: string
+  data: Record<string, unknown>
+  timestamp: string
+}
+
+/** connected 事件 data */
+export interface ConnectedData {
+  status: TaskStatus
+  current_stage: string | null
+}
+
+/** conversation 事件 data(与 Conversation 字段一致) */
+export interface ConversationEventData {
+  id: string
+  round_idx: number
+  role: string
+  type: string
+  content: string
+  created_at: string | null
+}
+
+/** status 事件 data */
+export interface StatusEventData {
+  status: TaskStatus
+  current_stage: string | null
+}
+
+/** done/error 事件 data */
+export interface DoneEventData {
+  status: TaskStatus
+  error_message?: string
+}

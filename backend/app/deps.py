@@ -3,10 +3,12 @@
 从 Authorization header 解 access token,返回当前 User。
 - Bearer <token> 格式
 - access token 类型(不含 refresh)
+
+SSE 端点特殊:EventSource 不能自定义 header,额外支持 query 参数 ?token=XXX
 """
 import uuid
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -86,3 +88,30 @@ def get_optional_user(
         return get_current_user(authorization=authorization, db=db)
     except HTTPException:
         return None
+
+
+def get_optional_user_sse(
+    authorization: str | None = Header(default=None),
+    token: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> User | None:
+    """SSE 专用可选登录
+
+    EventSource 不能自定义 header,所以额外支持 ?token=XXX 查询参数。
+    优先级:Authorization header > query token > 匿名
+    """
+    # header 优先
+    if authorization:
+        try:
+            return get_current_user(authorization=authorization, db=db)
+        except HTTPException:
+            pass
+    # query token 备选
+    if token:
+        try:
+            user_id = extract_user_id_from_token(token, expected_type="access")
+            user = db.query(User).filter(User.id == user_id).first()
+            return user
+        except (TokenExpiredError, TokenInvalidError):
+            pass
+    return None

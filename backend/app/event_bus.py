@@ -1,0 +1,139 @@
+"""任务事件总线
+
+为前端 SSE 实时推送提供内存级事件订阅。
+
+设计:
+- 每个 task_id 对应一个订阅者列表(每个订阅者是一个 Queue)
+- orchestrator / react_agent 落库 conversation 时调用 publish() 推送事件
+- SSE 端点调用 subscribe() 拿到 Queue,阻塞读事件
+- 任务结束/失败时推送终止事件,通知订阅者关闭
+
+线程安全:用 threading.Lock 保护订阅者字典。
+适用单机部署;多实例部署需换 Redis Pub/Sub(阶段 9+)。
+
+事件格式:dict,字段:
+- type: conversation / status / result / done / error
+- data: 对应业务数据(与 ConversationResponse / TaskResponse 字段一致)
+- task_id: str
+- timestamp: ISO 格式
+"""
+from __future__ import annotations
+
+import logging
+import queue
+import threading
+from datetime import datetime, timezone
+from typing import Any, Literal
+from uuid import UUID
+
+logger = logging.getLogger(__name__)
+
+# 事件类型
+EventType = Literal["conversation", "status", "result", "done", "error"]
+
+# 单个订阅者的队列容量上限(防止消费者过慢导致内存膨胀)
+_QUEUE_MAXSIZE = 256
+
+
+class _TaskBus:
+    """单个 task 的事件总线(内部用)"""
+
+    def __init__(self) -> None:
+        self._subscribers: list[queue.Queue[dict[str, Any]]] = []
+        self._lock = threading.Lock()
+        # 缓存最近的事件,供迟到的订阅者补播(只缓存最近 500 条)
+        self._history: list[dict[str, Any]] = []
+        self._finished = False
+
+    def subscribe(self) -> queue.Queue[dict[str, Any]]:
+        """订阅事件,返回 Queue。会先补播历史事件。"""
+        q: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=_QUEUE_MAXSIZE)
+        with self._lock:
+            # 补播历史(订阅前已发生的事件)
+            for event in self._history:
+                try:
+                    q.put_nowait(event)
+                except queue.Full:
+                    logger.warning("订阅补播时队列满,丢弃旧事件")
+                    break
+            self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: queue.Queue[dict[str, Any]]) -> None:
+        """取消订阅"""
+        with self._lock:
+            if q in self._subscribers:
+                self._subscribers.remove(q)
+
+    def publish(self, event: dict[str, Any]) -> None:
+        """推送事件给所有订阅者,并缓存到历史"""
+        with self._lock:
+            if self._finished:
+                return
+            self._history.append(event)
+            # 限制历史长度
+            if len(self._history) > 500:
+                self._history = self._history[-500:]
+            # 非阻塞推给所有订阅者
+            for q in self._subscribers:
+                try:
+                    q.put_nowait(event)
+                except queue.Full:
+                    logger.warning("订阅者队列满,丢弃事件")
+
+    def finish(self) -> None:
+        """标记任务结束,拒绝后续事件"""
+        with self._lock:
+            self._finished = True
+
+
+# ============================================================
+# 全局注册表:task_id → _TaskBus
+# ============================================================
+
+_buses: dict[str, _TaskBus] = {}
+_buses_lock = threading.Lock()
+
+
+def _get_bus(task_id: str) -> _TaskBus:
+    """获取(或创建)task 的事件总线"""
+    with _buses_lock:
+        if task_id not in _buses:
+            _buses[task_id] = _TaskBus()
+        return _buses[task_id]
+
+
+def subscribe(task_id: str | UUID) -> queue.Queue[dict[str, Any]]:
+    """订阅指定 task 的事件流"""
+    return _get_bus(str(task_id)).subscribe()
+
+
+def unsubscribe(task_id: str | UUID, q: queue.Queue[dict[str, Any]]) -> None:
+    """取消订阅"""
+    _get_bus(str(task_id)).unsubscribe(q)
+
+
+def publish(
+    task_id: str | UUID,
+    type: EventType,
+    data: dict[str, Any],
+) -> None:
+    """推送事件"""
+    event = {
+        "type": type,
+        "task_id": str(task_id),
+        "data": data,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    _get_bus(str(task_id)).publish(event)
+
+
+def finish_task(task_id: str | UUID) -> None:
+    """标记任务结束(后续 publish 静默丢弃)"""
+    _get_bus(str(task_id)).finish()
+
+
+def cleanup_task(task_id: str | UUID) -> None:
+    """清理 task 的事件总线(任务完成后释放内存)"""
+    with _buses_lock:
+        _buses.pop(str(task_id), None)

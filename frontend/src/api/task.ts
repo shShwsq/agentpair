@@ -2,9 +2,7 @@
  * 任务 API 模块
  *
  * 对应后端 app/routers/tasks.py 的端点。
- *
- * 注意:后端 POST /tasks 当前是同步阻塞执行(agent 跑完才返回),
- * createTask 设了 10 分钟超时。阶段 9 异步化后可改回正常超时 + 轮询。
+ * 后端 POST /tasks 异步执行(立即返回 task_id),进度通过 SSE 端点观看。
  */
 import client from './client'
 import type {
@@ -22,13 +20,11 @@ export function getScenarios(): Promise<Scenario[]> {
 /**
  * 提交任务
  *
- * 后端同步阻塞,agent 跑完才返回。超时设 10 分钟。
- * 阶段 9 改异步后:超时改回 30s,提交后立即拿 task_id 轮询。
+ * 后端立即返回 task_id(后台线程异步执行)。
+ * 前端跳转详情页后通过 SSE 接收实时进度。
  */
 export function createTask(req: TaskCreateRequest): Promise<TaskCreateResponse> {
-  return client
-    .post('/tasks', req, { timeout: 600_000 })
-    .then((r) => r.data)
+  return client.post('/tasks', req).then((r) => r.data)
 }
 
 /** 查询任务详情(含对话记录与结果) */

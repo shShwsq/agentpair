@@ -8,9 +8,7 @@
  * - 补充说明(可选,附加到 user_input)
  * - 分支(可选)
  *
- * 提交后:
- * - 后端同步阻塞执行(可能数分钟),前端显示加载态
- * - 完成后跳转任务详情页
+ * 提交后:后端立即返回 task_id(异步执行),前端跳转详情页通过 SSE 观看实时进度。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -79,6 +77,7 @@ async function handleSubmit(): Promise<void> {
       userInput += `\n补充说明: ${note.value.trim()}`
     }
 
+    // 后端立即返回 task_id(后台线程异步执行)
     const res = await createTask({
       scenario: selectedScenario.value,
       user_input: userInput,
@@ -88,7 +87,7 @@ async function handleSubmit(): Promise<void> {
       },
     })
 
-    // 跳转任务详情页
+    // 立即跳转详情页,SSE 接收实时进度
     await router.push({ name: 'task-detail', params: { id: res.id } })
   } catch (err) {
     error.value = extractErrorMessage(err)
@@ -112,14 +111,6 @@ async function handleSubmit(): Promise<void> {
         <h1>提交任务</h1>
         <p class="subtitle">输入 GitHub 仓库地址,双智能体将协作完成审计</p>
 
-        <!-- 加载中遮罩 -->
-        <div v-if="loading" class="loading-overlay">
-          <div class="spinner-lg" />
-          <h2>智能体工作中...</h2>
-          <p>user_agent 与 react_agent 正在协作,这可能需要几分钟。</p>
-          <p class="hint">请勿关闭页面,完成后将自动跳转到结果页。</p>
-        </div>
-
         <!-- 错误提示 -->
         <Transition name="fade">
           <div v-if="error" class="alert alert-error" role="alert">
@@ -132,7 +123,7 @@ async function handleSubmit(): Promise<void> {
           </div>
         </Transition>
 
-        <form v-if="!loading" @submit.prevent="handleSubmit" novalidate>
+        <form @submit.prevent="handleSubmit" novalidate>
           <!-- 场景选择 -->
           <div class="field">
             <label>场景</label>

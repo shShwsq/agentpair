@@ -14,6 +14,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.event_bus import publish
 from app.llm.client import LLMClient
 from app.models.task import Conversation, Result, Task
 from app.scenarios.base import get_scenario
@@ -264,15 +265,25 @@ def run_react_agent(
 def _add_conversation(
     db: Session, task: Task, *, round_idx: int, role: str, type: str, content: str
 ) -> None:
-    """记录一条对话(带 round_idx)"""
-    db.add(Conversation(
+    """记录一条对话(带 round_idx),同时推送事件给前端 SSE"""
+    conv = Conversation(
         task_id=task.id,
         round_idx=round_idx,
         role=role,
         type=type,
         content=content,
-    ))
+    )
+    db.add(conv)
     db.commit()
+    db.refresh(conv)
+    publish(task.id, "conversation", {
+        "id": str(conv.id),
+        "round_idx": conv.round_idx,
+        "role": conv.role,
+        "type": conv.type,
+        "content": conv.content,
+        "created_at": conv.created_at.isoformat() if conv.created_at else None,
+    })
 
 
 def _message_to_dict(msg: Any) -> dict[str, Any]:
