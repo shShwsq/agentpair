@@ -1,30 +1,44 @@
-"""任务相关的 Pydantic 模型(请求与响应)"""
+"""任务相关的 Pydantic 模型(请求与响应)
+
+通用化设计:
+- TaskCreateRequest: scenario + user_input + params(可选)
+- 兼容旧 API:提供 repo_url 时自动转成 user_input + params
+"""
 import uuid
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, HttpUrl
 
 
 class TaskCreateRequest(BaseModel):
-    """提交任务的请求"""
+    """提交任务的请求
 
-    repo_url: HttpUrl
+    方式 1(通用):传 scenario + user_input + params
+    方式 2(兼容):传 repo_url,自动推断 scenario=code_security_audit
+    """
+
+    # 场景标识,对应已注册的场景(见 app/scenarios/)
+    scenario: str = "code_security_audit"
+    # 用户意图文本(必填,若提供 repo_url 则自动生成)
+    user_input: str | None = None
+    # 可选参数(如 repo_url、branch 等),场景专用
+    params: dict[str, Any] | None = None
+
+    # 兼容字段:旧 API 直接传 repo_url
+    repo_url: HttpUrl | None = None
     branch: str | None = None
     scope: str | None = None
 
 
-class FindingResponse(BaseModel):
-    """漏洞发现响应"""
+class ResultResponse(BaseModel):
+    """任务结果项响应(通用)"""
 
     id: uuid.UUID
-    category: str
-    severity: str
-    file_path: str | None
-    line_range: str | None
-    description: str
-    remediation: str | None
-    verified: str
-    created_at: datetime
+    round_idx: int
+    title: str
+    content: str
+    metadata_: dict[str, Any] | None = None
 
     model_config = {"from_attributes": True}
 
@@ -33,6 +47,7 @@ class ConversationResponse(BaseModel):
     """对话记录响应"""
 
     id: uuid.UUID
+    round_idx: int
     role: str
     type: str
     content: str
@@ -46,24 +61,30 @@ class TaskResponse(BaseModel):
 
     id: uuid.UUID
     scenario: str
-    repo_url: str
-    branch: str | None
-    scope: str | None
+    user_input: str
+    params: dict[str, Any] | None = None
     status: str
     current_stage: str | None
     error_message: str | None
     created_at: datetime
     completed_at: datetime | None
-    findings: list[FindingResponse] = []
+    results: list[ResultResponse] = []
     conversations: list[ConversationResponse] = []
 
     model_config = {"from_attributes": True}
 
 
 class TaskCreateResponse(BaseModel):
-    """提交任务后的响应(只返回 ID)"""
+    """提交任务后的响应"""
 
     id: uuid.UUID
     status: str
 
     model_config = {"from_attributes": True}
+
+
+class ScenarioInfo(BaseModel):
+    """场景信息(给前端展示用)"""
+
+    id: str
+    name: str
