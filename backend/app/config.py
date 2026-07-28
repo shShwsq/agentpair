@@ -26,5 +26,14 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 1440
 
+    # LLM(阶段 1:开发期单 provider 配置)
+    LLM_PROVIDER: str = "dashscope"
+    LLM_API_KEY: str = ""
+    LLM_MODEL: str = "qwen3.6-flash"
+    LLM_ENABLE_THINKING: bool = True
+
+    # 仓库克隆临时目录
+    REPO_CLONE_DIR: str = "./_repos"
+
 
 settings = Settings()

@@ -1,0 +1,94 @@
+{
+  "_comment": "LLM 厂商清单。阶段 1 起所有 provider 走 OpenAI 兼容后端,差异通过本文件描述。",
+  "_thinkingModes": {
+    "hybrid": "混合思考,可通过 enable_thinking/thinking 参数开关",
+    "only": "仅思考模式,无法关闭",
+    "none": "不支持思考"
+  },
+  "llmProviders": [
+    {
+      "id": "dashscope",
+      "name": "阿里云百炼 DashScope",
+      "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "apiKeyUrl": "https://dashscope.console.aliyun.com/",
+      "supportsThinking": true,
+      "thinkingParam": "enable_thinking",
+      "models": [
+        { "id": "qwen3.7-max", "thinking": "hybrid", "thinkingDefault": true },
+        { "id": "qwen3.7-plus", "thinking": "hybrid", "thinkingDefault": true },
+        { "id": "qwen3.6-flash", "thinking": "hybrid", "thinkingDefault": true },
+        { "id": "qwen3.6-pro", "thinking": "hybrid", "thinkingDefault": true },
+        { "id": "deepseek-v4-flash", "thinking": "hybrid", "thinkingDefault": true },
+        { "id": "deepseek-v4-pro", "thinking": "hybrid", "thinkingDefault": true },
+        { "id": "qwq-plus", "thinking": "only", "thinkingDefault": true }
+      ]
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek 官方",
+      "baseUrl": "https://api.deepseek.com",
+      "apiKeyUrl": "https://platform.deepseek.com/api_keys",
+      "supportsThinking": true,
+      "thinkingParam": "thinking",
+      "models": [
+        { "id": "deepseek-v4-flash", "thinking": "hybrid", "thinkingDefault": true },
+        { "id": "deepseek-v4-pro", "thinking": "hybrid", "thinkingDefault": true }
+      ]
+    },
+    {
+      "id": "zhipu",
+      "name": "智谱 AI (BigModel)",
+      "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+      "apiKeyUrl": "https://open.bigmodel.cn/usercenter/apikeys",
+      "supportsThinking": true,
+      "thinkingParam": "thinking",
+      "models": [
+        { "id": "glm-5.2", "thinking": "hybrid", "thinkingDefault": true },
+        { "id": "glm-5.1", "thinking": "hybrid", "thinkingDefault": true }
+      ]
+    },
+    {
+      "id": "moonshot",
+      "name": "月之暗面 Kimi",
+      "baseUrl": "https://api.moonshot.cn/v1",
+      "apiKeyUrl": "https://platform.moonshot.cn/console/api-keys",
+      "supportsThinking": true,
+      "thinkingParam": "thinking",
+      "thinkingEnabledType": "enabled",
+      "thinkingTemperature": 1.0,
+      "nonThinkingTemperature": 0.6,
+      "models": [
+        { "id": "kimi-k2.6", "thinking": "hybrid", "thinkingDefault": true },
+        { "id": "kimi-k2.5", "thinking": "hybrid", "thinkingDefault": true }
+      ]
+    },
+    {
+      "id": "doubao",
+      "name": "火山引擎豆包",
+      "baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
+      "apiKeyUrl": "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
+      "supportsThinking": true,
+      "thinkingParam": "thinking",
+      "fallbackThinking": "hybrid",
+      "models": [
+        { "id": "doubao-seed-2-1-pro-260628", "thinking": "hybrid", "thinkingDefault": true },
+        { "id": "doubao-seed-2-1-turbo-260628", "thinking": "hybrid", "thinkingDefault": true },
+        { "id": "doubao-seed-2-0-mini-260428", "thinking": "hybrid", "thinkingDefault": true }
+      ]
+    },
+    {
+      "id": "minimax",
+      "name": "MiniMax",
+      "baseUrl": "https://api.minimaxi.com",
+      "apiKeyUrl": "https://platform.minimaxi.com/user-center/basic-information/interface-key",
+      "supportsThinking": true,
+      "thinkingParam": "thinking",
+      "thinkingEnabledType": "adaptive",
+      "reasoningSplit": true,
+      "models": [
+        { "id": "MiniMax-M3", "thinking": "hybrid", "thinkingDefault": true },
+        { "id": "MiniMax-M2.7", "thinking": "only", "thinkingDefault": true }
+      ]
+    }
+  ]
+}
