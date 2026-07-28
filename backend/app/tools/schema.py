@@ -10,16 +10,21 @@ from typing import Any
 from app.scenarios.base import get_scenario
 from app.tools import sandbox_tools
 from app.tools.cve_tools import query_cve
+from app.tools.skill_tool import list_available_skills, run_skill, set_current_scenario
 
 
 # 当前任务的上下文
 _CURRENT_TASK_ID: str = ""
 
 
-def set_current_task(task_id: str) -> None:
-    """react_agent 调用工具前,设置当前任务 ID"""
+def set_current_task(task_id: str, scenario_id: str = "code_security_audit") -> None:
+    """react_agent 调用工具前,设置当前任务 ID 和场景
+
+    scenario_id 用于 skill 工具按场景过滤可用 skill
+    """
     global _CURRENT_TASK_ID
     _CURRENT_TASK_ID = task_id
+    set_current_scenario(scenario_id)
 
 
 # 工具名 → 函数的映射(通用工具,所有场景共用池)
@@ -30,6 +35,8 @@ TOOL_FUNCTIONS: dict[str, Any] = {
     "search_code": sandbox_tools.search_code,
     "run_semgrep": sandbox_tools.run_semgrep,
     "query_cve": query_cve,
+    "list_skills": list_available_skills,
+    "skill": run_skill,
 }
 
 # 通用工具的 OpenAI function-calling 定义
@@ -157,6 +164,41 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "config": {"type": "string", "description": "semgrep 配置,默认 auto"},
                 },
                 "required": ["repo_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_skills",
+            "description": (
+                "列出当前场景所有可用的 skill(技能)。"
+                "skill 是预封装的多步审计操作指令,clone 完仓库后建议先调用此工具查看可用技能。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill",
+            "description": (
+                "获取指定 skill 的详细指令(SKILL.md 内容)。"
+                "拿到指令后,按其指引自行调用 search_code/read_file/run_in_sandbox 等底层工具执行。"
+                "先调 list_skills 查可用 skill 名称。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "skill 名称,如 check_sql_injection",
+                    },
+                },
+                "required": ["skill_name"],
             },
         },
     },

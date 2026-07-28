@@ -5,10 +5,14 @@ from fastapi import FastAPI
 
 from app.config import settings
 from app.database import Base, engine
-from app.routers import health, tasks
+from app.routers import health, skills, tasks
 
 # 导入场景模块,触发注册
 from app.scenarios import security_audit  # noqa: F401
+
+# 阶段 5:启动时扫描所有 SKILL.md,加载到进程级注册表
+from app.skills.loader import reload_registry
+reload_registry()
 
 
 @asynccontextmanager
@@ -36,6 +40,7 @@ app = FastAPI(
 
 app.include_router(health.router)
 app.include_router(tasks.router)
+app.include_router(skills.router)
 
 
 @app.get("/")

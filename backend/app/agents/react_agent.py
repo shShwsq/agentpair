@@ -49,9 +49,9 @@ def run_react_agent(
 
     注意:本函数不管理 task 状态(不标记 COMPLETED),不关闭沙箱
     """
-    # 设置当前任务上下文(供沙箱工具复用会话)
+    # 设置当前任务上下文(供沙箱工具复用会话 + skill 工具按场景过滤)
     task_id_str = str(task.id)
-    set_current_task(task_id_str)
+    set_current_task(task_id_str, task.scenario)
 
     # 获取场景配置
     scenario = get_scenario(task.scenario)
