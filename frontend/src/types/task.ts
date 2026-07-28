@@ -102,6 +102,16 @@ export interface ConversationEventData {
   type: string
   content: string
   created_at: string | null
+  /**
+   * 关联的流式调用 ID(可选)
+   *
+   * 仅 react_agent 的 type=thinking 会带此字段,标识这条对话是由哪次流式 LLM 调用产生的。
+   * 前端通过 conv_id 把流式卡片和正式对话记录关联:
+   * - 若 streamingItems 中存在对应 conv_id 的流式卡片,把卡片标记为"已落库",
+   *   不再重复追加到对话列表(因为流式卡片已经显示了 content,reasoning 也保留着)
+   * - 若不存在(迟到订阅者补播历史),正常追加 conversation 到对话列表
+   */
+  conv_id?: string
 }
 
 /** status 事件 data */

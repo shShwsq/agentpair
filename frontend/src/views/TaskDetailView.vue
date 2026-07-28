@@ -49,9 +49,11 @@ interface StreamingItem {
   iteration?: number
   reasoning: string
   content: string
-  status: 'streaming' | 'done' | 'error'
+  status: 'streaming' | 'done' | 'error' | 'finalized'
   started_at: string
   finished_at?: string
+  /** reasoning 是否展开(默认折叠,流式期间自动展开,完成后折叠) */
+  reasoning_expanded: boolean
 }
 
 const streamingItems = reactive<Map<string, StreamingItem>>(new Map())
@@ -90,6 +92,17 @@ function connectSSE(taskId: string): void {
     },
     onConversation: (data) => {
       if (!task.value) return
+
+      // 去重:如果这条 conversation 带有 conv_id,且对应流式卡片还在,
+      // 说明这条对话的内容已经在流式卡片中显示了(reasoning + content),
+      // 把流式卡片标记为"已落库"(finalized),不再重复追加到对话列表
+      if (data.conv_id && streamingItems.has(data.conv_id)) {
+        const item = streamingItems.get(data.conv_id)!
+        item.status = 'finalized'
+        // 不追加到 conversations 列表
+        return
+      }
+
       // 追加到对话列表
       const conv: Conversation = {
         id: data.id,
@@ -136,7 +149,7 @@ function handleThinkingDelta(data: ThinkingDeltaEventData): void {
   const { conv_id, round_idx, role, phase, delta, iteration } = data
 
   if (phase === 'start') {
-    // 创建新的流式项
+    // 创建新的流式项:流式期间 reasoning 默认展开(用户能看到模型在怎么想)
     streamingItems.set(conv_id, {
       conv_id,
       round_idx,
@@ -146,6 +159,7 @@ function handleThinkingDelta(data: ThinkingDeltaEventData): void {
       content: '',
       status: 'streaming',
       started_at: new Date().toISOString(),
+      reasoning_expanded: true,
     })
     return
   }
@@ -162,6 +176,7 @@ function handleThinkingDelta(data: ThinkingDeltaEventData): void {
       content: '',
       status: 'streaming',
       started_at: new Date().toISOString(),
+      reasoning_expanded: true,
     })
   }
 
@@ -174,13 +189,19 @@ function handleThinkingDelta(data: ThinkingDeltaEventData): void {
     cur.status = 'error'
     cur.reasoning += `\n[错误] ${delta}`
   } else if (phase === 'end') {
+    // 流式结束:标记完成,reasoning 自动折叠(只显示标题和字数提示)
+    // 不移除卡片!reasoning 不入正式 conversation 表,移除后用户再也看不到了
     cur.status = 'done'
     cur.finished_at = new Date().toISOString()
-    // 延迟 800ms 移除,让用户看到完整内容
-    // reasoning 不入正式 conversation 表,移除后只能从历史 GET 拿到 content 部分
-    setTimeout(() => {
-      streamingItems.delete(conv_id)
-    }, 800)
+    cur.reasoning_expanded = false
+  }
+}
+
+/** 切换流式卡片 reasoning 的展开/折叠 */
+function toggleReasoning(convId: string): void {
+  const item = streamingItems.get(convId)
+  if (item) {
+    item.reasoning_expanded = !item.reasoning_expanded
   }
 }
 
@@ -317,14 +338,16 @@ function getMessageMeta(item: DisplayItem): MessageMeta {
   if (item.is_streaming && item.streaming) {
     const role = item.streaming.role
     const status = item.streaming.status
-    if (role === 'user_agent') {
+    const roleLabel = role === 'user_agent' ? 'user_agent' : 'react_agent'
+    if (status === 'streaming') {
       return {
-        label: status === 'streaming' ? 'user_agent 思考中' : 'user_agent 思考',
+        label: `${roleLabel} 思考中`,
         variant: 'streaming',
       }
     }
+    // done / finalized / error 都显示"思考"(不带"中")
     return {
-      label: status === 'streaming' ? 'react_agent 思考中' : 'react_agent 思考',
+      label: `${roleLabel} 思考`,
       variant: 'streaming',
     }
   }
@@ -504,6 +527,7 @@ function formatTime(iso: string): string {
                 :key="item.id"
                 :class="['message', `msg-${getMessageMeta(item).variant}`, {
                   'msg-streaming-active': item.is_streaming && item.streaming?.status === 'streaming',
+                  'msg-streaming-finalized': item.is_streaming && item.streaming?.status === 'finalized',
                 }]"
               >
                 <div class="msg-header">
@@ -516,12 +540,26 @@ function formatTime(iso: string): string {
                   <span class="msg-time">{{ formatTime(item.created_at) }}</span>
                 </div>
 
-                <!-- 流式思考项:显示 reasoning + content -->
+                <!-- 流式思考项:显示 reasoning(可折叠) + content -->
                 <template v-if="item.is_streaming && item.streaming">
-                  <!-- reasoning(思考链,灰色斜体) -->
+                  <!-- reasoning(思考链,可折叠) -->
                   <div v-if="item.streaming.reasoning" class="msg-reasoning">
-                    <div class="msg-reasoning-label">思考链</div>
-                    <div class="msg-reasoning-content">{{ item.streaming.reasoning }}</div>
+                    <div
+                      class="msg-reasoning-header"
+                      @click="toggleReasoning(item.streaming.conv_id)"
+                    >
+                      <span class="msg-reasoning-toggle">
+                        {{ item.streaming.reasoning_expanded ? '▼' : '▶' }}
+                      </span>
+                      <span class="msg-reasoning-label">思考链</span>
+                      <span class="msg-reasoning-meta">
+                        {{ item.streaming.reasoning.length }} 字符
+                      </span>
+                    </div>
+                    <div
+                      v-if="item.streaming.reasoning_expanded"
+                      class="msg-reasoning-content"
+                    >{{ item.streaming.reasoning }}</div>
                   </div>
                   <!-- content(正式回答) -->
                   <div v-if="item.streaming.content" class="msg-content">{{ item.streaming.content }}</div>
@@ -869,6 +907,11 @@ function formatTime(iso: string): string {
   animation: streaming-pulse 2s ease-in-out infinite;
 }
 
+/* 已落库的流式项:无动画,边框变浅,表示已完成 */
+.msg-streaming-finalized {
+  opacity: 0.95;
+}
+
 @keyframes streaming-pulse {
   0%, 100% { box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2); }
   50% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.35); }
@@ -893,13 +936,41 @@ function formatTime(iso: string): string {
   border-left: 2px solid #d97706;
 }
 
+.msg-reasoning-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  user-select: none;
+  padding: var(--space-1) 0;
+  transition: background 0.15s ease;
+}
+
+.msg-reasoning-header:hover {
+  background: rgba(245, 158, 11, 0.08);
+  border-radius: var(--radius-sm);
+}
+
+.msg-reasoning-toggle {
+  display: inline-block;
+  width: 14px;
+  font-size: var(--fs-xs);
+  color: #92400e;
+  text-align: center;
+}
+
 .msg-reasoning-label {
   font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
   color: #92400e;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  margin-bottom: var(--space-1);
+}
+
+.msg-reasoning-meta {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  margin-left: auto;
 }
 
 .msg-reasoning-content {
@@ -911,6 +982,9 @@ function formatTime(iso: string): string {
   line-height: var(--lh-relaxed);
   max-height: 300px;
   overflow-y: auto;
+  margin-top: var(--space-1);
+  padding-top: var(--space-2);
+  border-top: 1px dashed rgba(146, 64, 14, 0.2);
 }
 
 .msg-content-muted {
