@@ -8,9 +8,16 @@
 - thinkingTemperature/nonThinkingTemperature:思考/非思考模式不同温度(Kimi)
 - thinking 模式:hybrid(可开关)/ only(强制)/ none(不支持)
 
+流式:chat_stream() 返回生成器,逐 chunk 产出 (reasoning_delta, content_delta, tool_call_delta)。
+- reasoning_delta:思考链增量(DeepSeek-R1 / Qwen-QwQ / Kimi-k2.6 等模型才有)
+- content_delta:正式回答增量
+- tool_call_delta:工具调用增量(累积 index + arguments 片段)
+所有 LLM 调用统一走流式,前端通过 SSE 实时看到思考过程。
+
 设计参考:C:\\Users\\njwjx\\Documents\\BaiduSyncdisk\\course_大四\\pro\\ai-plugin\\lib\\llm.js
 """
 import json
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -206,7 +213,7 @@ class LLMClient:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> Any:
-        """同步对话
+        """同步对话(已废弃,内部仅用于无工具的简单场景)
 
         自动注入 thinking 参数与温度(根据厂商与模型差异)
 
@@ -238,3 +245,175 @@ class LLMClient:
             kwargs["extra_body"] = extras
 
         return self.client.chat.completions.create(**kwargs)
+
+    def chat_stream(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float | None = None,
+        max_tokens: int = 4096,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+    ) -> Generator["StreamChunk", None, None]:
+        """流式对话(统一入口,所有 agent 都走这个)
+
+        每次产出 StreamChunk,描述这一片增量:
+        - reasoning_delta: 思考链增量(可空,部分模型才有)
+        - content_delta: 正式回答增量(可空)
+        - tool_call_deltas: 工具调用增量列表(可空,带 index 用于累积)
+        - finish_reason: 流结束时为 'tool_calls' / 'stop' / 'length' 等,中途为 None
+
+        工具调用流式累积说明:
+        OpenAI 流式响应中,一个 tool_call 会跨多个 chunk:
+        - 第一个 chunk: tool_calls[i].id / .type / .function.name
+        - 后续 chunk: tool_calls[i].function.arguments 片段
+        所以调用方需要按 index 累积 arguments 字符串,完整后才能 json.loads。
+
+        参考:ai-plugin/lib/llm.js 的 _parseSSE
+        """
+        extras = build_thinking_extras(
+            self.provider, self.model_meta, self.enable_thinking
+        ) or {}
+        resolved_temp = resolve_temperature(
+            self.provider, self.model_meta, self.enable_thinking, temperature
+        )
+
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": resolved_temp,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+        if tools:
+            kwargs["tools"] = tools
+            if tool_choice:
+                kwargs["tool_choice"] = tool_choice
+        if extras:
+            kwargs["extra_body"] = extras
+
+        # 流式调用,SDK 返回迭代器
+        stream = self.client.chat.completions.create(**kwargs)
+
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            # reasoning_content:思考链增量(DeepSeek/Qwen/Kimi 等)
+            # OpenAI SDK 1.x+ 把厂商扩展字段放在 delta 的 model_extra 里
+            reasoning_delta = ""
+            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                reasoning_delta = delta.reasoning_content
+            else:
+                # 兜底:从 model_extra(原始 dict)取
+                model_extra = getattr(delta, "model_extra", None) or {}
+                if isinstance(model_extra, dict):
+                    rc = model_extra.get("reasoning_content")
+                    if rc:
+                        reasoning_delta = rc
+
+            content_delta = delta.content or ""
+
+            # 工具调用增量(可能同时有多个 tool_call 并行)
+            tool_call_deltas: list[ToolCallDelta] = []
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    tool_call_deltas.append(ToolCallDelta(
+                        index=tc.index if tc.index is not None else 0,
+                        id=tc.id,
+                        name=tc.function.name if tc.function and tc.function.name else None,
+                        arguments_fragment=tc.function.arguments if tc.function and tc.function.arguments else "",
+                    ))
+
+            # 跳过完全空的 chunk(SSE keep-alive 等)
+            if (
+                not reasoning_delta
+                and not content_delta
+                and not tool_call_deltas
+                and not choice.finish_reason
+            ):
+                continue
+
+            yield StreamChunk(
+                reasoning_delta=reasoning_delta,
+                content_delta=content_delta,
+                tool_call_deltas=tool_call_deltas or None,
+                finish_reason=choice.finish_reason,
+            )
+
+
+# ============================================================
+# 流式数据结构
+# ============================================================
+
+
+class ToolCallDelta:
+    """工具调用增量(对应 OpenAI stream chunk 中的 tool_calls[i])
+
+    一个完整的 tool_call 会跨多个 chunk:
+    - 第一个 chunk 带 id 和 name(以及 arguments 起始片段)
+    - 后续 chunk 只带 arguments 增量片段
+    调用方需要按 index 累积 arguments,完整后才能 json.loads。
+    """
+
+    __slots__ = ("index", "id", "name", "arguments_fragment")
+
+    def __init__(
+        self,
+        index: int,
+        id: str | None = None,
+        name: str | None = None,
+        arguments_fragment: str = "",
+    ) -> None:
+        self.index = index
+        self.id = id  # 仅第一个 chunk 有
+        self.name = name  # 仅第一个 chunk 有
+        self.arguments_fragment = arguments_fragment  # 多个 chunk 累积
+
+    def __repr__(self) -> str:
+        return (
+            f"ToolCallDelta(index={self.index}, id={self.id!r}, "
+            f"name={self.name!r}, args_len={len(self.arguments_fragment)})"
+        )
+
+
+class StreamChunk:
+    """流式响应的单个 chunk
+
+    三个 delta 字段互斥(同一 chunk 通常只会有其中一个有值):
+    - reasoning_delta: 思考链增量(reasoning_content)
+    - content_delta: 正式回答增量(content)
+    - tool_call_deltas: 工具调用增量列表(tool_calls[i])
+
+    finish_reason 在流结束时非空('stop' / 'tool_calls' / 'length' 等)
+    """
+
+    __slots__ = ("reasoning_delta", "content_delta", "tool_call_deltas", "finish_reason")
+
+    def __init__(
+        self,
+        *,
+        reasoning_delta: str = "",
+        content_delta: str = "",
+        tool_call_deltas: list[ToolCallDelta] | None = None,
+        finish_reason: str | None = None,
+    ) -> None:
+        self.reasoning_delta = reasoning_delta
+        self.content_delta = content_delta
+        self.tool_call_deltas = tool_call_deltas
+        self.finish_reason = finish_reason
+
+    def __repr__(self) -> str:
+        parts = []
+        if self.reasoning_delta:
+            parts.append(f"reasoning({len(self.reasoning_delta)})")
+        if self.content_delta:
+            parts.append(f"content({len(self.content_delta)})")
+        if self.tool_call_deltas:
+            names = [tc.name or '?' for tc in self.tool_call_deltas]
+            parts.append(f"tool_call({','.join(names)})")
+        if self.finish_reason:
+            parts.append(f"finish={self.finish_reason}")
+        return f"StreamChunk({', '.join(parts) or 'empty'})"

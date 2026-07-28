@@ -7,6 +7,7 @@
  *   const es = subscribeTaskStream(taskId, {
  *     onConversation: (data) => { ... },
  *     onStatus: (data) => { ... },
+ *     onThinkingDelta: (data) => { ... },  // 流式 token 增量
  *     onDone: () => { ... },
  *     onError: (msg) => { ... },
  *   })
@@ -20,6 +21,7 @@ import type {
   SSEEvent,
   SSEEventType,
   StatusEventData,
+  ThinkingDeltaEventData,
 } from '@/types/task'
 
 /** 事件回调接口 */
@@ -27,6 +29,8 @@ export interface StreamCallbacks {
   onConnected?: (data: ConnectedData) => void
   onConversation?: (data: ConversationEventData) => void
   onStatus?: (data: StatusEventData) => void
+  /** 流式 token 增量(打字机效果)。每个 LLM 调用按 conv_id 累积 */
+  onThinkingDelta?: (data: ThinkingDeltaEventData) => void
   onDone?: (data: DoneEventData) => void
   onError?: (data: DoneEventData) => void
 }
@@ -48,7 +52,14 @@ export function subscribeTaskStream(
   const es = new EventSource(url)
 
   // 为每种事件类型注册监听器
-  const eventTypes: SSEEventType[] = ['connected', 'conversation', 'status', 'done', 'error']
+  const eventTypes: SSEEventType[] = [
+    'connected',
+    'conversation',
+    'status',
+    'thinking_delta',
+    'done',
+    'error',
+  ]
 
   for (const type of eventTypes) {
     es.addEventListener(type, (e: MessageEvent) => {
@@ -65,6 +76,9 @@ export function subscribeTaskStream(
             break
           case 'status':
             callbacks.onStatus?.(data as unknown as StatusEventData)
+            break
+          case 'thinking_delta':
+            callbacks.onThinkingDelta?.(data as unknown as ThinkingDeltaEventData)
             break
           case 'done':
             callbacks.onDone?.(data as unknown as DoneEventData)

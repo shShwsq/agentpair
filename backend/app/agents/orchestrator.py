@@ -56,7 +56,10 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         db.commit()
         _publish_status(task)
 
-        ua_result_0 = run_user_agent(user_intent, [], scenario_id)
+        ua_result_0 = run_user_agent(
+            user_intent, [], scenario_id,
+            task_id=task.id, round_idx=0,
+        )
         _record_user_agent(db, task, 0, ua_result_0)
 
         followup = ua_result_0.get("followup_query", user_intent)
@@ -89,7 +92,10 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             db.commit()
             _publish_status(task)
 
-            ua_result = run_user_agent(user_intent, react_summaries, scenario_id)
+            ua_result = run_user_agent(
+                user_intent, react_summaries, scenario_id,
+                task_id=task.id, round_idx=round_idx,
+            )
             _record_user_agent(db, task, round_idx, ua_result)
 
             if ua_result.get("done"):

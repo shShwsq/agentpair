@@ -7,9 +7,15 @@
 - 落库到 Result 表(带 round_idx)
 - 不再管理 task 状态(由 orchestrator 控制),只负责跑一轮返回结果
 - 不再关闭沙箱(由 orchestrator 控制,多轮复用)
+
+阶段 7+:LLM 调用全部流式
+- 通过 LLMClient.chat_stream() 拿 StreamChunk
+- reasoning_delta / content_delta / tool_call_deltas 都通过 event_bus 推给前端
+- 工具调用参数跨 chunk 累积,完整后才执行
 """
 import json
 import logging
+import uuid
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -18,7 +24,6 @@ from app.event_bus import publish
 from app.llm.client import LLMClient
 from app.models.task import Conversation, Result, Task
 from app.scenarios.base import get_scenario
-from app.tools import sandbox_tools
 from app.tools.schema import execute_tool, get_tools_for_scenario, set_current_task
 
 logger = logging.getLogger(__name__)
@@ -98,35 +103,51 @@ def run_react_agent(
     for iteration in range(1, MAX_ITERATIONS + 1):
         logger.info(f"[task={task.id}] react_agent 第 {round_idx} 轮 / 迭代 {iteration}")
 
-        # 调用 LLM
-        response = client.chat(
-            messages, tools=tools, tool_choice="auto", max_tokens=4096
+        # 流式调用 LLM,累积 reasoning / content / tool_calls
+        # 同时通过 event_bus 实时推送 thinking_delta 给前端
+        reasoning_full, content_full, tool_calls_full = _stream_llm_response(
+            client, task, db, round_idx, iteration, messages, tools
         )
-        msg = response.choices[0].message
 
-        # 把 assistant 消息加进去
-        messages.append(_message_to_dict(msg))
+        # 把 assistant 消息加进上下文(用于下一轮 LLM 调用)
+        assistant_msg: dict[str, Any] = {"role": "assistant"}
+        if content_full:
+            assistant_msg["content"] = content_full
+        if tool_calls_full:
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {
+                        "name": tc["name"],
+                        "arguments": tc["arguments_str"],
+                    },
+                }
+                for tc in tool_calls_full
+            ]
+        messages.append(assistant_msg)
 
-        # 记录思考到对话
-        if msg.content:
+        # 落库思考(content 部分),reasoning 不入 Conversation 表(只在 thinking_delta 实时显示)
+        # 因为 reasoning 是模型的思考链,通常是临时性的,不入正式记录
+        if content_full:
             _add_conversation(
                 db, task, round_idx=round_idx,
                 role="react_agent", type="thinking",
-                content=msg.content,
+                content=content_full,
             )
 
         # 没有工具调用 → agent 认为做完了
-        if not msg.tool_calls:
+        if not tool_calls_full:
             logger.info(f"[task={task.id}] react_agent 结束(无更多工具调用)")
-            if msg.content:
-                summary = msg.content
+            if content_full:
+                summary = content_full
             break
 
-        # 执行所有工具调用
-        for tool_call in msg.tool_calls:
-            fn_name = tool_call.function.name
+        # 执行所有工具调用(按出现顺序)
+        for tc in tool_calls_full:
+            fn_name = tc["name"]
             try:
-                fn_args = json.loads(tool_call.function.arguments or "{}")
+                fn_args = json.loads(tc["arguments_str"] or "{}")
             except json.JSONDecodeError:
                 fn_args = {}
 
@@ -155,7 +176,7 @@ def run_react_agent(
                 )
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": tool_call.id,
+                    "tool_call_id": tc["id"],
                     "content": f"已收到 {len(results_collected)} 个结果",
                 })
                 continue
@@ -171,7 +192,7 @@ def run_react_agent(
                 )
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": tool_call.id,
+                    "tool_call_id": tc["id"],
                     "content": result_str[:4000],
                 })
             except Exception as e:
@@ -184,7 +205,7 @@ def run_react_agent(
                 )
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": tool_call.id,
+                    "tool_call_id": tc["id"],
                     "content": err_msg,
                 })
 
@@ -214,22 +235,21 @@ def run_react_agent(
                 ),
             })
     else:
-        # 循环跑满了,强制提交
+        # 循环跑满了,强制提交(同样走流式)
         logger.warning(f"[task={task.id}] react_agent 达到最大迭代次数")
         messages.append({
             "role": "user",
             "content": "系统提示:已达最大迭代次数,请立即调用 submit_results 提交。",
         })
         try:
-            final_response = client.chat(
-                messages, tools=tools, tool_choice="auto", max_tokens=4096
+            reasoning_full, content_full, tool_calls_full = _stream_llm_response(
+                client, task, db, round_idx, MAX_ITERATIONS, messages, tools
             )
-            final_msg = final_response.choices[0].message
-            if final_msg.tool_calls:
-                for tc in final_msg.tool_calls:
-                    if tc.function.name == "submit_results":
+            if tool_calls_full:
+                for tc in tool_calls_full:
+                    if tc["name"] == "submit_results":
                         try:
-                            args = json.loads(tc.function.arguments or "{}")
+                            args = json.loads(tc["arguments_str"] or "{}")
                             for raw in args.get("results", []):
                                 results_collected.append(scenario.format_result(raw))
                             summary = args.get("summary", "")
@@ -255,6 +275,129 @@ def run_react_agent(
         summary = f"第 {round_idx} 轮完成,提交 {len(results_collected)} 个结果"
 
     return results_collected, summary
+
+
+# ============================================================
+# 流式 LLM 调用:边收 token 边推送 thinking_delta 给前端
+# ============================================================
+
+
+def _stream_llm_response(
+    client: LLMClient,
+    task: Task,
+    db: Session,
+    round_idx: int,
+    iteration: int,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+) -> tuple[str, str, list[dict[str, Any]]]:
+    """流式调用 LLM,实时推送 thinking_delta 事件
+
+    返回 (reasoning_full, content_full, tool_calls_full)
+        - reasoning_full: 完整思考链(供日志/调试,不入 Conversation 表)
+        - content_full: 完整回答内容
+        - tool_calls_full: 完整工具调用列表
+            [{"id": str, "name": str, "arguments_str": str, "index": int}]
+    """
+    # 这次 LLM 调用的临时 conv_id(前端按此 key 累积 thinking_delta)
+    conv_id = str(uuid.uuid4())
+    task_id = task.id
+
+    reasoning_full = ""
+    content_full = ""
+    # 工具调用累积:index → {id, name, arguments_str}
+    tool_calls_acc: dict[int, dict[str, Any]] = {}
+
+    # 推送流开始事件(前端可以创建占位项,显示"正在生成...")
+    publish(task_id, "thinking_delta", {
+        "conv_id": conv_id,
+        "round_idx": round_idx,
+        "role": "react_agent",
+        "phase": "start",
+        "delta": "",
+        "iteration": iteration,
+    })
+
+    try:
+        for chunk in client.chat_stream(messages, tools=tools, tool_choice="auto", max_tokens=4096):
+            # 思考链增量
+            if chunk.reasoning_delta:
+                reasoning_full += chunk.reasoning_delta
+                publish(task_id, "thinking_delta", {
+                    "conv_id": conv_id,
+                    "round_idx": round_idx,
+                    "role": "react_agent",
+                    "phase": "reasoning",
+                    "delta": chunk.reasoning_delta,
+                    "iteration": iteration,
+                })
+
+            # 正式回答增量
+            if chunk.content_delta:
+                content_full += chunk.content_delta
+                publish(task_id, "thinking_delta", {
+                    "conv_id": conv_id,
+                    "round_idx": round_idx,
+                    "role": "react_agent",
+                    "phase": "content",
+                    "delta": chunk.content_delta,
+                    "iteration": iteration,
+                })
+
+            # 工具调用增量(跨 chunk 累积)
+            if chunk.tool_call_deltas:
+                for tc_delta in chunk.tool_call_deltas:
+                    idx = tc_delta.index
+                    if idx not in tool_calls_acc:
+                        tool_calls_acc[idx] = {
+                            "id": tc_delta.id or "",
+                            "name": tc_delta.name or "",
+                            "arguments_str": "",
+                            "index": idx,
+                        }
+                    else:
+                        # 后续 chunk 可能补 id / name(理论上第一个 chunk 就有,但保险)
+                        if tc_delta.id and not tool_calls_acc[idx]["id"]:
+                            tool_calls_acc[idx]["id"] = tc_delta.id
+                        if tc_delta.name and not tool_calls_acc[idx]["name"]:
+                            tool_calls_acc[idx]["name"] = tc_delta.name
+                    # 累积 arguments 片段
+                    if tc_delta.arguments_fragment:
+                        tool_calls_acc[idx]["arguments_str"] += tc_delta.arguments_fragment
+
+            # finish_reason 出现,流结束
+            if chunk.finish_reason:
+                logger.debug(
+                    f"[task={task.id}] react_agent 流式结束,finish={chunk.finish_reason}, "
+                    f"reasoning={len(reasoning_full)}字符, content={len(content_full)}字符, "
+                    f"tool_calls={len(tool_calls_acc)}"
+                )
+    except Exception as e:
+        logger.exception(f"[task={task.id}] react_agent 流式调用失败")
+        # 推送错误 delta
+        publish(task_id, "thinking_delta", {
+            "conv_id": conv_id,
+            "round_idx": round_idx,
+            "role": "react_agent",
+            "phase": "error",
+            "delta": f"[流式调用失败: {e}]",
+            "iteration": iteration,
+        })
+        raise
+
+    # 推送流结束事件
+    publish(task_id, "thinking_delta", {
+        "conv_id": conv_id,
+        "round_idx": round_idx,
+        "role": "react_agent",
+        "phase": "end",
+        "delta": "",
+        "iteration": iteration,
+    })
+
+    # 按 index 排序输出
+    tool_calls_full = [tool_calls_acc[i] for i in sorted(tool_calls_acc.keys())]
+    return reasoning_full, content_full, tool_calls_full
 
 
 # ============================================================
@@ -284,23 +427,3 @@ def _add_conversation(
         "content": conv.content,
         "created_at": conv.created_at.isoformat() if conv.created_at else None,
     })
-
-
-def _message_to_dict(msg: Any) -> dict[str, Any]:
-    """把 OpenAI message 对象转成 dict"""
-    d: dict[str, Any] = {"role": msg.role}
-    if msg.content:
-        d["content"] = msg.content
-    if msg.tool_calls:
-        d["tool_calls"] = [
-            {
-                "id": tc.id,
-                "type": "function",
-                "function": {
-                    "name": tc.function.name,
-                    "arguments": tc.function.arguments,
-                },
-            }
-            for tc in msg.tool_calls
-        ]
-    return d

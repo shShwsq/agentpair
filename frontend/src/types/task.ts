@@ -72,7 +72,13 @@ export interface TaskDetail {
 // ============================================================
 
 /** SSE 事件类型 */
-export type SSEEventType = 'connected' | 'conversation' | 'status' | 'done' | 'error'
+export type SSEEventType =
+  | 'connected'
+  | 'conversation'
+  | 'status'
+  | 'thinking_delta'
+  | 'done'
+  | 'error'
 
 /** SSE 事件通用结构 */
 export interface SSEEvent {
@@ -102,6 +108,33 @@ export interface ConversationEventData {
 export interface StatusEventData {
   status: TaskStatus
   current_stage: string | null
+}
+
+/**
+ * thinking_delta 事件 data
+ *
+ * LLM 流式输出的 token 增量。前端按 conv_id 累积,实现打字机效果。
+ * 一个 conv_id 对应一次 LLM 调用:
+ *   1. phase='start' → 创建占位项,显示"正在生成..."
+ *   2. phase='reasoning' → 累积到思考链区域
+ *   3. phase='content' → 累积到正式回答区域
+ *   4. phase='end' → 标记完成
+ *
+ * 流结束后,完整内容会通过 conversation 事件再推一次(用于落库 + 迟到订阅者补播)
+ */
+export interface ThinkingDeltaEventData {
+  /** 该次 LLM 调用的临时 ID(前端按此 key 累积) */
+  conv_id: string
+  /** 协作轮次 */
+  round_idx: number
+  /** 角色:react_agent / user_agent */
+  role: 'react_agent' | 'user_agent'
+  /** 阶段:start / reasoning / content / end / error */
+  phase: 'start' | 'reasoning' | 'content' | 'end' | 'error'
+  /** 增量文本(start/end 时为空字符串) */
+  delta: string
+  /** 迭代序号(仅 react_agent 有,标识 ReAct 循环的第几次 LLM 调用) */
+  iteration?: number
 }
 
 /** done/error 事件 data */

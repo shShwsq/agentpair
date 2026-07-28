@@ -124,6 +124,7 @@ def stream_task_events(
     事件类型:
     - conversation: 新对话消息(user_agent/react_agent 的每一步)
     - status: 任务状态变更(进入新阶段)
+    - thinking_delta: LLM 流式 token 增量(打字机效果)
     - done: 任务完成(终止事件)
     - error: 任务失败(终止事件)
 

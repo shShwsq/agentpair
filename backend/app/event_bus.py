@@ -12,10 +12,22 @@
 适用单机部署;多实例部署需换 Redis Pub/Sub(阶段 9+)。
 
 事件格式:dict,字段:
-- type: conversation / status / result / done / error
+- type: conversation / status / thinking_delta / done / error
 - data: 对应业务数据(与 ConversationResponse / TaskResponse 字段一致)
 - task_id: str
 - timestamp: ISO 格式
+
+thinking_delta 事件(阶段 7+):
+  LLM 流式输出时每个 token 片段推送一次,前端打字机效果。
+  data 字段:
+    - conv_id: str       该次 LLM 调用的临时 ID(前端按此 key 累积)
+    - round_idx: int     协作轮次
+    - role: str          react_agent / user_agent
+    - phase: str         reasoning / content / tool_call / tool_result
+    - delta: str         增量文本
+    - index: int|None    工具调用索引(tool_call/tool_result phase 才有)
+  流式结束后,完整内容仍会通过 conversation 事件推送一次,
+  让迟到的订阅者(补播历史)也能看到完整内容。
 """
 from __future__ import annotations
 
@@ -29,7 +41,9 @@ from uuid import UUID
 logger = logging.getLogger(__name__)
 
 # 事件类型
-EventType = Literal["conversation", "status", "result", "done", "error"]
+EventType = Literal[
+    "conversation", "status", "thinking_delta", "done", "error"
+]
 
 # 单个订阅者的队列容量上限(防止消费者过慢导致内存膨胀)
 _QUEUE_MAXSIZE = 256
@@ -66,19 +80,29 @@ class _TaskBus:
                 self._subscribers.remove(q)
 
     def publish(self, event: dict[str, Any]) -> None:
-        """推送事件给所有订阅者,并缓存到历史"""
+        """推送事件给所有订阅者,并缓存到历史
+
+        thinking_delta 不入历史缓存:
+        这类事件数量极大(每个 token 一条),会挤掉 conversation/status 等重要事件。
+        打字机效果只对在线订阅者有意义,迟到的订阅者直接看完整 conversation 即可。
+        """
         with self._lock:
             if self._finished:
                 return
-            self._history.append(event)
-            # 限制历史长度
-            if len(self._history) > 500:
-                self._history = self._history[-500:]
+            # thinking_delta 不缓存,只推给在线订阅者
+            if event.get("type") != "thinking_delta":
+                self._history.append(event)
+                # 限制历史长度
+                if len(self._history) > 500:
+                    self._history = self._history[-500:]
             # 非阻塞推给所有订阅者
             for q in self._subscribers:
                 try:
                     q.put_nowait(event)
                 except queue.Full:
+                    # thinking_delta 满了就丢(打字机效果不要求可靠性)
+                    if event.get("type") == "thinking_delta":
+                        continue
                     logger.warning("订阅者队列满,丢弃事件")
 
     def finish(self) -> None:

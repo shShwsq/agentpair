@@ -22,11 +22,17 @@
 6. 循环 3-5,最多 MAX_ROUNDS 轮(防止无限循环)
 
 通用化:user_agent 的 prompt 从场景取,不绑定任何具体场景语义
+
+阶段 7+:LLM 调用流式,reasoning/content 实时推送 thinking_delta 事件,
+前端可见 user_agent 的思考过程。
 """
 import json
 import logging
+import uuid
 from typing import Any
+from uuid import UUID
 
+from app.event_bus import publish
 from app.llm.client import LLMClient
 from app.scenarios.base import get_scenario
 
@@ -64,6 +70,8 @@ def run_user_agent(
     user_intent: str,
     react_agent_summaries: list[dict[str, Any]],
     scenario_id: str = "code_security_audit",
+    task_id: UUID | str | None = None,
+    round_idx: int = 0,
 ) -> dict[str, Any]:
     """执行一次 user_agent 评估
 
@@ -72,6 +80,8 @@ def run_user_agent(
         react_agent_summaries: react_agent 之前几轮的执行结果列表
             每个元素:{"round": 1, "results": [...], "summary": "..."}
         scenario_id: 场景标识,用于加载 prompt 和 checklist
+        task_id: 任务 ID(用于推送 thinking_delta 事件,可选)
+        round_idx: 当前协作轮次(用于推送 thinking_delta 事件,可选)
 
     返回:user_agent 的结构化输出
         {
@@ -115,15 +125,17 @@ def run_user_agent(
             + "\n\n请评估覆盖情况,决定是否追问或结束。"
         )
 
-    # 调 LLM
+    # 调 LLM(流式)
     client = LLMClient()
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg},
     ]
 
-    response = client.chat(messages, max_tokens=2048)
-    content = response.choices[0].message.content or ""
+    # 流式调用:边收 token 边推 thinking_delta(如果传了 task_id)
+    content = _stream_user_agent_llm(
+        client, messages, task_id=task_id, round_idx=round_idx
+    )
 
     # 解析 JSON(LLM 可能输出带 ```json ``` 包裹的)
     try:
@@ -141,6 +153,96 @@ def run_user_agent(
         }
 
     return result
+
+
+# ============================================================
+# 流式 LLM 调用:user_agent 思考过程实时推送
+# ============================================================
+
+
+def _stream_user_agent_llm(
+    client: LLMClient,
+    messages: list[dict[str, str]],
+    *,
+    task_id: UUID | str | None = None,
+    round_idx: int = 0,
+) -> str:
+    """流式调用 user_agent 的 LLM,实时推送 thinking_delta 事件
+
+    user_agent 不调工具(无 tool_calls),只产出 reasoning + content。
+    content 是 JSON 格式的结构化评估结果。
+
+    返回完整的 content(供后续 JSON 解析)
+    """
+    if task_id is None:
+        # 未传 task_id(单测/直接调用),退化为非流式
+        response = client.chat(messages, max_tokens=2048)
+        return response.choices[0].message.content or ""
+
+    # 流式调用
+    conv_id = str(uuid.uuid4())
+    reasoning_full = ""
+    content_full = ""
+
+    # 推送流开始事件
+    publish(task_id, "thinking_delta", {
+        "conv_id": conv_id,
+        "round_idx": round_idx,
+        "role": "user_agent",
+        "phase": "start",
+        "delta": "",
+    })
+
+    try:
+        for chunk in client.chat_stream(messages, max_tokens=2048):
+            # 思考链增量
+            if chunk.reasoning_delta:
+                reasoning_full += chunk.reasoning_delta
+                publish(task_id, "thinking_delta", {
+                    "conv_id": conv_id,
+                    "round_idx": round_idx,
+                    "role": "user_agent",
+                    "phase": "reasoning",
+                    "delta": chunk.reasoning_delta,
+                })
+
+            # 正式回答增量(JSON 内容)
+            if chunk.content_delta:
+                content_full += chunk.content_delta
+                publish(task_id, "thinking_delta", {
+                    "conv_id": conv_id,
+                    "round_idx": round_idx,
+                    "role": "user_agent",
+                    "phase": "content",
+                    "delta": chunk.content_delta,
+                })
+
+            if chunk.finish_reason:
+                logger.debug(
+                    f"[task={task_id}] user_agent 流式结束,finish={chunk.finish_reason}, "
+                    f"reasoning={len(reasoning_full)}字符, content={len(content_full)}字符"
+                )
+    except Exception as e:
+        logger.exception(f"[task={task_id}] user_agent 流式调用失败")
+        publish(task_id, "thinking_delta", {
+            "conv_id": conv_id,
+            "round_idx": round_idx,
+            "role": "user_agent",
+            "phase": "error",
+            "delta": f"[流式调用失败: {e}]",
+        })
+        raise
+
+    # 推送流结束事件
+    publish(task_id, "thinking_delta", {
+        "conv_id": conv_id,
+        "round_idx": round_idx,
+        "role": "user_agent",
+        "phase": "end",
+        "delta": "",
+    })
+
+    return content_full
 
 
 # ============================================================

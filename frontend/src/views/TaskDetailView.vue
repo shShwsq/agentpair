@@ -7,10 +7,16 @@
  * 2. 结果清单:按 severity 分组(安全场景),展示 title/content/位置信息
  * 3. 协作对话流:按 round_idx 分组,展示 user_agent 与 react_agent 的来回
  *
- * 实时更新:SSE 接收每条对话/状态变更,实时追加到界面。
+ * 实时更新:SSE 接收每条对话/状态变更 + thinking_delta(流式 token 增量)。
  * 初始加载 GET /tasks/{id} 拿快照(补历史),然后 SSE 接收增量。
+ *
+ * 流式思考显示(thinking_delta):
+ * - 一次 LLM 调用对应一个 conv_id,前端按 conv_id 累积 reasoning + content
+ * - 流式期间以"流式思考卡片"显示打字机效果
+ * - 流式结束后(phase='end')延迟 800ms 移除卡片,由后续 conversation 事件接管
+ *   (reasoning 不入正式对话表,只在流式卡片临时显示)
  */
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
@@ -22,6 +28,7 @@ import type {
   TaskDetail,
   TaskResult,
   TaskStatus,
+  ThinkingDeltaEventData,
 } from '@/types/task'
 
 const route = useRoute()
@@ -32,6 +39,22 @@ const error = ref('')
 let eventSource: EventSource | null = null
 /** 对话流容器引用,用于自动滚动到底部 */
 const conversationRef = ref<HTMLElement | null>(null)
+
+// ---- 流式思考项(thinking_delta 累积)----
+// key: conv_id, value: 流式思考项状态
+interface StreamingItem {
+  conv_id: string
+  round_idx: number
+  role: 'react_agent' | 'user_agent'
+  iteration?: number
+  reasoning: string
+  content: string
+  status: 'streaming' | 'done' | 'error'
+  started_at: string
+  finished_at?: string
+}
+
+const streamingItems = reactive<Map<string, StreamingItem>>(new Map())
 
 // ---- 加载 + SSE 订阅 ----
 
@@ -86,6 +109,10 @@ function connectSSE(taskId: string): void {
         task.value.current_stage = data.current_stage
       }
     },
+    onThinkingDelta: (data) => {
+      handleThinkingDelta(data)
+      nextTick(scrollToBottom)
+    },
     onDone: async () => {
       // 任务完成:拉取最终结果(含 results)
       try {
@@ -103,6 +130,60 @@ function connectSSE(taskId: string): void {
   })
 }
 
+// ---- 流式增量处理 ----
+
+function handleThinkingDelta(data: ThinkingDeltaEventData): void {
+  const { conv_id, round_idx, role, phase, delta, iteration } = data
+
+  if (phase === 'start') {
+    // 创建新的流式项
+    streamingItems.set(conv_id, {
+      conv_id,
+      round_idx,
+      role,
+      iteration,
+      reasoning: '',
+      content: '',
+      status: 'streaming',
+      started_at: new Date().toISOString(),
+    })
+    return
+  }
+
+  const item = streamingItems.get(conv_id)
+  if (!item) {
+    // 没收到 start 事件就来了 delta,创建一个
+    streamingItems.set(conv_id, {
+      conv_id,
+      round_idx,
+      role,
+      iteration,
+      reasoning: '',
+      content: '',
+      status: 'streaming',
+      started_at: new Date().toISOString(),
+    })
+  }
+
+  const cur = streamingItems.get(conv_id)!
+  if (phase === 'reasoning') {
+    cur.reasoning += delta
+  } else if (phase === 'content') {
+    cur.content += delta
+  } else if (phase === 'error') {
+    cur.status = 'error'
+    cur.reasoning += `\n[错误] ${delta}`
+  } else if (phase === 'end') {
+    cur.status = 'done'
+    cur.finished_at = new Date().toISOString()
+    // 延迟 800ms 移除,让用户看到完整内容
+    // reasoning 不入正式 conversation 表,移除后只能从历史 GET 拿到 content 部分
+    setTimeout(() => {
+      streamingItems.delete(conv_id)
+    }, 800)
+  }
+}
+
 function scrollToBottom(): void {
   if (conversationRef.value) {
     conversationRef.value.scrollTop = conversationRef.value.scrollHeight
@@ -115,26 +196,61 @@ onUnmounted(() => {
 })
 
 // ---- 对话流分组:按 round_idx ----
+// 把正式对话和流式思考项混合,按 round_idx 分组
+// 流式项用 id=`stream:${conv_id}` 标识,防止和正式对话 id 冲突
 
-interface RoundGroup {
-  roundIdx: number
-  label: string
-  conversations: Conversation[]
+interface DisplayItem {
+  /** 正式对话用 UUID,流式项用 `stream:${conv_id}` */
+  id: string
+  round_idx: number
+  created_at: string
+  /** 是否流式思考项 */
+  is_streaming: boolean
+  /** 正式对话字段 */
+  role?: string
+  type?: string
+  content?: string
+  /** 流式项字段 */
+  streaming?: StreamingItem
 }
 
-const roundGroups = computed<RoundGroup[]>(() => {
-  if (!task.value?.conversations) return []
-  const groups = new Map<number, Conversation[]>()
-  for (const c of task.value.conversations) {
+const roundGroups = computed(() => {
+  if (!task.value?.conversations && streamingItems.size === 0) return []
+
+  const groups = new Map<number, DisplayItem[]>()
+
+  // 加入正式对话
+  for (const c of task.value?.conversations ?? []) {
     if (!groups.has(c.round_idx)) groups.set(c.round_idx, [])
-    groups.get(c.round_idx)!.push(c)
+    groups.get(c.round_idx)!.push({
+      id: c.id,
+      round_idx: c.round_idx,
+      created_at: c.created_at,
+      is_streaming: false,
+      role: c.role,
+      type: c.type,
+      content: c.content,
+    })
   }
+
+  // 加入流式思考项
+  for (const item of streamingItems.values()) {
+    if (!groups.has(item.round_idx)) groups.set(item.round_idx, [])
+    groups.get(item.round_idx)!.push({
+      id: `stream:${item.conv_id}`,
+      round_idx: item.round_idx,
+      created_at: item.started_at,
+      is_streaming: true,
+      streaming: item,
+    })
+  }
+
   return [...groups.entries()]
     .sort(([a], [b]) => a - b)
-    .map(([roundIdx, convs]) => ({
+    .map(([roundIdx, items]) => ({
       roundIdx,
       label: roundIdx === 0 ? '初始评估' : `第 ${roundIdx} 轮`,
-      conversations: convs.sort((a, b) => a.created_at.localeCompare(b.created_at)),
+      items: items.sort((a, b) => a.created_at.localeCompare(b.created_at)),
     }))
 })
 
@@ -193,10 +309,28 @@ const severityGroups = computed<SeverityGroup[]>(() => {
 
 interface MessageMeta {
   label: string
-  variant: 'user-agent' | 'react-agent' | 'tool' | 'error' | 'summary'
+  variant: 'user-agent' | 'react-agent' | 'tool' | 'error' | 'summary' | 'streaming'
 }
 
-function getMessageMeta(c: Conversation): MessageMeta {
+function getMessageMeta(item: DisplayItem): MessageMeta {
+  // 流式思考项
+  if (item.is_streaming && item.streaming) {
+    const role = item.streaming.role
+    const status = item.streaming.status
+    if (role === 'user_agent') {
+      return {
+        label: status === 'streaming' ? 'user_agent 思考中' : 'user_agent 思考',
+        variant: 'streaming',
+      }
+    }
+    return {
+      label: status === 'streaming' ? 'react_agent 思考中' : 'react_agent 思考',
+      variant: 'streaming',
+    }
+  }
+
+  // 正式对话项
+  const c = item as Required<DisplayItem>
   if (c.role === 'user_agent') {
     if (c.type === 'evaluation')
       return { label: 'user_agent 评估', variant: 'user-agent' }
@@ -219,7 +353,10 @@ function getMessageMeta(c: Conversation): MessageMeta {
       return { label: '错误', variant: 'error' }
     return { label: 'react_agent', variant: 'react-agent' }
   }
-  return { label: c.role, variant: 'react-agent' }
+  if (c.role === 'user') {
+    return { label: '用户指令', variant: 'tool' }
+  }
+  return { label: c.role || 'unknown', variant: 'react-agent' }
 }
 
 // ---- 状态徽章 ----
@@ -363,20 +500,47 @@ function formatTime(iso: string): string {
             <div class="round-label">{{ group.label }}</div>
             <div class="messages">
               <div
-                v-for="msg in group.conversations"
-                :key="msg.id"
-                :class="['message', `msg-${getMessageMeta(msg).variant}`]"
+                v-for="item in group.items"
+                :key="item.id"
+                :class="['message', `msg-${getMessageMeta(item).variant}`, {
+                  'msg-streaming-active': item.is_streaming && item.streaming?.status === 'streaming',
+                }]"
               >
                 <div class="msg-header">
-                  <span class="msg-label">{{ getMessageMeta(msg).label }}</span>
-                  <span class="msg-time">{{ formatTime(msg.created_at) }}</span>
+                  <span class="msg-label">{{ getMessageMeta(item).label }}</span>
+                  <span v-if="item.is_streaming && item.streaming?.status === 'streaming'" class="msg-streaming-tag">
+                    <span class="typing-dots">
+                      <span></span><span></span><span></span>
+                    </span>
+                  </span>
+                  <span class="msg-time">{{ formatTime(item.created_at) }}</span>
                 </div>
-                <div class="msg-content">{{ msg.content }}</div>
+
+                <!-- 流式思考项:显示 reasoning + content -->
+                <template v-if="item.is_streaming && item.streaming">
+                  <!-- reasoning(思考链,灰色斜体) -->
+                  <div v-if="item.streaming.reasoning" class="msg-reasoning">
+                    <div class="msg-reasoning-label">思考链</div>
+                    <div class="msg-reasoning-content">{{ item.streaming.reasoning }}</div>
+                  </div>
+                  <!-- content(正式回答) -->
+                  <div v-if="item.streaming.content" class="msg-content">{{ item.streaming.content }}</div>
+                  <!-- 流式中且无内容:提示 -->
+                  <div
+                    v-if="item.streaming.status === 'streaming' && !item.streaming.reasoning && !item.streaming.content"
+                    class="msg-content msg-content-muted"
+                  >
+                    等待模型响应...
+                  </div>
+                </template>
+
+                <!-- 正式对话项 -->
+                <div v-else class="msg-content">{{ item.content }}</div>
               </div>
             </div>
           </div>
-          <!-- 运行中等待提示 -->
-          <div v-if="isRunning" class="waiting-hint">
+          <!-- 运行中等待提示(没有流式项时才显示) -->
+          <div v-if="isRunning && streamingItems.size === 0" class="waiting-hint">
             <span class="typing-dots">
               <span></span><span></span><span></span>
             </span>
@@ -690,6 +854,68 @@ function formatTime(iso: string): string {
 .msg-summary {
   background: linear-gradient(135deg, #faf5ff 0%, #f0f4ff 100%);
   border-left-color: var(--color-primary);
+}
+
+/* ---- 流式思考项 ---- */
+.msg-streaming {
+  background: linear-gradient(135deg, #fefce8 0%, #fef3c7 100%);
+  border-left-color: #f59e0b;
+  position: relative;
+}
+
+.msg-streaming-active {
+  /* 进行中的流式项:加边框光晕 */
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2);
+  animation: streaming-pulse 2s ease-in-out infinite;
+}
+
+@keyframes streaming-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2); }
+  50% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.35); }
+}
+
+.msg-streaming-tag {
+  display: inline-flex;
+  align-items: center;
+  margin-left: var(--space-2);
+}
+
+.msg-streaming-tag .typing-dots span {
+  background: #f59e0b;
+}
+
+/* ---- 思考链(reasoning)区域 ---- */
+.msg-reasoning {
+  margin-bottom: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: var(--radius-md);
+  border-left: 2px solid #d97706;
+}
+
+.msg-reasoning-label {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: #92400e;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: var(--space-1);
+}
+
+.msg-reasoning-content {
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-style: italic;
+  line-height: var(--lh-relaxed);
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.msg-content-muted {
+  color: var(--color-text-muted);
+  font-style: italic;
 }
 
 .msg-header {
