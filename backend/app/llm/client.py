@@ -204,48 +204,6 @@ class LLMClient:
             base_url=self.provider["baseUrl"],
         )
 
-    def chat(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        temperature: float | None = None,
-        max_tokens: int = 4096,
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: str | dict[str, Any] | None = None,
-    ) -> Any:
-        """同步对话(已废弃,内部仅用于无工具的简单场景)
-
-        自动注入 thinking 参数与温度(根据厂商与模型差异)
-
-        厂商扩展参数(enable_thinking / thinking / reasoning_split 等)
-        通过 extra_body 传递,因为 OpenAI SDK 的 create() 不接受未在
-        签名里的关键字参数
-        """
-        # 构造厂商扩展参数(走 extra_body)
-        extras = build_thinking_extras(
-            self.provider, self.model_meta, self.enable_thinking
-        ) or {}
-
-        resolved_temp = resolve_temperature(
-            self.provider, self.model_meta, self.enable_thinking, temperature
-        )
-
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": resolved_temp,
-            "max_tokens": max_tokens,
-        }
-        if tools:
-            kwargs["tools"] = tools
-            if tool_choice:
-                kwargs["tool_choice"] = tool_choice
-        if extras:
-            # 厂商扩展字段通过 extra_body 传,OpenAI SDK 会原样转发给后端
-            kwargs["extra_body"] = extras
-
-        return self.client.chat.completions.create(**kwargs)
-
     def chat_stream(
         self,
         messages: list[dict[str, str]],

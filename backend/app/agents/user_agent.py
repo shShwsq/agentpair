@@ -69,9 +69,9 @@ def _format_checklist_for_prompt(checklist: list[dict[str, Any]]) -> str:
 def run_user_agent(
     user_intent: str,
     react_agent_summaries: list[dict[str, Any]],
-    scenario_id: str = "code_security_audit",
-    task_id: UUID | str | None = None,
+    task_id: UUID | str,
     round_idx: int = 0,
+    scenario_id: str = "code_security_audit",
 ) -> dict[str, Any]:
     """执行一次 user_agent 评估
 
@@ -79,9 +79,9 @@ def run_user_agent(
         user_intent: 用户原始意图(如"审计这个仓库: https://...")
         react_agent_summaries: react_agent 之前几轮的执行结果列表
             每个元素:{"round": 1, "results": [...], "summary": "..."}
+        task_id: 任务 ID(必填,用于推送 thinking_delta 事件)
+        round_idx: 当前协作轮次(用于推送 thinking_delta 事件)
         scenario_id: 场景标识,用于加载 prompt 和 checklist
-        task_id: 任务 ID(用于推送 thinking_delta 事件,可选)
-        round_idx: 当前协作轮次(用于推送 thinking_delta 事件,可选)
 
     返回:user_agent 的结构化输出
         {
@@ -132,7 +132,7 @@ def run_user_agent(
         {"role": "user", "content": user_msg},
     ]
 
-    # 流式调用:边收 token 边推 thinking_delta(如果传了 task_id)
+    # 流式调用:边收 token 边推 thinking_delta
     content = _stream_user_agent_llm(
         client, messages, task_id=task_id, round_idx=round_idx
     )
@@ -164,7 +164,7 @@ def _stream_user_agent_llm(
     client: LLMClient,
     messages: list[dict[str, str]],
     *,
-    task_id: UUID | str | None = None,
+    task_id: UUID | str,
     round_idx: int = 0,
 ) -> str:
     """流式调用 user_agent 的 LLM,实时推送 thinking_delta 事件
@@ -174,12 +174,6 @@ def _stream_user_agent_llm(
 
     返回完整的 content(供后续 JSON 解析)
     """
-    if task_id is None:
-        # 未传 task_id(单测/直接调用),退化为非流式
-        response = client.chat(messages, max_tokens=2048)
-        return response.choices[0].message.content or ""
-
-    # 流式调用
     conv_id = str(uuid.uuid4())
     reasoning_full = ""
     content_full = ""
