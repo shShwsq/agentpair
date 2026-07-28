@@ -21,7 +21,7 @@ async def lifespan(app: FastAPI):
     from app.models import task, user  # noqa: F401
 
     # 开发期:重建表(字段变更时需要)
-    if settings.DEBUG:
+    if settings.APP_DEBUG:
         Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     yield
