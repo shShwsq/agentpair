@@ -26,11 +26,18 @@ from app.config import settings
 def clone_repo(repo_url: str, branch: str | None = None) -> dict:
     """克隆 GitHub 仓库到本地临时目录
 
+    自动把 HTTPS URL 转成 SSH URL,绕过 Windows schannel SSL 问题
+    (用户机有 Clash 代理 + schannel backend 冲突,SSH 不受影响)
+    如果传入的已经是 SSH URL 或其他形式,原样使用
+
     返回:{ "path": str, "files_count": int }
     """
+    # 统一转成 SSH URL(只处理 github.com HTTPS)
+    clone_url = _to_ssh_url(repo_url)
+
     # 从 URL 提取仓库名作为目录名
-    # https://github.com/owner/repo(.git) -> repo
-    match = re.search(r"/([^/]+?)(?:\.git)?$", repo_url)
+    # git@github.com:owner/repo(.git) -> repo
+    match = re.search(r"/([^/]+?)(?:\.git)?$", clone_url)
     if not match:
         raise ValueError(f"无法从 URL 解析仓库名: {repo_url}")
     repo_name = match.group(1)
@@ -47,7 +54,7 @@ def clone_repo(repo_url: str, branch: str | None = None) -> dict:
     cmd = ["git", "clone", "--depth", "1"]  # 浅克隆,加速
     if branch:
         cmd.extend(["--branch", branch])
-    cmd.extend([repo_url, str(target_dir)])
+    cmd.extend([clone_url, str(target_dir)])
 
     result = subprocess.run(
         cmd,
@@ -66,6 +73,27 @@ def clone_repo(repo_url: str, branch: str | None = None) -> dict:
     )
 
     return {"path": str(target_dir), "files_count": files_count}
+
+
+def _to_ssh_url(repo_url: str) -> str:
+    """把 GitHub HTTPS URL 转成 SSH URL
+
+    https://github.com/owner/repo(.git)  ->  git@github.com:owner/repo.git
+    git@github.com:owner/repo.git        ->  原样返回
+    其他 URL                              ->  原样返回(非 GitHub)
+    """
+    # 已经是 SSH 形式
+    if repo_url.startswith("git@"):
+        return repo_url
+
+    # GitHub HTTPS → SSH
+    m = re.match(r"^https?://github\.com/(.+?)(?:\.git)?/?$", repo_url)
+    if m:
+        path = m.group(1)
+        return f"git@github.com:{path}.git"
+
+    # 非 GitHub 或无法识别,原样返回
+    return repo_url
 
 
 # ============================================================

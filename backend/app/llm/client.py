@@ -209,8 +209,12 @@ class LLMClient:
         """同步对话
 
         自动注入 thinking 参数与温度(根据厂商与模型差异)
+
+        厂商扩展参数(enable_thinking / thinking / reasoning_split 等)
+        通过 extra_body 传递,因为 OpenAI SDK 的 create() 不接受未在
+        签名里的关键字参数
         """
-        # 构造额外参数
+        # 构造厂商扩展参数(走 extra_body)
         extras = build_thinking_extras(
             self.provider, self.model_meta, self.enable_thinking
         ) or {}
@@ -224,11 +228,13 @@ class LLMClient:
             "messages": messages,
             "temperature": resolved_temp,
             "max_tokens": max_tokens,
-            **extras,
         }
         if tools:
             kwargs["tools"] = tools
             if tool_choice:
                 kwargs["tool_choice"] = tool_choice
+        if extras:
+            # 厂商扩展字段通过 extra_body 传,OpenAI SDK 会原样转发给后端
+            kwargs["extra_body"] = extras
 
         return self.client.chat.completions.create(**kwargs)
