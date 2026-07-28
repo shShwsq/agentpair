@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     )
 
     # 数据库
-    DATABASE_URL: str = "postgresql+psycopg2://localhost/agentpair"
+    DATABASE_URL: str = "postgresql+psycopg://localhost/agentpair"
 
     # 应用
     APP_ENV: str = "development"
