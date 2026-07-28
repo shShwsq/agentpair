@@ -49,7 +49,7 @@ interface StreamingItem {
   iteration?: number
   reasoning: string
   content: string
-  status: 'streaming' | 'done' | 'error' | 'finalized'
+  status: 'streaming' | 'done' | 'error'
   started_at: string
   finished_at?: string
   /** reasoning 是否展开(默认折叠,流式期间自动展开,完成后折叠) */
@@ -92,18 +92,9 @@ function connectSSE(taskId: string): void {
     },
     onConversation: (data) => {
       if (!task.value) return
-
-      // 去重:如果这条 conversation 带有 conv_id,且对应流式卡片还在,
-      // 说明这条对话的内容已经在流式卡片中显示了(reasoning + content),
-      // 把流式卡片标记为"已落库"(finalized),不再重复追加到对话列表
-      if (data.conv_id && streamingItems.has(data.conv_id)) {
-        const item = streamingItems.get(data.conv_id)!
-        item.status = 'finalized'
-        // 不追加到 conversations 列表
-        return
-      }
-
       // 追加到对话列表
+      // 注意:react_agent 的 type=thinking 不走 SSE 推送(已在流式卡片展示),
+      // 这里收到的都是其他类型(工具调用/结果/提交/用户指令/user_agent 评估等)
       const conv: Conversation = {
         id: data.id,
         round_idx: data.round_idx,
@@ -345,7 +336,7 @@ function getMessageMeta(item: DisplayItem): MessageMeta {
         variant: 'streaming',
       }
     }
-    // done / finalized / error 都显示"思考"(不带"中")
+    // done / error 都显示"思考"(不带"中")
     return {
       label: `${roleLabel} 思考`,
       variant: 'streaming',
@@ -527,7 +518,6 @@ function formatTime(iso: string): string {
                 :key="item.id"
                 :class="['message', `msg-${getMessageMeta(item).variant}`, {
                   'msg-streaming-active': item.is_streaming && item.streaming?.status === 'streaming',
-                  'msg-streaming-finalized': item.is_streaming && item.streaming?.status === 'finalized',
                 }]"
               >
                 <div class="msg-header">
@@ -905,11 +895,6 @@ function formatTime(iso: string): string {
   /* 进行中的流式项:加边框光晕 */
   box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2);
   animation: streaming-pulse 2s ease-in-out infinite;
-}
-
-/* 已落库的流式项:无动画,边框变浅,表示已完成 */
-.msg-streaming-finalized {
-  opacity: 0.95;
 }
 
 @keyframes streaming-pulse {

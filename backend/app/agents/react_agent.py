@@ -105,7 +105,7 @@ def run_react_agent(
 
         # 流式调用 LLM,累积 reasoning / content / tool_calls
         # 同时通过 event_bus 实时推送 thinking_delta 给前端
-        reasoning_full, content_full, tool_calls_full, conv_id = _stream_llm_response(
+        reasoning_full, content_full, tool_calls_full, _conv_id = _stream_llm_response(
             client, task, db, round_idx, iteration, messages, tools
         )
 
@@ -128,15 +128,14 @@ def run_react_agent(
         messages.append(assistant_msg)
 
         # 落库思考(content 部分),reasoning 不入 Conversation 表(只在 thinking_delta 实时显示)
-        # 因为 reasoning 是模型的思考链,通常是临时性的,不入正式记录
-        # conv_id 关联到流式卡片:前端收到此 conversation 事件时,
-        # 把对应流式卡片标记为"已落库",不重复追加到对话列表
+        # 不推送 SSE!流式卡片已经完整展示了 content + reasoning,
+        # 再推 conversation 事件会重复。迟到订阅者通过 GET /tasks/{id} 快照拿完整对话。
         if content_full:
             _add_conversation(
                 db, task, round_idx=round_idx,
                 role="react_agent", type="thinking",
                 content=content_full,
-                conv_id=conv_id,
+                publish_event=False,
             )
 
         # 没有工具调用 → agent 认为做完了
@@ -245,7 +244,7 @@ def run_react_agent(
             "content": "系统提示:已达最大迭代次数,请立即调用 submit_results 提交。",
         })
         try:
-            reasoning_full, content_full, tool_calls_full, conv_id = _stream_llm_response(
+            reasoning_full, content_full, tool_calls_full, _conv_id = _stream_llm_response(
                 client, task, db, round_idx, MAX_ITERATIONS, messages, tools
             )
             if tool_calls_full:
@@ -298,11 +297,10 @@ def _stream_llm_response(
 
     返回 (reasoning_full, content_full, tool_calls_full, conv_id)
         - reasoning_full: 完整思考链(供日志/调试,不入 Conversation 表)
-        - content_full: 完整回答内容
+        - content_full: 完整回答内容(落库但不再推 conversation 事件,避免和流式卡片重复)
         - tool_calls_full: 完整工具调用列表
             [{"id": str, "name": str, "arguments_str": str, "index": int}]
-        - conv_id: 这次 LLM 调用的标识,用于关联后续 conversation 事件
-            (前端通过 conv_id 把流式卡片和正式对话记录关联,去重)
+        - conv_id: 这次 LLM 调用的标识(供调试/日志,前端不再用于去重)
     """
     # 这次 LLM 调用的临时 conv_id(前端按此 key 累积 thinking_delta)
     conv_id = str(uuid.uuid4())
@@ -412,14 +410,17 @@ def _stream_llm_response(
 
 def _add_conversation(
     db: Session, task: Task, *, round_idx: int, role: str, type: str, content: str,
-    conv_id: str | None = None,
+    publish_event: bool = True,
 ) -> None:
-    """记录一条对话(带 round_idx),同时推送事件给前端 SSE
+    """记录一条对话(带 round_idx),可选推送事件给前端 SSE
 
     参数:
-        conv_id: 可选,关联到产生这条对话的流式 LLM 调用
-            (前端通过 conv_id 把流式卡片和正式对话记录关联,去重)
-            仅 react_agent 的 type=thinking 会传,其他对话无流式卡片关联
+        publish_event: 是否推送 conversation 事件给前端。
+            - True(默认):工具调用/结果/提交/用户指令/user_agent 评估等,
+              前端通过 SSE 实时追加到对话列表
+            - False:react_agent 的 type=thinking 不推 SSE,
+              因为流式卡片已经完整展示了 content + reasoning,
+              再推会重复。迟到订阅者通过 GET /tasks/{id} 快照拿完整对话。
     """
     conv = Conversation(
         task_id=task.id,
@@ -431,14 +432,12 @@ def _add_conversation(
     db.add(conv)
     db.commit()
     db.refresh(conv)
-    event_data: dict[str, Any] = {
-        "id": str(conv.id),
-        "round_idx": conv.round_idx,
-        "role": conv.role,
-        "type": conv.type,
-        "content": conv.content,
-        "created_at": conv.created_at.isoformat() if conv.created_at else None,
-    }
-    if conv_id:
-        event_data["conv_id"] = conv_id
-    publish(task.id, "conversation", event_data)
+    if publish_event:
+        publish(task.id, "conversation", {
+            "id": str(conv.id),
+            "round_idx": conv.round_idx,
+            "role": conv.role,
+            "type": conv.type,
+            "content": conv.content,
+            "created_at": conv.created_at.isoformat() if conv.created_at else None,
+        })
