@@ -16,13 +16,16 @@ from sqlalchemy.orm import Session
 
 from app.llm.client import LLMClient
 from app.models.task import Conversation, Finding, Task, TaskStatus
-from app.tools.schema import TOOL_DEFINITIONS, execute_tool
+from app.tools import sandbox_tools
+from app.tools.schema import TOOL_DEFINITIONS, execute_tool, set_current_task
 
 logger = logging.getLogger(__name__)
 
 
 # 最大迭代轮次,防止死循环
-MAX_ITERATIONS = 15
+MAX_ITERATIONS = 30
+# 连续相同工具调用的容忍次数,超过就打破循环
+MAX_SAME_CALLS = 3
 
 
 SYSTEM_PROMPT = """你是一个专业的代码安全审计智能体,使用 ReAct 模式工作:思考 → 调用工具 → 观察结果 → 继续思考。
@@ -58,19 +61,26 @@ SYSTEM_PROMPT = """你是一个专业的代码安全审计智能体,使用 ReAct
 - 不要漏报,但也不要误报。看上下文判断是否真的可利用
 - 如果某个模式在测试代码里(如 tests/、*_test.py),通常不算漏洞,但仍需报告为 info
 - 仓库 clone 后,先用 search_code 搜索一遍高危模式,再逐个 read_file 确认
+- **禁止重复 read 同一个文件**!如果已经读过某个文件,不要再读一遍。换一个文件读,或转入提交阶段
+- 单次审计控制在 15 轮以内,确认 3-5 个可疑点后立即 submit_findings 收尾
+- 若仓库无明显漏洞,也必须 submit_findings(传空数组),并在 description 里说明已查范围
 """
 
 
 def run_react_agent(task: Task, db: Session) -> None:
     """执行单轮 react_agent 审计
 
-    阶段 1:整个任务由 react_agent 独立完成
+    阶段 2:工具在沙箱里执行(mock 模式下走本地文件系统)
     阶段 4 起:user_agent 会调用本函数多次,每次带不同的追问请求
     """
     # 标记任务运行中
     task.status = TaskStatus.RUNNING
     task.current_stage = "react_agent 启动中"
     db.commit()
+
+    # 设置当前任务上下文(供沙箱工具复用会话)
+    task_id_str = str(task.id)
+    set_current_task(task_id_str)
 
     try:
         # 记录用户提问
@@ -99,6 +109,8 @@ def run_react_agent(task: Task, db: Session) -> None:
 
         findings_collected: list[dict[str, Any]] = []
         repo_path: str | None = None
+        # 记录最近几次的工具调用签名,用于检测循环
+        recent_calls: list[str] = []
 
         for iteration in range(1, MAX_ITERATIONS + 1):
             task.current_stage = f"react_agent 第 {iteration} 轮思考"
@@ -140,6 +152,10 @@ def run_react_agent(task: Task, db: Session) -> None:
                 except json.JSONDecodeError as e:
                     fn_args = {}
                     logger.error(f"[task={task.id}] 工具参数解析失败: {e}")
+
+                # 记录工具调用签名(用于循环检测)
+                call_sig = f"{fn_name}:{json.dumps(fn_args, sort_keys=True)}"
+                recent_calls.append(call_sig)
 
                 # 记录工具调用到对话
                 _add_conversation(
@@ -200,9 +216,60 @@ def run_react_agent(task: Task, db: Session) -> None:
                         "tool_call_id": tool_call.id,
                         "content": err_msg,
                     })
+
+            # 循环检测:检查最近 MAX_SAME_CALLS 次调用是否完全相同
+            if (
+                len(recent_calls) >= MAX_SAME_CALLS
+                and len(set(recent_calls[-MAX_SAME_CALLS:])) == 1
+            ):
+                same_sig = recent_calls[-1]
+                logger.warning(
+                    f"[task={task.id}] 检测到连续 {MAX_SAME_CALLS} 次相同调用,打破循环: {same_sig}"
+                )
+                _add_conversation(
+                    db, task,
+                    role="react_agent",
+                    type="thinking",
+                    content=f"检测到连续重复调用 {MAX_SAME_CALLS} 次,强制结束当前轮次,转入结果汇总",
+                )
+                # 注入提示,引导 LLM 提交结果
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "系统提示:你刚刚连续多次调用同一个工具且参数相同,看起来陷入了循环。"
+                        "请停止继续调用相同工具,**立即调用 submit_findings** 提交当前已发现的所有漏洞。"
+                        "如果没有发现漏洞,也调用 submit_findings 传空数组并说明原因。"
+                    ),
+                })
         else:
             # 循环跑满了还没结束
             logger.warning(f"[task={task.id}] react_agent 达到最大迭代次数 {MAX_ITERATIONS}")
+            # 注入提示,强制提交
+            messages.append({
+                "role": "user",
+                "content": (
+                    "系统提示:已达到最大迭代次数,请**立即调用 submit_findings** "
+                    "提交当前已发现的所有漏洞。若没有发现漏洞,传空数组并说明原因。"
+                ),
+            })
+            # 再给一次机会调用 submit_findings
+            try:
+                final_response = client.chat(
+                    messages, tools=tools, tool_choice="auto", max_tokens=4096
+                )
+                final_msg = final_response.choices[0].message
+                if final_msg.tool_calls:
+                    for tc in final_msg.tool_calls:
+                        if tc.function.name == "submit_findings":
+                            try:
+                                findings_collected = json.loads(
+                                    tc.function.arguments or "{}"
+                                ).get("findings", [])
+                            except json.JSONDecodeError:
+                                findings_collected = []
+                            break
+            except Exception as e:
+                logger.error(f"[task={task.id}] 最终提交失败: {e}")
 
         # 落库 findings
         for f in findings_collected:
@@ -245,6 +312,12 @@ def run_react_agent(task: Task, db: Session) -> None:
             type="error",
             content=f"执行失败: {e}",
         )
+    finally:
+        # 任务结束,关闭沙箱会话(释放资源)
+        try:
+            sandbox_tools.close_session(task_id_str)
+        except Exception as cleanup_err:
+            logger.warning(f"[task={task.id}] 关闭沙箱失败: {cleanup_err}")
 
 
 # ============================================================

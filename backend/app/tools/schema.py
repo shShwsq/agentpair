@@ -1,17 +1,35 @@
 """OpenAI function-calling 工具定义
 
-把本地工具包装成 OpenAI tools 规范,供 react_agent 调用
+阶段 2:切换到沙箱版工具
+- sandbox_tools.py 在沙箱里执行(mock 模式下走本地文件系统模拟)
+- 工具实现需要 task_id 用于沙箱会话复用,通过 _TASK_CONTEXT 注入
+
+设计要点:
+- 工具签名对 LLM 透明:LLM 看到的工具定义不含 task_id
+- task_id 由 react_agent 在调用 execute_tool 前注入
 """
 from typing import Any
 
+from app.tools import sandbox_tools
 
-# 工具名 → Python 函数的映射(供 agent 分发调用)
-from app.tools.local_tools import clone_repo, read_file, search_code
 
+# 当前任务的上下文(线程本地存储更合适,但阶段 2 单进程同步执行够用)
+# key: tool_call_id(str)  value: task_id(str)
+# 简化处理:react_agent 在每个工具调用前 set 当前 task_id
+_CURRENT_TASK_ID: str = ""
+
+
+def set_current_task(task_id: str) -> None:
+    """react_agent 调用工具前,设置当前任务 ID"""
+    global _CURRENT_TASK_ID
+    _CURRENT_TASK_ID = task_id
+
+
+# 工具名 → 函数的映射
 TOOL_FUNCTIONS: dict[str, Any] = {
-    "clone_repo": clone_repo,
-    "read_file": read_file,
-    "search_code": search_code,
+    "clone_repo": sandbox_tools.clone_repo,
+    "read_file": sandbox_tools.read_file,
+    "search_code": sandbox_tools.search_code,
 }
 
 # OpenAI function-calling 工具规范
@@ -20,7 +38,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "clone_repo",
-            "description": "克隆 GitHub 仓库到本地,返回本地路径。审计任务开始时必须先调用此工具",
+            "description": "克隆 GitHub 仓库到沙箱,返回沙箱内的路径。审计任务开始时必须先调用此工具",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -100,10 +118,11 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 def execute_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
     """执行工具调用
 
-    阶段 1:直接调用本地 Python 函数
-    阶段 2 起会改为沙箱执行
+    阶段 2:走沙箱实现,自动注入 task_id
     """
     if tool_name not in TOOL_FUNCTIONS:
         raise ValueError(f"未知工具: {tool_name}")
     func = TOOL_FUNCTIONS[tool_name]
+    # 注入 task_id(react_agent 调用前 set 过)
+    arguments["task_id"] = _CURRENT_TASK_ID
     return func(**arguments)

@@ -35,5 +35,13 @@ class Settings(BaseSettings):
     # 仓库克隆临时目录
     REPO_CLONE_DIR: str = "./_repos"
 
+    # 沙箱配置(阶段 2 起)
+    # mode: mock(本地未部署 Server)/ sandbox(连真实 OpenSandbox Server)
+    SANDBOX_MODE: str = "mock"
+    SANDBOX_SERVER_URL: str = "http://localhost:8080"
+    SANDBOX_API_KEY: str = ""
+    SANDBOX_IMAGE: str = "opensandbox/code-interpreter:v1.0.2"
+    SANDBOX_TIMEOUT_MINUTES: int = 30
+
 
 settings = Settings()
