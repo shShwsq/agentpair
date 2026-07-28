@@ -1,112 +1,83 @@
 <script setup lang="ts">
 /**
- * 首页(占位)
+ * 首页
  *
- * 阶段 7 后续会扩展为任务列表页。当前仅展示登录状态 + 登出按钮,
- * 作为登录后的落地页,验证完整鉴权链路。
+ * 登录后的落地页。当前作为任务系统的入口:
+ * - 展示欢迎信息 + 用户邮箱
+ * - 提供提交任务的 CTA 按钮
+ *
+ * 阶段 7 后续会扩展为任务列表页(需后端补 GET /tasks 接口)。
  */
 import { useRouter } from 'vue-router'
 
-import { useAuthStore } from '@/stores/auth'
+import AppHeader from '@/components/AppHeader.vue'
 
 const router = useRouter()
-const authStore = useAuthStore()
-
-function handleLogout(): void {
-  authStore.logout()
-  router.push('/login')
-}
 </script>
 
 <template>
-  <div class="home-page">
-    <header class="home-header">
-      <div class="header-inner">
-        <div class="brand">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2a4 4 0 0 1 4 4v1h1a3 3 0 0 1 3 3v3a3 3 0 0 1-3 3h-1v1a4 4 0 0 1-4 4" />
-            <path d="M12 2a4 4 0 0 0-4 4v1H7a3 3 0 0 0-3 3v3a3 3 0 0 0 3 3h1v1a4 4 0 0 0 4 4" />
-          </svg>
-          <span>AgentPair</span>
-        </div>
-        <div class="user-area">
-          <span class="user-email">{{ authStore.user?.email }}</span>
-          <button class="btn-logout" @click="handleLogout">登出</button>
-        </div>
-      </div>
-    </header>
+  <div class="page">
+    <AppHeader>
+      <template #nav>
+        <RouterLink to="/" class="router-link-active">首页</RouterLink>
+        <RouterLink to="/tasks/new">提交任务</RouterLink>
+      </template>
+    </AppHeader>
 
-    <main class="home-main">
+    <main class="main">
       <div class="welcome-card">
         <div class="welcome-icon">
           <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-            <polyline points="22 4 12 14.01 9 11.01" />
+            <path d="M12 2a4 4 0 0 1 4 4v1h1a3 3 0 0 1 3 3v3a3 3 0 0 1-3 3h-1v1a4 4 0 0 1-4 4" />
+            <path d="M12 2a4 4 0 0 0-4 4v1H7a3 3 0 0 0-3 3v3a3 3 0 0 0 3 3h1v1a4 4 0 0 0 4 4" />
           </svg>
         </div>
-        <h1>登录成功</h1>
-        <p>欢迎回来,{{ authStore.user?.email }}</p>
-        <p class="hint">阶段 7 后续将在此展示任务列表、提交任务等功能。</p>
+        <h1>欢迎使用 AgentPair</h1>
+        <p>双智能体协作系统 · user_agent 澄清意图,react_agent 执行任务</p>
+
+        <div class="cta-area">
+          <button class="btn-primary" @click="router.push('/tasks/new')">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            提交新任务
+          </button>
+        </div>
+
+        <div class="feature-grid">
+          <div class="feature">
+            <div class="feature-icon">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9 11H1l8-8 8 8h-8v10" transform="rotate(180 9 11)" />
+              </svg>
+            </div>
+            <h3>user_agent</h3>
+            <p>作为资深工程师,对照 checklist 评估结果,追问未覆盖项</p>
+          </div>
+          <div class="feature">
+            <div class="feature-icon">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="16 18 22 12 16 6" />
+                <polyline points="8 6 2 12 8 18" />
+              </svg>
+            </div>
+            <h3>react_agent</h3>
+            <p>克隆仓库、调用工具、执行任务、提交结构化结果</p>
+          </div>
+        </div>
       </div>
     </main>
   </div>
 </template>
 
 <style scoped>
-.home-page {
+.page {
   min-height: 100vh;
   background: var(--color-bg);
 }
 
-.home-header {
-  background: var(--color-surface);
-  border-bottom: 1px solid var(--color-border);
-}
-
-.header-inner {
-  max-width: var(--content-width);
-  margin: 0 auto;
-  padding: var(--space-4) var(--space-6);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-weight: var(--fw-bold);
-  font-size: var(--fs-lg);
-  color: var(--color-primary);
-}
-
-.user-area {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-}
-
-.user-email {
-  font-size: var(--fs-sm);
-  color: var(--color-text-secondary);
-}
-
-.btn-logout {
-  padding: var(--space-2) var(--space-4);
-  font-size: var(--fs-sm);
-  color: var(--color-text-secondary);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  transition: all var(--transition-fast);
-}
-
-.btn-logout:hover {
-  color: var(--color-danger);
-  border-color: var(--color-danger);
-}
-
-.home-main {
+.main {
   max-width: var(--content-width);
   margin: 0 auto;
   padding: var(--space-12) var(--space-6);
@@ -123,7 +94,7 @@ function handleLogout(): void {
 
 .welcome-icon {
   display: inline-flex;
-  color: var(--color-success);
+  color: var(--color-primary);
   margin-bottom: var(--space-4);
 }
 
@@ -132,18 +103,61 @@ function handleLogout(): void {
   margin-bottom: var(--space-2);
 }
 
-.welcome-card p {
+.welcome-card > p {
   color: var(--color-text-secondary);
   font-size: var(--fs-base);
 }
 
-.welcome-card .hint {
-  margin-top: var(--space-6);
-  font-size: var(--fs-sm);
-  color: var(--color-text-muted);
-  padding: var(--space-3) var(--space-4);
-  background: var(--color-surface-alt);
+.cta-area {
+  margin: var(--space-8) 0;
+}
+
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 48px;
+  padding: 0 var(--space-6);
+  font-size: var(--fs-base);
+  font-weight: var(--fw-semibold);
+  color: white;
+  background: var(--color-primary);
   border-radius: var(--radius-md);
-  display: inline-block;
+  transition: background var(--transition-fast);
+}
+
+.btn-primary:hover {
+  background: var(--color-primary-hover);
+}
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-5);
+  margin-top: var(--space-8);
+  text-align: left;
+}
+
+.feature {
+  padding: var(--space-5);
+  background: var(--color-surface-alt);
+  border-radius: var(--radius-lg);
+}
+
+.feature-icon {
+  display: inline-flex;
+  color: var(--color-primary);
+  margin-bottom: var(--space-3);
+}
+
+.feature h3 {
+  font-size: var(--fs-base);
+  margin-bottom: var(--space-2);
+}
+
+.feature p {
+  font-size: var(--fs-sm);
+  color: var(--color-text-secondary);
+  line-height: var(--lh-relaxed);
 }
 </style>
