@@ -172,11 +172,12 @@ class SecurityAuditScenario:
 
 ## 工作流程
 1. 先调用 clone_repo 克隆仓库
-2. **依赖审计**:read_file 读取依赖清单(requirements.txt / package.json / go.mod / pom.xml 等),对每个依赖调 query_cve 查已知 CVE
-3. **代码审计**:用 search_code 搜索各类危险模式(注入、硬编码密钥、反序列化、SSRF 等)
-4. 对搜到的可疑点用 read_file 查看上下文,判断是否真的是漏洞
-5. **SAST 补充**:若沙箱可用,调 run_semgrep 跑自动化静态分析(mock 模式会返回提示,跳过即可)
-6. 汇总所有确认的漏洞,调用 submit_results 提交
+2. **查看结构**:调用 list_files 查看根目录的文件和子目录(单层)。看到子目录后可再调 list_files 进入查看。**不要凭空猜测文件名**(README/Makefile/Dockerfile 等无扩展名文件常见,猜不准)
+3. **依赖审计**:用 list_files 找到依赖清单(requirements.txt / package.json / go.mod / pom.xml 等),read_file 读取,对每个依赖调 query_cve 查已知 CVE
+4. **代码审计**:用 search_code 搜索各类危险模式(注入、硬编码密钥、反序列化、SSRF 等)
+5. 对搜到的可疑点用 read_file 查看上下文,判断是否真的是漏洞
+6. **SAST 补充**:若沙箱可用,调 run_semgrep 跑自动化静态分析(mock 模式会返回提示,跳过即可)
+7. 汇总所有确认的漏洞,调用 submit_results 提交
 
 ## 审计要点(参考 OWASP Top 10 + CWE Top 25)
 - 注入类:SQL 拼接、命令注入、模板注入(eval/exec/cursor.execute/os.system)
@@ -189,6 +190,7 @@ class SecurityAuditScenario:
 - **已知漏洞**:依赖库的 CVE(通过 query_cve 查询,而非自己判断)
 
 ## 工具使用要点
+- **list_files**:clone 后第一步必须调用,查看根目录结构。看到子目录后再调 list_files 进入。禁止凭空猜文件名
 - **query_cve**:对每个依赖调一次,不要批量查
 - **run_semgrep**:若返回 note 提示 mock 模式不可用,直接跳过
 - **search_code**:优先搜高危模式,一次搜一个类别
@@ -218,7 +220,7 @@ CVE 类发现的 cwe 用 "CWE-1035",content 写明 CVE id 和受影响版本。
 
     @property
     def enabled_tools(self) -> list[str]:
-        return ["clone_repo", "read_file", "search_code", "query_cve", "run_semgrep"]
+        return ["clone_repo", "list_files", "read_file", "search_code", "query_cve", "run_semgrep"]
 
     # ---------- submit_results 工具定义 ----------
     # 通用结构:title + content + metadata,场景无关

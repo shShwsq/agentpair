@@ -136,8 +136,153 @@ def _clone_repo_sandbox(ctx: dict, clone_url: str, repo_name: str, branch: str |
     return {"path": repo_dir, "files_count": files_count}
 
 
+# 噪声目录:列出仓库结构时跳过(参考 Claude Code LS 的 ignore 设计)
+_SKIP_DIRS_LIST = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv",
+    ".idea", ".vscode", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    "dist", "build", ".next", ".nuxt", "target",
+}
+
+
 # ============================================================
-# 工具 2:read_file
+# 工具 2:list_files(参考 Claude Code LS:单层列出,不递归)
+# ============================================================
+
+
+def list_files(
+    repo_path: str,
+    subdir: str = "",
+    max_entries: int = 200,
+    task_id: str = "",
+) -> dict:
+    """列出仓库内某目录下的文件和子目录(单层,不递归)
+
+    参考 Claude Code 的 LS 工具设计:
+    - 单层列出指定目录的内容,不递归整树(避免大仓库撑爆上下文)
+    - 跳过噪声目录(.git / node_modules / __pycache__ / venv 等)
+    - 区分 file / dir,便于 LLM 决定下一步进哪个子目录或读哪个文件
+    - 目录排前、文件排后,各自按名字排序
+    - 限制返回条数(max_entries),超出则 truncated=true
+
+    参数:
+        repo_path: clone_repo 返回的 path
+        subdir: 仓库内相对路径,默认根目录。如 "src"、"tests/unit"
+        max_entries: 最多返回条目数,默认 200
+
+    返回:{
+        "path": "src/",          # 本次列出的目录(相对仓库)
+        "entries": [
+            {"name": "main.py", "type": "file", "size": 1024},
+            {"name": "utils", "type": "dir", "size": 0},
+            ...
+        ],
+        "total": int,
+        "truncated": bool,
+    }
+    """
+    ctx = _get_or_create_session(task_id)
+    mode = ctx["mode"]
+
+    if mode == "mock":
+        return _list_files_mock(repo_path, subdir, max_entries)
+    else:
+        return _list_files_sandbox(ctx, repo_path, subdir, max_entries)
+
+
+def _list_files_mock(repo_path: str, subdir: str, max_entries: int) -> dict:
+    """mock 模式:用 Path.iterdir 直接列"""
+    root = Path(repo_path).resolve()
+    target = (root / subdir).resolve() if subdir else root
+
+    # 防路径穿越
+    if not target.is_relative_to(root):
+        raise ValueError("非法路径:不能超出仓库根目录")
+    if not target.is_dir():
+        raise FileNotFoundError(f"目录不存在: {subdir or '(根)'}")
+
+    entries = []
+    for entry in target.iterdir():
+        # 跳过噪声目录(只跳目录,不跳同名文件)
+        if entry.is_dir() and entry.name in _SKIP_DIRS_LIST:
+            continue
+        if entry.is_dir():
+            entries.append({"name": entry.name, "type": "dir", "size": 0})
+        else:
+            try:
+                size = entry.stat().st_size
+            except OSError:
+                size = 0
+            entries.append({"name": entry.name, "type": "file", "size": size})
+
+    # 排序:目录在前、文件在后;各自按名字大小写不敏感排序
+    entries.sort(key=lambda e: (e["type"] != "dir", e["name"].lower()))
+
+    truncated = len(entries) > max_entries
+    entries = entries[:max_entries]
+
+    return {
+        "path": (subdir.rstrip("/") + "/") if subdir else ".",
+        "entries": entries,
+        "total": len(entries),
+        "truncated": truncated,
+    }
+
+
+def _list_files_sandbox(
+    ctx: dict, repo_path: str, subdir: str, max_entries: int
+) -> dict:
+    """sandbox 模式:用 ls -Ap1 单层列出
+
+    -A:列出除 . 和 .. 外的所有条目(含隐藏文件)
+    -p:目录名末尾加 /(便于解析)
+    -1:每行一个
+    """
+    session: SandboxSession = ctx["session"]
+    full_path = (
+        f"{repo_path.rstrip('/')}/{subdir.lstrip('/')}"
+        if subdir else repo_path
+    )
+
+    # 检查目录是否存在
+    check = session.run_command(
+        f"test -d {shlex.quote(full_path)} && echo OK || echo MISSING"
+    )
+    if "MISSING" in check:
+        raise FileNotFoundError(f"目录不存在: {subdir or '(根)'}")
+
+    # 单层列出
+    output = session.run_command(f"ls -Ap1 {shlex.quote(full_path)}")
+
+    entries = []
+    for line in output.splitlines():
+        name = line.strip()
+        if not name:
+            continue
+        is_dir = name.endswith("/")
+        name = name.rstrip("/")
+        if is_dir and name in _SKIP_DIRS_LIST:
+            continue
+        if is_dir:
+            entries.append({"name": name, "type": "dir", "size": 0})
+        else:
+            # 不查文件大小(避免 N 次 stat,LLM 不需要精确大小)
+            entries.append({"name": name, "type": "file", "size": 0})
+
+    entries.sort(key=lambda e: (e["type"] != "dir", e["name"].lower()))
+
+    truncated = len(entries) > max_entries
+    entries = entries[:max_entries]
+
+    return {
+        "path": (subdir.rstrip("/") + "/") if subdir else ".",
+        "entries": entries,
+        "total": len(entries),
+        "truncated": truncated,
+    }
+
+
+# ============================================================
+# 工具 3:read_file
 # ============================================================
 
 
@@ -212,7 +357,7 @@ def _read_file_sandbox(
 
 
 # ============================================================
-# 工具 3:search_code
+# 工具 4:search_code
 # ============================================================
 
 
@@ -364,7 +509,7 @@ def _to_ssh_url(repo_url: str) -> str:
 
 
 # ============================================================
-# 工具 4:run_semgrep(阶段 3)
+# 工具 5:run_semgrep(阶段 3)
 # ============================================================
 
 

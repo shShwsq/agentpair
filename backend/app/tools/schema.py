@@ -25,6 +25,7 @@ def set_current_task(task_id: str) -> None:
 # 工具名 → 函数的映射(通用工具,所有场景共用池)
 TOOL_FUNCTIONS: dict[str, Any] = {
     "clone_repo": sandbox_tools.clone_repo,
+    "list_files": sandbox_tools.list_files,
     "read_file": sandbox_tools.read_file,
     "search_code": sandbox_tools.search_code,
     "run_semgrep": sandbox_tools.run_semgrep,
@@ -76,6 +77,35 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["repo_path", "file_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": (
+                "列出仓库内某目录下的文件和子目录(单层,不递归)。"
+                "clone 后先调用此工具查看仓库结构,再决定读哪些文件。"
+                "看子目录后可再次调用进入子目录查看。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {
+                        "type": "string",
+                        "description": "clone_repo 返回的 path",
+                    },
+                    "subdir": {
+                        "type": "string",
+                        "description": "仓库内相对路径,默认根目录。如 'src'、'tests/unit'",
+                    },
+                    "max_entries": {
+                        "type": "integer",
+                        "description": "最大返回条目数,默认 200",
+                    },
+                },
+                "required": ["repo_path"],
             },
         },
     },
