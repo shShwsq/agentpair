@@ -1,4 +1,4 @@
-"""沙箱版工具实现(阶段 2)
+"""沙箱版工具实现(阶段 2 起)
 
 所有工具都通过 SandboxSession 执行,接口与 local_tools.py 保持一致。
 
@@ -7,6 +7,7 @@ mock 模式:沙箱会话的 run_command 走本地 subprocess,但 Windows 不支�
          Python 实现,绕过 shell
 sandbox 模式:走真实沙箱,在 Linux 容器里执行 Unix 命令
 """
+import json
 import logging
 import os
 import re
@@ -360,3 +361,133 @@ def _to_ssh_url(repo_url: str) -> str:
         return f"git@github.com:{path}.git"
 
     return repo_url
+
+
+# ============================================================
+# 工具 4:run_semgrep(阶段 3)
+# ============================================================
+
+
+def run_semgrep(
+    repo_path: str,
+    config: str = "auto",
+    task_id: str = "",
+) -> dict:
+    """在沙箱里运行 Semgrep 静态分析
+
+    参数:
+        repo_path: clone_repo 返回的 path
+        config: semgrep 配置,默认 "auto"(自动选规则集)。
+                也可指定 "p/python"、"p/javascript" 等
+
+    返回:{
+        "findings": [
+            {
+                "rule_id": "python.lang.security...",
+                "severity": "HIGH",
+                "file": "src/main.py",
+                "line": 42,
+                "message": "..."
+            },
+            ...
+        ],
+        "total": int,
+        "truncated": bool
+    }
+
+    mock 模式:返回提示让 LLM 知道本工具不可用
+    sandbox 模式:在沙箱里执行 semgrep
+    """
+    ctx = _get_or_create_session(task_id)
+    mode = ctx["mode"]
+
+    if mode == "mock":
+        # mock 模式:semgrep 需要沙箱,跳过
+        return {
+            "findings": [],
+            "total": 0,
+            "truncated": False,
+            "note": (
+                "mock 模式不支持 semgrep(需要 Linux 沙箱环境)。",
+                "请通过其他工具(search_code + read_file)进行手动 SAST 检查,",
+                "或切换 SANDBOX_MODE=sandbox 启用此工具。"
+            ),
+        }
+
+    return _run_semgrep_sandbox(ctx, repo_path, config)
+
+
+def _run_semgrep_sandbox(ctx: dict, repo_path: str, config: str) -> dict:
+    """sandbox 模式:在沙箱里运行 semgrep"""
+    session: SandboxSession = ctx["session"]
+
+    # 先检查 semgrep 是否已安装
+    check = session.run_command("which semgrep || echo MISSING")
+    if "MISSING" in check:
+        # 尝试 pip 安装
+        logger.info("[sandbox] semgrep 未安装,尝试 pip install semgrep")
+        install_result = session.run_command(
+            "pip install semgrep 2>&1 | tail -5", timeout=180
+        )
+        # 再次检查
+        check2 = session.run_command("which semgrep || echo MISSING")
+        if "MISSING" in check2:
+            return {
+                "findings": [],
+                "total": 0,
+                "truncated": False,
+                "error": "semgrep 安装失败,请检查沙箱镜像或手动安装",
+            }
+
+    # 运行 semgrep,输出 JSON
+    # --json 输出到 stdout
+    # --quiet 只输出结果,不输出 banner
+    # --config auto 自动选规则
+    cmd = f"semgrep --json --quiet --config {shlex.quote(config)} {shlex.quote(repo_path)}"
+    logger.info(f"[sandbox] semgrep: {cmd}")
+    output = session.run_command(cmd, timeout=300)  # semgrep 可能慢,5 分钟超时
+
+    # 解析 JSON
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError as e:
+        return {
+            "findings": [],
+            "total": 0,
+            "truncated": False,
+            "error": f"semgrep 输出解析失败: {e}",
+        }
+
+    results = data.get("results", [])
+    findings = []
+    for r in results[:100]:  # 限制最多 100 个,防超长
+        # 提取信息
+        path = r.get("path", "")
+        # 去掉 repo_path 前缀
+        if path.startswith(repo_path):
+            path = path[len(repo_path):].lstrip("/")
+
+        findings.append({
+            "rule_id": r.get("check_id", ""),
+            "severity": _map_semgrep_severity(r.get("extra", {}).get("severity", "")),
+            "file": path,
+            "line": r.get("start", {}).get("line", 0),
+            "message": r.get("extra", {}).get("message", "")[:200],
+        })
+
+    total = len(findings)
+    return {
+        "findings": findings,
+        "total": total,
+        "truncated": total >= 100,
+    }
+
+
+def _map_semgrep_severity(sev: str) -> str:
+    """把 semgrep 的 severity 映射到统一格式"""
+    mapping = {
+        "ERROR": "HIGH",
+        "WARNING": "MEDIUM",
+        "INFO": "LOW",
+    }
+    return mapping.get(sev.upper(), sev.upper())

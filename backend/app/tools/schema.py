@@ -4,6 +4,10 @@
 - sandbox_tools.py 在沙箱里执行(mock 模式下走本地文件系统模拟)
 - 工具实现需要 task_id 用于沙箱会话复用,通过 _TASK_CONTEXT 注入
 
+阶段 3:新增 CVE 查询(OSV API)和 Semgrep(沙箱静态分析)
+- CVE 查询纯 HTTP 调用,mock 和 sandbox 都可用
+- Semgrep 需要沙箱环境,mock 模式返回提示
+
 设计要点:
 - 工具签名对 LLM 透明:LLM 看到的工具定义不含 task_id
 - task_id 由 react_agent 在调用 execute_tool 前注入
@@ -11,10 +15,10 @@
 from typing import Any
 
 from app.tools import sandbox_tools
+from app.tools.cve_tools import query_cve
 
 
 # 当前任务的上下文(线程本地存储更合适,但阶段 2 单进程同步执行够用)
-# key: tool_call_id(str)  value: task_id(str)
 # 简化处理:react_agent 在每个工具调用前 set 当前 task_id
 _CURRENT_TASK_ID: str = ""
 
@@ -30,6 +34,8 @@ TOOL_FUNCTIONS: dict[str, Any] = {
     "clone_repo": sandbox_tools.clone_repo,
     "read_file": sandbox_tools.read_file,
     "search_code": sandbox_tools.search_code,
+    "run_semgrep": sandbox_tools.run_semgrep,
+    "query_cve": query_cve,
 }
 
 # OpenAI function-calling 工具规范
@@ -112,13 +118,67 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_cve",
+            "description": (
+                "查询指定包+版本的已知 CVE 漏洞(用 OSV API)。"
+                "审计完依赖清单后,对每个依赖调一次本工具查已知漏洞。"
+                "返回漏洞列表,含 CVE id、严重程度、修复版本"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "package_name": {
+                        "type": "string",
+                        "description": "包名,大小写与依赖清单一致,如 'flask'、'requests'",
+                    },
+                    "version": {
+                        "type": "string",
+                        "description": "版本号,如 '2.0.0'",
+                    },
+                    "ecosystem": {
+                        "type": "string",
+                        "description": "包管理系统,默认 python(PyPI)。可选:npm/go/java/php/ruby/rust/csharp",
+                    },
+                },
+                "required": ["package_name", "version"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_semgrep",
+            "description": (
+                "在沙箱里运行 Semgrep 静态分析,自动扫描代码漏洞。"
+                "适合作为补充检查,与手动 search_code 配合。"
+                "注意:需要沙箱环境(sandbox 模式),mock 模式不可用"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {
+                        "type": "string",
+                        "description": "clone_repo 返回的 path",
+                    },
+                    "config": {
+                        "type": "string",
+                        "description": "semgrep 配置,默认 'auto' 自动选规则集。也可指定 'p/python'、'p/javascript' 等",
+                    },
+                },
+                "required": ["repo_path"],
+            },
+        },
+    },
 ]
 
 
 def execute_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
     """执行工具调用
 
-    阶段 2:走沙箱实现,自动注入 task_id
+    阶段 3:走沙箱实现 + CVE 查询,自动注入 task_id
     """
     if tool_name not in TOOL_FUNCTIONS:
         raise ValueError(f"未知工具: {tool_name}")
