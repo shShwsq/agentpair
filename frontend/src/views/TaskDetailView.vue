@@ -20,6 +20,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
+import ConversationMessage from '@/components/ConversationMessage.vue'
 import { getTask } from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
 import { extractErrorMessage } from '@/utils/error'
@@ -207,9 +208,20 @@ onUnmounted(() => {
   if (eventSource) eventSource.close()
 })
 
-// ---- 对话流分组:按 round_idx ----
-// 把正式对话和流式思考项混合,按 round_idx 分组
-// 流式项用 id=`stream:${conv_id}` 标识,防止和正式对话 id 冲突
+// ---- 对话流分组:按 round_idx → 再按迭代分段 ----
+//
+// 层级结构:
+//   round
+//     ├─ plain segment     (user_agent 评估/追问/总结、user 指令等关键节点,平铺)
+//     └─ iteration segment (react_agent 一次 ReAct 循环:thinking + N 个工具调用/结果 + 可选 submit)
+//
+// 迭代识别:遇到 react_agent 的 thinking 项(实时流式或历史 type=thinking)就开新迭代,
+// 后续 react_agent 的 tool_call/tool_result/submit 归入当前迭代,
+// 直到遇到下一个 thinking(开新迭代)或非 react_agent 消息(关闭迭代,平铺该消息)。
+//
+// 折叠策略:
+// - 迭代块:默认折叠。包含正在流式中的 thinking 时自动展开;用户点击切换后以用户选择为准。
+// - 工具调用组:默认折叠(一个迭代内的所有 tool_call/tool_result 合并为一个折叠块)。
 
 interface DisplayItem {
   /** 正式对话用 UUID,流式项用 `stream:${conv_id}` */
@@ -226,7 +238,109 @@ interface DisplayItem {
   streaming?: StreamingItem
 }
 
-const roundGroups = computed(() => {
+/** 平铺段:user_agent/user 等关键消息,直接渲染为单张卡片 */
+interface PlainSegment {
+  kind: 'plain'
+  item: DisplayItem
+}
+
+/** 迭代段:react_agent 一次 ReAct 循环的所有产物 */
+interface IterationSegment {
+  kind: 'iteration'
+  /** 迭代在 round 内的序号(从 1 开始) */
+  iterationIdx: number
+  /** 唯一标识:`${roundIdx}-${iterationIdx}` */
+  id: string
+  /** 该迭代的 thinking 项(流式或历史,通常 1 条) */
+  thinkingItems: DisplayItem[]
+  /** 该迭代内的工具调用项(tool_call + tool_result),按时间顺序 */
+  toolItems: DisplayItem[]
+  /** 该迭代内的其他 react_agent 项(submit 等) */
+  otherItems: DisplayItem[]
+  /** 是否包含正在流式中的项(自动展开用) */
+  hasStreaming: boolean
+}
+
+type RoundSegment = PlainSegment | IterationSegment
+
+interface RoundGroup {
+  roundIdx: number
+  label: string
+  segments: RoundSegment[]
+}
+
+/** 用户手动展开过的迭代 id(流式结束后保留展开状态,不被自动折叠) */
+const expandedIterations = reactive<Set<string>>(new Set())
+/** 用户手动展开过的工具组 id(格式 `${iterId}-tools`) */
+const expandedToolGroups = reactive<Set<string>>(new Set())
+
+/** 判断 DisplayItem 是否为 react_agent 的 thinking(迭代起点) */
+function isReactThinkingItem(item: DisplayItem): boolean {
+  if (item.is_streaming) {
+    return item.streaming?.role === 'react_agent'
+  }
+  return item.role === 'react_agent' && item.type === 'thinking'
+}
+
+/** 判断 DisplayItem 是否属于 react_agent(用于归入当前迭代) */
+function isReactAgentItem(item: DisplayItem): boolean {
+  if (item.is_streaming) return item.streaming?.role === 'react_agent'
+  return item.role === 'react_agent'
+}
+
+/** 判断 DisplayItem 是否正在流式 */
+function isStreamingActive(item: DisplayItem): boolean {
+  return !!(item.is_streaming && item.streaming?.status === 'streaming')
+}
+
+/** 把单个 round 内的 DisplayItem 列表按迭代分段 */
+function segmentRoundItems(roundIdx: number, items: DisplayItem[]): RoundSegment[] {
+  const segments: RoundSegment[] = []
+  let current: IterationSegment | null = null
+  let iterCounter = 0
+
+  const closeCurrent = () => {
+    if (current) {
+      segments.push(current)
+      current = null
+    }
+  }
+
+  for (const item of items) {
+    if (isReactThinkingItem(item)) {
+      // thinking = 新迭代起点,先关闭上一个
+      closeCurrent()
+      iterCounter++
+      current = {
+        kind: 'iteration',
+        iterationIdx: iterCounter,
+        id: `${roundIdx}-${iterCounter}`,
+        thinkingItems: [item],
+        toolItems: [],
+        otherItems: [],
+        hasStreaming: isStreamingActive(item),
+      }
+    } else if (current && isReactAgentItem(item)) {
+      // 归入当前迭代
+      if (item.is_streaming) {
+        current.thinkingItems.push(item)
+      } else if (item.type === 'tool_call' || item.type === 'tool_result') {
+        current.toolItems.push(item)
+      } else {
+        current.otherItems.push(item)
+      }
+      if (isStreamingActive(item)) current.hasStreaming = true
+    } else {
+      // user_agent / user / 其他 → 平铺
+      closeCurrent()
+      segments.push({ kind: 'plain', item })
+    }
+  }
+  closeCurrent()
+  return segments
+}
+
+const roundGroups = computed<RoundGroup[]>(() => {
   if (!task.value?.conversations && streamingItems.size === 0) return []
 
   const groups = new Map<number, DisplayItem[]>()
@@ -286,12 +400,74 @@ const roundGroups = computed(() => {
 
   return [...groups.entries()]
     .sort(([a], [b]) => a - b)
-    .map(([roundIdx, items]) => ({
-      roundIdx,
-      label: roundIdx === 0 ? '初始评估' : `第 ${roundIdx} 轮`,
-      items: items.sort((a, b) => a.created_at.localeCompare(b.created_at)),
-    }))
+    .map(([roundIdx, items]) => {
+      const sorted = items.sort((a, b) => a.created_at.localeCompare(b.created_at))
+      return {
+        roundIdx,
+        label: roundIdx === 0 ? '初始评估' : `第 ${roundIdx} 轮`,
+        segments: segmentRoundItems(roundIdx, sorted),
+      }
+    })
 })
+
+// ---- 折叠状态查询/切换 ----
+
+/** 迭代是否展开:用户手动展开 OR 当前正在流式(自动展开) */
+function isIterationExpanded(seg: IterationSegment): boolean {
+  return expandedIterations.has(seg.id) || seg.hasStreaming
+}
+
+function toggleIteration(seg: IterationSegment): void {
+  if (expandedIterations.has(seg.id)) {
+    expandedIterations.delete(seg.id)
+  } else {
+    expandedIterations.add(seg.id)
+  }
+}
+
+/** 工具组是否展开(默认折叠,仅由用户控制) */
+function isToolGroupExpanded(iterId: string): boolean {
+  return expandedToolGroups.has(`${iterId}-tools`)
+}
+
+function toggleToolGroup(iterId: string): void {
+  const key = `${iterId}-tools`
+  if (expandedToolGroups.has(key)) {
+    expandedToolGroups.delete(key)
+  } else {
+    expandedToolGroups.add(key)
+  }
+}
+
+/** 从工具调用 content 中提取工具名(用于折叠摘要预览) */
+function extractToolName(content: string): string {
+  // content 形如 "调用 semgrep_scan({...})" 或 "调用 read_file({...})"
+  const m = content.match(/^调用\s+(\w+)\s*\(/)
+  return m ? m[1] : content.slice(0, 30)
+}
+
+/** 迭代内的工具调用数(只数 tool_call,不数 tool_result) */
+function toolCallCount(seg: IterationSegment): number {
+  return seg.toolItems.filter(
+    (i) => !i.is_streaming && i.type === 'tool_call',
+  ).length
+}
+
+/** 迭代摘要:工具数量 + 工具名预览(最多 3 个) */
+function iterationSummary(seg: IterationSegment): string {
+  const count = toolCallCount(seg)
+  if (count === 0) {
+    // 没有工具调用,可能只有 thinking(纯回答)
+    return '思考中无工具调用'
+  }
+  const names = seg.toolItems
+    .filter((i) => !i.is_streaming && i.type === 'tool_call')
+    .map((i) => extractToolName(i.content || ''))
+    .slice(0, 3)
+  const preview = names.join(', ')
+  const extra = count > 3 ? ` 等 ${count} 个` : ''
+  return `${count} 个工具调用: ${preview}${extra}`
+}
 
 // ---- 结果分组:按 severity ----
 
@@ -343,62 +519,6 @@ const severityGroups = computed<SeverityGroup[]>(() => {
       results,
     }))
 })
-
-// ---- 对话消息元信息(角色/类型 → 展示) ----
-
-interface MessageMeta {
-  label: string
-  variant: 'user-agent' | 'react-agent' | 'tool' | 'error' | 'summary' | 'streaming'
-}
-
-function getMessageMeta(item: DisplayItem): MessageMeta {
-  // 流式思考项
-  if (item.is_streaming && item.streaming) {
-    const role = item.streaming.role
-    const status = item.streaming.status
-    const roleLabel = role === 'user_agent' ? 'user_agent' : 'react_agent'
-    if (status === 'streaming') {
-      return {
-        label: `${roleLabel} 思考中`,
-        variant: 'streaming',
-      }
-    }
-    // done / error 都显示"思考"(不带"中")
-    return {
-      label: `${roleLabel} 思考`,
-      variant: 'streaming',
-    }
-  }
-
-  // 正式对话项
-  const c = item as Required<DisplayItem>
-  if (c.role === 'user_agent') {
-    if (c.type === 'evaluation')
-      return { label: 'user_agent 评估', variant: 'user-agent' }
-    if (c.type === 'followup')
-      return { label: 'user_agent 追问', variant: 'user-agent' }
-    if (c.type === 'summary')
-      return { label: '最终总结', variant: 'summary' }
-    return { label: 'user_agent', variant: 'user-agent' }
-  }
-  if (c.role === 'react_agent') {
-    if (c.type === 'thinking')
-      return { label: 'react_agent 思考', variant: 'react-agent' }
-    if (c.type === 'tool_call')
-      return { label: '工具调用', variant: 'tool' }
-    if (c.type === 'tool_result')
-      return { label: '工具结果', variant: 'tool' }
-    if (c.type === 'submit')
-      return { label: '提交结果', variant: 'react-agent' }
-    if (c.type === 'error')
-      return { label: '错误', variant: 'error' }
-    return { label: 'react_agent', variant: 'react-agent' }
-  }
-  if (c.role === 'user') {
-    return { label: '用户指令', variant: 'tool' }
-  }
-  return { label: c.role || 'unknown', variant: 'react-agent' }
-}
 
 // ---- 状态徽章 ----
 
@@ -540,58 +660,71 @@ function formatTime(iso: string): string {
           <div v-for="group in roundGroups" :key="group.roundIdx" class="round-group">
             <div class="round-label">{{ group.label }}</div>
             <div class="messages">
-              <div
-                v-for="item in group.items"
-                :key="item.id"
-                :class="['message', `msg-${getMessageMeta(item).variant}`, {
-                  'msg-streaming-active': item.is_streaming && item.streaming?.status === 'streaming',
-                }]"
+              <template
+                v-for="seg in group.segments"
+                :key="seg.kind === 'iteration' ? `iter-${seg.id}` : `plain-${seg.item.id}`"
               >
-                <div class="msg-header">
-                  <span class="msg-label">{{ getMessageMeta(item).label }}</span>
-                  <span v-if="item.is_streaming && item.streaming?.status === 'streaming'" class="msg-streaming-tag">
-                    <span class="typing-dots">
-                      <span></span><span></span><span></span>
+                <!-- 平铺段:user_agent 评估/追问/总结、user 指令等关键消息 -->
+                <ConversationMessage
+                  v-if="seg.kind === 'plain'"
+                  :item="seg.item"
+                  @toggle-reasoning="toggleReasoning"
+                />
+
+                <!-- 迭代段:react_agent 一次 ReAct 循环(thinking + 工具调用 + 可选 submit) -->
+                <div
+                  v-else
+                  class="iteration-block"
+                  :class="{
+                    'iteration-streaming': seg.hasStreaming,
+                    'iteration-expanded': isIterationExpanded(seg),
+                  }"
+                >
+                  <div class="iteration-header" @click="toggleIteration(seg)">
+                    <span class="iteration-toggle">{{ isIterationExpanded(seg) ? '▼' : '▶' }}</span>
+                    <span class="iteration-label">迭代 {{ seg.iterationIdx }}</span>
+                    <span class="iteration-summary">{{ iterationSummary(seg) }}</span>
+                    <span v-if="seg.hasStreaming" class="iteration-streaming-tag">
+                      <span class="typing-dots"><span></span><span></span><span></span></span>
                     </span>
-                  </span>
-                  <span class="msg-time">{{ formatTime(item.created_at) }}</span>
-                </div>
-
-                <!-- 流式思考项:显示 reasoning(可折叠) + content -->
-                <template v-if="item.is_streaming && item.streaming">
-                  <!-- reasoning(思考链,可折叠) -->
-                  <div v-if="item.streaming.reasoning" class="msg-reasoning">
+                  </div>
+                  <div v-if="isIterationExpanded(seg)" class="iteration-body">
+                    <!-- thinking 项(流式或历史) -->
+                    <ConversationMessage
+                      v-for="t in seg.thinkingItems"
+                      :key="t.id"
+                      :item="t"
+                      @toggle-reasoning="toggleReasoning"
+                    />
+                    <!-- 工具调用折叠组(一个迭代内的所有 tool_call/tool_result 合并) -->
                     <div
-                      class="msg-reasoning-header"
-                      @click="toggleReasoning(item.streaming.conv_id)"
+                      v-if="seg.toolItems.length > 0"
+                      class="tool-group"
+                      :class="{ 'tool-group-expanded': isToolGroupExpanded(seg.id) }"
                     >
-                      <span class="msg-reasoning-toggle">
-                        {{ item.streaming.reasoning_expanded ? '▼' : '▶' }}
-                      </span>
-                      <span class="msg-reasoning-label">思考链</span>
-                      <span class="msg-reasoning-meta">
-                        {{ item.streaming.reasoning.length }} 字符
-                      </span>
+                      <div class="tool-group-header" @click="toggleToolGroup(seg.id)">
+                        <span class="tool-group-toggle">{{ isToolGroupExpanded(seg.id) ? '▼' : '▶' }}</span>
+                        <span class="tool-group-label">🔧 工具调用 ({{ toolCallCount(seg) }})</span>
+                      </div>
+                      <div v-if="isToolGroupExpanded(seg.id)" class="tool-group-body">
+                        <ConversationMessage
+                          v-for="ti in seg.toolItems"
+                          :key="ti.id"
+                          :item="ti"
+                          @toggle-reasoning="toggleReasoning"
+                        />
+                      </div>
                     </div>
-                    <div
-                      v-if="item.streaming.reasoning_expanded"
-                      class="msg-reasoning-content"
-                    >{{ item.streaming.reasoning }}</div>
+                    <!-- 其他项(submit 等) -->
+                    <ConversationMessage
+                      v-for="o in seg.otherItems"
+                      :key="o.id"
+                      :item="o"
+                      @toggle-reasoning="toggleReasoning"
+                    />
                   </div>
-                  <!-- content(正式回答) -->
-                  <div v-if="item.streaming.content" class="msg-content">{{ item.streaming.content }}</div>
-                  <!-- 流式中且无内容:提示 -->
-                  <div
-                    v-if="item.streaming.status === 'streaming' && !item.streaming.reasoning && !item.streaming.content"
-                    class="msg-content msg-content-muted"
-                  >
-                    等待模型响应...
-                  </div>
-                </template>
-
-                <!-- 正式对话项 -->
-                <div v-else class="msg-content">{{ item.content }}</div>
-              </div>
+                </div>
+              </template>
             </div>
           </div>
           <!-- 运行中等待提示(没有流式项时才显示) -->
@@ -880,167 +1013,127 @@ function formatTime(iso: string): string {
   border-left: 2px solid var(--color-border);
 }
 
-.message {
-  padding: var(--space-3) var(--space-4);
+/* ---- 迭代块(react_agent 一次 ReAct 循环,可折叠) ---- */
+.iteration-block {
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  border-left: 3px solid transparent;
-}
-
-.msg-user-agent {
-  background: var(--color-info-light);
-  border-left-color: var(--color-info);
-}
-
-.msg-react-agent {
-  background: #faf5ff;
-  border-left-color: #a855f7;
-}
-
-.msg-tool {
   background: var(--color-surface-alt);
-  border-left-color: var(--color-text-muted);
+  overflow: hidden;
 }
 
-.msg-error {
-  background: var(--color-danger-light);
-  border-left-color: var(--color-danger);
+.iteration-streaming {
+  /* 包含正在流式 thinking 的迭代:加橙色光晕提示 */
+  border-color: #f59e0b;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.15);
 }
 
-.msg-summary {
-  background: linear-gradient(135deg, #faf5ff 0%, #f0f4ff 100%);
-  border-left-color: var(--color-primary);
-}
-
-/* ---- 流式思考项 ---- */
-.msg-streaming {
-  background: linear-gradient(135deg, #fefce8 0%, #fef3c7 100%);
-  border-left-color: #f59e0b;
-  position: relative;
-}
-
-.msg-streaming-active {
-  /* 进行中的流式项:加边框光晕 */
-  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2);
-  animation: streaming-pulse 2s ease-in-out infinite;
-}
-
-@keyframes streaming-pulse {
-  0%, 100% { box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2); }
-  50% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.35); }
-}
-
-.msg-streaming-tag {
-  display: inline-flex;
-  align-items: center;
-  margin-left: var(--space-2);
-}
-
-.msg-streaming-tag .typing-dots span {
-  background: #f59e0b;
-}
-
-/* ---- 思考链(reasoning)区域 ---- */
-.msg-reasoning {
-  margin-bottom: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  background: rgba(255, 255, 255, 0.5);
-  border-radius: var(--radius-md);
-  border-left: 2px solid #d97706;
-}
-
-.msg-reasoning-header {
+.iteration-header {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
   cursor: pointer;
   user-select: none;
-  padding: var(--space-1) 0;
+  background: var(--color-surface);
+  border-bottom: 1px solid transparent;
   transition: background 0.15s ease;
 }
 
-.msg-reasoning-header:hover {
-  background: rgba(245, 158, 11, 0.08);
-  border-radius: var(--radius-sm);
+.iteration-header:hover {
+  background: var(--color-surface-alt);
 }
 
-.msg-reasoning-toggle {
+.iteration-expanded .iteration-header {
+  border-bottom-color: var(--color-border);
+}
+
+.iteration-toggle {
   display: inline-block;
   width: 14px;
   font-size: var(--fs-xs);
-  color: #92400e;
+  color: var(--color-text-secondary);
   text-align: center;
 }
 
-.msg-reasoning-label {
+.iteration-label {
   font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
-  color: #92400e;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.msg-reasoning-meta {
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-  margin-left: auto;
-}
-
-.msg-reasoning-content {
-  font-size: var(--fs-xs);
-  color: var(--color-text-secondary);
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-style: italic;
-  line-height: var(--lh-relaxed);
-  max-height: 300px;
-  overflow-y: auto;
-  margin-top: var(--space-1);
-  padding-top: var(--space-2);
-  border-top: 1px dashed rgba(146, 64, 14, 0.2);
-}
-
-.msg-content-muted {
-  color: var(--color-text-muted);
-  font-style: italic;
-}
-
-.msg-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: var(--space-2);
-}
-
-.msg-label {
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-semibold);
-  color: var(--color-text-secondary);
+  color: #a855f7;
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
 
-.msg-summary .msg-label {
-  color: var(--color-primary);
-}
-
-.msg-time {
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-}
-
-.msg-content {
-  font-size: var(--fs-sm);
-  white-space: pre-wrap;
-  word-break: break-word;
-  line-height: var(--lh-relaxed);
-}
-
-.msg-tool .msg-content {
-  font-family: var(--font-mono);
+.iteration-summary {
   font-size: var(--fs-xs);
   color: var(--color-text-secondary);
-  max-height: 200px;
-  overflow-y: auto;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.iteration-streaming-tag {
+  display: inline-flex;
+  align-items: center;
+}
+
+.iteration-streaming-tag .typing-dots span {
+  background: #f59e0b;
+}
+
+.iteration-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+}
+
+/* ---- 工具调用折叠组(一个迭代内的所有 tool_call/tool_result 合并) ---- */
+.tool-group {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  overflow: hidden;
+}
+
+.tool-group-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid transparent;
+  transition: background 0.15s ease;
+}
+
+.tool-group-header:hover {
+  background: var(--color-surface-alt);
+}
+
+.tool-group-expanded .tool-group-header {
+  border-bottom-color: var(--color-border);
+}
+
+.tool-group-toggle {
+  display: inline-block;
+  width: 14px;
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  text-align: center;
+}
+
+.tool-group-label {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--color-text-secondary);
+}
+
+.tool-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
 }
 
 /* ---- 对话区头部 + 实时指示器 ---- */
