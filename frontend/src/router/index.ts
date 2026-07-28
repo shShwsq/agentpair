@@ -1,0 +1,89 @@
+/**
+ * Vue Router 配置
+ *
+ * 路由职责划分:
+ * - 公开路由:login / auth/* (无需登录)
+ * - 受保护路由: / (需要登录,meta.requiresAuth = true)
+ *
+ * 守卫逻辑:
+ * - 受保护路由未登录 → 跳 /login?redirect=原始路径
+ * - 已登录访问 /login → 跳 / (避免重复登录)
+ * - 有 token 但 user 未加载(页面刷新)→ 先 fetchMe 恢复会话
+ */
+import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
+
+import { useAuthStore } from '@/stores/auth'
+
+const routes: RouteRecordRaw[] = [
+  {
+    path: '/',
+    name: 'home',
+    component: () => import('@/views/HomeView.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
+    path: '/login',
+    name: 'login',
+    component: () => import('@/views/LoginView.vue'),
+    meta: { guestOnly: true },
+  },
+  {
+    path: '/auth/github/callback',
+    name: 'github-callback',
+    component: () => import('@/views/OAuthCallbackView.vue'),
+  },
+  {
+    path: '/auth/verify-email',
+    name: 'verify-email',
+    component: () => import('@/views/VerifyEmailView.vue'),
+  },
+  {
+    path: '/auth/password/reset',
+    name: 'reset-password',
+    component: () => import('@/views/ResetPasswordView.vue'),
+  },
+  // 兜底:未匹配的路由跳首页
+  {
+    path: '/:pathMatch(.*)*',
+    redirect: '/',
+  },
+]
+
+const router = createRouter({
+  history: createWebHistory(),
+  routes,
+  scrollBehavior() {
+    // 切换页面时滚到顶部
+    return { top: 0 }
+  },
+})
+
+// 标记是否已尝试恢复会话(避免每次路由都 fetchMe)
+let sessionRestored = false
+
+router.beforeEach(async (to) => {
+  const authStore = useAuthStore()
+
+  // 有 token 但 user 为空(页面刷新场景):先尝试恢复
+  if (authStore.hasToken && !authStore.isAuthenticated && !sessionRestored) {
+    sessionRestored = true
+    await authStore.fetchMe()
+  }
+
+  // 受保护路由:未登录 → 跳登录
+  if (to.meta.requiresAuth && !authStore.isAuthenticated) {
+    return {
+      name: 'login',
+      query: { redirect: to.fullPath },
+    }
+  }
+
+  // 已登录访问登录页 → 跳首页
+  if (to.meta.guestOnly && authStore.isAuthenticated) {
+    return { name: 'home' }
+  }
+
+  return true
+})
+
+export default router
