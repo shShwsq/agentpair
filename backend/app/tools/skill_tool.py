@@ -9,7 +9,10 @@
 - LLM 看完 SKILL.md 后,自己决定调用 search_code / read_file / run_in_sandbox 等底层工具
 - 这符合 Trae / Claude Code 的 skill 规范:Markdown 指令驱动,而非程序化 steps
 - scenario 上下文从 react_agent 注入(set_current_scenario)
+
+并发安全:用 contextvars 替代全局变量,每个后台线程有独立上下文。
 """
+import contextvars
 import logging
 
 from app.skills import loader as skill_loader
@@ -17,14 +20,18 @@ from app.skills import loader as skill_loader
 logger = logging.getLogger(__name__)
 
 
-# 当前 scenario(由 react_agent 在每轮开始时注入)
-_CURRENT_SCENARIO: str = "code_security_audit"
+# 当前 scenario(由 react_agent 在每轮开始时注入,每个线程独立)
+_CURRENT_SCENARIO: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_scenario", default="code_security_audit"
+)
 
 
 def set_current_scenario(scenario_id: str) -> None:
-    """react_agent 调用工具前,注入当前任务的场景"""
-    global _CURRENT_SCENARIO
-    _CURRENT_SCENARIO = scenario_id
+    """react_agent 调用工具前,注入当前任务的场景
+
+    使用 ContextVar,每个后台线程的 set 只影响该线程自身。
+    """
+    _CURRENT_SCENARIO.set(scenario_id)
 
 
 # ============================================================
@@ -44,9 +51,10 @@ def list_available_skills(task_id: str = "") -> dict:
         "total": int
     }
     """
-    skills = skill_loader.REGISTRY.list_for_scenario(_CURRENT_SCENARIO)
+    scenario = _CURRENT_SCENARIO.get()
+    skills = skill_loader.REGISTRY.list_for_scenario(scenario)
     return {
-        "scenario": _CURRENT_SCENARIO,
+        "scenario": scenario,
         "skills": [
             {"name": s.name, "description": s.description}
             for s in skills
@@ -74,12 +82,13 @@ def run_skill(skill_name: str, task_id: str = "") -> dict:
 
     LLM 拿到 instructions 后,按其指引自行调用底层工具执行
     """
-    skill = skill_loader.REGISTRY.get(_CURRENT_SCENARIO, skill_name)
+    scenario = _CURRENT_SCENARIO.get()
+    skill = skill_loader.REGISTRY.get(scenario, skill_name)
     if not skill:
-        available = [s.name for s in skill_loader.REGISTRY.list_for_scenario(_CURRENT_SCENARIO)]
+        available = [s.name for s in skill_loader.REGISTRY.list_for_scenario(scenario)]
         return {
             "error": f"未知 skill: {skill_name}",
-            "scenario": _CURRENT_SCENARIO,
+            "scenario": scenario,
             "available_skills": available,
             "hint": "先调用 list_skills 查可用 skill 名称",
         }

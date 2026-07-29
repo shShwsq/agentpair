@@ -78,8 +78,29 @@ def run_react_agent(
             user_msg += f"\n分支: {params['branch']}"
     else:
         # 追问轮:不重新 clone,基于已有仓库继续
+        # 注入 repo_path + 已有结果摘要,让 LLM 有完整上下文(每轮 messages 是重新构造的)
+        from app.tools import sandbox_tools
+
+        ws_info = sandbox_tools.get_workspace_info(task_id_str)
+        repo_path_hint = ""
+        if ws_info and ws_info.get("repo_path"):
+            repo_path_hint = (
+                f"\n仓库路径(已 clone,直接用这个路径调 read_file/search_code/list_files): "
+                f"{ws_info['repo_path']}"
+            )
+
+        # 已提交的结果摘要(让 LLM 知道之前查了什么,避免重复)
+        results_hint = ""
+        if task.results:
+            prev_titles = [r.get("title", "?") for r in task.results[:10]]
+            results_hint = (
+                f"\n之前已完成的审计项: {', '.join(prev_titles)}"
+                + (f" 等 {len(task.results)} 项" if len(task.results) > 10 else "")
+            )
+
         user_msg = (
-            f"基于之前的审计结果,现在请针对以下问题继续检查(不需要重新 clone 仓库):\n\n"
+            f"基于之前的审计结果,现在请针对以下问题继续检查(不需要重新 clone 仓库):"
+            f"{repo_path_hint}{results_hint}\n\n"
             f"{followup_query}"
         )
 

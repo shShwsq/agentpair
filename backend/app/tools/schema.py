@@ -4,7 +4,11 @@
 - 通用工具(clone/read/search/cve/semgrep)定义在此,场景通过白名单选择启用哪些
 - submit_results 是内部工具,定义从场景取(不同场景的 result 结构不同)
 - task_id 自动注入
+
+并发安全:用 contextvars 替代全局变量,每个后台线程有独立上下文,
+避免多任务并发执行时 task_id / scenario 互相覆盖导致工作区串台。
 """
+import contextvars
 from typing import Any
 
 from app.scenarios.base import get_scenario
@@ -13,17 +17,19 @@ from app.tools.cve_tools import query_cve
 from app.tools.skill_tool import list_available_skills, run_skill, set_current_scenario
 
 
-# 当前任务的上下文
-_CURRENT_TASK_ID: str = ""
+# 当前任务的上下文(每个线程独立,避免并发任务互相覆盖)
+_CURRENT_TASK_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_task_id", default=""
+)
 
 
 def set_current_task(task_id: str, scenario_id: str = "code_security_audit") -> None:
     """react_agent 调用工具前,设置当前任务 ID 和场景
 
-    scenario_id 用于 skill 工具按场景过滤可用 skill
+    scenario_id 用于 skill 工具按场景过滤可用 skill。
+    使用 ContextVar,每个后台线程的 set 只影响该线程自身。
     """
-    global _CURRENT_TASK_ID
-    _CURRENT_TASK_ID = task_id
+    _CURRENT_TASK_ID.set(task_id)
     set_current_scenario(scenario_id)
 
 
@@ -253,5 +259,5 @@ def execute_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
     if tool_name not in TOOL_FUNCTIONS:
         raise ValueError(f"未知工具: {tool_name}")
     func = TOOL_FUNCTIONS[tool_name]
-    arguments["task_id"] = _CURRENT_TASK_ID
+    arguments["task_id"] = _CURRENT_TASK_ID.get()
     return func(**arguments)
