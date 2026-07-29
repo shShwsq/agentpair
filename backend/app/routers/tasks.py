@@ -4,6 +4,7 @@
 阶段 7:异步化 + SSE 实时流
 
 端点:
+- GET /tasks  列出当前用户可见的任务(自己 + 匿名)
 - POST /tasks  提交任务,立即返回 task_id,后台线程执行
 - GET /tasks/{task_id}  查询任务状态与结果
 - GET /tasks/{task_id}/stream  SSE 实时事件流(对话/状态/结果/完成)
@@ -30,6 +31,7 @@ from app.schemas.task import (
     ScenarioInfo,
     TaskCreateRequest,
     TaskCreateResponse,
+    TaskListItem,
     TaskResponse,
 )
 
@@ -41,6 +43,34 @@ router = APIRouter(tags=["tasks"])
 def list_all_scenarios() -> list[dict[str, str]]:
     """列出所有可用场景(给前端选择用)"""
     return list_scenarios()
+
+
+@router.get("/tasks", response_model=list[TaskListItem])
+def list_tasks(
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> list[Task]:
+    """列出当前用户可见的任务(自己的 + 匿名的),按创建时间倒序
+
+    用于侧栏历史任务列表。精简字段(不含对话/结果),降低传输成本。
+    """
+    query = db.query(Task)
+    if current_user:
+        # 登录用户:返回自己的任务 + 匿名任务
+        query = query.filter(
+            (Task.user_id == current_user.id) | (Task.user_id.is_(None))
+        )
+    else:
+        # 未登录:只返回匿名任务
+        query = query.filter(Task.user_id.is_(None))
+    return (
+        query.order_by(Task.created_at.desc())
+        .offset(max(0, offset))
+        .limit(min(max(1, limit), 100))
+        .all()
+    )
 
 
 @router.post("/tasks", response_model=TaskCreateResponse, status_code=status.HTTP_201_CREATED)

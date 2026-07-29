@@ -77,6 +77,18 @@ export interface TaskDetail {
   conversations: Conversation[]
 }
 
+/** 任务列表项(后端 TaskListItem,精简版用于侧栏) */
+export interface TaskListItem {
+  id: string
+  scenario: string
+  user_input: string
+  status: TaskStatus
+  current_stage: string | null
+  error_message: string | null
+  created_at: string
+  completed_at: string | null
+}
+
 // ============================================================
 // SSE 事件类型(后端 event_bus.py publish 的事件格式)
 // ============================================================

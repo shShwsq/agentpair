@@ -680,11 +680,9 @@ function formatTime(iso: string): string {
     </AppHeader>
 
     <div class="page-body">
-    <!-- 左侧:工作区文件树侧栏(折叠时完全隐藏) -->
+    <!-- 左侧:历史任务栏 + 按需切换工作区(折叠时完全隐藏) -->
     <WorkspaceSidebar
       v-if="task && !workspaceCollapsed"
-      :task-id="route.params.id as string"
-      :is-running="isRunning"
     />
 
     <main class="main">

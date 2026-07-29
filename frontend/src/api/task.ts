@@ -10,11 +10,24 @@ import type {
   TaskCreateRequest,
   TaskCreateResponse,
   TaskDetail,
+  TaskListItem,
 } from '@/types/task'
 
 /** 列出可用场景 */
 export function getScenarios(): Promise<Scenario[]> {
   return client.get('/scenarios').then((r) => r.data)
+}
+
+/**
+ * 列出当前用户可见的任务(自己的 + 匿名的)
+ *
+ * 用于侧栏历史任务列表。按创建时间倒序。
+ */
+export function listTasks(params?: {
+  limit?: number
+  offset?: number
+}): Promise<TaskListItem[]> {
+  return client.get('/tasks', { params }).then((r) => r.data)
 }
 
 /**

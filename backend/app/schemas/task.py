@@ -81,6 +81,21 @@ class TaskResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class TaskListItem(BaseModel):
+    """任务列表项(精简版,不含对话/结果,用于侧栏列表)"""
+
+    id: uuid.UUID
+    scenario: str
+    user_input: str
+    status: str
+    current_stage: str | None
+    error_message: str | None
+    created_at: datetime
+    completed_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
 class TaskCreateResponse(BaseModel):
     """提交任务后的响应"""
 
