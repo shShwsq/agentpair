@@ -42,6 +42,13 @@ let eventSource: EventSource | null = null
 /** 对话流容器引用,用于自动滚动到底部 */
 const conversationRef = ref<HTMLElement | null>(null)
 
+/** 工作区侧栏是否折叠(默认折叠,完全隐藏) */
+const workspaceCollapsed = ref(true)
+
+function toggleWorkspace(): void {
+  workspaceCollapsed.value = !workspaceCollapsed.value
+}
+
 // ---- 流式思考项(thinking_delta 累积)----
 // key: conv_id, value: 流式思考项状态
 interface StreamingItem {
@@ -636,6 +643,35 @@ function formatTime(iso: string): string {
 <template>
   <div class="page">
     <AppHeader>
+      <template #leading>
+        <button
+          v-if="task"
+          class="workspace-toggle"
+          :class="{ 'is-active': !workspaceCollapsed }"
+          :title="workspaceCollapsed ? '展开工作区' : '折叠工作区'"
+          :aria-label="workspaceCollapsed ? '展开工作区' : '折叠工作区'"
+          @click="toggleWorkspace"
+        >
+          <svg
+            class="workspace-toggle-icon"
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <!-- 外框 -->
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <!-- 中间偏左的竖线(始终显示) -->
+            <line x1="9" y1="6" x2="9" y2="18" />
+            <!-- 展开态:右侧再加一竖线(侧栏+主区) -->
+            <line v-if="!workspaceCollapsed" x1="15" y1="6" x2="15" y2="18" />
+          </svg>
+        </button>
+      </template>
       <template #nav>
         <RouterLink to="/">首页</RouterLink>
         <RouterLink to="/tasks/new">提交任务</RouterLink>
@@ -644,9 +680,9 @@ function formatTime(iso: string): string {
     </AppHeader>
 
     <div class="page-body">
-    <!-- 左侧:工作区文件树侧栏(可折叠) -->
+    <!-- 左侧:工作区文件树侧栏(折叠时完全隐藏) -->
     <WorkspaceSidebar
-      v-if="task"
+      v-if="task && !workspaceCollapsed"
       :task-id="route.params.id as string"
       :is-running="isRunning"
     />
@@ -858,6 +894,39 @@ function formatTime(iso: string): string {
   margin: 0 auto;
   overflow-y: auto;
   padding: var(--space-6) var(--space-6) var(--space-12);
+}
+
+/* ---- 工作区开关按钮(渲染在 AppHeader 的 leading slot 内) ---- */
+.workspace-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.workspace-toggle:hover {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+.workspace-toggle.is-active {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+.workspace-toggle-icon {
+  display: block;
+  flex-shrink: 0;
 }
 
 /* ---- 加载 / 错误状态 ---- */

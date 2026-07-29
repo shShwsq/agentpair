@@ -21,6 +21,10 @@ function handleLogout(): void {
 <template>
   <header class="app-header">
     <div class="header-inner">
+      <!-- 最左侧前置区(如工作区开关按钮) -->
+      <div v-if="$slots.leading" class="header-leading">
+        <slot name="leading" />
+      </div>
       <div class="header-left">
         <RouterLink to="/" class="brand">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -64,6 +68,13 @@ function handleLogout(): void {
   display: flex;
   align-items: center;
   gap: var(--space-8);
+}
+
+.header-leading {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-right: var(--space-4);
 }
 
 .brand {

@@ -11,7 +11,7 @@
  * - 任务运行中:clone 完成后即可浏览;若尚未 clone,轮询检查可用性
  * - 任务完成后:session 保留 1 小时(后端 TTL),供用户回看
  */
-import { computed, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 
 import {
   getWorkspaceInfo,
@@ -26,9 +26,6 @@ const props = defineProps<{
   /** 任务是否运行中(运行中轮询工作区可用性) */
   isRunning: boolean
 }>()
-
-// ---- 侧栏折叠状态 ----
-const collapsed = ref(true)
 
 // ---- 工作区可用性 ----
 const available = ref(false)
@@ -152,6 +149,8 @@ watch(
   },
 )
 
+// 组件仅在展开时挂载,挂载即初始化
+onMounted(ensureInitialized)
 onUnmounted(stopPolling)
 
 // ============================================================
@@ -251,17 +250,9 @@ async function refreshNode(node: TreeNode): Promise<void> {
 }
 
 // ============================================================
-// 展开/折叠侧栏
+// 计算属性
 // ============================================================
 
-function toggleCollapse(): void {
-  collapsed.value = !collapsed.value
-  if (!collapsed.value) {
-    ensureInitialized()
-  }
-}
-
-// ---- 计算属性 ----
 const selectedFileName = computed(() => {
   if (!selectedFilePath.value) return ''
   const parts = selectedFilePath.value.split('/')
@@ -270,74 +261,64 @@ const selectedFileName = computed(() => {
 
 const hasPrevPage = computed(() => fileOffset.value > 1)
 const hasNextPage = computed(() => fileTruncated.value)
-const showFilePanel = computed(() => !collapsed.value && selectedFilePath.value !== null)
+const showFilePanel = computed(() => selectedFilePath.value !== null)
 </script>
 
 <template>
   <div class="workspace-container">
-    <!-- 侧栏 -->
-    <aside class="workspace-sidebar" :class="{ collapsed }">
-      <!-- 折叠时:竖排展开按钮 -->
-      <button v-if="collapsed" class="expand-btn" @click="toggleCollapse" title="展开工作区">
-        <span class="expand-icon">📁</span>
-        <span class="expand-label">工作区</span>
-      </button>
-
-      <!-- 展开时:完整侧栏 -->
-      <template v-else>
-        <div class="sidebar-header">
-          <span class="sidebar-title">📁 工作区</span>
-          <div class="sidebar-actions">
-            <button
-              class="icon-btn"
-              title="刷新文件树"
-              :disabled="!available"
-              @click="refreshTree"
-            >↻</button>
-            <button class="icon-btn" title="折叠侧栏" @click="toggleCollapse">◀</button>
-          </div>
+    <!-- 侧栏(组件仅在展开时挂载) -->
+    <aside class="workspace-sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-title">📁 工作区</span>
+        <div class="sidebar-actions">
+          <button
+            class="icon-btn"
+            title="刷新文件树"
+            :disabled="!available"
+            @click="refreshTree"
+          >↻</button>
         </div>
+      </div>
 
-        <!-- 检查中 -->
-        <div v-if="checkingAvailable && !available" class="sidebar-status">
-          <span class="spinner-sm" /> 检查工作区...
+      <!-- 检查中 -->
+      <div v-if="checkingAvailable && !available" class="sidebar-status">
+        <span class="spinner-sm" /> 检查工作区...
+      </div>
+
+      <!-- 不可用 -->
+      <div v-else-if="!available" class="sidebar-status sidebar-status-muted">
+        <p>{{ unavailableReason || '工作区不可用' }}</p>
+        <p v-if="isRunning" class="status-hint">等待 react_agent clone 仓库...</p>
+      </div>
+
+      <!-- 文件树(扁平化渲染) -->
+      <div v-else class="file-tree">
+        <div
+          v-for="item in flatTree"
+          :key="item.node.path"
+          class="tree-node"
+          :class="[
+            `tree-${item.node.type}`,
+            { 'tree-selected': selectedFilePath === item.node.path },
+          ]"
+          :style="{ paddingLeft: `${item.depth * 14 + 8}px` }"
+          @click="item.node.type === 'dir' ? toggleDir(item.node) : selectFile(item.node)"
+        >
+          <span class="tree-icon">
+            {{ item.node.type === 'dir'
+              ? (item.node.expanded ? '📂' : '📁')
+              : '📄' }}
+          </span>
+          <span class="tree-name">{{ item.node.name }}</span>
+          <span v-if="item.node.loading" class="tree-loading">...</span>
         </div>
-
-        <!-- 不可用 -->
-        <div v-else-if="!available" class="sidebar-status sidebar-status-muted">
-          <p>{{ unavailableReason || '工作区不可用' }}</p>
-          <p v-if="isRunning" class="status-hint">等待 react_agent clone 仓库...</p>
+        <div v-if="treeRoot.loaded && treeRoot.children.length === 0" class="empty-tree">
+          (空目录)
         </div>
+      </div>
 
-        <!-- 文件树(扁平化渲染) -->
-        <div v-else class="file-tree">
-          <div
-            v-for="item in flatTree"
-            :key="item.node.path"
-            class="tree-node"
-            :class="[
-              `tree-${item.node.type}`,
-              { 'tree-selected': selectedFilePath === item.node.path },
-            ]"
-            :style="{ paddingLeft: `${item.depth * 14 + 8}px` }"
-            @click="item.node.type === 'dir' ? toggleDir(item.node) : selectFile(item.node)"
-          >
-            <span class="tree-icon">
-              {{ item.node.type === 'dir'
-                ? (item.node.expanded ? '📂' : '📁')
-                : '📄' }}
-            </span>
-            <span class="tree-name">{{ item.node.name }}</span>
-            <span v-if="item.node.loading" class="tree-loading">...</span>
-          </div>
-          <div v-if="treeRoot.loaded && treeRoot.children.length === 0" class="empty-tree">
-            (空目录)
-          </div>
-        </div>
-
-        <!-- 错误提示 -->
-        <div v-if="errorMsg" class="sidebar-error">{{ errorMsg }}</div>
-      </template>
+      <!-- 错误提示 -->
+      <div v-if="errorMsg" class="sidebar-error">{{ errorMsg }}</div>
     </aside>
 
     <!-- 文件查看面板(右侧,仅展开侧栏且选中文件时显示) -->
@@ -383,43 +364,6 @@ const showFilePanel = computed(() => !collapsed.value && selectedFilePath.value 
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  transition: width var(--transition-fast);
-}
-
-.workspace-sidebar.collapsed {
-  width: 40px;
-}
-
-.expand-btn {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 6px;
-  width: 40px;
-  height: 100%;
-  padding-top: var(--space-3);
-  border: none;
-  background: var(--color-surface);
-  cursor: pointer;
-  color: var(--color-text-secondary);
-  transition: background var(--transition-fast);
-}
-
-.expand-btn:hover {
-  background: var(--color-surface-alt);
-  color: var(--color-primary);
-}
-
-.expand-icon {
-  font-size: 16px;
-}
-
-.expand-label {
-  font-size: 10px;
-  writing-mode: vertical-rl;
-  letter-spacing: 2px;
-  line-height: 1;
 }
 
 .sidebar-header {
