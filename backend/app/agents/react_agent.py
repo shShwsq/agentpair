@@ -193,10 +193,12 @@ def run_react_agent(
                     role="react_agent", type="tool_result",
                     content=result_str[:500],
                 )
+                # 完整结果传给 LLM(工具自身已控制返回量:
+                # read_file 默认 200 行、search_code 默认 50 匹配等)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
-                    "content": result_str[:4000],
+                    "content": result_str,
                 })
             except Exception as e:
                 err_msg = f"工具执行失败: {e}"

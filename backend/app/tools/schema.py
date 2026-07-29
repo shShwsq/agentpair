@@ -66,7 +66,11 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "读取仓库内某个文件的内容",
+            "description": (
+                "读取仓库内文件内容,返回带行号的内容(cat -n 格式),支持分页。"
+                "首次读前 200 行,需要看后续内容时用 offset 翻页。"
+                "行号可用于在结果中精确引用位置。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -80,7 +84,11 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     },
                     "max_lines": {
                         "type": "integer",
-                        "description": "最大返回行数,默认 500",
+                        "description": "本次最多返回行数,默认 200",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "从第几行开始读(1-based),默认 1。配合 max_lines 翻页",
                     },
                 },
                 "required": ["repo_path", "file_path"],
@@ -120,7 +128,13 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "search_code",
-            "description": "在仓库内用正则搜索代码,返回匹配的文件:行号:内容",
+            "description": (
+                "在仓库内用正则搜索代码。支持三种输出模式: "
+                "content(默认,返回匹配行+行号+可选上下文)、"
+                "files_with_matches(只返回含匹配的文件路径)、"
+                "count(返回每个文件的匹配数)。"
+                "安全审计建议用 context_lines=3-5 看上下文,便于判断是否为漏洞。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -128,6 +142,20 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "pattern": {"type": "string", "description": "正则表达式"},
                     "file_glob": {"type": "string", "description": "文件过滤 glob,如 '*.py'"},
                     "case_sensitive": {"type": "boolean", "description": "是否大小写敏感,默认 false"},
+                    "max_matches": {"type": "integer", "description": "本次最多返回匹配数,默认 50"},
+                    "context_lines": {
+                        "type": "integer",
+                        "description": "匹配行前后各显示 N 行上下文(仅 content 模式),默认 0",
+                    },
+                    "output_mode": {
+                        "type": "string",
+                        "enum": ["content", "files_with_matches", "count"],
+                        "description": "输出模式,默认 content",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "分页偏移,跳过前 N 个匹配,默认 0",
+                    },
                 },
                 "required": ["repo_path", "pattern"],
             },

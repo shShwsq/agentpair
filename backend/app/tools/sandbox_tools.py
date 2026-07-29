@@ -282,22 +282,59 @@ def _list_files_sandbox(
 
 
 # ============================================================
-# 工具 3:read_file
+# 工具 3:read_file(参考 Claude Code / TRAE Read:带行号 + offset 分页)
 # ============================================================
 
 
-def read_file(repo_path: str, file_path: str, max_lines: int = 500, task_id: str = "") -> dict:
-    """读取仓库内文件"""
+def read_file(
+    repo_path: str,
+    file_path: str,
+    max_lines: int = 200,
+    offset: int = 1,
+    task_id: str = "",
+) -> dict:
+    """读取仓库内文件内容(带行号,支持分页)
+
+    参考 Claude Code / TRAE Read 工具设计:
+    - 返回内容带行号(cat -n 格式),便于 LLM 精确定位行号
+    - 支持 offset 从第 N 行开始读,配合 max_lines 翻页,避免大文件一次性撑爆上下文
+    - 默认读前 200 行;需要看后面时调 offset=N 再读
+
+    参数:
+        repo_path: clone_repo 返回的 path
+        file_path: 仓库内相对路径
+        max_lines: 本次最多返回行数,默认 200
+        offset: 从第几行开始读(1-based),默认 1
+
+    返回:{
+        "path": str,           # 文件相对路径
+        "content": str,        # 带行号的内容(cat -n 格式)
+        "start_line": int,     # 本次返回的起始行号
+        "end_line": int,       # 本次返回的结束行号
+        "total_lines": int,    # 文件总行数
+        "truncated": bool      # 是否还有更多未读(本次未读到文件尾)
+    }
+    """
     ctx = _get_or_create_session(task_id)
     mode = ctx["mode"]
 
     if mode == "mock":
-        return _read_file_mock(repo_path, file_path, max_lines)
+        return _read_file_mock(repo_path, file_path, max_lines, offset)
     else:
-        return _read_file_sandbox(ctx, repo_path, file_path, max_lines)
+        return _read_file_sandbox(ctx, repo_path, file_path, max_lines, offset)
 
 
-def _read_file_mock(repo_path: str, file_path: str, max_lines: int) -> dict:
+def _format_numbered_lines(lines: list[str], start_line: int) -> str:
+    """把行列表格式化成 cat -n 风格的字符串(行号右对齐 + 冒号)"""
+    width = len(str(start_line + len(lines) - 1))
+    width = max(width, 4)  # 至少 4 位,视觉对齐
+    return "\n".join(
+        f"{str(i):>{width}}: {line}"
+        for i, line in enumerate(lines, start=start_line)
+    )
+
+
+def _read_file_mock(repo_path: str, file_path: str, max_lines: int, offset: int) -> dict:
     """mock 模式:直接用 Python 读"""
     full_path = Path(repo_path) / file_path
     # 防路径穿越
@@ -313,28 +350,37 @@ def _read_file_mock(repo_path: str, file_path: str, max_lines: int) -> dict:
         return {
             "path": file_path,
             "content": "(二进制文件,无法显示)",
+            "start_line": 0,
+            "end_line": 0,
             "total_lines": 0,
             "truncated": False,
         }
 
-    lines = content.splitlines()
-    total_lines = len(lines)
-    truncated = total_lines > max_lines
-    if truncated:
-        lines = lines[:max_lines]
+    all_lines = content.splitlines()
+    total_lines = len(all_lines)
+
+    # offset 是 1-based,转 0-based 切片
+    start_idx = max(0, min(offset - 1, total_lines))
+    end_idx = min(start_idx + max_lines, total_lines)
+    selected = all_lines[start_idx:end_idx]
+
+    start_line = start_idx + 1
+    end_line = start_idx + len(selected)
 
     return {
         "path": file_path,
-        "content": "\n".join(lines),
+        "content": _format_numbered_lines(selected, start_line),
+        "start_line": start_line,
+        "end_line": end_line,
         "total_lines": total_lines,
-        "truncated": truncated,
+        "truncated": end_line < total_lines,
     }
 
 
 def _read_file_sandbox(
-    ctx: dict, repo_path: str, file_path: str, max_lines: int
+    ctx: dict, repo_path: str, file_path: str, max_lines: int, offset: int
 ) -> dict:
-    """sandbox 模式:在沙箱里用 head/wc 读"""
+    """sandbox 模式:在沙箱里用 awk 读(带行号 + 范围)"""
     session: SandboxSession = ctx["session"]
     full_path = f"{repo_path.rstrip('/')}/{file_path.lstrip('/')}"
 
@@ -345,14 +391,27 @@ def _read_file_sandbox(
     total_lines_str = session.run_command(f"wc -l < {shlex.quote(full_path)}").strip()
     total_lines = int(total_lines_str) if total_lines_str.isdigit() else 0
 
-    truncated = total_lines > max_lines
-    content = session.run_command(f"head -n {max_lines} {shlex.quote(full_path)}")
+    # 用 awk 一次性完成:行号格式化 + 范围截取
+    start = max(1, offset)
+    end = start + max_lines - 1
+    awk_script = (
+        f"NR>={start} && NR<={end} "
+        f"{{printf \"%6d: %s\\n\", NR, $0}}"
+    )
+    content = session.run_command(
+        f"awk '{awk_script}' {shlex.quote(full_path)}"
+    )
+
+    start_line = min(start, total_lines) if total_lines > 0 else 0
+    end_line = min(end, total_lines) if total_lines > 0 else 0
 
     return {
         "path": file_path,
         "content": content,
+        "start_line": start_line,
+        "end_line": end_line,
         "total_lines": total_lines,
-        "truncated": truncated,
+        "truncated": end_line < total_lines,
     }
 
 
@@ -368,16 +427,39 @@ def search_code(
     file_glob: str | None = None,
     case_sensitive: bool = False,
     max_matches: int = 50,
+    context_lines: int = 0,
+    output_mode: str = "content",
+    offset: int = 0,
     task_id: str = "",
 ) -> dict:
-    """在仓库里搜索代码"""
+    """在仓库里搜索代码(支持上下文、多种输出模式、分页)
+
+    参考 TRAE Grep 工具设计:
+    - output_mode:
+        - "content"(默认):返回匹配行 + 行号 + 上下文
+        - "files_with_matches":只返回含匹配的文件路径(快速定位)
+        - "count":返回每个文件的匹配数
+    - context_lines:匹配行前后各显示 N 行(仅 content 模式有效),
+        安全审计场景建议设 3-5,便于理解漏洞上下文
+    - offset:分页偏移,跳过前 N 个匹配
+
+    返回(content):{"matches": [{file,line,content,context_before,context_after}], "total_matches", "truncated", "offset"}
+    返回(files_with_matches):{"files": [...], "total_files", "truncated", "offset"}
+    返回(count):{"counts": {file: count}, "total_matches"}
+    """
     ctx = _get_or_create_session(task_id)
     mode = ctx["mode"]
 
     if mode == "mock":
-        return _search_code_mock(repo_path, pattern, file_glob, case_sensitive, max_matches)
+        return _search_code_mock(
+            repo_path, pattern, file_glob, case_sensitive,
+            max_matches, context_lines, output_mode, offset,
+        )
     else:
-        return _search_code_sandbox(ctx, repo_path, pattern, file_glob, case_sensitive, max_matches)
+        return _search_code_sandbox(
+            ctx, repo_path, pattern, file_glob, case_sensitive,
+            max_matches, context_lines, output_mode, offset,
+        )
 
 
 def _search_code_mock(
@@ -386,8 +468,11 @@ def _search_code_mock(
     file_glob: str | None,
     case_sensitive: bool,
     max_matches: int,
+    context_lines: int,
+    output_mode: str,
+    offset: int,
 ) -> dict:
-    """mock 模式:用 Python 实现搜索(复用阶段 1 的纯 Python grep)"""
+    """mock 模式:用 Python 实现搜索"""
     import fnmatch
 
     flags = 0 if case_sensitive else re.IGNORECASE
@@ -402,7 +487,9 @@ def _search_code_mock(
         ".cfg", ".ini", ".env",
     }
 
-    matches = []
+    need_context = output_mode == "content" and context_lines > 0
+    all_matches: list[dict] = []
+
     for root, dirs, files in os.walk(repo_path):
         dirs[:] = [d for d in dirs if d not in skip_dirs]
         for fname in files:
@@ -415,25 +502,49 @@ def _search_code_mock(
             fpath = os.path.join(root, fname)
             try:
                 with open(fpath, encoding="utf-8", errors="ignore") as f:
-                    for i, line in enumerate(f, 1):
-                        if regex.search(line):
-                            rel = os.path.relpath(fpath, repo_path)
-                            matches.append(
-                                {"file": rel, "line": i, "content": line.rstrip()}
-                            )
-                            if len(matches) >= max_matches:
-                                return {
-                                    "matches": matches,
-                                    "total_matches": len(matches),
-                                    "truncated": True,
-                                }
+                    lines = f.readlines()
             except (PermissionError, OSError):
                 continue
 
+            rel = os.path.relpath(fpath, repo_path)
+            for i, line in enumerate(lines):
+                if regex.search(line):
+                    m = {"file": rel, "line": i + 1, "content": line.rstrip()}
+                    if need_context:
+                        start = max(0, i - context_lines)
+                        end = i + 1 + context_lines
+                        m["context_before"] = [l.rstrip() for l in lines[start:i]]
+                        m["context_after"] = [l.rstrip() for l in lines[i + 1:end]]
+                    all_matches.append(m)
+
+    if output_mode == "count":
+        counts: dict[str, int] = {}
+        for m in all_matches:
+            counts[m["file"]] = counts.get(m["file"], 0) + 1
+        return {"counts": counts, "total_matches": len(all_matches)}
+
+    if output_mode == "files_with_matches":
+        files = sorted(set(m["file"] for m in all_matches))
+        total = len(files)
+        page = files[offset:offset + max_matches]
+        return {
+            "files": page,
+            "total_files": total,
+            "truncated": offset + len(page) < total,
+            "offset": offset,
+        }
+
+    # output_mode == "content"
+    total = len(all_matches)
+    page = all_matches[offset:offset + max_matches]
+    for m in page:
+        m.setdefault("context_before", [])
+        m.setdefault("context_after", [])
     return {
-        "matches": matches,
-        "total_matches": len(matches),
-        "truncated": False,
+        "matches": page,
+        "total_matches": total,
+        "truncated": offset + len(page) < total,
+        "offset": offset,
     }
 
 
@@ -444,29 +555,121 @@ def _search_code_sandbox(
     file_glob: str | None,
     case_sensitive: bool,
     max_matches: int,
+    context_lines: int,
+    output_mode: str,
+    offset: int,
 ) -> dict:
     """sandbox 模式:用 ripgrep"""
     session: SandboxSession = ctx["session"]
 
+    # ---- files_with_matches 模式:只返回文件路径 ----
+    if output_mode == "files_with_matches":
+        cmd_parts = ["rg", "--files-with-matches", "--color=never"]
+        if not case_sensitive:
+            cmd_parts.append("-i")
+        if file_glob:
+            cmd_parts.extend(["--glob", shlex.quote(file_glob)])
+        cmd_parts.extend(["-e", shlex.quote(pattern), shlex.quote(repo_path)])
+        output = session.run_command(f"{' '.join(cmd_parts)} || true")
+        files = []
+        for line in output.splitlines():
+            f = line.strip()
+            if not f:
+                continue
+            if f.startswith(repo_path):
+                f = f[len(repo_path):].lstrip("/")
+            files.append(f)
+        files.sort()
+        total = len(files)
+        page = files[offset:offset + max_matches]
+        return {
+            "files": page,
+            "total_files": total,
+            "truncated": offset + len(page) < total,
+            "offset": offset,
+        }
+
+    # ---- count 模式:返回每个文件的匹配数 ----
+    if output_mode == "count":
+        cmd_parts = ["rg", "--count", "--color=never"]
+        if not case_sensitive:
+            cmd_parts.append("-i")
+        if file_glob:
+            cmd_parts.extend(["--glob", shlex.quote(file_glob)])
+        cmd_parts.extend(["-e", shlex.quote(pattern), shlex.quote(repo_path)])
+        output = session.run_command(f"{' '.join(cmd_parts)} || true")
+        counts = {}
+        total = 0
+        for line in output.splitlines():
+            # 格式: path:count
+            idx = line.rfind(":")
+            if idx < 0:
+                continue
+            f = line[:idx]
+            c_str = line[idx + 1:]
+            c = int(c_str) if c_str.isdigit() else 0
+            if f.startswith(repo_path):
+                f = f[len(repo_path):].lstrip("/")
+            counts[f] = c
+            total += c
+        return {"counts": counts, "total_matches": total}
+
+    # ---- content 模式(默认):匹配行 + 可选上下文 ----
+    # 1. rg 拿匹配行(不带 context),多取 offset+max_matches 个用于分页
     cmd_parts = ["rg", "--line-number", "--no-heading", "--color=never"]
-    cmd_parts.extend(["--max-count", str(max_matches)])
+    cmd_parts.extend(["--max-count", str(offset + max_matches)])
     if not case_sensitive:
         cmd_parts.append("-i")
     if file_glob:
         cmd_parts.extend(["--glob", shlex.quote(file_glob)])
     cmd_parts.extend(["-e", shlex.quote(pattern), shlex.quote(repo_path)])
-
     cmd = " ".join(cmd_parts)
     logger.info(f"[sandbox] search: {cmd}")
     output = session.run_command(f"{cmd} || true")
 
-    matches = _parse_search_output(output, repo_path)
-    total = len(matches)
-    truncated = total >= max_matches
+    all_matches = _parse_search_output(output, repo_path)
+    total = len(all_matches)
+    page = all_matches[offset:offset + max_matches]
+
+    # 2. 对当前页匹配,用 awk 读 context(逐匹配一次命令)
+    if context_lines > 0:
+        for m in page:
+            full_path = f"{repo_path.rstrip('/')}/{m['file'].lstrip('/')}"
+            start = max(1, m["line"] - context_lines)
+            end = m["line"] + context_lines
+            awk_script = (
+                f"NR>={start} && NR<={end} "
+                f"{{printf \"%d\\t%s\\n\", NR, $0}}"
+            )
+            ctx_output = session.run_command(
+                f"awk '{awk_script}' {shlex.quote(full_path)}"
+            )
+            ctx_before = []
+            ctx_after = []
+            for cl in ctx_output.splitlines():
+                # 格式: 行号\t内容
+                idx = cl.find("\t")
+                if idx < 0:
+                    continue
+                ln_str = cl[:idx]
+                text = cl[idx + 1:]
+                ln = int(ln_str) if ln_str.isdigit() else 0
+                if ln < m["line"]:
+                    ctx_before.append(text.rstrip())
+                elif ln > m["line"]:
+                    ctx_after.append(text.rstrip())
+            m["context_before"] = ctx_before
+            m["context_after"] = ctx_after
+    else:
+        for m in page:
+            m["context_before"] = []
+            m["context_after"] = []
+
     return {
-        "matches": matches[:max_matches],
+        "matches": page,
         "total_matches": total,
-        "truncated": truncated,
+        "truncated": offset + len(page) < total,
+        "offset": offset,
     }
 
 
