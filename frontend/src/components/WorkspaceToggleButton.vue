@@ -2,8 +2,9 @@
 /**
  * 侧栏开关按钮
  *
- * 方框 + 中间偏左一竖线图标。展开态额外显示右侧一竖线(侧栏+主区)。
- * 渲染在 AppHeader 的 #leading / #trailing slot 内,用于切换左/右侧栏显隐。
+ * 方框 + 一竖线图标。展开态额外显示另一侧一竖线(侧栏+主区)。
+ * side='left'(默认):竖线偏左,用于左侧栏;展开时右侧加一竖线。
+ * side='right':竖线偏右,用于右侧栏;展开时左侧加一竖线。
  */
 withDefaults(
   defineProps<{
@@ -13,10 +14,13 @@ withDefaults(
     expandTitle?: string
     /** 展开态鼠标悬浮提示 */
     collapseTitle?: string
+    /** 侧栏位置:left=左侧栏(竖线偏左),right=右侧栏(竖线偏右) */
+    side?: 'left' | 'right'
   }>(),
   {
     expandTitle: '展开侧栏',
     collapseTitle: '折叠侧栏',
+    side: 'left',
   },
 )
 
@@ -46,10 +50,10 @@ defineEmits<{
     >
       <!-- 外框 -->
       <rect x="3" y="4" width="18" height="16" rx="2" />
-      <!-- 中间偏左的竖线(始终显示) -->
-      <line x1="9" y1="6" x2="9" y2="18" />
-      <!-- 展开态:右侧再加一竖线(侧栏+主区) -->
-      <line v-if="!collapsed" x1="15" y1="6" x2="15" y2="18" />
+      <!-- 始终显示的竖线:left 侧栏在 x=9(偏左),right 侧栏在 x=15(偏右) -->
+      <line :x1="side === 'left' ? 9 : 15" y1="6" :x2="side === 'left' ? 9 : 15" y2="18" />
+      <!-- 展开态:另一侧再加一竖线(侧栏+主区) -->
+      <line v-if="!collapsed" :x1="side === 'left' ? 15 : 9" y1="6" :x2="side === 'left' ? 15 : 9" y2="18" />
     </svg>
   </button>
 </template>

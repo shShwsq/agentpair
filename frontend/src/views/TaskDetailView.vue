@@ -1152,15 +1152,6 @@ function formatTime(iso: string): string {
         <RouterLink to="/tasks/new">提交任务</RouterLink>
         <RouterLink to="/settings">模型设置</RouterLink>
       </template>
-      <template #trailing>
-        <WorkspaceToggleButton
-          v-if="task"
-          :collapsed="detailCollapsed"
-          expand-title="展开任务详情"
-          collapse-title="折叠任务详情"
-          @toggle="toggleDetail"
-        />
-      </template>
     </AppHeader>
 
     <div class="page-body">
@@ -1358,96 +1349,119 @@ function formatTime(iso: string): string {
       </template>
     </main>
 
-    <!-- 右侧:任务详情 + 覆盖度看板(可完全隐藏;折叠时不渲染) -->
+    <!-- 右侧:任务详情 + 覆盖度看板(抽屉把手式;展开时顶部条带标题+折叠按钮,折叠时悬浮把手在 page-body 右上角) -->
     <aside v-if="task && !detailCollapsed" class="detail-sidebar">
-      <!-- 概览卡片 -->
-      <section class="overview-card">
-        <div class="overview-header">
-          <h1>任务详情</h1>
-          <span :class="['badge', statusConfig[task.status].class]">
-            {{ statusConfig[task.status].label }}
-          </span>
-          <div
-            v-if="task.status === 'completed' || task.results.length > 0"
-            class="overview-actions"
-          >
-            <button
-              class="btn-export"
-              :disabled="exporting"
-              title="下载 Markdown 报告"
-              @click="exportMarkdown"
+      <div class="detail-sidebar-header">
+        <span class="detail-sidebar-title">任务详情</span>
+        <WorkspaceToggleButton
+          side="right"
+          :collapsed="false"
+          expand-title="展开任务详情"
+          collapse-title="折叠任务详情"
+          @toggle="toggleDetail"
+        />
+      </div>
+      <div class="detail-sidebar-body">
+        <!-- 概览卡片 -->
+        <section class="overview-card">
+          <div class="overview-header">
+            <h1>任务详情</h1>
+            <span :class="['badge', statusConfig[task.status].class]">
+              {{ statusConfig[task.status].label }}
+            </span>
+            <div
+              v-if="task.status === 'completed' || task.results.length > 0"
+              class="overview-actions"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                <polyline points="7 10 12 15 17 10" />
-                <line x1="12" y1="15" x2="12" y2="3" />
-              </svg>
-              Markdown
-            </button>
-            <button
-              class="btn-export"
-              :disabled="exporting"
-              title="打印或另存为 PDF"
-              @click="exportPdf"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="6 9 6 2 18 2 18 9" />
-                <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
-                <rect x="6" y="14" width="12" height="8" />
-              </svg>
-              PDF
-            </button>
+              <button
+                class="btn-export"
+                :disabled="exporting"
+                title="下载 Markdown 报告"
+                @click="exportMarkdown"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+                Markdown
+              </button>
+              <button
+                class="btn-export"
+                :disabled="exporting"
+                title="打印或另存为 PDF"
+                @click="exportPdf"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="6 9 6 2 18 2 18 9" />
+                  <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+                  <rect x="6" y="14" width="12" height="8" />
+                </svg>
+                PDF
+              </button>
+            </div>
           </div>
-        </div>
-        <dl class="overview-meta">
-          <div>
-            <dt>场景</dt>
-            <dd>{{ task.scenario }}</dd>
+          <dl class="overview-meta">
+            <div>
+              <dt>场景</dt>
+              <dd>{{ task.scenario }}</dd>
+            </div>
+            <div>
+              <dt>创建时间</dt>
+              <dd>{{ formatTime(task.created_at) }}</dd>
+            </div>
+            <div v-if="task.completed_at">
+              <dt>完成时间</dt>
+              <dd>{{ formatTime(task.completed_at) }}</dd>
+            </div>
+          </dl>
+          <div class="overview-input">
+            <span class="label">用户意图</span>
+            <p>{{ task.user_input }}</p>
           </div>
-          <div>
-            <dt>创建时间</dt>
-            <dd>{{ formatTime(task.created_at) }}</dd>
+          <div v-if="task.current_stage" class="overview-stage">
+            <span class="label">当前阶段</span>
+            <p>{{ task.current_stage }}</p>
           </div>
-          <div v-if="task.completed_at">
-            <dt>完成时间</dt>
-            <dd>{{ formatTime(task.completed_at) }}</dd>
+          <div v-if="task.error_message" class="alert alert-error">
+            {{ task.error_message }}
           </div>
-        </dl>
-        <div class="overview-input">
-          <span class="label">用户意图</span>
-          <p>{{ task.user_input }}</p>
-        </div>
-        <div v-if="task.current_stage" class="overview-stage">
-          <span class="label">当前阶段</span>
-          <p>{{ task.current_stage }}</p>
-        </div>
-        <div v-if="task.error_message" class="alert alert-error">
-          {{ task.error_message }}
-        </div>
-      </section>
+        </section>
 
-      <!-- 覆盖度看板(场景声明了 coverage 时显示) -->
-      <section v-if="scenarioDecl?.coverage && coverageData" class="coverage-section">
-        <h2>
-          覆盖度看板
-          <span class="count">{{ coverageData.covered_count }}/{{ coverageData.total_count }}</span>
-          <span v-if="coverageData.last_round !== null" class="coverage-round">
-            第 {{ coverageData.last_round }} 轮评估
-          </span>
-        </h2>
-        <div class="coverage-grid">
-          <div
-            v-for="d in coverageData.dimensions"
-            :key="d.id"
-            :class="['coverage-card', d.covered ? 'coverage-covered' : 'coverage-missing']"
-            :title="d.description"
-          >
-            <span class="coverage-dot" />
-            <span class="coverage-name">{{ d.name }}</span>
+        <!-- 覆盖度看板(场景声明了 coverage 时显示) -->
+        <section v-if="scenarioDecl?.coverage && coverageData" class="coverage-section">
+          <h2>
+            覆盖度看板
+            <span class="count">{{ coverageData.covered_count }}/{{ coverageData.total_count }}</span>
+            <span v-if="coverageData.last_round !== null" class="coverage-round">
+              第 {{ coverageData.last_round }} 轮评估
+            </span>
+          </h2>
+          <div class="coverage-grid">
+            <div
+              v-for="d in coverageData.dimensions"
+              :key="d.id"
+              :class="['coverage-card', d.covered ? 'coverage-covered' : 'coverage-missing']"
+              :title="d.description"
+            >
+              <span class="coverage-dot" />
+              <span class="coverage-name">{{ d.name }}</span>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      </div>
     </aside>
+
+    <!-- 折叠态:page-body 右上角悬浮把手(header 下方右侧,点击重新展开) -->
+    <div v-else-if="task" class="detail-handle">
+      <WorkspaceToggleButton
+        side="right"
+        :collapsed="true"
+        expand-title="展开任务详情"
+        collapse-title="折叠任务详情"
+        @toggle="toggleDetail"
+      />
+    </div>
     </div>
 
     <!-- 用户澄清提问弹窗(user_agent ask_user=true 时触发) -->
@@ -1478,6 +1492,7 @@ function formatTime(iso: string): string {
   align-items: stretch;
   min-height: 0;
   overflow: hidden;
+  position: relative; /* 给折叠态悬浮把手定位 */
 }
 
 .main {
@@ -1489,31 +1504,65 @@ function formatTime(iso: string): string {
   padding: var(--space-6) var(--space-6) var(--space-12);
 }
 
-/* ---- 右侧任务详情栏(可完全隐藏;折叠时不渲染) ---- */
+/* ---- 右侧任务详情栏(抽屉把手式;展开时顶部条+滚动内容区,折叠时不渲染) ---- */
 .detail-sidebar {
   flex-shrink: 0;
   width: 340px;
   min-width: 0;
   height: 100%;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
   border-left: 1px solid var(--color-border);
   background: var(--color-bg);
-  padding: var(--space-4) var(--space-4) var(--space-12);
 }
 
-/* 侧栏内卡片间距收紧(窄列下避免过大留白) */
+/* 顶部条:标题 + 折叠按钮(header 下方,固定不滚) */
+.detail-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.detail-sidebar-title {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--color-text);
+}
+
+/* 内容区:独立滚动,卡片间距用 gap 统一 */
+.detail-sidebar-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4) var(--space-4) var(--space-12);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
 .detail-sidebar .overview-card {
-  margin-bottom: var(--space-4);
+  margin-bottom: 0;
   padding: var(--space-4);
 }
 
 .detail-sidebar .coverage-section {
-  margin-bottom: var(--space-4);
+  margin-bottom: 0;
 }
 
 /* 窄列下 meta 网格单列即可 */
 .detail-sidebar .overview-meta {
   grid-template-columns: 1fr;
+}
+
+/* ---- 折叠态悬浮把手(page-body 右上角,header 下方右侧) ---- */
+.detail-handle {
+  position: absolute;
+  right: var(--space-3);
+  top: var(--space-3);
+  z-index: 5;
 }
 
 /* ---- 加载 / 错误状态 ---- */
