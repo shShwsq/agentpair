@@ -22,6 +22,7 @@ import { useRoute } from 'vue-router'
 import AppHeader from '@/components/AppHeader.vue'
 import ConversationMessage from '@/components/ConversationMessage.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
+import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import { getTask } from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
 import { extractErrorMessage } from '@/utils/error'
@@ -644,33 +645,11 @@ function formatTime(iso: string): string {
   <div class="page">
     <AppHeader>
       <template #leading>
-        <button
+        <WorkspaceToggleButton
           v-if="task"
-          class="workspace-toggle"
-          :class="{ 'is-active': !workspaceCollapsed }"
-          :title="workspaceCollapsed ? '展开工作区' : '折叠工作区'"
-          :aria-label="workspaceCollapsed ? '展开工作区' : '折叠工作区'"
-          @click="toggleWorkspace"
-        >
-          <svg
-            class="workspace-toggle-icon"
-            viewBox="0 0 24 24"
-            width="18"
-            height="18"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <!-- 外框 -->
-            <rect x="3" y="4" width="18" height="16" rx="2" />
-            <!-- 中间偏左的竖线(始终显示) -->
-            <line x1="9" y1="6" x2="9" y2="18" />
-            <!-- 展开态:右侧再加一竖线(侧栏+主区) -->
-            <line v-if="!workspaceCollapsed" x1="15" y1="6" x2="15" y2="18" />
-          </svg>
-        </button>
+          :collapsed="workspaceCollapsed"
+          @toggle="toggleWorkspace"
+        />
       </template>
       <template #nav>
         <RouterLink to="/">首页</RouterLink>
@@ -892,39 +871,6 @@ function formatTime(iso: string): string {
   margin: 0 auto;
   overflow-y: auto;
   padding: var(--space-6) var(--space-6) var(--space-12);
-}
-
-/* ---- 工作区开关按钮(渲染在 AppHeader 的 leading slot 内) ---- */
-.workspace-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  padding: 0;
-  color: var(--color-text-secondary);
-  background: transparent;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.workspace-toggle:hover {
-  color: var(--color-primary);
-  border-color: var(--color-primary);
-  background: var(--color-primary-light);
-}
-
-.workspace-toggle.is-active {
-  color: var(--color-primary);
-  border-color: var(--color-primary);
-  background: var(--color-primary-light);
-}
-
-.workspace-toggle-icon {
-  display: block;
-  flex-shrink: 0;
 }
 
 /* ---- 加载 / 错误状态 ---- */

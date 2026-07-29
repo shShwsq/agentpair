@@ -2,22 +2,35 @@
 /**
  * 首页
  *
- * 登录后的落地页。当前作为任务系统的入口:
- * - 展示欢迎信息 + 用户邮箱
- * - 提供提交任务的 CTA 按钮
- *
- * 阶段 7 后续会扩展为任务列表页(需后端补 GET /tasks 接口)。
+ * 登录后的落地页。展示欢迎信息 + 提交任务 CTA。
+ * 左侧可展开历史任务栏(WorkspaceSidebar),与任务详情页一致。
  */
+import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
+import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
+import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 
 const router = useRouter()
+
+/** 历史任务侧栏是否折叠(默认折叠) */
+const workspaceCollapsed = ref(true)
+
+function toggleWorkspace(): void {
+  workspaceCollapsed.value = !workspaceCollapsed.value
+}
 </script>
 
 <template>
   <div class="page">
     <AppHeader>
+      <template #leading>
+        <WorkspaceToggleButton
+          :collapsed="workspaceCollapsed"
+          @toggle="toggleWorkspace"
+        />
+      </template>
       <template #nav>
         <RouterLink to="/" class="router-link-active">首页</RouterLink>
         <RouterLink to="/tasks/new">提交任务</RouterLink>
@@ -25,62 +38,80 @@ const router = useRouter()
       </template>
     </AppHeader>
 
-    <main class="main">
-      <div class="welcome-card">
-        <div class="welcome-icon">
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2a4 4 0 0 1 4 4v1h1a3 3 0 0 1 3 3v3a3 3 0 0 1-3 3h-1v1a4 4 0 0 1-4 4" />
-            <path d="M12 2a4 4 0 0 0-4 4v1H7a3 3 0 0 0-3 3v3a3 3 0 0 0 3 3h1v1a4 4 0 0 0 4 4" />
-          </svg>
-        </div>
-        <h1>欢迎使用 AgentPair</h1>
-        <p>双智能体协作系统 · user_agent 澄清意图,react_agent 执行任务</p>
+    <div class="page-body">
+      <WorkspaceSidebar v-if="!workspaceCollapsed" />
 
-        <div class="cta-area">
-          <button class="btn-primary" @click="router.push('/tasks/new')">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="12" y1="5" x2="12" y2="19" />
-              <line x1="5" y1="12" x2="19" y2="12" />
+      <main class="main">
+        <div class="welcome-card">
+          <div class="welcome-icon">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2a4 4 0 0 1 4 4v1h1a3 3 0 0 1 3 3v3a3 3 0 0 1-3 3h-1v1a4 4 0 0 1-4 4" />
+              <path d="M12 2a4 4 0 0 0-4 4v1H7a3 3 0 0 0-3 3v3a3 3 0 0 0 3 3h1v1a4 4 0 0 0 4 4" />
             </svg>
-            提交新任务
-          </button>
-        </div>
+          </div>
+          <h1>欢迎使用 AgentPair</h1>
+          <p>双智能体协作系统 · user_agent 澄清意图,react_agent 执行任务</p>
 
-        <div class="feature-grid">
-          <div class="feature">
-            <div class="feature-icon">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M9 11H1l8-8 8 8h-8v10" transform="rotate(180 9 11)" />
+          <div class="cta-area">
+            <button class="btn-primary" @click="router.push('/tasks/new')">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
               </svg>
-            </div>
-            <h3>user_agent</h3>
-            <p>作为资深工程师,对照 checklist 评估结果,追问未覆盖项</p>
+              提交新任务
+            </button>
           </div>
-          <div class="feature">
-            <div class="feature-icon">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="16 18 22 12 16 6" />
-                <polyline points="8 6 2 12 8 18" />
-              </svg>
+
+          <div class="feature-grid">
+            <div class="feature">
+              <div class="feature-icon">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M9 11H1l8-8 8 8h-8v10" transform="rotate(180 9 11)" />
+                </svg>
+              </div>
+              <h3>user_agent</h3>
+              <p>作为资深工程师,对照 checklist 评估结果,追问未覆盖项</p>
             </div>
-            <h3>react_agent</h3>
-            <p>克隆仓库、调用工具、执行任务、提交结构化结果</p>
+            <div class="feature">
+              <div class="feature-icon">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="16 18 22 12 16 6" />
+                  <polyline points="8 6 2 12 8 18" />
+                </svg>
+              </div>
+              <h3>react_agent</h3>
+              <p>克隆仓库、调用工具、执行任务、提交结构化结果</p>
+            </div>
           </div>
         </div>
-      </div>
-    </main>
+      </main>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .page {
-  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
   background: var(--color-bg);
 }
 
+.page-body {
+  flex: 1;
+  display: flex;
+  align-items: stretch;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .main {
+  flex: 1;
+  min-width: 0;
   max-width: var(--content-width);
   margin: 0 auto;
+  overflow-y: auto;
   padding: var(--space-12) var(--space-6);
 }
 
