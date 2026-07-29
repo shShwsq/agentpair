@@ -34,6 +34,7 @@ import { subscribeTaskStream } from '@/api/stream'
 import { extractErrorMessage } from '@/utils/error'
 import type {
   Conversation,
+  PlanStep,
   Scenario,
   ScenarioResultMetaField,
   TaskCoverage,
@@ -88,6 +89,10 @@ let streamingSeqCounter = 0
 /** 每 round 已收到的正式对话数(用于给 streamingItem 计算插入位置 seq) */
 const convCountPerRound = reactive<Map<number, number>>(new Map())
 
+// ---- 计划清单(plan 事件 + 历史回放)----
+// key: round_idx,value: 该 round 最新一次的 plan 步骤列表(覆盖式更新)
+const planPerRound = reactive<Map<number, PlanStep[]>>(new Map())
+
 // ---- 加载 + SSE 订阅 ----
 
 async function initTask(): Promise<void> {
@@ -102,6 +107,11 @@ async function initTask(): Promise<void> {
     scenarios.value = scenarioList
     error.value = ''
     loading.value = false
+
+    // 从历史对话提取 plan(刷新页面/迟到订阅者回放)
+    // react_agent 的 type=thinking content 里可能含 <plan>...</plan>,
+    // 每个 round 取最后一次出现的 plan(可能被后续思考更新过状态)
+    extractPlanFromHistory(taskData.conversations)
 
     // 2. 若任务仍在进行,连接 SSE 接收实时事件
     if (task.value && (task.value.status === 'pending' || task.value.status === 'running')) {
@@ -235,10 +245,19 @@ function connectSSE(taskId: string): void {
       handleThinkingDelta(data)
       nextTick(scrollToBottom)
     },
+    onPlan: (data) => {
+      // 覆盖式更新:每个 round 只保留最新一次 plan
+      planPerRound.set(data.round_idx, data.steps)
+      nextTick(scrollToBottom)
+    },
     onDone: async () => {
       // 任务完成:拉取最终结果(含 results)
       try {
         task.value = await getTask(taskId)
+        // 重新提取 plan(最终快照可能含最后一轮的 plan 更新)
+        if (task.value) {
+          extractPlanFromHistory(task.value.conversations)
+        }
       } catch (err) {
         console.error('拉取最终结果失败:', err)
       }
@@ -322,6 +341,50 @@ function toggleReasoning(convId: string): void {
   }
 }
 
+// ---- plan 提取工具(与后端 _extract_plan 正则一致)----
+
+const PLAN_BLOCK_RE = /<plan>\s*([\s\S]*?)\s*<\/plan>/
+const PLAN_LINE_RE = /^\s*(?:\d+[.、)]\s*)?(?:\[([\w_]+)\]\s*)?(.+)$/
+
+/** 从单段 content 提取 plan 步骤列表,无 plan 块返回 null */
+function parsePlanFromContent(content: string): PlanStep[] | null {
+  const m = content.match(PLAN_BLOCK_RE)
+  if (!m) return null
+  const block = m[1]
+  const steps: PlanStep[] = []
+  let id = 0
+  for (const line of block.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    const lm = trimmed.match(PLAN_LINE_RE)
+    if (!lm) continue
+    id += 1
+    let status: PlanStep['status'] = (lm[1] as PlanStep['status']) || 'pending'
+    if (status !== 'pending' && status !== 'in_progress' && status !== 'done') {
+      status = 'pending'
+    }
+    steps.push({ id, text: lm[2].trim(), status })
+  }
+  return steps.length > 0 ? steps : null
+}
+
+/** 从历史对话提取 plan,每个 round 取最后一次出现的 plan(可能被更新过状态) */
+function extractPlanFromHistory(conversations: Conversation[]): void {
+  // 按 round 收集所有含 plan 的 thinking content,保留每个 round 最后一次
+  const lastPlanPerRound = new Map<number, PlanStep[]>()
+  for (const c of conversations) {
+    if (c.role !== 'react_agent' || c.type !== 'thinking') continue
+    if (!c.content) continue
+    const steps = parsePlanFromContent(c.content)
+    if (steps) {
+      lastPlanPerRound.set(c.round_idx, steps)
+    }
+  }
+  for (const [roundIdx, steps] of lastPlanPerRound) {
+    planPerRound.set(roundIdx, steps)
+  }
+}
+
 function scrollToBottom(): void {
   if (conversationRef.value) {
     conversationRef.value.scrollTop = conversationRef.value.scrollHeight
@@ -396,6 +459,8 @@ interface RoundGroup {
   roundIdx: number
   label: string
   segments: RoundSegment[]
+  /** 该 round 的计划清单(复杂任务时 react_agent 输出,空数组表示无 plan) */
+  planSteps: PlanStep[]
 }
 
 /** 用户手动展开过的迭代 id(流式结束后保留展开状态,不被自动折叠) */
@@ -563,6 +628,7 @@ const roundGroups = computed<RoundGroup[]>(() => {
         roundIdx,
         label: roundIdx === 0 ? '初始评估' : `第 ${roundIdx} 轮`,
         segments: segmentRoundItems(roundIdx, sorted),
+        planSteps: planPerRound.get(roundIdx) ?? [],
       }
     })
 })
@@ -642,6 +708,12 @@ function iterationSummary(seg: IterationSegment): string {
   const preview = names.join(', ')
   const extra = count > 3 ? ` 等 ${count} 个` : ''
   return `${count} 个工具调用: ${preview}${extra}`
+}
+
+/** plan 进度文本:已完成 / 总数 */
+function planProgress(steps: PlanStep[]): string {
+  const done = steps.filter((s) => s.status === 'done').length
+  return `${done}/${steps.length}`
 }
 
 // ---- 结果分组:由场景声明驱动 ----
@@ -972,6 +1044,25 @@ function formatTime(iso: string): string {
 
           <div v-for="group in roundGroups" :key="group.roundIdx" class="round-group">
             <div class="round-label">{{ group.label }}</div>
+            <!-- 计划清单(复杂任务时 react_agent 输出,展示接下来要做的步骤 + 进度) -->
+            <div v-if="group.planSteps.length > 0" class="plan-card">
+              <div class="plan-header">
+                <span class="plan-title">计划清单</span>
+                <span class="plan-progress">{{ planProgress(group.planSteps) }}</span>
+              </div>
+              <div class="plan-steps">
+                <div
+                  v-for="s in group.planSteps"
+                  :key="s.id"
+                  :class="['plan-step', `plan-step-${s.status}`]"
+                >
+                  <span class="plan-step-icon">{{
+                    s.status === 'done' ? '✓' : s.status === 'in_progress' ? '◌' : '○'
+                  }}</span>
+                  <span class="plan-step-text">{{ s.text }}</span>
+                </div>
+              </div>
+            </div>
             <div class="messages">
               <template
                 v-for="seg in group.segments"
@@ -1435,6 +1526,108 @@ function formatTime(iso: string): string {
   background: var(--color-primary-light);
   border-radius: var(--radius-full);
   margin-bottom: var(--space-3);
+}
+
+/* ---- 计划清单卡片 ---- */
+.plan-card {
+  margin-bottom: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%);
+  border: 1px solid #a7f3d0;
+  border-radius: var(--radius-lg);
+}
+
+.plan-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-2);
+}
+
+.plan-title {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: #047857;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.plan-progress {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: #059669;
+  padding: var(--space-1) var(--space-2);
+  background: rgba(255, 255, 255, 0.7);
+  border-radius: var(--radius-full);
+}
+
+.plan-steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.plan-step {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--fs-sm);
+  border-radius: var(--radius-sm);
+  transition: background 0.15s ease;
+}
+
+.plan-step-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  border-radius: 50%;
+}
+
+.plan-step-text {
+  flex: 1;
+  word-break: break-word;
+}
+
+.plan-step-pending {
+  color: var(--color-text-muted);
+}
+
+.plan-step-pending .plan-step-icon {
+  color: var(--color-text-muted);
+  background: var(--color-surface-alt);
+}
+
+.plan-step-in_progress {
+  color: var(--color-text);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.plan-step-in_progress .plan-step-icon {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.15);
+  animation: plan-step-pulse 1.5s ease-in-out infinite;
+}
+
+.plan-step-done {
+  color: var(--color-text-secondary);
+  text-decoration: line-through;
+  text-decoration-color: var(--color-text-muted);
+}
+
+.plan-step-done .plan-step-icon {
+  color: #fff;
+  background: #10b981;
+}
+
+@keyframes plan-step-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(0.9); }
 }
 
 .messages {

@@ -105,6 +105,46 @@ const time = computed(() => formatTime(props.item.created_at))
 
 /** 正式对话项的 reasoning(完整评估)折叠状态:默认折叠,点击展开 */
 const evalExpanded = ref(false)
+
+/**
+ * tool_call content 拆分:后端把意图放在首行,原始调用详情放后续行。
+ * 首行作为卡片标题高亮显示,其余作为等宽详情。
+ * 无换行时(旧数据兼容)返回 null,走普通渲染。
+ */
+const toolCallParts = computed<{ intent: string; detail: string } | null>(() => {
+  if (props.item.type !== 'tool_call' || !props.item.content) return null
+  const idx = props.item.content.indexOf('\n')
+  if (idx < 0) return null
+  return {
+    intent: props.item.content.slice(0, idx),
+    detail: props.item.content.slice(idx + 1),
+  }
+})
+
+/**
+ * 过滤 content 里的 <plan>...</plan> 块。
+ * plan 由 TaskDetailView 单独渲染成清单卡片,不在 thinking 正文重复显示。
+ * 流式期间 plan 块可能不完整(只有开标签),也一并清理。
+ */
+const PLAN_BLOCK_RE = /<plan>[\s\S]*?<\/plan>|<plan>[\s\S]*$/g
+function stripPlanBlock(content: string): string {
+  return content.replace(PLAN_BLOCK_RE, '').trim()
+}
+
+/** 流式项的展示 content(去掉 plan 块) */
+const streamingDisplayContent = computed(() => {
+  const c = props.item.streaming?.content || ''
+  return stripPlanBlock(c)
+})
+
+/** 正式对话项的展示 content(tool_call 拆分时用 detail,否则过滤 plan 块) */
+const displayContent = computed(() => {
+  if (toolCallParts.value) return toolCallParts.value.detail
+  const c = props.item.content || ''
+  // thinking 类的 content 可能含 plan 块,过滤掉
+  if (props.item.type === 'thinking') return stripPlanBlock(c)
+  return c
+})
 </script>
 
 <template>
@@ -139,9 +179,9 @@ const evalExpanded = ref(false)
           class="msg-reasoning-content"
         >{{ item.streaming.reasoning }}</div>
       </div>
-      <div v-if="item.streaming.content" class="msg-content">{{ item.streaming.content }}</div>
+      <div v-if="streamingDisplayContent" class="msg-content">{{ streamingDisplayContent }}</div>
       <div
-        v-if="isActive && !item.streaming.reasoning && !item.streaming.content"
+        v-if="isActive && !item.streaming.reasoning && !streamingDisplayContent"
         class="msg-content msg-content-muted"
       >
         等待模型响应...
@@ -165,7 +205,9 @@ const evalExpanded = ref(false)
         </div>
         <div v-if="evalExpanded" class="msg-reasoning-content">{{ item.reasoning }}</div>
       </div>
-      <div v-if="item.content" class="msg-content">{{ item.content }}</div>
+      <!-- tool_call:首行作为意图标题高亮,其余作为等宽调用详情 -->
+      <div v-if="toolCallParts" class="msg-tool-intent">{{ toolCallParts.intent }}</div>
+      <div v-if="displayContent" class="msg-content">{{ displayContent }}</div>
     </template>
   </div>
 </template>
@@ -329,6 +371,17 @@ const evalExpanded = ref(false)
   color: var(--color-text-secondary);
   max-height: 200px;
   overflow-y: auto;
+}
+
+/* tool_call 意图标题:人类可读的一句话,高亮显示在调用详情上方 */
+.msg-tool-intent {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--color-primary);
+  margin-bottom: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-primary-light);
+  border-radius: var(--radius-sm);
 }
 
 .typing-dots {

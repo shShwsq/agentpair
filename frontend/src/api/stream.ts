@@ -18,6 +18,7 @@ import type {
   ConnectedData,
   ConversationEventData,
   DoneEventData,
+  PlanEventData,
   SSEEvent,
   SSEEventType,
   StatusEventData,
@@ -31,6 +32,8 @@ export interface StreamCallbacks {
   onStatus?: (data: StatusEventData) => void
   /** 流式 token 增量(打字机效果)。每个 LLM 调用按 conv_id 累积 */
   onThinkingDelta?: (data: ThinkingDeltaEventData) => void
+  /** 计划清单更新(复杂任务时 react_agent 输出 <plan>,后端提取推送) */
+  onPlan?: (data: PlanEventData) => void
   onDone?: (data: DoneEventData) => void
   onError?: (data: DoneEventData) => void
 }
@@ -57,6 +60,7 @@ export function subscribeTaskStream(
     'conversation',
     'status',
     'thinking_delta',
+    'plan',
     'done',
     'error',
   ]
@@ -79,6 +83,9 @@ export function subscribeTaskStream(
             break
           case 'thinking_delta':
             callbacks.onThinkingDelta?.(data as unknown as ThinkingDeltaEventData)
+            break
+          case 'plan':
+            callbacks.onPlan?.(data as unknown as PlanEventData)
             break
           case 'done':
             callbacks.onDone?.(data as unknown as DoneEventData)

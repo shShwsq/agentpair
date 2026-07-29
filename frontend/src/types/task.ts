@@ -186,6 +186,7 @@ export type SSEEventType =
   | 'conversation'
   | 'status'
   | 'thinking_delta'
+  | 'plan'
   | 'done'
   | 'error'
 
@@ -252,4 +253,28 @@ export interface ThinkingDeltaEventData {
 export interface DoneEventData {
   status: TaskStatus
   error_message?: string
+}
+
+/**
+ * plan 事件 data
+ *
+ * react_agent 在复杂任务的思考 content 里输出 <plan>...</plan> 计划清单,
+ * 后端提取后推送此事件(覆盖式更新,取最新一次)。
+ * 历史回放时前端从 thinking conversation.content 重新提取。
+ */
+export interface PlanEventData {
+  /** 协作轮次 */
+  round_idx: number
+  /** 计划步骤列表 */
+  steps: PlanStep[]
+}
+
+/** 计划步骤 */
+export interface PlanStep {
+  /** 步骤序号(从 1 开始) */
+  id: number
+  /** 步骤描述 */
+  text: string
+  /** 状态:pending / in_progress / done */
+  status: 'pending' | 'in_progress' | 'done'
 }

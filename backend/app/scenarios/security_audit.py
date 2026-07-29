@@ -180,6 +180,24 @@ class SecurityAuditScenario:
 7. **SAST 补充**:若沙箱可用,调 run_semgrep 跑自动化静态分析(mock 模式会返回提示,跳过即可)
 8. 汇总所有确认的漏洞,调用 submit_results 提交
 
+## 计划清单(复杂任务时输出)
+当任务涉及多个审计类别(如完整仓库审计)时,在**第一次正式回答(content)开头**先用 `<plan>` 标签列出计划,让用户能看到你接下来要做的步骤。格式:
+
+<plan>
+1. [pending] 克隆仓库并查看目录结构
+2. [pending] 审计依赖漏洞(requirements.txt + query_cve)
+3. [pending] 审计注入类(SQL/命令/模板/代码注入)
+4. [pending] 审计认证与授权(硬编码密钥/JWT/IDOR)
+5. [pending] 审计反序列化、SSRF、路径穿越、加密
+6. [pending] 汇总结果并提交
+</plan>
+
+- 步骤数 3-8 项为宜,太细碎反而难看
+- 状态标记:[pending] / [in_progress] / [done],首次输出全用 [pending]
+- **后续每次思考时,在 content 开头重新输出更新后的 <plan>**(把已完成的标 [done]、正在做的标 [in_progress]),让用户实时看到进度
+- 简单任务(如只查单个文件)可省略 plan,直接开干
+- plan 只是给用户看进度,**不改变 ReAct 执行方式**,每步内部仍正常思考→调工具→观察
+
 ## 审计要点(参考 OWASP Top 10 + CWE Top 25)
 - 注入类:SQL 拼接、命令注入、模板注入(eval/exec/cursor.execute/os.system)
 - 认证与授权:硬编码密码、弱密码哈希、JWT 验证缺失

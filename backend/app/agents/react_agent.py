@@ -15,6 +15,7 @@
 """
 import json
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -140,6 +141,15 @@ def run_react_agent(
                 reasoning=reasoning_full,
                 publish_event=False,
             )
+            # 提取计划清单(复杂任务时 react_agent 会在 content 里输出 <plan>...</plan>)
+            # plan 数据持久化在 thinking.content 里,历史回放时前端重新提取;
+            # 在线订阅者通过 plan 事件实时收到(覆盖式更新,取最新一次)
+            plan_steps = _extract_plan(content_full)
+            if plan_steps:
+                publish(task.id, "plan", {
+                    "round_idx": round_idx,
+                    "steps": plan_steps,
+                })
 
         # 没有工具调用 → agent 认为做完了
         if not tool_calls_full:
@@ -160,10 +170,13 @@ def run_react_agent(
             call_sig = f"{fn_name}:{json.dumps(fn_args, sort_keys=True)}"
             recent_calls.append(call_sig)
 
+            # 工具意图:人类可读的一句话说明,合并到 content 首行(前端拆分渲染)
+            intent = _build_tool_intent(fn_name, fn_args)
+            call_detail = f"调用 {fn_name}({json.dumps(fn_args, ensure_ascii=False)[:200]})"
             _add_conversation(
                 db, task, round_idx=round_idx,
                 role="react_agent", type="tool_call",
-                content=f"调用 {fn_name}({json.dumps(fn_args, ensure_ascii=False)[:200]})",
+                content=f"{intent}\n{call_detail}",
             )
 
             # 特殊工具:submit_results
@@ -411,6 +424,77 @@ def _stream_llm_response(
 # ============================================================
 # 辅助函数
 # ============================================================
+
+
+def _build_tool_intent(fn_name: str, fn_args: dict) -> str:
+    """根据工具名+参数生成人类可读的意图说明
+
+    用于工具调用卡片标题,让用户一眼看出"这个工具调用打算做什么"。
+    纯模板映射,不调 LLM。未知工具回退到工具名。
+    """
+    if fn_name == "clone_repo":
+        return f"克隆仓库 {fn_args.get('repo_url', '?')}"
+    if fn_name == "list_files":
+        subdir = fn_args.get("subdir", "")
+        return f"查看目录结构: {subdir or '根目录'}"
+    if fn_name == "read_file":
+        return f"读取文件 {fn_args.get('file_path', '?')}"
+    if fn_name == "search_code":
+        return f"搜索代码: {fn_args.get('pattern', '?')}"
+    if fn_name == "query_cve":
+        return (
+            f"查询 {fn_args.get('package_name', '?')}@"
+            f"{fn_args.get('version', '?')} 的已知漏洞"
+        )
+    if fn_name == "run_semgrep":
+        return "运行 Semgrep 静态分析"
+    if fn_name == "list_skills":
+        return "查看可用技能列表"
+    if fn_name == "skill":
+        return f"获取技能指令: {fn_args.get('skill_name', '?')}"
+    if fn_name == "submit_results":
+        return "提交审计结果"
+    return f"调用 {fn_name}"
+
+
+# 计划清单提取:<plan>...</plan> 块,逐行解析序号 + 可选状态标记 + 文本
+_PLAN_BLOCK_RE = re.compile(r"<plan>\s*(.*?)\s*</plan>", re.DOTALL)
+_PLAN_LINE_RE = re.compile(
+    r"^\s*(?:\d+[.、)]\s*)?(?:\[([\w_]+)\]\s*)?(.+)$"
+)
+
+
+def _extract_plan(content: str) -> list[dict] | None:
+    """从 thinking content 中提取 <plan>...</plan> 计划清单
+
+    支持格式(状态标记可选,缺省 pending):
+        <plan>
+        1. [done] 克隆仓库并查看结构
+        2. [in_progress] 审计依赖漏洞
+        3. [pending] 审计注入类漏洞
+        </plan>
+
+    返回 [{"id": 1, "text": "...", "status": "pending|in_progress|done"}]
+    无 plan 块或解析为空时返回 None。
+    """
+    m = _PLAN_BLOCK_RE.search(content)
+    if not m:
+        return None
+    block = m.group(1)
+    steps: list[dict] = []
+    for i, line in enumerate(block.split("\n"), 1):
+        line = line.strip()
+        if not line:
+            continue
+        lm = _PLAN_LINE_RE.match(line)
+        if not lm:
+            continue
+        status = lm.group(1) or "pending"
+        text = lm.group(2).strip()
+        if status not in ("pending", "in_progress", "done"):
+            status = "pending"
+        steps.append({"id": i, "text": text, "status": status})
+    return steps if steps else None
 
 
 def _add_conversation(
