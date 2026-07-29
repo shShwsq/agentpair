@@ -121,3 +121,65 @@ class ScenarioInfo(BaseModel):
     result_grouping: dict[str, Any] | None = None
     result_meta_fields: list[dict[str, Any]] = []
     coverage: dict[str, Any] | None = None
+
+
+# ============================================================
+# 阶段 8:用户澄清(user_agent 向用户提问)
+# ============================================================
+
+
+class ClarificationQuestionOption(BaseModel):
+    """选择题选项"""
+
+    value: str
+    label: str
+
+
+class ClarificationQuestion(BaseModel):
+    """user_agent 向用户提出的问题
+
+    两种类型:
+    - choice: 选择题(用户从 options 中选,可单选或多选)
+    - text: 填空题(用户自由文本回答)
+    """
+
+    id: str
+    type: str  # "choice" | "text"
+    question: str
+    placeholder: str | None = None
+    required: bool = False
+    options: list[ClarificationQuestionOption] | None = None
+    multi: bool = False
+
+
+class PendingQuestion(BaseModel):
+    """任务当前待回答的问题(GET /tasks/{id}/pending_question 返回)
+
+    前端在收到 question 事件后弹出 QuestionDialog;刷新页面后通过
+    GET /tasks/{id}/pending_question 恢复弹窗。无待回答问题时返回 None。
+    """
+
+    ask_round: int
+    questions: list[ClarificationQuestion]
+    reasoning: str = ""
+    conversation_id: str | None = None
+
+
+class AnswerItem(BaseModel):
+    """单个问题的答案"""
+
+    question_id: str
+    value: str | list[str]
+
+
+class AnswerRequest(BaseModel):
+    """用户提交答案(POST /tasks/{id}/answer)"""
+
+    answers: list[AnswerItem]
+
+
+class AnswerResponse(BaseModel):
+    """提交答案的响应"""
+
+    accepted: bool
+    message: str = ""

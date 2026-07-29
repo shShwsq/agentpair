@@ -21,20 +21,26 @@ import { useRoute } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
 import ConversationMessage from '@/components/ConversationMessage.vue'
+import QuestionDialog from '@/components/QuestionDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import {
   downloadTaskReportMarkdown,
+  getPendingQuestion,
   getScenarios,
   getTask,
   getTaskCoverage,
   getTaskReportHtml,
+  submitTaskAnswer,
 } from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
 import { extractErrorMessage } from '@/utils/error'
 import type {
+  AnswerItem,
+  ClarificationQuestion,
   Conversation,
   PlanStep,
+  QuestionEventData,
   Scenario,
   ScenarioResultMetaField,
   TaskCoverage,
@@ -93,6 +99,72 @@ const convCountPerRound = reactive<Map<number, number>>(new Map())
 // key: round_idx,value: 该 round 最新一次的 plan 步骤列表(覆盖式更新)
 const planPerRound = reactive<Map<number, PlanStep[]>>(new Map())
 
+// ---- 用户澄清提问弹窗(阶段 8)----
+// user_agent 在第 0 轮评估时若 ask_user=true,后端推送 question 事件,
+// 前端弹出 QuestionDialog 让用户填答。刷新页面后通过 getPendingQuestion 恢复。
+const questionOpen = ref(false)
+const questionData = reactive<{
+  questions: ClarificationQuestion[]
+  reasoning: string
+  askRound: number
+}>({
+  questions: [],
+  reasoning: '',
+  askRound: 0,
+})
+const submittingAnswer = ref(false)
+
+/** 从 PendingQuestion / QuestionEventData 填充弹窗数据并打开 */
+function openQuestionDialog(payload: {
+  questions: ClarificationQuestion[]
+  reasoning?: string
+  ask_round?: number
+}): void {
+  questionData.questions = payload.questions ?? []
+  questionData.reasoning = payload.reasoning ?? ''
+  questionData.askRound = payload.ask_round ?? 0
+  questionOpen.value = true
+}
+
+/** 用户提交答案:调 API,成功后关闭弹窗 */
+async function handleSubmitAnswer(answers: AnswerItem[]): Promise<void> {
+  if (!task.value?.id || submittingAnswer.value) return
+  submittingAnswer.value = true
+  try {
+    const resp = await submitTaskAnswer(String(task.value.id), { answers })
+    if (resp.accepted) {
+      questionOpen.value = false
+    } else {
+      error.value = resp.message || '答案提交失败,任务可能已结束'
+    }
+  } catch (err) {
+    error.value = extractErrorMessage(err)
+  } finally {
+    submittingAnswer.value = false
+  }
+}
+
+/** 用户取消提问弹窗(直接关闭,不提交) */
+function handleCancelQuestion(): void {
+  questionOpen.value = false
+}
+
+/** 刷新页面后恢复待回答问题弹窗(若后端有 pending question) */
+async function restorePendingQuestion(taskId: string): Promise<void> {
+  try {
+    const pending = await getPendingQuestion(taskId)
+    if (pending && pending.questions?.length) {
+      openQuestionDialog({
+        questions: pending.questions,
+        reasoning: pending.reasoning,
+        ask_round: pending.ask_round,
+      })
+    }
+  } catch {
+    // 无 pending question 或任务已结束,静默忽略
+  }
+}
+
 // ---- 加载 + SSE 订阅 ----
 
 async function initTask(): Promise<void> {
@@ -127,6 +199,10 @@ async function initTask(): Promise<void> {
     // 2. 若任务仍在进行,连接 SSE 接收实时事件
     if (task.value && (task.value.status === 'pending' || task.value.status === 'running')) {
       connectSSE(taskId)
+      // 恢复可能存在的待回答问题弹窗(刷新页面 / 迟到订阅者场景)
+      // 后端 user_agent 可能已发出 ask_user,但 SSE 事件在连接前已错过,
+      // 通过 GET /pending_question 拉取当前待回答问题
+      void restorePendingQuestion(taskId)
     }
 
     // 3. 加载覆盖度看板(场景声明了 coverage 才拉取)
@@ -260,6 +336,14 @@ function connectSSE(taskId: string): void {
       // 覆盖式更新:每个 round 只保留最新一次 plan
       planPerRound.set(data.round_idx, data.steps)
       nextTick(scrollToBottom)
+    },
+    onQuestion: (data: QuestionEventData) => {
+      // user_agent 请求用户澄清:弹出 QuestionDialog
+      openQuestionDialog({
+        questions: data.questions,
+        reasoning: data.reasoning,
+        ask_round: data.ask_round,
+      })
     },
     onDone: async () => {
       // 任务完成:拉取最终结果(含 results)
@@ -1348,6 +1432,17 @@ function formatTime(iso: string): string {
       </template>
     </main>
     </div>
+
+    <!-- 用户澄清提问弹窗(user_agent ask_user=true 时触发) -->
+    <QuestionDialog
+      :open="questionOpen"
+      :questions="questionData.questions"
+      :reasoning="questionData.reasoning"
+      :ask-round="questionData.askRound"
+      :submitting="submittingAnswer"
+      @submit="handleSubmitAnswer"
+      @cancel="handleCancelQuestion"
+    />
   </div>
 </template>
 

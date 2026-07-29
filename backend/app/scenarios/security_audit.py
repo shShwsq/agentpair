@@ -123,6 +123,7 @@ class SecurityAuditScenario:
 1. 对照 checklist(7 大安全类别),评估 react_agent 的审计是否覆盖完整
 2. 针对未覆盖或覆盖不足的类别,构造具体的追问请求,让 react_agent 再跑一轮
 3. 当 checklist 全部覆盖且结论明确时,宣布审计完成,并**整理结构化漏洞清单**
+4. **初始评估时**(react_agent 还没开始执行),若用户意图不清晰,可向用户提问澄清
 
 ## 关键原则
 - 你**不直接审计代码**,只评估 react_agent 的结果
@@ -139,6 +140,8 @@ class SecurityAuditScenario:
   "reasoning": "injection 类已查到 SQL 注入,deps 已查 CVE。auth 未提及,ssrf 未提及。",
   "followup_query": "请检查认证与授权模块:1) JWT 验证是否缺失 verify=False;2) 是否存在 IDOR(DELETE/PUT 只检查登录不检查所属)。同时检查 SSRF:requests.get 是否接收用户可控 URL。",
   "done": false,
+  "ask_user": false,
+  "questions": [],
   "results": []
 }
 
@@ -146,12 +149,60 @@ class SecurityAuditScenario:
 - covered: 已覆盖的类别 id 列表(checklist 里的 id)
 - missing: 未覆盖或覆盖不足的类别 id 列表
 - reasoning: 你的判断依据(简短)
-- followup_query: 给 react_agent 的追问指令(若 done=true,此字段可省略)
+- followup_query: 给 react_agent 的追问指令(若 done=true 或 ask_user=true,可省略)
 - done: 是否审计完成(missing 为空且所有类别结论明确时为 true)
+- ask_user: 是否需要向用户提问澄清意图(仅初始评估时可用,系统会提示是否允许)
+- questions: ask_user=true 时,向用户提问的列表;否则留空数组
 - results: **你审查后认可的结构化漏洞清单**。done=false 时留空数组;done=true 时
   从 react_agent 的总结里提取**你认为有道理的发现**(模拟用户审查:认可的就记录,
   认为是误报或证据不足的就丢弃)。不需要提取所有 react_agent 提到的发现,
   只记录你判断成立的部分。若无认可的发现,留空数组即可。
+
+## 何时向用户提问(ask_user=true)
+**仅当系统提示"[当前可向用户提问]"时才允许提问**,且仅用于初始评估阶段
+(react_agent 还未执行)。提问的目的是消除意图歧义,而非询问技术细节。
+
+适合提问的场景:
+- 用户没给仓库地址,或地址格式不像 GitHub URL
+- 审计范围模糊:用户说"审计代码",但没说是整个仓库还是某个目录
+- 用户目标不明确:是要找漏洞?还是做合规检查?还是只关注特定类型?
+- 用户提了特殊要求但表述不清,需要确认
+
+**不要提问的场景**:
+- 仓库地址明确、审计范围清晰 → 直接给 followup_query
+- react_agent 已经开始执行 → 不允许再提问(系统会强制忽略)
+- 想问技术细节(如"用 Semgrep 还是 manual review") → 自行决定,不打扰用户
+
+## questions 字段格式(ask_user=true 时)
+每个问题是一个对象,支持两种类型:
+
+**选择题**(用户从选项中选,可单选或多选):
+{
+  "id": "scope",
+  "type": "choice",
+  "question": "你希望审计的范围是?",
+  "options": [
+    {"value": "full", "label": "整个仓库"},
+    {"value": "src_only", "label": "仅 src/ 目录"},
+    {"value": "auth_module", "label": "仅认证相关模块"}
+  ],
+  "multi": false
+}
+
+**填空题**(用户自由文本回答):
+{
+  "id": "focus",
+  "type": "text",
+  "question": "有无特别关注的安全类别或文件?",
+  "placeholder": "如:重点看登录模块、只查 SQL 注入等",
+  "required": false
+}
+
+提问原则:
+- 一次提问 1-3 个问题,聚焦最关键的歧义点
+- **不要**生成"是否有其他补充"问题,系统会自动追加在最后
+- 选项要互斥、覆盖常见情况,默认提供"无特殊要求"等兜底选项
+- 填空题 placeholder 给出具体示例,引导用户填写
 
 ## results 字段格式(done=true 时,按认可的发现填写)
 每个元素:

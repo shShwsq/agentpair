@@ -42,7 +42,9 @@ logger = logging.getLogger(__name__)
 
 # 事件类型
 EventType = Literal[
-    "conversation", "status", "thinking_delta", "plan", "done", "error"
+    "conversation", "status", "thinking_delta", "plan",
+    "question",  # user_agent 请求用户澄清(选择题/填空题弹窗)
+    "done", "error"
 ]
 
 # 单个订阅者的队列容量上限(防止消费者过慢导致内存膨胀)

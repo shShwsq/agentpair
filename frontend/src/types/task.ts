@@ -7,6 +7,58 @@
 /** 任务状态(后端 TaskStatus 枚举的字符串值) */
 export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed'
 
+// ============================================================
+// 阶段 8:user_agent 向用户提问澄清意图
+// ============================================================
+
+/** 选择题选项 */
+export interface ClarificationQuestionOption {
+  value: string
+  label: string
+}
+
+/**
+ * user_agent 向用户提出的问题
+ *
+ * 两种类型:
+ * - choice: 选择题(用户从 options 中选,可单选或多选)
+ * - text: 填空题(用户自由文本回答)
+ */
+export interface ClarificationQuestion {
+  id: string
+  type: 'choice' | 'text'
+  question: string
+  placeholder?: string
+  required?: boolean
+  options?: ClarificationQuestionOption[]
+  multi?: boolean
+}
+
+/** 任务当前待回答的问题(GET /tasks/{id}/pending_question) */
+export interface PendingQuestion {
+  ask_round: number
+  questions: ClarificationQuestion[]
+  reasoning?: string
+  conversation_id?: string | null
+}
+
+/** 单个问题的答案 */
+export interface AnswerItem {
+  question_id: string
+  value: string | string[]
+}
+
+/** 提交答案请求 */
+export interface AnswerRequest {
+  answers: AnswerItem[]
+}
+
+/** 提交答案响应 */
+export interface AnswerResponse {
+  accepted: boolean
+  message?: string
+}
+
 /** 场景信息(后端 ScenarioInfo) */
 export interface Scenario {
   id: string
@@ -187,6 +239,7 @@ export type SSEEventType =
   | 'status'
   | 'thinking_delta'
   | 'plan'
+  | 'question'
   | 'done'
   | 'error'
 
@@ -277,4 +330,22 @@ export interface PlanStep {
   text: string
   /** 状态:pending / in_progress / done */
   status: 'pending' | 'in_progress' | 'done'
+}
+
+/**
+ * question 事件 data(阶段 8:用户澄清)
+ *
+ * user_agent 在第 0 轮初始评估时,若认为用户意图不清晰,输出 ask_user=true
+ * + questions 列表。后端推送此事件,前端弹出 QuestionDialog 让用户填答。
+ * 用户提交后通过 POST /tasks/{id}/answer 唤醒后台线程继续评估。
+ */
+export interface QuestionEventData {
+  /** 提问轮次(0=首次,1=用户回答后再问) */
+  ask_round: number
+  /** 问题列表(最后一题固定为"是否有其他补充") */
+  questions: ClarificationQuestion[]
+  /** user_agent 的判断依据(展示给用户参考) */
+  reasoning?: string
+  /** 对应的 Conversation 记录 id(落库的提问记录) */
+  conversation_id?: string | null
 }

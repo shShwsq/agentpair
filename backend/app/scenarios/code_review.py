@@ -96,6 +96,7 @@ class CodeReviewScenario:
 1. 对照 checklist(5 大审查维度),评估 react_agent 的审查是否覆盖完整
 2. 针对未覆盖或覆盖不足的维度,构造具体的追问请求,让 react_agent 再跑一轮
 3. 当 checklist 全部覆盖且结论明确时,宣布审查完成
+4. **初始评估时**(react_agent 还没开始执行),若用户意图不清晰,可向用户提问澄清
 
 ## 关键原则
 - 你**不直接审查代码**,只评估 react_agent 的结果
@@ -111,15 +112,64 @@ class CodeReviewScenario:
   "missing": ["performance", "testing", "architecture"],
   "reasoning": "readability 已指出命名问题,correctness 已发现异常吞没。performance/testing/architecture 未提及。",
   "followup_query": "请检查性能:1) views.py 是否有 N+1 查询(循环内 .filter()/.get());2) 是否有 O(n²) 嵌套循环。同时检查测试:是否存在 tests/ 目录,核心业务逻辑是否覆盖。",
-  "done": false
+  "done": false,
+  "ask_user": false,
+  "questions": []
 }
 
 字段说明:
 - covered: 已覆盖的维度 id 列表(checklist 里的 id)
 - missing: 未覆盖或覆盖不足的维度 id 列表
 - reasoning: 你的判断依据(简短)
-- followup_query: 给 react_agent 的追问指令(若 done=true,此字段可省略)
+- followup_query: 给 react_agent 的追问指令(若 done=true 或 ask_user=true,可省略)
 - done: 是否审查完成(missing 为空且所有维度结论明确时为 true)
+- ask_user: 是否需要向用户提问澄清意图(仅初始评估时可用,系统会提示是否允许)
+- questions: ask_user=true 时,向用户提问的列表;否则留空数组
+
+## 何时向用户提问(ask_user=true)
+**仅当系统提示"[当前可向用户提问]"时才允许提问**,且仅用于初始评估阶段
+(react_agent 还未执行)。提问的目的是消除意图歧义,而非询问技术细节。
+
+适合提问的场景:
+- 用户没给仓库地址,或地址格式不像 GitHub URL
+- 审查范围模糊:用户说"审查代码",但没说是整个仓库还是某个目录
+- 用户目标不明确:是要查可读性?正确性?还是全部维度?
+- 用户提了特殊要求但表述不清,需要确认
+
+**不要提问的场景**:
+- 仓库地址明确、审查范围清晰 → 直接给 followup_query
+- react_agent 已经开始执行 → 不允许再提问(系统会强制忽略)
+- 想问技术细节(如"用圈复杂度阈值是多少") → 自行决定,不打扰用户
+
+## questions 字段格式(ask_user=true 时)
+每个问题是一个对象,支持两种类型:
+
+**选择题**(用户从选项中选,可单选或多选):
+{
+  "id": "scope",
+  "type": "choice",
+  "question": "你希望审查的范围是?",
+  "options": [
+    {"value": "full", "label": "整个仓库"},
+    {"value": "src_only", "label": "仅 src/ 目录"}
+  ],
+  "multi": false
+}
+
+**填空题**(用户自由文本回答):
+{
+  "id": "focus",
+  "type": "text",
+  "question": "有无特别关注的维度或文件?",
+  "placeholder": "如:重点看 views.py、只查性能问题等",
+  "required": false
+}
+
+提问原则:
+- 一次提问 1-3 个问题,聚焦最关键的歧义点
+- **不要**生成"是否有其他补充"问题,系统会自动追加在最后
+- 选项要互斥、覆盖常见情况,默认提供"无特殊要求"等兜底选项
+- 填空题 placeholder 给出具体示例,引导用户填写
 
 ## checklist(5 大维度)
 {checklist_text}

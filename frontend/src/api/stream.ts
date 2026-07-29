@@ -19,6 +19,7 @@ import type {
   ConversationEventData,
   DoneEventData,
   PlanEventData,
+  QuestionEventData,
   SSEEvent,
   SSEEventType,
   StatusEventData,
@@ -34,6 +35,8 @@ export interface StreamCallbacks {
   onThinkingDelta?: (data: ThinkingDeltaEventData) => void
   /** 计划清单更新(复杂任务时 react_agent 输出 <plan>,后端提取推送) */
   onPlan?: (data: PlanEventData) => void
+  /** 用户澄清提问(阶段 8:user_agent 输出 ask_user=true 时触发) */
+  onQuestion?: (data: QuestionEventData) => void
   onDone?: (data: DoneEventData) => void
   onError?: (data: DoneEventData) => void
 }
@@ -61,6 +64,7 @@ export function subscribeTaskStream(
     'status',
     'thinking_delta',
     'plan',
+    'question',
     'done',
     'error',
   ]
@@ -86,6 +90,9 @@ export function subscribeTaskStream(
             break
           case 'plan':
             callbacks.onPlan?.(data as unknown as PlanEventData)
+            break
+          case 'question':
+            callbacks.onQuestion?.(data as unknown as QuestionEventData)
             break
           case 'done':
             callbacks.onDone?.(data as unknown as DoneEventData)

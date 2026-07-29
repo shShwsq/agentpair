@@ -31,11 +31,19 @@ from app.models.task import Conversation, Task, TaskStatus
 from app.models.user import User
 from app.scenarios.base import get_scenario, list_scenarios
 from app.schemas.task import (
+    AnswerRequest,
+    AnswerResponse,
+    PendingQuestion,
     ScenarioInfo,
     TaskCreateRequest,
     TaskCreateResponse,
     TaskListItem,
     TaskResponse,
+)
+from app.user_interaction import (
+    get_pending_question,
+    has_pending_question,
+    submit_answers,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,6 +152,84 @@ def get_task(
             raise HTTPException(status_code=403, detail="无权访问此任务")
 
     return task
+
+
+# ============================================================
+# 阶段 8:用户澄清(user_agent 向用户提问)
+# ============================================================
+
+
+@router.get("/tasks/{task_id}/pending_question")
+def get_task_pending_question(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> PendingQuestion | None:
+    """查询任务当前待回答的问题(刷新页面后恢复弹窗用)
+
+    无待回答问题时返回 None(HTTP 200 + 空 body),前端据此关闭弹窗。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权访问此任务")
+
+    payload = get_pending_question(task_id)
+    if payload is None:
+        return None
+    return PendingQuestion(
+        ask_round=payload.get("ask_round", 0),
+        questions=payload.get("questions", []),
+        reasoning=payload.get("reasoning", ""),
+        conversation_id=payload.get("conversation_id"),
+    )
+
+
+@router.post("/tasks/{task_id}/answer", response_model=AnswerResponse)
+def submit_task_answer(
+    task_id: uuid.UUID,
+    req: AnswerRequest,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> AnswerResponse:
+    """提交用户对澄清问题的答案
+
+    后端收到后唤醒阻塞的后台线程,把答案拼回 user_intent 重新评估。
+    若当前 task 没有待回答问题(重复提交或任务已结束),返回 accepted=false。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权访问此任务")
+
+    if task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
+        return AnswerResponse(
+            accepted=False,
+            message=f"任务已结束({task.status.value}),无法提交答案",
+        )
+
+    if not has_pending_question(task_id):
+        return AnswerResponse(
+            accepted=False,
+            message="当前没有待回答的问题(可能已回答或任务已结束)",
+        )
+
+    # 转换为 dict 列表(submit_answers 期望的格式)
+    answers = [
+        {"question_id": a.question_id, "value": a.value}
+        for a in req.answers
+    ]
+    ok = submit_answers(task_id, answers)
+    if not ok:
+        return AnswerResponse(
+            accepted=False,
+            message="提交失败:可能已被回答过或状态异常",
+        )
+    return AnswerResponse(accepted=True, message="答案已提交,智能体将继续评估")
 
 
 @router.get("/tasks/{task_id}/coverage")

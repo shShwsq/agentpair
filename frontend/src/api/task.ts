@@ -6,6 +6,9 @@
  */
 import client from './client'
 import type {
+  AnswerRequest,
+  AnswerResponse,
+  PendingQuestion,
   Scenario,
   TaskCoverage,
   TaskCreateRequest,
@@ -83,4 +86,30 @@ export function getTaskReportHtml(taskId: string): Promise<string> {
       transformResponse: [(x) => x],
     })
     .then((r) => r.data)
+}
+
+// ============================================================
+// 阶段 8:用户澄清(user_agent 向用户提问)
+// ============================================================
+
+/**
+ * 查询任务当前待回答的问题
+ *
+ * 用于刷新页面后恢复提问弹窗。无待回答问题时返回 null。
+ */
+export function getPendingQuestion(taskId: string): Promise<PendingQuestion | null> {
+  return client.get(`/tasks/${taskId}/pending_question`).then((r) => r.data)
+}
+
+/**
+ * 提交用户对澄清问题的答案
+ *
+ * 后端唤醒阻塞的后台线程,把答案拼回 user_intent 重新评估。
+ * 返回 accepted=false 表示任务已结束 / 重复提交 / 状态异常。
+ */
+export function submitTaskAnswer(
+  taskId: string,
+  req: AnswerRequest,
+): Promise<AnswerResponse> {
+  return client.post(`/tasks/${taskId}/answer`, req).then((r) => r.data)
 }
