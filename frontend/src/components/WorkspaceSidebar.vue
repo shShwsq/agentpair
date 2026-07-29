@@ -369,8 +369,8 @@ const showFilePanel = computed(() => !collapsed.value && selectedFilePath.value 
 <style scoped>
 .workspace-container {
   display: flex;
-  width: 100%;
-  height: 100%;
+  flex-shrink: 0;
+  align-self: flex-start;
   overflow: hidden;
   position: sticky;
   top: 0;
