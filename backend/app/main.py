@@ -10,6 +10,7 @@ from app.routers import settings as settings_router
 from app.routers import workspace as workspace_router
 
 # 导入场景模块,触发注册
+from app.scenarios import code_review  # noqa: F401
 from app.scenarios import security_audit  # noqa: F401
 
 # 阶段 5:启动时扫描所有 SKILL.md,加载到进程级注册表
