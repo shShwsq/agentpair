@@ -103,6 +103,7 @@ async function handleSubmit(): Promise<void> {
       <template #nav>
         <RouterLink to="/">首页</RouterLink>
         <RouterLink to="/tasks/new" class="router-link-active">提交任务</RouterLink>
+        <RouterLink to="/settings">模型设置</RouterLink>
       </template>
     </AppHeader>
 

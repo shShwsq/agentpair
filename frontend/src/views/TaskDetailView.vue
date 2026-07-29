@@ -638,6 +638,7 @@ function formatTime(iso: string): string {
       <template #nav>
         <RouterLink to="/">首页</RouterLink>
         <RouterLink to="/tasks/new">提交任务</RouterLink>
+        <RouterLink to="/settings">模型设置</RouterLink>
       </template>
     </AppHeader>
 

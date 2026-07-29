@@ -72,11 +72,13 @@ def run_user_agent(
     task_id: UUID | str,
     round_idx: int = 0,
     scenario_id: str = "code_security_audit",
+    client: LLMClient | None = None,
 ) -> dict[str, Any]:
     """执行一次 user_agent 评估
 
     参数:
         user_intent: 用户原始意图(如"审计这个仓库: https://...")
+        client: 可选的 LLMClient(阶段 6:从用户配置构造),None 时回退到 env 默认
         react_agent_summaries: react_agent 之前几轮的执行结果列表
             每个元素:{"round": 1, "results": [...], "summary": "..."}
         task_id: 任务 ID(必填,用于推送 thinking_delta 事件)
@@ -126,7 +128,7 @@ def run_user_agent(
         )
 
     # 调 LLM(流式)
-    client = LLMClient()
+    client = client or LLMClient()
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg},

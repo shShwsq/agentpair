@@ -21,6 +21,7 @@ const router = useRouter()
       <template #nav>
         <RouterLink to="/" class="router-link-active">首页</RouterLink>
         <RouterLink to="/tasks/new">提交任务</RouterLink>
+        <RouterLink to="/settings">模型设置</RouterLink>
       </template>
     </AppHeader>
 

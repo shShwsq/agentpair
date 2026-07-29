@@ -1,5 +1,5 @@
 {
-  "_comment": "LLM 厂商清单。阶段 1 起所有 provider 走 OpenAI 兼容后端,差异通过本文件描述。",
+  "_comment": "LLM / Embedding 厂商清单。阶段 1 起所有 provider 走 OpenAI 兼容后端,差异通过本文件描述。",
   "_thinkingModes": {
     "hybrid": "混合思考,可通过 enable_thinking/thinking 参数开关",
     "only": "仅思考模式,无法关闭",
@@ -88,6 +88,59 @@
       "models": [
         { "id": "MiniMax-M3", "thinking": "hybrid", "thinkingDefault": true },
         { "id": "MiniMax-M2.7", "thinking": "only", "thinkingDefault": true }
+      ]
+    }
+  ],
+  "embeddingProviders": [
+    {
+      "id": "dashscope",
+      "name": "阿里云百炼 DashScope",
+      "baseUrl": "https://dashscope.aliyuncs.com/api/v1",
+      "apiKeyUrl": "https://dashscope.console.aliyun.com/",
+      "models": [
+        { "id": "text-embedding-v4", "name": "Text-Embedding-V4 (纯文本)", "dimension": 1024, "multimodal": false },
+        { "id": "tongyi-embedding-vision-plus-2026-03-06", "name": "Tongyi-Embedding-Vision-Plus (多模态)", "dimension": 1024, "multimodal": true }
+      ]
+    },
+    {
+      "id": "zhipu",
+      "name": "智谱 AI (BigModel)",
+      "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+      "apiKeyUrl": "https://open.bigmodel.cn/usercenter/apikeys",
+      "models": [
+        { "id": "embedding-3", "name": "Embedding-3", "dimension": 1024, "multimodal": false, "dimensionsParam": true }
+      ]
+    },
+    {
+      "id": "baidu",
+      "name": "百度千帆",
+      "baseUrl": "https://qianfan.baidubce.com/v2",
+      "apiKeyUrl": "https://console.bce.baidu.com/iam/#/iam/apikey/list",
+      "models": [
+        { "id": "bge-large-zh", "name": "BGE-Large-ZH", "dimension": 1024, "multimodal": false },
+        { "id": "bge-large-en", "name": "BGE-Large-EN", "dimension": 1024, "multimodal": false }
+      ]
+    },
+    {
+      "id": "volcengine",
+      "name": "火山引擎豆包",
+      "baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
+      "apiKeyUrl": "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
+      "fallbackDimension": 1024,
+      "fallbackMultimodal": true,
+      "fallbackMultimodalEndpoint": true,
+      "fallbackDimensionsParam": true,
+      "models": [
+        { "id": "doubao-embedding-vision-251215", "name": "Doubao Embedding Vision 251215", "dimension": 1024, "multimodal": true, "multimodalEndpoint": true, "dimensionsParam": true }
+      ]
+    },
+    {
+      "id": "jina",
+      "name": "Jina AI",
+      "baseUrl": "https://api.jina.ai/v1",
+      "apiKeyUrl": "https://jina.ai/api-dashboard/",
+      "models": [
+        { "id": "jina-embeddings-v5-text-small", "name": "Jina Embeddings V5 Text Small", "dimension": 1024, "multimodal": false, "dimensionsParam": true }
       ]
     }
   ]

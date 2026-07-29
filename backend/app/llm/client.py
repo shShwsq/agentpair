@@ -169,8 +169,7 @@ def build_chat_url(base_url: str) -> str:
 class LLMClient:
     """OpenAI 兼容 LLM 客户端
 
-    阶段 1:从 settings 读取单 provider 配置
-    阶段 6 起:支持用户自选 provider/model
+    配置来源优先级:显式构造参数 > 用户保存的配置(阶段 6) > env 默认(阶段 1)
     """
 
     def __init__(
@@ -179,6 +178,7 @@ class LLMClient:
         api_key: str | None = None,
         model: str | None = None,
         enable_thinking: bool | None = None,
+        base_url: str | None = None,
     ):
         self.provider_id = provider_id or settings.LLM_PROVIDER
         self.api_key = api_key or settings.LLM_API_KEY
@@ -186,9 +186,11 @@ class LLMClient:
         self.enable_thinking = (
             enable_thinking if enable_thinking is not None else settings.LLM_ENABLE_THINKING
         )
+        # 可选:自定义 baseUrl 覆盖 catalog 预设(留空则用 catalog 的 baseUrl)
+        self.base_url_override = base_url
 
         if not self.api_key:
-            raise ValueError("未配置 LLM_API_KEY,请在 .env 中设置")
+            raise ValueError("未配置 LLM_API_KEY,请在 .env 中设置或在前端模型设置中配置")
 
         self.provider = find_provider(self.provider_id)
         if not self.provider:
@@ -198,10 +200,40 @@ class LLMClient:
         # 豆包用 Endpoint ID,model_meta 可能匹配不上,用 fallbackThinking 兜底
         # 此时 thinking_mode 取 fallbackThinking
 
+        # baseUrl 优先级:用户自定义 > catalog 预设
+        effective_base_url = self.base_url_override or self.provider["baseUrl"]
+
         # openai SDK 客户端(指向厂商的 OpenAI 兼容端点)
         self.client = OpenAI(
             api_key=self.api_key,
-            base_url=self.provider["baseUrl"],
+            base_url=effective_base_url,
+        )
+
+    @classmethod
+    def from_user_config(cls, user_llm_config) -> "LLMClient":
+        """从用户保存的配置构造客户端(阶段 6)
+
+        user_llm_config: UserLLMConfig ORM 实例(或 None)
+        - None 或 llm_config 为空 → 回退到 env 默认(走 __init__ 默认参数)
+        - 有 llm_config → 用用户配置构造
+
+        返回 LLMClient 实例。失败时(如缺 api_key)回退到 env 默认。
+        """
+        if user_llm_config is None or not user_llm_config.llm_config:
+            return cls()
+
+        cfg = user_llm_config.llm_config
+        api_key = cfg.get("api_key", "")
+        if not api_key:
+            # 用户未填 api_key(可能是更新时传空串保留了空),回退到 env
+            return cls()
+
+        return cls(
+            provider_id=cfg.get("provider"),
+            api_key=api_key,
+            model=cfg.get("model"),
+            enable_thinking=cfg.get("enable_thinking", True),
+            base_url=cfg.get("base_url"),
         )
 
     def chat_stream(
@@ -300,6 +332,43 @@ class LLMClient:
                 tool_call_deltas=tool_call_deltas or None,
                 finish_reason=choice.finish_reason,
             )
+
+    def test(self, prompt: str = "你好,请用一句话介绍自己") -> dict[str, Any]:
+        """测试 LLM 连通性(非流式,取首个 chunk 即可)
+
+        返回 { success, message, latency_ms }
+        用流式接口调,但只取首条有 content 的 chunk 后立即关闭,避免长回复耗时。
+        """
+        import time
+
+        start = time.perf_counter()
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            # 取流式的前几个 chunk,拿到任意 content 即视为成功
+            for chunk in self.chat_stream(messages, max_tokens=64):
+                if chunk.content_delta or chunk.reasoning_delta:
+                    latency_ms = int((time.perf_counter() - start) * 1000)
+                    return {
+                        "success": True,
+                        "message": "LLM 测试成功",
+                        "latency_ms": latency_ms,
+                    }
+                if chunk.finish_reason in ("stop", "tool_calls"):
+                    break
+            # 没拿到 content 但流正常结束,也算成功(部分模型只输出 reasoning)
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            return {
+                "success": True,
+                "message": "LLM 测试成功(未返回 content,可能仅思考)",
+                "latency_ms": latency_ms,
+            }
+        except Exception as e:
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            return {
+                "success": False,
+                "message": f"LLM 测试失败: {e}",
+                "latency_ms": latency_ms,
+            }
 
 
 # ============================================================

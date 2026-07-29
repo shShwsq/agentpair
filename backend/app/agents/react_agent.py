@@ -40,6 +40,7 @@ def run_react_agent(
     db: Session,
     round_idx: int = 1,
     followup_query: str | None = None,
+    client: LLMClient | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """跑一轮 react_agent
 
@@ -48,6 +49,7 @@ def run_react_agent(
         db: 数据库会话
         round_idx: 当前协作轮次(1 开始)
         followup_query: 追问指令。None 表示第一轮(用 task.user_input)
+        client: 可选的 LLMClient(阶段 6:从用户配置构造),None 时回退到 env 默认
 
     返回:(results 列表, summary 文本)
         results: [{"title": str, "content": str, "metadata": dict}]
@@ -87,8 +89,8 @@ def run_react_agent(
         content=user_msg,
     )
 
-    # 创建 LLM 客户端
-    client = LLMClient()
+    # 创建 LLM 客户端(优先用注入的,否则回退到 env 默认)
+    client = client or LLMClient()
 
     # ReAct 循环
     messages = [

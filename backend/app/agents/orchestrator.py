@@ -21,7 +21,9 @@ from sqlalchemy.orm import Session
 from app.agents.react_agent import run_react_agent
 from app.agents.user_agent import MAX_ROUNDS, run_user_agent
 from app.event_bus import finish_task, publish
+from app.llm.client import LLMClient
 from app.models.task import Conversation, Task, TaskStatus
+from app.models.user_llm_config import UserLLMConfig
 from app.tools import sandbox_tools
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,9 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
     _publish_status(task)
 
     scenario_id = task.scenario
+
+    # 阶段 6:加载用户保存的 LLM 配置(若已配置则覆盖 env 默认)
+    llm_client = _build_llm_client(db, task.user_id)
 
     # 用户原始意图
     user_intent = task.user_input
@@ -60,6 +65,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             user_intent, [],
             task_id=task.id, round_idx=0,
             scenario_id=scenario_id,
+            client=llm_client,
         )
         _record_user_agent(db, task, 0, ua_result_0)
 
@@ -79,6 +85,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 task, db,
                 round_idx=round_idx,
                 followup_query=None if is_first else followup,
+                client=llm_client,
             )
 
             react_summaries.append({
@@ -97,6 +104,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 user_intent, react_summaries,
                 task_id=task.id, round_idx=round_idx,
                 scenario_id=scenario_id,
+                client=llm_client,
             )
             _record_user_agent(db, task, round_idx, ua_result)
 
@@ -245,3 +253,22 @@ def _publish_status(task: Task) -> None:
         "status": task.status.value if hasattr(task.status, 'value') else str(task.status),
         "current_stage": task.current_stage,
     })
+
+
+def _build_llm_client(db: Session, user_id) -> LLMClient | None:
+    """按 task.user_id 加载用户保存的 LLM 配置,构造 LLMClient
+
+    - user_id 为空(匿名任务)或未配置 → 返回 None,agent 内部回退到 env 默认
+    - 用户已配置 → 返回 LLMClient.from_user_config(...)
+    - 构造失败(如 provider 已下线)→ 记日志并回退到 None
+    """
+    if user_id is None:
+        return None
+    try:
+        cfg = db.query(UserLLMConfig).filter(UserLLMConfig.user_id == user_id).first()
+        if cfg is None or not cfg.llm_config:
+            return None
+        return LLMClient.from_user_config(cfg)
+    except Exception as e:
+        logger.warning(f"[user={user_id}] 加载用户 LLM 配置失败,回退到 env 默认: {e}")
+        return None
