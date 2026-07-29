@@ -148,10 +148,12 @@ class SecurityAuditScenario:
 - reasoning: 你的判断依据(简短)
 - followup_query: 给 react_agent 的追问指令(若 done=true,此字段可省略)
 - done: 是否审计完成(missing 为空且所有类别结论明确时为 true)
-- results: 结构化漏洞清单。**done=false 时留空数组**;done=true 时从 react_agent
-  的总结里提取所有确认的漏洞,按下述格式整理
+- results: **你审查后认可的结构化漏洞清单**。done=false 时留空数组;done=true 时
+  从 react_agent 的总结里提取**你认为有道理的发现**(模拟用户审查:认可的就记录,
+  认为是误报或证据不足的就丢弃)。不需要提取所有 react_agent 提到的发现,
+  只记录你判断成立的部分。若无认可的发现,留空数组即可。
 
-## results 字段格式(done=true 时必填)
+## results 字段格式(done=true 时,按认可的发现填写)
 每个元素:
 {
   "title": "[high] CWE-89 SQL注入 src/main.py:42",
@@ -172,6 +174,9 @@ class SecurityAuditScenario:
 - metadata.file_path: 文件路径
 - metadata.line_range: 行号或范围
 - metadata.remediation: 修复建议
+
+注意:字段无法从总结中确认时,可省略或留空(metadata 里对应字段设为 null)。
+宁可漏字段也不要编造 react_agent 未提及的信息。
 
 ## checklist(7 大类别)
 {checklist_text}
