@@ -1219,23 +1219,19 @@ function formatTime(iso: string): string {
           </div>
         </section>
 
-        <!-- 协作对话流 -->
+        <!-- 协作对话流(无外框,顶部仅在运行时显示实时徽标) -->
         <section v-if="roundGroups.length > 0 || isRunning" ref="conversationRef" class="conversation-section">
-          <div class="conv-header">
-            <h2>协作对话流</h2>
-            <span v-if="isRunning" class="live-indicator">
+          <div v-if="isRunning" class="conv-header">
+            <span class="live-indicator">
               <span class="live-dot" />实时
             </span>
           </div>
-          <!-- 用户指令(整个对话流最顶部,独立显示) -->
-          <div v-if="userDirective" class="round-group">
-            <div class="round-label">用户指令</div>
-            <div class="messages">
-              <ConversationMessage
-                :item="userDirective"
-                @toggle-reasoning="toggleReasoning"
-              />
-            </div>
+          <!-- 用户指令(右对齐,像聊天界面的用户消息气泡) -->
+          <div v-if="userDirective" class="user-directive">
+            <ConversationMessage
+              :item="userDirective"
+              @toggle-reasoning="toggleReasoning"
+            />
           </div>
 
           <div v-for="group in roundGroups" :key="group.roundIdx" class="round-group">
@@ -1662,8 +1658,7 @@ function formatTime(iso: string): string {
 }
 
 /* ---- 通用 section ---- */
-.results-section,
-.conversation-section {
+.results-section {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-xl);
@@ -1672,8 +1667,12 @@ function formatTime(iso: string): string {
   margin-bottom: var(--space-6);
 }
 
-.results-section h2,
-.conversation-section h2 {
+/* 对话流:无外框,直接铺在主区背景上(聊天式) */
+.conversation-section {
+  margin-bottom: var(--space-6);
+}
+
+.results-section h2 {
   font-size: var(--fs-lg);
   margin-bottom: var(--space-5);
 }
@@ -1858,6 +1857,17 @@ function formatTime(iso: string): string {
 }
 
 /* ---- 对话流 ---- */
+/* 用户指令:右对齐气泡,像聊天界面的用户消息(消息卡头部已含"用户指令"标签) */
+.user-directive {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: var(--space-6);
+}
+
+.user-directive :deep(.message) {
+  max-width: 80%;
+}
+
 .round-group {
   margin-bottom: var(--space-6);
 }
@@ -2215,17 +2225,12 @@ function formatTime(iso: string): string {
   padding: var(--space-2) var(--space-3);
 }
 
-/* ---- 对话区头部 + 实时指示器 ---- */
+/* ---- 对话区头部 + 实时指示器(标题已移除,仅在运行时右对齐显示实时徽标) ---- */
 .conv-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: var(--space-5);
-}
-
-.conv-header h2 {
-  font-size: var(--fs-lg);
-  margin: 0;
+  justify-content: flex-end;
+  margin-bottom: var(--space-3);
 }
 
 .live-indicator {
