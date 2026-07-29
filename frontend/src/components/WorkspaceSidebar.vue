@@ -423,7 +423,20 @@ function truncateInput(s: string, max = 40): string {
               class="workspace-btn"
               title="查看工作区"
               @click.stop="openWorkspace(t.id)"
-            >📁</button>
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+              </svg>
+            </button>
           </div>
         </div>
         <div v-if="tasksError" class="sidebar-error">{{ tasksError }}</div>
@@ -469,9 +482,37 @@ function truncateInput(s: string, max = 40): string {
             @click="item.node.type === 'dir' ? toggleDir(item.node) : selectFile(item.node)"
           >
             <span class="tree-icon">
-              {{ item.node.type === 'dir'
-                ? (item.node.expanded ? '📂' : '📁')
-                : '📄' }}
+              <!-- 文件夹:展开/折叠两种形态 -->
+              <svg
+                v-if="item.node.type === 'dir'"
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                <!-- 展开时:在文件夹右下角加一个开口小三角 -->
+                <path v-if="item.node.expanded" d="M6 13l3 3 5-5" />
+              </svg>
+              <!-- 文件 -->
+              <svg
+                v-else
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+                <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
+              </svg>
             </span>
             <span class="tree-name">{{ item.node.name }}</span>
             <span v-if="item.node.loading" class="tree-loading">...</span>
@@ -683,13 +724,14 @@ function truncateInput(s: string, max = 40): string {
 .workspace-btn {
   flex-shrink: 0;
   width: 28px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: none;
   background: transparent;
   cursor: pointer;
-  font-size: 14px;
+  color: var(--color-text-muted);
   border-radius: var(--radius-sm);
   transition: all var(--transition-fast);
   margin-left: var(--space-2);
@@ -697,6 +739,7 @@ function truncateInput(s: string, max = 40): string {
 
 .workspace-btn:hover {
   background: var(--color-primary-light);
+  color: var(--color-primary);
 }
 
 /* ---- 文件树 ---- */
@@ -738,7 +781,20 @@ function truncateInput(s: string, max = 40): string {
 
 .tree-icon {
   flex-shrink: 0;
-  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--color-text-secondary);
+}
+
+.tree-dir .tree-icon {
+  color: var(--color-warning);
+}
+
+.tree-file .tree-icon {
+  color: var(--color-text-muted);
 }
 
 .tree-name {
