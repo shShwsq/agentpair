@@ -1362,10 +1362,31 @@ function formatTime(iso: string): string {
         />
       </div>
       <div class="detail-sidebar-body">
-        <!-- 概览卡片 -->
-        <section class="overview-card">
+        <!-- 覆盖度(场景声明了 coverage 时显示,置顶以便无需滚动即可查看) -->
+        <section v-if="scenarioDecl?.coverage && coverageData" class="coverage-section">
+          <h2>
+            覆盖度
+            <span class="count">{{ coverageData.covered_count }}/{{ coverageData.total_count }}</span>
+            <span v-if="coverageData.last_round !== null" class="coverage-round">
+              第 {{ coverageData.last_round }} 轮评估
+            </span>
+          </h2>
+          <div class="coverage-grid">
+            <div
+              v-for="d in coverageData.dimensions"
+              :key="d.id"
+              :class="['coverage-card', d.covered ? 'coverage-covered' : 'coverage-missing']"
+              :title="d.description"
+            >
+              <span class="coverage-dot" />
+              <span class="coverage-name">{{ d.name }}</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- 任务详情(扁平化,无卡片外框) -->
+        <section class="overview-section">
           <div class="overview-header">
-            <h1>任务详情</h1>
             <span :class="['badge', statusConfig[task.status].class]">
               {{ statusConfig[task.status].label }}
             </span>
@@ -1379,12 +1400,11 @@ function formatTime(iso: string): string {
                 title="下载 Markdown 报告"
                 @click="exportMarkdown"
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                   <polyline points="7 10 12 15 17 10" />
                   <line x1="12" y1="15" x2="12" y2="3" />
                 </svg>
-                Markdown
               </button>
               <button
                 class="btn-export"
@@ -1392,12 +1412,11 @@ function formatTime(iso: string): string {
                 title="打印或另存为 PDF"
                 @click="exportPdf"
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <polyline points="6 9 6 2 18 2 18 9" />
                   <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
                   <rect x="6" y="14" width="12" height="8" />
                 </svg>
-                PDF
               </button>
             </div>
           </div>
@@ -1425,28 +1444,6 @@ function formatTime(iso: string): string {
           </div>
           <div v-if="task.error_message" class="alert alert-error">
             {{ task.error_message }}
-          </div>
-        </section>
-
-        <!-- 覆盖度看板(场景声明了 coverage 时显示) -->
-        <section v-if="scenarioDecl?.coverage && coverageData" class="coverage-section">
-          <h2>
-            覆盖度看板
-            <span class="count">{{ coverageData.covered_count }}/{{ coverageData.total_count }}</span>
-            <span v-if="coverageData.last_round !== null" class="coverage-round">
-              第 {{ coverageData.last_round }} 轮评估
-            </span>
-          </h2>
-          <div class="coverage-grid">
-            <div
-              v-for="d in coverageData.dimensions"
-              :key="d.id"
-              :class="['coverage-card', d.covered ? 'coverage-covered' : 'coverage-missing']"
-              :title="d.description"
-            >
-              <span class="coverage-dot" />
-              <span class="coverage-name">{{ d.name }}</span>
-            </div>
           </div>
         </section>
       </div>
@@ -1507,8 +1504,8 @@ function formatTime(iso: string): string {
 /* ---- 右侧任务详情栏(抽屉把手式;展开时顶部条+滚动内容区,折叠时不渲染) ---- */
 .detail-sidebar {
   flex-shrink: 0;
-  width: 340px;
-  min-width: 0;
+  width: clamp(300px, 26vw, 380px);
+  min-width: 300px;
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -1537,25 +1534,13 @@ function formatTime(iso: string): string {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--space-4) var(--space-4) var(--space-12);
+  padding: var(--space-4);
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
 }
 
-.detail-sidebar .overview-card {
-  margin-bottom: 0;
-  padding: var(--space-4);
-}
 
-.detail-sidebar .coverage-section {
-  margin-bottom: 0;
-}
-
-/* 窄列下 meta 网格单列即可 */
-.detail-sidebar .overview-meta {
-  grid-template-columns: 1fr;
-}
 
 /* ---- 折叠态悬浮把手(page-body 右上角,header 下方右侧) ---- */
 .detail-handle {
@@ -1563,6 +1548,20 @@ function formatTime(iso: string): string {
   right: var(--space-3);
   top: var(--space-3);
   z-index: 5;
+}
+
+/* ---- 响应式:窄屏下右侧栏改为覆盖式抽屉 ---- */
+@media (max-width: 1024px) {
+  .detail-sidebar {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 20;
+    width: min(380px, 85vw);
+    box-shadow: var(--shadow-xl);
+    border-left: 1px solid var(--color-border-strong);
+  }
 }
 
 /* ---- 加载 / 错误状态 ---- */
@@ -1585,43 +1584,38 @@ function formatTime(iso: string): string {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ---- 概览卡片 ---- */
-.overview-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-sm);
-  padding: var(--space-6);
-  margin-bottom: var(--space-6);
+/* ---- 任务详情概览(扁平化) ---- */
+.overview-section {
+  padding: var(--space-2) 0;
 }
 
 .overview-header {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  margin-bottom: var(--space-4);
-}
-
-.overview-header h1 {
-  font-size: var(--fs-xl);
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .overview-actions {
   display: flex;
   gap: var(--space-2);
-  margin-left: auto;
 }
 
 .btn-export {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
   font-size: var(--fs-xs);
   color: var(--color-text-secondary);
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   cursor: pointer;
   transition: all var(--transition-fast);
 }
@@ -1638,9 +1632,9 @@ function formatTime(iso: string): string {
 
 .overview-meta {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: var(--space-4);
-  margin-bottom: var(--space-4);
+  grid-template-columns: 1fr;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
 }
 
 .overview-meta dt {
@@ -1659,7 +1653,6 @@ function formatTime(iso: string): string {
   padding: var(--space-3) var(--space-4);
   background: var(--color-surface-alt);
   border-radius: var(--radius-md);
-  margin-bottom: var(--space-3);
 }
 
 .overview-input .label,
@@ -1675,6 +1668,8 @@ function formatTime(iso: string): string {
   font-size: var(--fs-sm);
   white-space: pre-wrap;
   word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
 }
 
 /* ---- 状态徽章 ---- */
@@ -1732,9 +1727,9 @@ function formatTime(iso: string): string {
   font-size: var(--fs-sm);
 }
 
-/* ---- 覆盖度看板 ---- */
+/* ---- 覆盖度 ---- */
 .coverage-section {
-  margin-bottom: var(--space-6);
+  margin-bottom: 0;
 }
 
 .coverage-section h2 {
@@ -1742,7 +1737,7 @@ function formatTime(iso: string): string {
   align-items: center;
   gap: var(--space-2);
   margin-bottom: var(--space-3);
-  font-size: var(--fs-lg);
+  font-size: var(--fs-base);
   font-weight: var(--fw-semibold);
 }
 
@@ -1755,7 +1750,7 @@ function formatTime(iso: string): string {
 
 .coverage-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
   gap: var(--space-2);
 }
 
@@ -1798,6 +1793,7 @@ function formatTime(iso: string): string {
 .coverage-name {
   color: var(--color-text);
   font-weight: var(--fw-medium);
+  word-break: break-word;
 }
 
 /* ---- 结果清单 ---- */
