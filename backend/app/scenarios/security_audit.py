@@ -300,6 +300,79 @@ CVE 类发现的 cwe 用 "CWE-1035",content 写明 CVE id 和受影响版本。
             "metadata": metadata,
         }
 
+    # ---------- 前端声明(场景无关 UI 驱动,阶段 7) ----------
+
+    @property
+    def form_fields(self) -> list[dict[str, Any]]:
+        """提交任务表单字段定义
+
+        安全场景:repo_url(必填)+ branch(可选)+ note(可选)
+        这些字段名与 params 对齐,前端提交时作为 params 的 key
+        """
+        return [
+            {
+                "name": "repo_url",
+                "type": "url",
+                "label": "GitHub 仓库地址",
+                "required": True,
+                "placeholder": "https://github.com/owner/repo",
+                "description": "要审计的仓库地址",
+            },
+            {
+                "name": "branch",
+                "type": "text",
+                "label": "分支",
+                "required": False,
+                "placeholder": "默认主分支",
+            },
+            {
+                "name": "note",
+                "type": "textarea",
+                "label": "补充说明",
+                "required": False,
+                "placeholder": "如:重点关注认证模块、只审计 src/ 目录等",
+            },
+        ]
+
+    @property
+    def result_grouping(self) -> dict[str, Any]:
+        """结果分组维度:按 severity 分组,固定枚举+顺序
+
+        color 与前端 sev-* CSS class 对齐
+        """
+        return {
+            "field": "severity",
+            "type": "ordered",
+            "values": [
+                {"value": "critical", "label": "严重", "color": "critical", "order": 0},
+                {"value": "high", "label": "高危", "color": "high", "order": 1},
+                {"value": "medium", "label": "中危", "color": "medium", "order": 2},
+                {"value": "low", "label": "低危", "color": "low", "order": 3},
+                {"value": "info", "label": "提示", "color": "info", "order": 4},
+            ],
+            "default_label": "未分级",
+            "default_color": "unknown",
+        }
+
+    @property
+    def result_meta_fields(self) -> list[dict[str, Any]]:
+        """结果 meta 字段展示:cwe + file_path(可点击跳转)+ line_range"""
+        return [
+            {"name": "cwe", "label": "CWE", "type": "text"},
+            {"name": "file_path", "label": "文件", "type": "file"},
+            {"name": "line_range", "label": "行号", "type": "text"},
+        ]
+
+    @property
+    def coverage(self) -> dict[str, Any]:
+        """覆盖度看板:维度派生自 checklist 的 7 大类别"""
+        return {
+            "dimensions": [
+                {"id": c["id"], "name": c["name"], "description": c.get("description", "")}
+                for c in self.checklist
+            ],
+        }
+
 
 # 注册场景
 _security_audit = SecurityAuditScenario()

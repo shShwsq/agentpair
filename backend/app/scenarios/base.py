@@ -7,6 +7,12 @@
 - enabled_tools:启用的工具白名单
 - submit_tool_schema:submit_results 工具的参数定义(不同场景的 result 结构不同)
 
+前端声明(场景无关 UI 驱动,阶段 7 新增):
+- form_fields:提交任务表单字段定义,前端按此动态渲染
+- result_grouping:结果清单分组维度声明,前端按此分组展示
+- result_meta_fields:结果项 metadata 字段展示声明,前端按此渲染标签
+- coverage:覆盖度看板声明,前端按此渲染维度状态
+
 轻量配置:场景是 Python 类,注册到 SCENARIOS 字典,代码内 if-else 分发
 """
 from typing import Any, Protocol, runtime_checkable
@@ -63,6 +69,59 @@ class Scenario(Protocol):
         """
         ...
 
+    # ---------- 前端声明(场景无关 UI 驱动) ----------
+
+    @property
+    def form_fields(self) -> list[dict[str, Any]]:
+        """提交任务表单字段定义,前端按此动态渲染
+
+        每个字段:
+        - name: 字段名(提交时作为 params 的 key)
+        - type: text / url / textarea / select / number
+        - label: 显示标签
+        - required: 是否必填
+        - placeholder: 占位提示(可选)
+        - default: 默认值(可选)
+        - description: 字段说明(可选)
+        - options: type=select 时的选项列表 [{"value":..., "label":...}](可选)
+        """
+        ...
+
+    @property
+    def result_grouping(self) -> dict[str, Any] | None:
+        """结果清单分组维度声明,前端按此分组展示。None 表示不分组(平铺)
+
+        结构:
+        - field: 从 result.metadata 取该字段分组
+        - type: "ordered"(固定枚举+顺序) | "dynamic"(按值动态分组)
+        - values: ordered 时提供 [{"value":..., "label":..., "color":..., "order":...}]
+        - default_label: 元数据缺失该字段时的分组名
+        - default_color: 默认分组颜色 key
+        """
+        ...
+
+    @property
+    def result_meta_fields(self) -> list[dict[str, Any]]:
+        """结果项 metadata 字段展示声明,前端按此渲染标签
+
+        每个字段:
+        - name: metadata 中的 key
+        - label: 显示标签
+        - type: "text" / "file"(file 类型可点击跳转源码位置)
+        """
+        ...
+
+    @property
+    def coverage(self) -> dict[str, Any] | None:
+        """覆盖度看板声明,前端按此渲染维度状态。None 表示不显示看板
+
+        结构:
+        - dimensions: 维度列表 [{"id":..., "name":..., "description":...}]
+          通常派生自 checklist
+        - 数据来源固定:从 user_agent type=evaluation 的 reasoning 解析 covered/missing
+        """
+        ...
+
 
 # 场景注册表
 SCENARIOS: dict[str, "Scenario"] = {}
@@ -82,6 +141,29 @@ def get_scenario(scenario_id: str) -> "Scenario":
     return SCENARIOS[scenario_id]
 
 
-def list_scenarios() -> list[dict[str, str]]:
-    """列出所有场景(给前端展示用)"""
-    return [{"id": s.id, "name": s.name} for s in SCENARIOS.values()]
+def list_scenarios() -> list[dict[str, Any]]:
+    """列出所有场景的完整声明(给前端动态渲染用)
+
+    返回每个场景的 id/name + 四项前端声明(form_fields/result_grouping/
+    result_meta_fields/coverage)。声明缺失时兜底为空值,保证前端兼容。
+    """
+    result: list[dict[str, Any]] = []
+    for s in SCENARIOS.values():
+        result.append({
+            "id": s.id,
+            "name": s.name,
+            "form_fields": _get_prop(s, "form_fields", []),
+            "result_grouping": _get_prop(s, "result_grouping", None),
+            "result_meta_fields": _get_prop(s, "result_meta_fields", []),
+            "coverage": _get_prop(s, "coverage", None),
+        })
+    return result
+
+
+def _get_prop(scenario: "Scenario", name: str, default: Any) -> Any:
+    """安全获取场景的可选属性,缺失时返回默认值"""
+    try:
+        val = getattr(scenario, name)
+        return val if val is not None else default
+    except (AttributeError, NotImplementedError):
+        return default

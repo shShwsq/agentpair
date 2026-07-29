@@ -106,7 +106,18 @@ class TaskCreateResponse(BaseModel):
 
 
 class ScenarioInfo(BaseModel):
-    """场景信息(给前端展示用)"""
+    """场景信息(给前端展示用)
+
+    除 id/name 外,携带四项场景声明,驱动前端场景无关渲染:
+    - form_fields: 提交表单字段定义
+    - result_grouping: 结果分组维度(None 表示平铺)
+    - result_meta_fields: 结果 meta 字段展示
+    - coverage: 覆盖度看板声明(None 表示不显示)
+    """
 
     id: str
     name: str
+    form_fields: list[dict[str, Any]] = []
+    result_grouping: dict[str, Any] | None = None
+    result_meta_fields: list[dict[str, Any]] = []
+    coverage: dict[str, Any] | None = None

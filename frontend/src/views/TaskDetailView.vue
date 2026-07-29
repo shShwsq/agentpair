@@ -4,7 +4,7 @@
  *
  * 三大区域:
  * 1. 任务概览:状态徽章、场景、创建时间、当前阶段、错误信息
- * 2. 结果清单:按 severity 分组(安全场景),展示 title/content/位置信息
+ * 2. 结果清单:分组由场景声明 result_grouping 驱动(安全场景按 severity),展示 title/content/meta
  * 3. 协作对话流:按 round_idx 分组,展示 user_agent 与 react_agent 的来回
  *
  * 实时更新:SSE 接收每条对话/状态变更 + thinking_delta(流式 token 增量)。
@@ -23,11 +23,20 @@ import AppHeader from '@/components/AppHeader.vue'
 import ConversationMessage from '@/components/ConversationMessage.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
-import { getTask } from '@/api/task'
+import {
+  downloadTaskReportMarkdown,
+  getScenarios,
+  getTask,
+  getTaskCoverage,
+  getTaskReportHtml,
+} from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
 import { extractErrorMessage } from '@/utils/error'
 import type {
   Conversation,
+  Scenario,
+  ScenarioResultMetaField,
+  TaskCoverage,
   TaskDetail,
   TaskResult,
   TaskStatus,
@@ -45,6 +54,9 @@ const conversationRef = ref<HTMLElement | null>(null)
 
 /** 工作区侧栏是否折叠(默认折叠,完全隐藏) */
 const workspaceCollapsed = ref(true)
+
+/** 场景声明列表(从 /scenarios 拉取,驱动结果分组/meta 渲染) */
+const scenarios = ref<Scenario[]>([])
 
 function toggleWorkspace(): void {
   workspaceCollapsed.value = !workspaceCollapsed.value
@@ -81,8 +93,13 @@ const convCountPerRound = reactive<Map<number, number>>(new Map())
 async function initTask(): Promise<void> {
   const taskId = route.params.id as string
   try {
-    // 1. 先 GET 拿任务快照(含历史对话)
-    task.value = await getTask(taskId)
+    // 并行:拉任务快照 + 拉场景声明(场景声明驱动结果分组/meta 渲染)
+    const [taskData, scenarioList] = await Promise.all([
+      getTask(taskId),
+      getScenarios().catch(() => [] as Scenario[]),
+    ])
+    task.value = taskData
+    scenarios.value = scenarioList
     error.value = ''
     loading.value = false
 
@@ -90,9 +107,81 @@ async function initTask(): Promise<void> {
     if (task.value && (task.value.status === 'pending' || task.value.status === 'running')) {
       connectSSE(taskId)
     }
+
+    // 3. 加载覆盖度看板(场景声明了 coverage 才拉取)
+    void loadCoverage()
   } catch (err) {
     error.value = extractErrorMessage(err)
     loading.value = false
+  }
+}
+
+/** 当前任务对应的场景声明(从列表里 find) */
+const scenarioDecl = computed<Scenario | null>(() => {
+  const sid = task.value?.scenario
+  if (!sid) return null
+  return scenarios.value.find((s) => s.id === sid) ?? null
+})
+
+// ---- 覆盖度看板(仅当场景声明了 coverage 时启用) ----
+
+const coverageData = ref<TaskCoverage | null>(null)
+
+/** 拉取覆盖度数据;场景无 coverage 或任务无 evaluation 时静默置空 */
+async function loadCoverage(): Promise<void> {
+  if (!task.value?.id || !scenarioDecl.value?.coverage) return
+  try {
+    coverageData.value = await getTaskCoverage(String(task.value.id))
+  } catch {
+    coverageData.value = null
+  }
+}
+
+// ---- 报告导出(Markdown 下载 / PDF 打印) ----
+
+const exporting = ref(false)
+
+/** 导出 Markdown:下载 .md 文件 */
+async function exportMarkdown(): Promise<void> {
+  if (!task.value?.id || exporting.value) return
+  exporting.value = true
+  try {
+    const blob = await downloadTaskReportMarkdown(String(task.value.id))
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `task-${task.value.id}.md`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  } catch (err) {
+    error.value = extractErrorMessage(err)
+  } finally {
+    exporting.value = false
+  }
+}
+
+/** 导出 PDF:获取 HTML 报告,新窗口渲染并调起打印 */
+async function exportPdf(): Promise<void> {
+  if (!task.value?.id || exporting.value) return
+  exporting.value = true
+  try {
+    const html = await getTaskReportHtml(String(task.value.id))
+    const w = window.open('', '_blank')
+    if (!w) {
+      error.value = '无法打开新窗口,请检查浏览器弹窗拦截设置'
+      return
+    }
+    w.document.write(html)
+    w.document.close()
+    w.focus()
+    // 等待渲染后调起打印对话框(用户可选"另存为 PDF")
+    setTimeout(() => w.print(), 400)
+  } catch (err) {
+    error.value = extractErrorMessage(err)
+  } finally {
+    exporting.value = false
   }
 }
 
@@ -130,6 +219,11 @@ function connectSSE(taskId: string): void {
       )
       // 自动滚动到底部
       nextTick(scrollToBottom)
+
+      // user_agent 评估产出 → 刷新覆盖度看板
+      if (data.role === 'user_agent' && data.type === 'evaluation') {
+        void loadCoverage()
+      }
     },
     onStatus: (data) => {
       if (task.value) {
@@ -550,55 +644,75 @@ function iterationSummary(seg: IterationSegment): string {
   return `${count} 个工具调用: ${preview}${extra}`
 }
 
-// ---- 结果分组:按 severity ----
+// ---- 结果分组:由场景声明驱动 ----
+//
+// 场景声明 result_grouping 决定分组方式:
+// - 声明为 null:不分组,所有结果放入单个"结果"组平铺
+// - type=ordered:按声明 values 的 order 排序,metadata 缺失该字段用 default 组
+// - type=dynamic:按 metadata 实际值动态分组,缺失用 default 组
+//
+// color 与前端 sev-<color> CSS class 对齐(安全场景保留原视觉)
 
-type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info' | 'unknown'
-
-const severityOrder: Record<Severity, number> = {
-  critical: 0,
-  high: 1,
-  medium: 2,
-  low: 3,
-  info: 4,
-  unknown: 5,
-}
-
-const severityLabels: Record<Severity, string> = {
-  critical: '严重',
-  high: '高危',
-  medium: '中危',
-  low: '低危',
-  info: '提示',
-  unknown: '未分级',
-}
-
-function getSeverity(result: TaskResult): Severity {
-  const s = result.metadata_?.['severity'] as string | undefined
-  if (s && s in severityOrder) return s as Severity
-  return 'unknown'
-}
-
-interface SeverityGroup {
-  severity: Severity
+interface ResultGroup {
+  /** 分组 key(severity 值或 '__default__' / 'all') */
+  key: string
   label: string
+  /** 颜色 key,对应 sev-<color> CSS class */
+  color: string
   results: TaskResult[]
 }
 
-const severityGroups = computed<SeverityGroup[]>(() => {
+const resultGroups = computed<ResultGroup[]>(() => {
   if (!task.value?.results) return []
-  const groups = new Map<Severity, TaskResult[]>()
-  for (const r of task.value.results) {
-    const sev = getSeverity(r)
-    if (!groups.has(sev)) groups.set(sev, [])
-    groups.get(sev)!.push(r)
+  const results = task.value.results
+  const grouping = scenarioDecl.value?.result_grouping
+
+  // 不分组:单个平铺组
+  if (!grouping) {
+    return [{ key: 'all', label: '结果', color: 'unknown', results }]
   }
-  return [...groups.entries()]
-    .sort(([a], [b]) => severityOrder[a] - severityOrder[b])
-    .map(([severity, results]) => ({
-      severity,
-      label: severityLabels[severity],
-      results,
-    }))
+
+  // 按 grouping.field 从 metadata 取值分组
+  const buckets = new Map<string, TaskResult[]>()
+  for (const r of results) {
+    const raw = (r.metadata_?.[grouping.field] as string | undefined) ?? ''
+    const key = raw || '__default__'
+    if (!buckets.has(key)) buckets.set(key, [])
+    buckets.get(key)!.push(r)
+  }
+
+  if (grouping.type === 'ordered') {
+    // 按声明 values 的 order 排序,仅渲染有结果的组
+    const ordered: ResultGroup[] = []
+    for (const v of [...grouping.values].sort((a, b) => a.order - b.order)) {
+      const rs = buckets.get(v.value) || []
+      if (rs.length > 0) {
+        ordered.push({ key: v.value, label: v.label, color: v.color, results: rs })
+      }
+    }
+    // default 组(metadata 缺失字段的结果)
+    const defaultRs = buckets.get('__default__') || []
+    if (defaultRs.length > 0) {
+      ordered.push({
+        key: '__default__',
+        label: grouping.default_label,
+        color: grouping.default_color,
+        results: defaultRs,
+      })
+    }
+    return ordered
+  }
+
+  // dynamic:按实际值动态分组,缺失用 default
+  const dyn: ResultGroup[] = []
+  for (const [key, rs] of buckets) {
+    if (key === '__default__') {
+      dyn.push({ key, label: grouping.default_label, color: grouping.default_color, results: rs })
+    } else {
+      dyn.push({ key, label: key, color: grouping.default_color, results: rs })
+    }
+  }
+  return dyn
 })
 
 // ---- 状态徽章 ----
@@ -616,15 +730,50 @@ const isRunning = computed(
   () => task.value?.status === 'pending' || task.value?.status === 'running',
 )
 
-// ---- 结果卡片 metadata 提取 ----
+// ---- 结果卡片 metadata 渲染:由场景声明驱动 ----
+//
+// 场景声明 result_meta_fields 决定展示哪些 metadata 字段:
+// - type=text:普通标签
+// - type=file:文件标签(加 meta-file class,B1 阶段加 @click 跳转源码)
 
-function getResultMeta(r: TaskResult): { cwe?: string; file?: string; line?: string } {
-  const m = r.metadata_ || {}
-  return {
-    cwe: m['cwe'] as string | undefined,
-    file: m['file_path'] as string | undefined,
-    line: m['line_range'] as string | undefined,
+interface ResultMetaItem {
+  field: ScenarioResultMetaField
+  value: string
+}
+
+function getResultMetaItems(r: TaskResult): ResultMetaItem[] {
+  const fields = scenarioDecl.value?.result_meta_fields || []
+  const items: ResultMetaItem[] = []
+  for (const f of fields) {
+    const v = r.metadata_?.[f.name]
+    if (v != null && v !== '') {
+      items.push({ field: f, value: String(v) })
+    }
   }
+  return items
+}
+
+// ---- 结果项点击跳转源码位置(B1) ----
+
+/** 工作区侧栏组件引用,用于调用 openTaskFile 跳转 */
+const sidebarRef = ref<InstanceType<typeof WorkspaceSidebar> | null>(null)
+
+/** 从 line_range 字符串(如 "10-20" / "10")解析起始行号 */
+function parseStartLine(lineRange?: string): number | undefined {
+  if (!lineRange) return undefined
+  const m = lineRange.match(/(\d+)/)
+  return m ? parseInt(m[1], 10) : undefined
+}
+
+/** 点击结果项的文件标签:展开侧栏并打开文件定位行号 */
+async function onResultFileClick(r: TaskResult): Promise<void> {
+  const path = r.metadata_?.['file_path'] as string | undefined
+  if (!path || !task.value?.id) return
+  const startLine = parseStartLine(r.metadata_?.['line_range'] as string | undefined)
+  // 展开工作区侧栏(若折叠)
+  workspaceCollapsed.value = false
+  await nextTick()
+  await sidebarRef.value?.openTaskFile(String(task.value.id), path, startLine)
 }
 
 // ---- 格式化时间 ----
@@ -662,6 +811,7 @@ function formatTime(iso: string): string {
     <!-- 左侧:历史任务栏 + 按需切换工作区(折叠时完全隐藏) -->
     <WorkspaceSidebar
       v-if="task && !workspaceCollapsed"
+      ref="sidebarRef"
     />
 
     <main class="main">
@@ -686,6 +836,37 @@ function formatTime(iso: string): string {
             <span :class="['badge', statusConfig[task.status].class]">
               {{ statusConfig[task.status].label }}
             </span>
+            <div
+              v-if="task.status === 'completed' || task.results.length > 0"
+              class="overview-actions"
+            >
+              <button
+                class="btn-export"
+                :disabled="exporting"
+                title="下载 Markdown 报告"
+                @click="exportMarkdown"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+                Markdown
+              </button>
+              <button
+                class="btn-export"
+                :disabled="exporting"
+                title="打印或另存为 PDF"
+                @click="exportPdf"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="6 9 6 2 18 2 18 9" />
+                  <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+                  <rect x="6" y="14" width="12" height="8" />
+                </svg>
+                PDF
+              </button>
+            </div>
           </div>
           <dl class="overview-meta">
             <div>
@@ -714,12 +895,34 @@ function formatTime(iso: string): string {
           </div>
         </section>
 
-        <!-- 结果清单 -->
+        <!-- 覆盖度看板(场景声明了 coverage 时显示) -->
+        <section v-if="scenarioDecl?.coverage && coverageData" class="coverage-section">
+          <h2>
+            覆盖度看板
+            <span class="count">{{ coverageData.covered_count }}/{{ coverageData.total_count }}</span>
+            <span v-if="coverageData.last_round !== null" class="coverage-round">
+              第 {{ coverageData.last_round }} 轮评估
+            </span>
+          </h2>
+          <div class="coverage-grid">
+            <div
+              v-for="d in coverageData.dimensions"
+              :key="d.id"
+              :class="['coverage-card', d.covered ? 'coverage-covered' : 'coverage-missing']"
+              :title="d.description"
+            >
+              <span class="coverage-dot" />
+              <span class="coverage-name">{{ d.name }}</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- 结果清单(分组由场景声明驱动) -->
         <section v-if="task.results.length > 0" class="results-section">
           <h2>结果清单 <span class="count">({{ task.results.length }})</span></h2>
-          <div v-for="group in severityGroups" :key="group.severity" class="severity-group">
+          <div v-for="group in resultGroups" :key="group.key" class="severity-group">
             <h3>
-              <span :class="['severity-tag', `sev-${group.severity}`]">{{ group.label }}</span>
+              <span :class="['severity-tag', `sev-${group.color}`]">{{ group.label }}</span>
               <span class="count">{{ group.results.length }}</span>
             </h3>
             <div class="result-cards">
@@ -733,10 +936,14 @@ function formatTime(iso: string): string {
                   <span class="round-tag">第 {{ r.round_idx }} 轮</span>
                 </div>
                 <p class="result-content">{{ r.content }}</p>
-                <div class="result-meta">
-                  <span v-if="getResultMeta(r).cwe" class="meta-tag">{{ getResultMeta(r).cwe }}</span>
-                  <span v-if="getResultMeta(r).file" class="meta-tag meta-file">
-                    {{ getResultMeta(r).file }}<template v-if="getResultMeta(r).line">:{{ getResultMeta(r).line }}</template>
+                <div v-if="getResultMetaItems(r).length > 0" class="result-meta">
+                  <span
+                    v-for="item in getResultMetaItems(r)"
+                    :key="item.field.name"
+                    :class="['meta-tag', { 'meta-file': item.field.type === 'file' }]"
+                    @click="item.field.type === 'file' ? onResultFileClick(r) : undefined"
+                  >
+                    {{ item.value }}
                   </span>
                 </div>
               </article>
@@ -906,12 +1113,42 @@ function formatTime(iso: string): string {
 .overview-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: var(--space-3);
   margin-bottom: var(--space-4);
 }
 
 .overview-header h1 {
   font-size: var(--fs-xl);
+}
+
+.overview-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.btn-export {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.btn-export:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.btn-export:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .overview-meta {
@@ -1005,6 +1242,74 @@ function formatTime(iso: string): string {
   color: var(--color-text-muted);
   font-weight: var(--fw-normal);
   font-size: var(--fs-sm);
+}
+
+/* ---- 覆盖度看板 ---- */
+.coverage-section {
+  margin-bottom: var(--space-6);
+}
+
+.coverage-section h2 {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+}
+
+.coverage-round {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  font-weight: var(--fw-normal);
+}
+
+.coverage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: var(--space-2);
+}
+
+.coverage-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  transition: all var(--transition-fast);
+}
+
+.coverage-covered {
+  border-color: var(--color-success);
+  background: var(--color-success-light);
+}
+
+.coverage-covered .coverage-dot {
+  background: var(--color-success);
+}
+
+.coverage-missing {
+  border-color: var(--color-border);
+  background: var(--color-surface-alt);
+}
+
+.coverage-missing .coverage-dot {
+  background: var(--color-text-muted);
+}
+
+.coverage-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+}
+
+.coverage-name {
+  color: var(--color-text);
+  font-weight: var(--fw-medium);
 }
 
 /* ---- 结果清单 ---- */
@@ -1104,6 +1409,12 @@ function formatTime(iso: string): string {
 .meta-file {
   color: var(--color-primary);
   background: var(--color-primary-light);
+  cursor: pointer;
+  transition: filter var(--transition-fast);
+}
+
+.meta-file:hover {
+  filter: brightness(0.95);
 }
 
 /* ---- 对话流 ---- */

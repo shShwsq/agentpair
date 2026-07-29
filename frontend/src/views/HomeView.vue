@@ -70,7 +70,7 @@ function toggleWorkspace(): void {
                 </svg>
               </div>
               <h3>user_agent</h3>
-              <p>作为资深工程师,对照 checklist 评估结果,追问未覆盖项</p>
+              <p>对照场景判据评估结果,针对未覆盖项追问,确保任务完整</p>
             </div>
             <div class="feature">
               <div class="feature-icon">
@@ -80,7 +80,7 @@ function toggleWorkspace(): void {
                 </svg>
               </div>
               <h3>react_agent</h3>
-              <p>克隆仓库、调用工具、执行任务、提交结构化结果</p>
+              <p>调用工具执行任务,提交结构化结果供 user_agent 评估</p>
             </div>
           </div>
         </div>

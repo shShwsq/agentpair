@@ -9,7 +9,7 @@
  * 文件树用懒加载:首次只加载根目录,点击文件夹时才加载子目录。
  * 树扁平化为带 depth 的一维列表渲染,避免递归组件。
  */
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import {
@@ -119,6 +119,16 @@ const fileTotalLines = ref(0)
 const fileTruncated = ref(false)
 const loadingFile = ref(false)
 const fileOffset = ref(1)
+/** 文件内容容器引用,用于行号滚动定位 */
+const fileContentRef = ref<HTMLElement | null>(null)
+/** 高亮行号(由结果清单点击跳转设置,滚动定位后保留高亮) */
+const highlightLine = ref<number | null>(null)
+
+/** 文件内容按行拆分(用于行号渲染 + 高亮定位) */
+const fileContentLines = computed<string[]>(() => {
+  if (!fileContent.value) return []
+  return fileContent.value.split('\n')
+})
 
 // ---- 错误提示 ----
 const errorMsg = ref('')
@@ -262,6 +272,7 @@ async function selectFile(node: TreeNode): Promise<void> {
   if (node.type !== 'file') return
   selectedFilePath.value = node.path
   fileOffset.value = 1
+  highlightLine.value = null // 手动选文件时清除高亮
   await loadFileContent()
 }
 
@@ -379,6 +390,73 @@ function truncateInput(s: string, max = 40): string {
   if (s.length <= max) return s
   return s.slice(0, max) + '...'
 }
+
+// ============================================================
+// 对外暴露:从结果清单点击跳转打开指定文件并定位行号(B1)
+// ============================================================
+
+/** 逐层展开文件树直到目标文件,返回文件节点(懒加载目录) */
+async function expandToPath(filePath: string): Promise<TreeNode | null> {
+  const parts = filePath.split('/').filter(Boolean)
+  let current = treeRoot
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]
+    const isLast = i === parts.length - 1
+    if (!current.loaded) await loadDir(current)
+    const child = current.children.find((c) => c.name === part)
+    if (!child) return null
+    if (isLast) return child
+    // 中间目录:确保展开
+    if (!current.expanded) current.expanded = true
+    current = child
+  }
+  return null
+}
+
+/** 跳转到指定行:翻到该行所在分页,滚动 + 高亮 */
+async function jumpToLine(line: number): Promise<void> {
+  highlightLine.value = line
+  const pageSize = 500
+  const targetOffset = Math.floor((line - 1) / pageSize) * pageSize + 1
+  if (fileOffset.value !== targetOffset) {
+    fileOffset.value = targetOffset
+    await loadFileContent()
+  }
+  await nextTick()
+  const el = fileContentRef.value?.querySelector(`[data-line="${line}"]`)
+  el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+}
+
+/**
+ * 打开指定任务的指定文件并定位行号(供 TaskDetailView 结果清单点击调用)
+ *
+ * 流程:切换/初始化任务工作区 → 逐层展开到目标文件 → 选中加载 → 定位行号
+ */
+async function openTaskFile(taskId: string, filePath: string, line?: number): Promise<void> {
+  // 切换/初始化任务工作区
+  if (selectedTaskId.value !== taskId) {
+    selectedTaskId.value = taskId
+    view.value = 'workspace'
+    resetFileTree()
+    await ensureInitialized()
+  } else {
+    view.value = 'workspace'
+    if (!initialized) await ensureInitialized()
+  }
+  if (!available.value) return
+
+  // 展开到目标文件
+  const node = await expandToPath(filePath)
+  if (!node) return
+  await selectFile(node)
+
+  // 定位行号
+  if (line && line > 0) {
+    await jumpToLine(line)
+  }
+}
+
+defineExpose({ openTaskFile })
 </script>
 
 <template>
@@ -543,11 +621,23 @@ function truncateInput(s: string, max = 40): string {
           </button>
         </div>
       </div>
-      <div class="file-content">
+      <div ref="fileContentRef" class="file-content">
         <div v-if="loadingFile" class="file-loading">
           <span class="spinner-sm" /> 加载中...
         </div>
-        <pre v-else><code>{{ fileContent || '(空文件)' }}</code></pre>
+        <div v-else-if="fileContentLines.length > 0" class="code-lines">
+          <div
+            v-for="(line, i) in fileContentLines"
+            :key="fileStartLine + i"
+            :data-line="fileStartLine + i"
+            class="code-line"
+            :class="{ 'code-line-highlight': highlightLine === fileStartLine + i }"
+          >
+            <span class="line-no">{{ fileStartLine + i }}</span>
+            <span class="line-content">{{ line }}</span>
+          </div>
+        </div>
+        <pre v-else><code>(空文件)</code></pre>
       </div>
     </section>
   </div>
@@ -897,6 +987,46 @@ function truncateInput(s: string, max = 40): string {
   line-height: 1.6;
   color: var(--color-text);
   white-space: pre;
+}
+
+/* ---- 按行渲染(行号 + 高亮) ---- */
+.code-lines {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.code-line {
+  display: flex;
+  align-items: baseline;
+  padding: 0 var(--space-2) 0 0;
+  transition: background var(--transition-fast);
+}
+
+.code-line:hover {
+  background: var(--color-surface-alt);
+}
+
+.code-line-highlight {
+  background: var(--color-warning-light);
+  /* 高亮持续到手动选其他文件;不随 hover 失效 */
+}
+
+.line-no {
+  flex-shrink: 0;
+  width: 48px;
+  text-align: right;
+  padding-right: var(--space-3);
+  color: var(--color-text-muted);
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.line-content {
+  white-space: pre;
+  flex: 1;
+  min-width: 0;
+  color: var(--color-text);
 }
 
 .file-loading {

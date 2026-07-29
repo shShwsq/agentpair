@@ -11,6 +11,93 @@ export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed'
 export interface Scenario {
   id: string
   name: string
+  /** 提交表单字段定义,前端按此动态渲染 */
+  form_fields: ScenarioFormField[]
+  /** 结果分组维度声明,null 表示平铺不分组 */
+  result_grouping: ScenarioResultGrouping | null
+  /** 结果项 metadata 字段展示声明 */
+  result_meta_fields: ScenarioResultMetaField[]
+  /** 覆盖度看板声明,null 表示不显示看板 */
+  coverage: ScenarioCoverage | null
+}
+
+/** 场景表单字段定义 */
+export interface ScenarioFormField {
+  /** 字段名(提交时作为 params 的 key) */
+  name: string
+  /** text / url / textarea / select / number */
+  type: 'text' | 'url' | 'textarea' | 'select' | 'number'
+  label: string
+  required: boolean
+  placeholder?: string
+  default?: string
+  description?: string
+  /** type=select 时的选项 */
+  options?: { value: string; label: string }[]
+}
+
+/** 结果分组维度声明 */
+export interface ScenarioResultGrouping {
+  /** 从 result.metadata 取该字段分组 */
+  field: string
+  /** ordered(固定枚举+顺序) | dynamic(按值动态分组) */
+  type: 'ordered' | 'dynamic'
+  /** ordered 时的固定枚举值 */
+  values: ScenarioResultGroupValue[]
+  /** 元数据缺失该字段时的分组名 */
+  default_label: string
+  /** 默认分组颜色 key(对应前端 sev-<color> CSS class) */
+  default_color: string
+}
+
+/** 分组枚举值 */
+export interface ScenarioResultGroupValue {
+  value: string
+  label: string
+  /** 颜色 key,对应前端 CSS class 后缀(如 critical/high/medium) */
+  color: string
+  /** 排序序号 */
+  order: number
+}
+
+/** 结果 meta 字段展示声明 */
+export interface ScenarioResultMetaField {
+  /** metadata 中的 key */
+  name: string
+  label: string
+  /** text / file(file 类型可点击跳转源码位置) */
+  type: 'text' | 'file'
+}
+
+/** 覆盖度看板声明 */
+export interface ScenarioCoverage {
+  /** 维度列表(通常派生自场景 checklist) */
+  dimensions: ScenarioCoverageDimension[]
+}
+
+/** 覆盖度维度 */
+export interface ScenarioCoverageDimension {
+  id: string
+  name: string
+  description: string
+}
+
+/** 任务覆盖度看板数据(GET /tasks/{id}/coverage) */
+export interface TaskCoverage {
+  /** 各维度覆盖状态 */
+  dimensions: TaskCoverageDimension[]
+  /** 已覆盖维度数 */
+  covered_count: number
+  /** 维度总数 */
+  total_count: number
+  /** 最新评估所在轮次(null 表示尚无评估) */
+  last_round: number | null
+}
+
+/** 任务覆盖度维度(含运行时覆盖状态) */
+export interface TaskCoverageDimension extends ScenarioCoverageDimension {
+  /** 是否已覆盖 */
+  covered: boolean
 }
 
 /** 提交任务请求(后端 TaskCreateRequest) */

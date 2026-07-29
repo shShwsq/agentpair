@@ -2,16 +2,14 @@
 /**
  * 提交任务页
  *
- * 表单:
- * - 场景选择(从 GET /scenarios 拉取)
+ * 表单字段由选中场景的 form_fields 声明动态渲染(场景无关):
+ * - 场景选择(从 GET /scenarios 拉取,每个场景自带表单字段定义)
  * - 使用模型(从 GET /settings/models 拉取用户已配置的 LLM 列表)
- * - 仓库地址(必填,自动生成 user_input)
- * - 补充说明(可选,附加到 user_input)
- * - 分支(可选)
+ * - 动态字段(按场景声明渲染 text/url/textarea/select/number)
  *
  * 提交后:后端立即返回 task_id(异步执行),前端跳转详情页通过 SSE 观看实时进度。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
@@ -28,48 +26,60 @@ const router = useRouter()
 const scenarios = ref<Scenario[]>([])
 const selectedScenario = ref('')
 
+/** 当前选中场景的声明(驱动表单字段渲染) */
+const selectedScenarioDecl = computed<Scenario | null>(() =>
+  scenarios.value.find((s) => s.id === selectedScenario.value) ?? null,
+)
+
 // ---- 模型列表 ----
 
 const llmConfigs = ref<LLMConfigItemOut[]>([])
 const selectedLlmConfigId = ref('')
 const loadingModels = ref(true)
 
-onMounted(async () => {
-  try {
-    const [scenarioList, models] = await Promise.all([getScenarios(), getMyModels().catch(() => null)])
-    scenarios.value = scenarioList
-    if (scenarioList.length > 0) {
-      selectedScenario.value = scenarioList[0].id
+// ---- 动态表单数据 ----
+
+/** 表单字段值,key 对应场景声明 form_fields[].name */
+const formData = reactive<Record<string, string>>({})
+
+/** 通用 URL 校验(不绑定 github,场景无关) */
+const urlPattern = /^https?:\/\/[^\s/$.?#].[^\s]*$/
+
+/** 按选中场景声明重置表单字段(切场景时调用) */
+function resetFormData(s: Scenario | null): void {
+  // 清空旧字段
+  Object.keys(formData).forEach((k) => delete formData[k])
+  // 按声明填默认值
+  if (s) {
+    for (const f of s.form_fields) {
+      formData[f.name] = f.default ?? ''
     }
-    if (models && models.llm_configs.length > 0) {
-      llmConfigs.value = models.llm_configs
-      // 默认选第一个已配置 Key 的,否则选第一个
-      const firstWithKey = models.llm_configs.find((c) => c.has_api_key)
-      selectedLlmConfigId.value = (firstWithKey ?? models.llm_configs[0]).id
-    }
-  } catch {
-    selectedScenario.value = 'code_security_audit'
-  } finally {
-    loadingModels.value = false
   }
+}
+
+// 切换场景时重置表单
+watch(selectedScenario, (newId) => {
+  const s = scenarios.value.find((x) => x.id === newId) ?? null
+  resetFormData(s)
 })
 
-// ---- 表单 ----
-
-const repoUrl = ref('')
-const branch = ref('')
-const note = ref('')
 const loading = ref(false)
 const error = ref('')
 
-const githubUrlPattern = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+(?:\.git)?$/
-
-const errors = computed(() => {
-  const e: { repoUrl?: string } = {}
-  if (!repoUrl.value.trim()) {
-    e.repoUrl = '请输入仓库地址'
-  } else if (!githubUrlPattern.test(repoUrl.value.trim())) {
-    e.repoUrl = '请输入有效的 GitHub 仓库地址(https://github.com/owner/repo)'
+/** 基于场景声明校验字段 */
+const errors = computed<Record<string, string>>(() => {
+  const e: Record<string, string> = {}
+  const s = selectedScenarioDecl.value
+  if (!s) return e
+  for (const f of s.form_fields) {
+    const v = String(formData[f.name] ?? '').trim()
+    if (f.required && !v) {
+      e[f.name] = `${f.label}不能为空`
+      continue
+    }
+    if (v && f.type === 'url' && !urlPattern.test(v)) {
+      e[f.name] = `请输入有效的 ${f.label}`
+    }
   }
   return e
 })
@@ -84,14 +94,32 @@ async function handleSubmit(): Promise<void> {
 
   loading.value = true
   try {
-    // 构造 user_input:仓库地址 + 补充说明
-    const url = repoUrl.value.trim()
-    let userInput = `请审计这个仓库: ${url}`
-    if (branch.value.trim()) {
-      userInput += `\n分支: ${branch.value.trim()}`
+    // 构造 params:从 formData 取场景声明字段的值
+    const params: Record<string, unknown> = {}
+    const s = selectedScenarioDecl.value
+    if (s) {
+      for (const f of s.form_fields) {
+        const v = String(formData[f.name] ?? '').trim()
+        if (v) params[f.name] = v
+      }
     }
-    if (note.value.trim()) {
-      userInput += `\n补充说明: ${note.value.trim()}`
+
+    // user_input 生成:repo_url 优先,否则用所有字段拼成文本
+    // (A5 阶段会进一步场景化,这里先保证通用可用)
+    let userInput = ''
+    if (params.repo_url) {
+      userInput = `请处理这个仓库: ${params.repo_url}`
+      if (params.branch) userInput += `\n分支: ${params.branch}`
+      if (params.note) userInput += `\n补充说明: ${params.note}`
+    } else {
+      const parts: string[] = []
+      if (s) {
+        for (const f of s.form_fields) {
+          const v = String(formData[f.name] ?? '').trim()
+          if (v) parts.push(`${f.label}: ${v}`)
+        }
+      }
+      userInput = parts.join('\n') || '(无明确指令)'
     }
 
     // 后端立即返回 task_id(后台线程异步执行)
@@ -99,10 +127,7 @@ async function handleSubmit(): Promise<void> {
       scenario: selectedScenario.value,
       user_input: userInput,
       llm_config_id: selectedLlmConfigId.value || undefined,
-      params: {
-        repo_url: url,
-        ...(branch.value.trim() ? { branch: branch.value.trim() } : {}),
-      },
+      params,
     })
 
     // 立即跳转详情页,SSE 接收实时进度
@@ -119,6 +144,27 @@ function modelLabel(cfg: LLMConfigItemOut): string {
   const name = cfg.name || cfg.model
   return cfg.has_api_key ? name : `${name}(未配置 Key)`
 }
+
+onMounted(async () => {
+  try {
+    const [scenarioList, models] = await Promise.all([getScenarios(), getMyModels().catch(() => null)])
+    scenarios.value = scenarioList
+    if (scenarioList.length > 0) {
+      selectedScenario.value = scenarioList[0].id // 触发 watch 重置 formData
+    }
+    if (models && models.llm_configs.length > 0) {
+      llmConfigs.value = models.llm_configs
+      // 默认选第一个已配置 Key 的,否则选第一个
+      const firstWithKey = models.llm_configs.find((c) => c.has_api_key)
+      selectedLlmConfigId.value = (firstWithKey ?? models.llm_configs[0]).id
+    }
+  } catch {
+    // 场景拉取失败兜底(不应发生,保留旧默认以便能提交)
+    selectedScenario.value = 'code_security_audit'
+  } finally {
+    loadingModels.value = false
+  }
+})
 </script>
 
 <template>
@@ -134,7 +180,7 @@ function modelLabel(cfg: LLMConfigItemOut): string {
     <main class="main">
       <div class="form-card">
         <h1>提交任务</h1>
-        <p class="subtitle">输入 GitHub 仓库地址,双智能体将协作完成审计</p>
+        <p class="subtitle">输入任务信息,双智能体将协作完成任务</p>
 
         <!-- 错误提示 -->
         <Transition name="fade">
@@ -189,44 +235,45 @@ function modelLabel(cfg: LLMConfigItemOut): string {
             </p>
           </div>
 
-          <!-- 仓库地址 -->
-          <div class="field">
-            <label for="repo-url">GitHub 仓库地址</label>
+          <!-- 动态字段(由选中场景的 form_fields 声明驱动) -->
+          <div
+            v-for="f in selectedScenarioDecl?.form_fields ?? []"
+            :key="f.name"
+            class="field"
+          >
+            <label :for="`field-${f.name}`">
+              {{ f.label }}<span v-if="f.required" class="required-mark"> *</span>
+            </label>
             <input
-              id="repo-url"
-              v-model.trim="repoUrl"
-              type="url"
-              placeholder="https://github.com/owner/repo"
-              :class="{ invalid: errors.repoUrl }"
+              v-if="f.type === 'text' || f.type === 'url' || f.type === 'number'"
+              :id="`field-${f.name}`"
+              v-model.trim="formData[f.name]"
+              :type="f.type === 'number' ? 'number' : (f.type === 'url' ? 'url' : 'text')"
+              :placeholder="f.placeholder"
+              :class="{ invalid: errors[f.name] }"
             />
-            <span v-if="errors.repoUrl" class="field-error">{{ errors.repoUrl }}</span>
-          </div>
-
-          <!-- 分支(可选) -->
-          <div class="field">
-            <label for="branch">分支(可选)</label>
-            <input
-              id="branch"
-              v-model.trim="branch"
-              type="text"
-              placeholder="默认主分支"
-            />
-          </div>
-
-          <!-- 补充说明(可选) -->
-          <div class="field">
-            <label for="note">补充说明(可选)</label>
             <textarea
-              id="note"
-              v-model="note"
+              v-else-if="f.type === 'textarea'"
+              :id="`field-${f.name}`"
+              v-model="formData[f.name]"
               rows="3"
-              placeholder="如:重点关注认证模块、只审计 src/ 目录等"
+              :placeholder="f.placeholder"
+              :class="{ invalid: errors[f.name] }"
             />
+            <select
+              v-else-if="f.type === 'select'"
+              :id="`field-${f.name}`"
+              v-model="formData[f.name]"
+            >
+              <option v-for="opt in f.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+            </select>
+            <p v-if="f.description" class="field-hint">{{ f.description }}</p>
+            <span v-if="errors[f.name]" class="field-error">{{ errors[f.name] }}</span>
           </div>
 
           <button type="submit" class="btn-primary" :disabled="!canSubmit">
             <span v-if="loading" class="spinner" />
-            {{ loading ? '处理中...' : '开始审计' }}
+            {{ loading ? '处理中...' : '开始任务' }}
           </button>
         </form>
       </div>
@@ -345,6 +392,11 @@ function modelLabel(cfg: LLMConfigItemOut): string {
   margin-top: var(--space-1);
   font-size: var(--fs-xs);
   color: var(--color-danger);
+}
+
+.required-mark {
+  color: var(--color-danger);
+  font-weight: var(--fw-semibold);
 }
 
 .field-hint {
