@@ -1339,11 +1339,12 @@ function formatTime(iso: string): string {
             </div>
           </div>
           <!-- 运行中等待提示(没有流式项时才显示) -->
+          <!-- 优先用后端推送的 current_stage(如"正在克隆仓库..."),无则回退通用文案 -->
           <div v-if="isRunning && streamingItems.size === 0" class="waiting-hint">
             <span class="typing-dots">
               <span></span><span></span><span></span>
             </span>
-            智能体思考中...
+            {{ task?.current_stage || '智能体思考中...' }}
           </div>
         </section>
       </template>

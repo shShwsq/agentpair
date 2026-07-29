@@ -78,6 +78,17 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
     all_results_count = 0
 
     try:
+        # ---------- 预处理:若用户选了仓库,主动 clone + list_files ----------
+        # 把仓库结构和 repo_path 提前准备好:
+        #   - 注入 user_agent:看到结构后能给更精准的初始指令/提问
+        #   - 注入 react_agent 第 1 轮:跳过自主 clone,直接开始审计
+        # clone 失败(https+ssh 都不行)抛异常,由外层 except 捕获 → 任务 failed
+        repo_path, repo_context = _prepare_repo_context(task, db, task_id_str)
+        if repo_context:
+            effective_intent += (
+                "\n\n[已预克隆仓库结构,供你参考给出初始指令]\n" + repo_context
+            )
+
         # ---------- 第 0 轮:user_agent 初始评估(含用户澄清循环) ----------
         task.current_stage = "user_agent 初始评估"
         db.commit()
@@ -158,14 +169,16 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             _publish_status(task)
 
             # react_agent 跑一轮
-            # 第 1 轮 followup_query=None(用初始指令,会 clone)
-            # 后续轮 followup_query=追问(不 clone)
+            # 第 1 轮 followup_query=None(用初始指令);若已主动 clone,传 repo_context
+            #   让 react_agent 跳过自主 clone,直接基于已 clone 的仓库开始审计
+            # 后续轮 followup_query=追问(不 clone,不传 repo_context)
             is_first = round_idx == 1
             _results, summary = run_react_agent(
                 task, db,
                 round_idx=round_idx,
                 followup_query=None if is_first else followup,
                 client=llm_client,
+                repo_context=repo_context if is_first else None,
             )
 
             react_summaries.append({
@@ -589,3 +602,93 @@ def _build_llm_client(db: Session, user_id, llm_config_id: str | None = None) ->
     except Exception as e:
         logger.warning(f"[user={user_id}] 加载用户 LLM 配置失败,回退到 env 默认: {e}")
         return None
+
+
+# ============================================================
+# 预处理:主动 clone + list_files(把仓库结构提前准备好)
+# ============================================================
+
+
+def _prepare_repo_context(
+    task: Task, db: Session, task_id_str: str,
+) -> tuple[str | None, str]:
+    """若用户选了仓库,主动 clone + list_files,返回 (repo_path, repo_context 文本)
+
+    - 无 repo_url:返回 (None, ""),走原流程(react_agent 自主 clone)
+    - 有 repo_url:先 https 后 ssh clone,失败抛异常(外层 except → 任务 failed);
+      成功后 list_files 根目录,格式化成 repo_context 文本
+
+    repo_context 会注入:
+      - user_agent 第 0 轮(拼到 effective_intent):看到结构给更准初始指令
+      - react_agent 第 1 轮(传 repo_context 参数):跳过自主 clone 直接审计
+
+    主动 clone 复用 sandbox_tools 的 session 管理,完成后 react_agent / workspace
+    路由可通过 task_id 直接复用同一会话(前端工作区侧栏也立即可用)。
+    """
+    params = task.params or {}
+    repo_url = params.get("repo_url")
+    if not repo_url:
+        return None, ""
+
+    branch = params.get("branch")
+
+    # 主动 clone(协议回退:先 https 后 ssh,都失败抛 RuntimeError)
+    task.current_stage = "正在克隆仓库(先 HTTPS,失败回退 SSH)..."
+    db.commit()
+    _publish_status(task)
+
+    clone_result = sandbox_tools.clone_repo_with_fallback(
+        repo_url, branch=branch, task_id=task_id_str,
+    )
+    repo_path = clone_result["path"]
+    logger.info(
+        f"[task={task.id}] 主动 clone 成功,path={repo_path},"
+        f"files_count={clone_result.get('files_count')}"
+    )
+
+    # 主动 list_files(根目录),把结构拼进上下文
+    task.current_stage = "正在读取仓库根目录结构..."
+    db.commit()
+    _publish_status(task)
+
+    try:
+        files_result = sandbox_tools.list_files(repo_path, task_id=task_id_str)
+    except Exception as e:
+        # list_files 失败不应让整个任务失败(clone 已成功),降级为只给 repo_path
+        logger.warning(f"[task={task.id}] list_files 失败,降级为仅 repo_path: {e}")
+        files_result = {"entries": [], "total": 0, "truncated": False}
+
+    repo_context = _format_repo_context(repo_url, repo_path, files_result)
+    return repo_path, repo_context
+
+
+def _format_repo_context(
+    repo_url: str, repo_path: str, files_result: dict,
+) -> str:
+    """把 clone 结果 + list_files 结果格式化成给 agent 看的上下文文本
+
+    格式:
+        仓库 <url> 已克隆到 <path>
+        根目录结构(共 N 项):
+          [目录] src
+          [文件] README.md (1234 B)
+          ...
+    """
+    entries = files_result.get("entries", [])
+    total = files_result.get("total", 0)
+    truncated = files_result.get("truncated", False)
+
+    lines = [f"仓库 {repo_url} 已克隆到 {repo_path}"]
+    trunc_hint = ", 已截断(仅显示部分)" if truncated else ""
+    lines.append(f"根目录结构(共 {total} 项{trunc_hint}):")
+    for e in entries:
+        etype = e.get("type", "file")
+        name = e.get("name", "?")
+        if etype == "dir":
+            lines.append(f"  [目录] {name}")
+        else:
+            size = e.get("size", 0)
+            size_str = f" ({size} B)" if size else ""
+            lines.append(f"  [文件] {name}{size_str}")
+
+    return "\n".join(lines)

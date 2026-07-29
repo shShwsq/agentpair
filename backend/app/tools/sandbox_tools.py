@@ -806,6 +806,80 @@ def _to_ssh_url(repo_url: str) -> str:
     return repo_url
 
 
+def _to_https_url(repo_url: str) -> str:
+    """把 GitHub SSH URL 转成 HTTPS URL(镜像 _to_ssh_url)"""
+    m = re.match(r"^git@github\.com:(.+?)(?:\.git)?$", repo_url)
+    if m:
+        path = m.group(1)
+        return f"https://github.com/{path}.git"
+
+    # 已经是 https 形式,原样返回
+    return repo_url
+
+
+def clone_repo_with_fallback(
+    repo_url: str, branch: str | None = None, task_id: str = "",
+) -> dict:
+    """克隆仓库(协议回退:先 HTTPS,失败再 SSH)
+
+    供 orchestrator 在 user_agent 评估前主动调用(不等 react_agent 自主 clone)。
+    与 clone_repo 的区别:clone_repo 强制转 SSH;本函数先试 HTTPS,失败回退 SSH,
+    两者都失败才抛 RuntimeError(让 orchestrator 把任务标记为 failed)。
+
+    复用同一套 session 管理(_get_or_create_session + _set_repo_path),
+    所以 clone 完成后 react_agent / workspace 路由可直接通过 task_id 复用会话。
+    """
+    # 候选 URL:去重,保持"先 https 后 ssh"顺序
+    https_url = _to_https_url(repo_url)
+    ssh_url = _to_ssh_url(repo_url)
+    candidates: list[str] = []
+    for u in [https_url, ssh_url]:
+        if u and u not in candidates:
+            candidates.append(u)
+
+    # 从 URL 提取仓库名(两种格式都支持)
+    match = re.search(r"/([^/]+?)(?:\.git)?$", repo_url)
+    if not match:
+        raise ValueError(f"无法从 URL 解析仓库名: {repo_url}")
+    repo_name = match.group(1)
+
+    ctx = _get_or_create_session(task_id)
+    mode = ctx["mode"]
+
+    errors: list[str] = []
+    for idx, url in enumerate(candidates):
+        try:
+            logger.info(
+                f"[clone_fallback] task={task_id} 尝试第 {idx + 1} 种协议: {url}"
+            )
+            if mode == "mock":
+                result = _clone_repo_mock(ctx, url, repo_name, branch)
+            else:
+                result = _clone_repo_sandbox(ctx, url, repo_name, branch)
+            _set_repo_path(task_id, result["path"])
+            logger.info(f"[clone_fallback] task={task_id} 克隆成功(协议 {url})")
+            return result
+        except Exception as e:
+            err_msg = str(e)[:300]
+            errors.append(f"[{url}] {err_msg}")
+            logger.warning(
+                f"[clone_fallback] task={task_id} 协议 {url} 克隆失败: {err_msg}"
+            )
+            # 清理可能残留的半成品目录(mock 模式),避免下次重试撞目录
+            if mode == "mock":
+                mock_dir: Path = ctx["mock_dir"]
+                leftover = mock_dir / repo_name
+                if leftover.exists():
+                    try:
+                        shutil.rmtree(leftover, ignore_errors=True)
+                    except Exception:
+                        pass
+
+    raise RuntimeError(
+        f"仓库克隆失败(已尝试 {len(candidates)} 种协议):\n" + "\n".join(errors)
+    )
+
+
 # ============================================================
 # 工具 5:run_semgrep(阶段 3)
 # ============================================================

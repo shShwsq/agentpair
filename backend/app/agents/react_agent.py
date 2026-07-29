@@ -48,6 +48,7 @@ def run_react_agent(
     round_idx: int = 1,
     followup_query: str | None = None,
     client: LLMClient | None = None,
+    repo_context: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """跑一轮 react_agent
 
@@ -57,6 +58,10 @@ def run_react_agent(
         round_idx: 当前协作轮次(1 开始)
         followup_query: 追问指令。None 表示第一轮(用 task.user_input)
         client: 可选的 LLMClient(阶段 6:从用户配置构造),None 时回退到 env 默认
+        repo_context: 第 1 轮专用。orchestrator 主动 clone 后传入的仓库上下文
+            (含 repo_path + 根目录结构)。非空时,第 1 轮 user_msg 会注入它并
+            提示"仓库已 clone,不要调用 clone_repo,直接开始审计"。
+            None 表示未主动 clone(走原流程,LLM 自主 clone)。
 
     返回:(results 列表, summary 文本)
         results: [{"title": str, "content": str, "metadata": dict}]
@@ -82,6 +87,15 @@ def run_react_agent(
             user_msg += f"\n仓库地址: {params['repo_url']}"
         if params.get("branch"):
             user_msg += f"\n分支: {params['branch']}"
+
+        # orchestrator 已主动 clone 时,注入仓库上下文,提示跳过 clone_repo
+        if repo_context:
+            user_msg += (
+                "\n\n[仓库已预先 clone,无需你再调用 clone_repo]\n"
+                + repo_context
+                + "\n\n请直接基于上述仓库路径开始审计(用 read_file / search_code / "
+                "list_files 等工具),不要再调用 clone_repo。"
+            )
     else:
         # 追问轮:不重新 clone,基于已有仓库继续
         # 跨轮记忆传递:加载之前轮次的 react_agent 总结 + user_agent 评估,
