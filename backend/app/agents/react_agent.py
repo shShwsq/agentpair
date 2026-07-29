@@ -317,16 +317,21 @@ def run_react_agent(
                 ),
             })
     else:
-        # 循环跑满了,强制提交(同样走流式)
+        # 循环跑满了,让 react_agent 输出自然语言总结(不再强制调 submit_results)
         logger.warning(f"[task={task.id}] react_agent 达到最大迭代次数")
         messages.append({
             "role": "user",
-            "content": "系统提示:已达最大迭代次数,请立即调用 submit_results 提交。",
+            "content": (
+                "系统提示:已达最大迭代次数。请用自然语言总结本轮审计的发现,"
+                "包括已确认的漏洞、已检查的范围、未完成的检查项。"
+                "如果之前已通过 submit_results 提交过结构化结果,这里只需总结即可。"
+            ),
         })
         try:
             reasoning_full, content_full, tool_calls_full, _conv_id = _stream_llm_response(
                 client, task, db, round_idx, MAX_ITERATIONS, messages, tools
             )
+            # 仍处理可能的 submit_results(如果 LLM 选择在这轮提交)
             if tool_calls_full:
                 for tc in tool_calls_full:
                     if tc["name"] == "submit_results":
@@ -334,12 +339,13 @@ def run_react_agent(
                             args = json.loads(tc["arguments_str"] or "{}")
                             for raw in args.get("results", []):
                                 results_collected.append(scenario.format_result(raw))
-                            summary = args.get("summary", "")
                         except json.JSONDecodeError:
                             pass
-                        break
+            # content 作为 summary(自然语言总结)
+            if content_full:
+                summary = content_full
         except Exception as e:
-            logger.error(f"[task={task.id}] 最终提交失败: {e}")
+            logger.error(f"[task={task.id}] 最终总结失败: {e}")
 
     # 落库 results(带 round_idx)
     for r in results_collected:
@@ -354,7 +360,7 @@ def run_react_agent(
     db.commit()
 
     if not summary:
-        summary = f"第 {round_idx} 轮完成,提交 {len(results_collected)} 个结果"
+        summary = f"第 {round_idx} 轮完成,共 {len(results_collected)} 个结果"
 
     return results_collected, summary
 

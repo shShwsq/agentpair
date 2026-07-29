@@ -417,19 +417,24 @@ onUnmounted(() => {
   if (eventSource) eventSource.close()
 })
 
-// ---- 对话流分组:按 round_idx → 再按迭代分段 ----
+// ---- 对话流分组:按 round_idx → 按 plan step 分组迭代 → 再按迭代分段 ----
 //
 // 层级结构:
 //   round
 //     ├─ plain segment     (user_agent 评估/追问/总结、user 指令等关键节点,平铺)
-//     └─ iteration segment (react_agent 一次 ReAct 循环:thinking + N 个工具调用/结果 + 可选 submit)
+//     └─ step group        (plan step,文字=step.text,内含多个迭代;无 plan 时回退为单个平铺组)
+//          └─ iteration segment (react_agent 一次 ReAct 循环:thinking + N 个工具调用/结果)
 //
 // 迭代识别:遇到 react_agent 的 thinking 项(实时流式或历史 type=thinking)就开新迭代,
 // 后续 react_agent 的 tool_call/tool_result/submit 归入当前迭代,
 // 直到遇到下一个 thinking(开新迭代)或非 react_agent 消息(关闭迭代,平铺该消息)。
 //
+// step 归属推断:用迭代内首个工具调用的工具名匹配 plan step 关键词
+// (复用后端 _TOOL_STEP_KEYWORDS 映射,与 plan 状态推进逻辑一致)
+//
 // 折叠策略:
-// - 迭代块:默认折叠。包含正在流式中的 thinking 时自动展开;用户点击切换后以用户选择为准。
+// - step 组:默认折叠(完成后)或展开(含流式中)。文字=step.text。
+// - 迭代块:默认折叠。包含正在流式中的 thinking 时自动展开。
 // - 工具调用组:默认折叠(一个迭代内的所有 tool_call/tool_result 合并为一个折叠块)。
 
 interface DisplayItem {
@@ -474,7 +479,22 @@ interface IterationSegment {
   hasStreaming: boolean
 }
 
-type RoundSegment = PlainSegment | IterationSegment
+/** plan step 分组:把归属同一 step 的迭代合并 */
+interface StepGroup {
+  kind: 'step'
+  /** step 唯一标识:`${roundIdx}-step-${stepId}` 或 `${roundIdx}-nostep` */
+  id: string
+  /** step 文字(无 plan 时为"审计过程") */
+  text: string
+  /** step 状态(无 plan 时为 in_progress) */
+  status: PlanStep['status'] | 'none'
+  /** 该 step 下的迭代列表 */
+  iterations: IterationSegment[]
+  /** 是否含流式中(任一迭代流式则为 true) */
+  hasStreaming: boolean
+}
+
+type RoundSegment = PlainSegment | StepGroup
 
 interface RoundGroup {
   roundIdx: number
@@ -484,6 +504,8 @@ interface RoundGroup {
   planSteps: PlanStep[]
 }
 
+/** 用户手动展开过的 step 组 id */
+const expandedSteps = reactive<Set<string>>(new Set())
 /** 用户手动展开过的迭代 id(流式结束后保留展开状态,不被自动折叠) */
 const expandedIterations = reactive<Set<string>>(new Set())
 /** 用户手动展开过的工具组 id(格式 `${iterId}-tools`) */
@@ -508,22 +530,77 @@ function isStreamingActive(item: DisplayItem): boolean {
   return !!(item.is_streaming && item.streaming?.status === 'streaming')
 }
 
-/** 把单个 round 内的 DisplayItem 列表按迭代分段 */
-function segmentRoundItems(roundIdx: number, items: DisplayItem[]): RoundSegment[] {
-  const segments: RoundSegment[] = []
+/** 工具名 → plan step 关键词映射(与后端 _TOOL_STEP_KEYWORDS 保持一致) */
+const TOOL_STEP_KEYWORDS: Record<string, string[]> = {
+  clone_repo:     ['克隆', 'clone', '仓库'],
+  list_files:     ['结构', '目录', '查看', 'list'],
+  read_file:      ['读取', '依赖', '清单', 'read'],
+  query_cve:      ['依赖', 'cve', '漏洞'],
+  search_code:    ['注入', '密钥', '反序列化', 'ssrf', '路径', '认证', '授权',
+                    '审计', '代码审计', 'search'],
+  run_semgrep:    ['semgrep', 'sast', '静态分析'],
+  list_skills:    ['skill', '技能'],
+  skill:          ['skill', '技能'],
+  submit_results: ['提交', '汇总', 'submit'],
+}
+
+/** 从工具调用 content 提取工具名 */
+function extractToolNameFromContent(content: string): string {
+  // content 形如 "读取文件 xxx\n调用 read_file({...})" 或 "调用 read_file({...})"
+  const m = content.match(/(?:^|\n)调用\s+(\w+)\s*\(/)
+  return m ? m[1] : ''
+}
+
+/** 推断迭代归属哪个 plan step,返回 step id(无匹配返回 null) */
+function inferStepFromIteration(
+  iter: IterationSegment,
+  planSteps: PlanStep[],
+): number | null {
+  if (!planSteps.length) return null
+  // 取迭代内首个 tool_call 的工具名
+  const firstToolCall = iter.toolItems.find(
+    (i) => !i.is_streaming && i.type === 'tool_call',
+  )
+  if (!firstToolCall) return null
+  const toolName = extractToolNameFromContent(firstToolCall.content || '')
+  if (!toolName) return null
+  const keywords = TOOL_STEP_KEYWORDS[toolName]
+  if (!keywords) return null
+
+  const kwLower = keywords.map((k) => k.toLowerCase())
+  // 先找 pending(进入新步骤),再找 in_progress(同步骤内)
+  for (const s of planSteps) {
+    if (s.status !== 'pending') continue
+    if (kwLower.some((k) => s.text.toLowerCase().includes(k))) return s.id
+  }
+  for (const s of planSteps) {
+    if (s.status !== 'in_progress') continue
+    if (kwLower.some((k) => s.text.toLowerCase().includes(k))) return s.id
+  }
+  return null
+}
+
+/** 把单个 round 内的 DisplayItem 列表先按迭代分段,再按 plan step 分组 */
+function segmentRoundItems(
+  roundIdx: number,
+  items: DisplayItem[],
+  planSteps: PlanStep[],
+): RoundSegment[] {
+  // 第一阶段:按 thinking 起点切迭代(原逻辑)
+  const iterations: IterationSegment[] = []
+  const plains: { idx: number; seg: PlainSegment }[] = []
   let current: IterationSegment | null = null
   let iterCounter = 0
 
   const closeCurrent = () => {
     if (current) {
-      segments.push(current)
+      iterations.push(current)
       current = null
     }
   }
 
   for (const item of items) {
     if (isReactThinkingItem(item)) {
-      // thinking = 新迭代起点,先关闭上一个
       closeCurrent()
       iterCounter++
       current = {
@@ -536,7 +613,6 @@ function segmentRoundItems(roundIdx: number, items: DisplayItem[]): RoundSegment
         hasStreaming: isStreamingActive(item),
       }
     } else if (current && isReactAgentItem(item)) {
-      // 归入当前迭代
       if (item.is_streaming) {
         current.thinkingItems.push(item)
       } else if (item.type === 'tool_call' || item.type === 'tool_result') {
@@ -546,12 +622,69 @@ function segmentRoundItems(roundIdx: number, items: DisplayItem[]): RoundSegment
       }
       if (isStreamingActive(item)) current.hasStreaming = true
     } else {
-      // user_agent / user / 其他 → 平铺
       closeCurrent()
-      segments.push({ kind: 'plain', item })
+      plains.push({ idx: iterations.length + plains.length, seg: { kind: 'plain', item } })
     }
   }
   closeCurrent()
+
+  // 第二阶段:按 plan step 分组迭代
+  // 无 plan 时,所有迭代归入单个"审计过程"组(保持折叠体验一致)
+  const segments: RoundSegment[] = []
+  const stepGroupsMap = new Map<number, StepGroup>()
+  const noStepGroup: StepGroup = {
+    kind: 'step',
+    id: `${roundIdx}-nostep`,
+    text: '审计过程',
+    status: 'none',
+    iterations: [],
+    hasStreaming: false,
+  }
+
+  for (const iter of iterations) {
+    const stepId = inferStepFromIteration(iter, planSteps)
+    if (stepId !== null) {
+      // 归入 plan step 组
+      let group = stepGroupsMap.get(stepId)
+      if (!group) {
+        const step = planSteps.find((s) => s.id === stepId)
+        group = {
+          kind: 'step',
+          id: `${roundIdx}-step-${stepId}`,
+          text: step?.text || '(未知步骤)',
+          status: step?.status || 'pending',
+          iterations: [],
+          hasStreaming: false,
+        }
+        stepGroupsMap.set(stepId, group)
+      }
+      group.iterations.push(iter)
+      if (iter.hasStreaming) group.hasStreaming = true
+    } else {
+      // 无法归属(无 plan 或工具名无匹配)→ 归入无 step 组
+      noStepGroup.iterations.push(iter)
+      if (iter.hasStreaming) noStepGroup.hasStreaming = true
+    }
+  }
+
+  // 按 plan step 顺序输出 step 组(无 plan 时只有 noStepGroup)
+  for (const step of planSteps) {
+    const group = stepGroupsMap.get(step.id)
+    if (group) {
+      // 同步最新状态(plan 可能已被 LLM 更新)
+      group.status = step.status
+      segments.push(group)
+    }
+  }
+  // 追加无法归属的迭代组(如果有)
+  if (noStepGroup.iterations.length > 0) {
+    segments.push(noStepGroup)
+  }
+  // 追加 plain 段(保持原顺序——plains 在迭代之后,简化处理)
+  for (const { seg } of plains) {
+    segments.push(seg)
+  }
+
   return segments
 }
 
@@ -645,11 +778,12 @@ const roundGroups = computed<RoundGroup[]>(() => {
     .map(([roundIdx, items]) => {
       // 用 seq 排序(稳定,不依赖跨来源的 created_at)
       const sorted = items.sort((a, b) => a.seq - b.seq)
+      const steps = planPerRound.get(roundIdx) ?? []
       return {
         roundIdx,
         label: roundIdx === 0 ? '初始评估' : `第 ${roundIdx} 轮`,
-        segments: segmentRoundItems(roundIdx, sorted),
-        planSteps: planPerRound.get(roundIdx) ?? [],
+        segments: segmentRoundItems(roundIdx, sorted, steps),
+        planSteps: steps,
       }
     })
 })
@@ -673,6 +807,29 @@ const userDirective = computed<DisplayItem | null>(() => {
 })
 
 // ---- 折叠状态查询/切换 ----
+
+/** step 组是否展开:用户手动展开 OR 含流式中(自动展开) OR 状态为 in_progress */
+function isStepExpanded(group: StepGroup): boolean {
+  return expandedSteps.has(group.id) || group.hasStreaming
+}
+
+function toggleStep(group: StepGroup): void {
+  if (expandedSteps.has(group.id)) {
+    expandedSteps.delete(group.id)
+  } else {
+    expandedSteps.add(group.id)
+  }
+}
+
+/** step 组的状态图标:done=✓,in_progress=◌,pending=○,none=· */
+function stepStatusIcon(status: PlanStep['status'] | 'none'): string {
+  switch (status) {
+    case 'done': return '✓'
+    case 'in_progress': return '◌'
+    case 'pending': return '○'
+    default: return '·'
+  }
+}
 
 /** 迭代是否展开:用户手动展开 OR 当前正在流式(自动展开) */
 function isIterationExpanded(seg: IterationSegment): boolean {
@@ -1091,7 +1248,7 @@ function formatTime(iso: string): string {
             <div class="messages">
               <template
                 v-for="seg in group.segments"
-                :key="seg.kind === 'iteration' ? `iter-${seg.id}` : `plain-${seg.item.id}`"
+                :key="seg.kind === 'step' ? `step-${seg.id}` : `plain-${seg.item.id}`"
               >
                 <!-- 平铺段:user_agent 评估/追问/总结、user 指令等关键消息 -->
                 <ConversationMessage
@@ -1100,56 +1257,81 @@ function formatTime(iso: string): string {
                   @toggle-reasoning="toggleReasoning"
                 />
 
-                <!-- 迭代段:react_agent 一次 ReAct 循环(thinking + 工具调用 + 可选 submit) -->
+                <!-- step 分组:plan step 下含多个迭代(无 plan 时为单个"审计过程"组) -->
                 <div
                   v-else
-                  class="iteration-block"
+                  class="step-block"
                   :class="{
-                    'iteration-streaming': seg.hasStreaming,
-                    'iteration-expanded': isIterationExpanded(seg),
+                    'step-streaming': seg.hasStreaming,
+                    'step-done': seg.status === 'done',
+                    'step-expanded': isStepExpanded(seg),
                   }"
                 >
-                  <div class="iteration-header" @click="toggleIteration(seg)">
-                    <span class="iteration-toggle">{{ isIterationExpanded(seg) ? '▼' : '▶' }}</span>
-                    <span class="iteration-summary">{{ iterationSummary(seg) }}</span>
-                    <span v-if="seg.hasStreaming" class="iteration-streaming-tag">
+                  <div class="step-header" @click="toggleStep(seg)">
+                    <span class="step-toggle">{{ isStepExpanded(seg) ? '▼' : '▶' }}</span>
+                    <span
+                      :class="['step-status-icon', `step-status-${seg.status}`]"
+                    >{{ stepStatusIcon(seg.status) }}</span>
+                    <span class="step-text">{{ seg.text }}</span>
+                    <span class="step-iter-count">{{ seg.iterations.length }} 次迭代</span>
+                    <span v-if="seg.hasStreaming" class="step-streaming-tag">
                       <span class="typing-dots"><span></span><span></span><span></span></span>
                     </span>
                   </div>
-                  <div v-if="isIterationExpanded(seg)" class="iteration-body">
-                    <!-- thinking 项(流式或历史) -->
-                    <ConversationMessage
-                      v-for="t in seg.thinkingItems"
-                      :key="t.id"
-                      :item="t"
-                      @toggle-reasoning="toggleReasoning"
-                    />
-                    <!-- 工具调用折叠组(一个迭代内的所有 tool_call/tool_result 合并) -->
+                  <div v-if="isStepExpanded(seg)" class="step-body">
+                    <!-- 该 step 下的所有迭代 -->
                     <div
-                      v-if="seg.toolItems.length > 0"
-                      class="tool-group"
-                      :class="{ 'tool-group-expanded': isToolGroupExpanded(seg.id) }"
+                      v-for="iter in seg.iterations"
+                      :key="iter.id"
+                      class="iteration-block"
+                      :class="{
+                        'iteration-streaming': iter.hasStreaming,
+                        'iteration-expanded': isIterationExpanded(iter),
+                      }"
                     >
-                      <div class="tool-group-header" @click="toggleToolGroup(seg.id)">
-                        <span class="tool-group-toggle">{{ isToolGroupExpanded(seg.id) ? '▼' : '▶' }}</span>
-                        <span class="tool-group-label">🔧 工具调用 ({{ toolCallCount(seg) }})</span>
+                      <div class="iteration-header" @click="toggleIteration(iter)">
+                        <span class="iteration-toggle">{{ isIterationExpanded(iter) ? '▼' : '▶' }}</span>
+                        <span class="iteration-summary">{{ iterationSummary(iter) }}</span>
+                        <span v-if="iter.hasStreaming" class="iteration-streaming-tag">
+                          <span class="typing-dots"><span></span><span></span><span></span></span>
+                        </span>
                       </div>
-                      <div v-if="isToolGroupExpanded(seg.id)" class="tool-group-body">
+                      <div v-if="isIterationExpanded(iter)" class="iteration-body">
+                        <!-- thinking 项(流式或历史) -->
                         <ConversationMessage
-                          v-for="ti in seg.toolItems"
-                          :key="ti.id"
-                          :item="ti"
+                          v-for="t in iter.thinkingItems"
+                          :key="t.id"
+                          :item="t"
+                          @toggle-reasoning="toggleReasoning"
+                        />
+                        <!-- 工具调用折叠组(一个迭代内的所有 tool_call/tool_result 合并) -->
+                        <div
+                          v-if="iter.toolItems.length > 0"
+                          class="tool-group"
+                          :class="{ 'tool-group-expanded': isToolGroupExpanded(iter.id) }"
+                        >
+                          <div class="tool-group-header" @click="toggleToolGroup(iter.id)">
+                            <span class="tool-group-toggle">{{ isToolGroupExpanded(iter.id) ? '▼' : '▶' }}</span>
+                            <span class="tool-group-label">🔧 工具调用 ({{ toolCallCount(iter) }})</span>
+                          </div>
+                          <div v-if="isToolGroupExpanded(iter.id)" class="tool-group-body">
+                            <ConversationMessage
+                              v-for="ti in iter.toolItems"
+                              :key="ti.id"
+                              :item="ti"
+                              @toggle-reasoning="toggleReasoning"
+                            />
+                          </div>
+                        </div>
+                        <!-- 其他项(submit 等) -->
+                        <ConversationMessage
+                          v-for="o in iter.otherItems"
+                          :key="o.id"
+                          :item="o"
                           @toggle-reasoning="toggleReasoning"
                         />
                       </div>
                     </div>
-                    <!-- 其他项(submit 等) -->
-                    <ConversationMessage
-                      v-for="o in seg.otherItems"
-                      :key="o.id"
-                      :item="o"
-                      @toggle-reasoning="toggleReasoning"
-                    />
                   </div>
                 </div>
               </template>
@@ -1660,6 +1842,119 @@ function formatTime(iso: string): string {
   gap: var(--space-3);
   padding-left: var(--space-4);
   border-left: 2px solid var(--color-border);
+}
+
+/* ---- step 分组(plan step,可折叠,内含多个迭代) ---- */
+.step-block {
+  margin-bottom: var(--space-2);
+  border-left: 3px solid var(--color-border);
+  transition: border-color 0.2s ease;
+}
+
+.step-block.step-streaming {
+  border-left-color: #f59e0b;
+}
+
+.step-block.step-done {
+  border-left-color: #10b981;
+}
+
+.step-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s ease;
+  user-select: none;
+}
+
+.step-header:hover {
+  background: var(--color-surface-alt);
+}
+
+.step-toggle {
+  flex-shrink: 0;
+  width: 14px;
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  text-align: center;
+}
+
+.step-status-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  border-radius: 50%;
+}
+
+.step-status-pending {
+  color: var(--color-text-muted);
+  background: var(--color-surface-alt);
+}
+
+.step-status-in_progress {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.15);
+  animation: step-pulse 1.5s ease-in-out infinite;
+}
+
+.step-status-done {
+  color: #fff;
+  background: #10b981;
+}
+
+.step-status-none {
+  color: var(--color-text-muted);
+  background: transparent;
+}
+
+@keyframes step-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(0.9); }
+}
+
+.step-text {
+  flex: 1;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step-done .step-text {
+  color: var(--color-text-secondary);
+  text-decoration: line-through;
+  text-decoration-color: var(--color-text-muted);
+}
+
+.step-iter-count {
+  flex-shrink: 0;
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-surface-alt);
+  border-radius: var(--radius-full);
+}
+
+.step-streaming-tag {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.step-body {
+  padding-left: var(--space-3);
+  padding-top: var(--space-1);
+  padding-bottom: var(--space-1);
 }
 
 /* ---- 迭代块(react_agent 一次 ReAct 循环,可折叠) ---- */

@@ -178,7 +178,8 @@ class SecurityAuditScenario:
 5. **代码审计**:对 skill 未覆盖的类别,用 search_code 搜索各类危险模式(注入、硬编码密钥、反序列化、SSRF 等)
 6. 对搜到的可疑点用 read_file 查看上下文,判断是否真的是漏洞
 7. **SAST 补充**:若沙箱可用,调 run_semgrep 跑自动化静态分析(mock 模式会返回提示,跳过即可)
-8. 汇总所有确认的漏洞,调用 submit_results 提交
+8. **提交结果**:每确认一个漏洞就调 submit_results 提交(可累积提交),不必等全部完成
+9. **自然结束**:审计完成后正常输出总结即可,不需要再调用任何工具。最后的总结会作为本轮 summary 返回给 user_agent
 
 ## 计划清单(复杂任务时输出)
 当任务涉及多个审计类别(如完整仓库审计)时,在**第一次正式回答(content)开头**先用 `<plan>` 标签列出计划,让用户能看到你接下来要做的步骤。格式:
@@ -217,7 +218,7 @@ class SecurityAuditScenario:
 - **search_code**:对 skill 未覆盖的类别,自己写正则搜高危模式
 
 ## 输出规范
-所有发现必须通过 submit_results 工具提交,每个 result 包含:
+发现漏洞时通过 submit_results 工具提交,每个 result 包含:
 - title: 简短标题,如 "[high] CWE-89 SQL注入 src/main.py:42"
 - content: 漏洞描述 + 修复建议
 - metadata: 必须包含以下字段:
@@ -229,12 +230,17 @@ class SecurityAuditScenario:
 
 CVE 类发现的 cwe 用 "CWE-1035",content 写明 CVE id 和受影响版本。
 
+## 结束方式
+- 确认漏洞后随时可调 submit_results 提交(支持多次调用累积提交)
+- 审计完成后**正常输出自然语言总结即可**,不需要再调用任何工具
+- 总结应包括:已确认的漏洞概览、已检查的范围、未完成或建议后续检查的项
+- 若无明显漏洞,直接输出总结说明已查范围,不需要调 submit_results
+
 ## 注意
 - 不要漏报,但也不要误报。看上下文判断是否真的可利用
 - 测试代码里(tests/、*_test.py)的发现标为 info
 - **禁止重复 read 同一个文件**
 - 单次审计控制在 20 轮以内
-- 若无明显漏洞,也必须 submit_results(传空数组),并在最后一轮思考里说明已查范围
 """
 
     # ---------- 工具白名单 ----------
@@ -259,8 +265,8 @@ CVE 类发现的 cwe 用 "CWE-1035",content 写明 CVE id 和受影响版本。
             "function": {
                 "name": "submit_results",
                 "description": (
-                    "提交本轮审计的所有结果。审计完成或确认无更多发现时必须调用。"
-                    "若没有发现,传空数组 results=[]"
+                    "提交结构化审计结果(漏洞清单)。确认漏洞时可随时调用,支持多次调用累积提交。"
+                    "审计结束后不需要再调用此工具,正常输出总结即可。"
                 ),
                 "parameters": {
                     "type": "object",
