@@ -55,13 +55,12 @@ function handleLogout(): void {
 }
 
 .header-inner {
-  max-width: var(--content-width);
-  margin: 0 auto;
-  padding: var(--space-4) var(--space-6);
+  /* 顶栏内容撑满宽度,侧栏按钮紧贴左边缘;用户区靠 margin-left:auto 钉到右侧 */
+  padding: var(--space-4) var(--space-6) var(--space-4) var(--space-4);
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-6);
+  justify-content: flex-start;
+  gap: var(--space-3);
 }
 
 .header-left {
@@ -74,15 +73,20 @@ function handleLogout(): void {
   display: flex;
   align-items: center;
   flex-shrink: 0;
-  margin-right: var(--space-4);
 }
 
+/* 品牌:深色字标 + 主色图标,收紧字距,克制不张扬 */
 .brand {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  font-weight: var(--fw-bold);
+  font-weight: var(--fw-semibold);
   font-size: var(--fs-lg);
+  letter-spacing: -0.01em;
+  color: var(--color-text);
+}
+
+.brand svg {
   color: var(--color-primary);
 }
 
@@ -96,35 +100,42 @@ function handleLogout(): void {
   display: flex;
   align-items: center;
   gap: var(--space-4);
+  margin-left: auto;
 }
 
 .user-email {
   font-size: var(--fs-sm);
   color: var(--color-text-secondary);
+  letter-spacing: 0.01em;
 }
 
 .btn-logout {
   padding: var(--space-2) var(--space-4);
   font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
   color: var(--color-text-secondary);
-  border: 1px solid var(--color-border-strong);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
+  letter-spacing: 0.01em;
   transition: all var(--transition-fast);
 }
 
 .btn-logout:hover {
   color: var(--color-danger);
   border-color: var(--color-danger);
+  background: var(--color-danger-light);
 }
 
-/* 导航项(slot 里的 RouterLink/a)通用样式 */
+/* 导航项(slot 里的 RouterLink/a):去掉强填充,用文字色 + 极细下划线指示当前页 */
 :deep(.nav a) {
-  padding: var(--space-2) var(--space-4);
+  position: relative;
+  padding: var(--space-2) var(--space-3);
   font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
   color: var(--color-text-secondary);
+  letter-spacing: 0.01em;
   border-radius: var(--radius-md);
-  transition: all var(--transition-fast);
+  transition: color var(--transition-fast), background var(--transition-fast);
 }
 
 :deep(.nav a:hover) {
@@ -134,6 +145,18 @@ function handleLogout(): void {
 
 :deep(.nav a.router-link-active) {
   color: var(--color-primary);
-  background: var(--color-primary-light);
+  background: transparent;
+  font-weight: var(--fw-semibold);
+}
+
+:deep(.nav a.router-link-active)::after {
+  content: '';
+  position: absolute;
+  left: var(--space-3);
+  right: var(--space-3);
+  bottom: 3px;
+  height: 2px;
+  background: var(--color-primary);
+  border-radius: var(--radius-full);
 }
 </style>
