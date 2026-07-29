@@ -10,6 +10,7 @@ export interface User {
   email: string
   email_verified: boolean
   github_id: string | null
+  has_password: boolean
   created_at: string
 }
 
@@ -30,6 +31,13 @@ export interface RefreshResponse {
 /** 通用消息响应(后端 MessageResponse) */
 export interface MessageResponse {
   message: string
+}
+
+/** 修改密码请求(后端 ChangePasswordRequest) */
+export interface ChangePasswordRequest {
+  /** 当前密码;OAuth 用户(无密码)可不传 */
+  current_password?: string
+  new_password: string
 }
 
 /** 后端错误响应(FastAPI HTTPException 格式) */

@@ -55,6 +55,17 @@ class ResetPasswordRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=128)
 
 
+class ChangePasswordRequest(BaseModel):
+    """修改密码(已登录用户)
+
+    - current_password: 当前密码;OAuth 用户(无密码)可不传
+    - new_password: 新密码
+    """
+
+    current_password: str | None = None
+    new_password: str = Field(min_length=8, max_length=128)
+
+
 class GitHubOAuthRequest(BaseModel):
     """GitHub OAuth 登录(传 code)"""
 
@@ -73,6 +84,7 @@ class UserResponse(BaseModel):
     email: str
     email_verified: bool
     github_id: str | None
+    has_password: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -85,6 +97,7 @@ class UserResponse(BaseModel):
             email=user.email,
             email_verified=user.is_email_verified,
             github_id=user.github_id,
+            has_password=bool(user.password_hash),
             created_at=user.created_at,
         )
 

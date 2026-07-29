@@ -6,6 +6,7 @@
  */
 import client from './client'
 import type {
+  ChangePasswordRequest,
   MessageResponse,
   RefreshResponse,
   TokenResponse,
@@ -50,6 +51,12 @@ export function forgotPassword(email: string): Promise<MessageResponse> {
 
 export function resetPassword(token: string, new_password: string): Promise<MessageResponse> {
   return client.post('/auth/password/reset', { token, new_password }).then((r) => r.data)
+}
+
+// ---- 修改密码(已登录) ----
+
+export function changePassword(req: ChangePasswordRequest): Promise<MessageResponse> {
+  return client.post('/auth/password/change', req).then((r) => r.data)
 }
 
 // ---- GitHub OAuth ----

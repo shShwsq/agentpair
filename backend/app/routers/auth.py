@@ -9,6 +9,7 @@
 - GET    /auth/me                    当前用户信息(需登录)
 - POST   /auth/password/forgot       忘记密码(发重置邮件)
 - POST   /auth/password/reset        重置密码
+- POST   /auth/password/change       修改密码(需登录)
 - POST   /auth/oauth/github          GitHub OAuth 登录
 """
 import logging
@@ -32,6 +33,7 @@ from app.github_oauth import GitHubOAuthError, github_oauth_login
 from app.models.email_token import EmailTokenType
 from app.models.user import User
 from app.schemas.user import (
+    ChangePasswordRequest,
     ForgotPasswordRequest,
     GitHubOAuthRequest,
     LoginRequest,
@@ -269,6 +271,43 @@ def reset_password(
     db.commit()
 
     return MessageResponse(message="密码重置成功,请用新密码登录")
+
+
+@router.post("/password/change", response_model=MessageResponse)
+def change_password(
+    req: ChangePasswordRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> MessageResponse:
+    """修改密码(已登录用户)
+
+    - 已有密码的用户:必须传 current_password 且匹配
+    - OAuth 用户(password_hash 为空):可跳过 current_password 直接设置
+    - 新密码不能与当前密码相同(已有密码时)
+    """
+    has_password = bool(user.password_hash)
+
+    if has_password:
+        if not req.current_password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="请输入当前密码",
+            )
+        if not verify_password(req.current_password, user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="当前密码错误",
+            )
+        if verify_password(req.new_password, user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="新密码不能与当前密码相同",
+            )
+
+    user.password_hash = hash_password(req.new_password)
+    db.commit()
+
+    return MessageResponse(message="密码修改成功" if has_password else "密码设置成功")
 
 
 # ============================================================
