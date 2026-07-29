@@ -35,6 +35,12 @@ MAX_ITERATIONS = 30
 # 连续相同工具调用的容忍次数,超过就打破循环
 MAX_SAME_CALLS = 3
 
+# 跨轮记忆传递:从 Conversation 表加载之前轮次的对话,作为前缀注入当前轮 user_msg
+# 单条消息(react_agent 总结 / user_agent 评估)最大字符数,超出截断
+MAX_HISTORY_MSG_CHARS = 3000
+# 历史记忆总字符数上限,超出时丢弃最早轮次(FIFO)
+MAX_HISTORY_TOTAL_CHARS = 12000
+
 
 def run_react_agent(
     task: Task,
@@ -78,7 +84,8 @@ def run_react_agent(
             user_msg += f"\n分支: {params['branch']}"
     else:
         # 追问轮:不重新 clone,基于已有仓库继续
-        # 注入 repo_path + 已有结果摘要,让 LLM 有完整上下文(每轮 messages 是重新构造的)
+        # 跨轮记忆传递:加载之前轮次的 react_agent 总结 + user_agent 评估,
+        # 作为前缀注入 user_msg,让 LLM 看到完整对话历史(同一任务内记忆延续)
         from app.tools import sandbox_tools
 
         ws_info = sandbox_tools.get_workspace_info(task_id_str)
@@ -89,19 +96,14 @@ def run_react_agent(
                 f"{ws_info['repo_path']}"
             )
 
-        # 已提交的结果摘要(让 LLM 知道之前查了什么,避免重复)
-        results_hint = ""
-        if task.results:
-            prev_titles = [r.get("title", "?") for r in task.results[:10]]
-            results_hint = (
-                f"\n之前已完成的审计项: {', '.join(prev_titles)}"
-                + (f" 等 {len(task.results)} 项" if len(task.results) > 10 else "")
-            )
+        # 之前轮次的对话记忆(react_agent 自己的总结 + user_agent 的评估反馈)
+        history_prefix = _build_history_context(db, task.id, round_idx)
 
         user_msg = (
             f"基于之前的审计结果,现在请针对以下问题继续检查(不需要重新 clone 仓库):"
-            f"{repo_path_hint}{results_hint}\n\n"
-            f"{followup_query}"
+            f"{repo_path_hint}\n\n"
+            f"{history_prefix}"
+            f"\n\n[本轮 user_agent 追问]\n{followup_query}"
         )
 
     # 记录 user 指令到对话
@@ -633,6 +635,101 @@ def _format_plan_reminder(plan_steps: list[dict]) -> str:
         lines.append(f"{sym} [{s['status']}] {s['text']}")
     lines.append("如果某个步骤已完成,请在回答开头的 <plan> 里将其标为 [done]。")
     return "\n".join(lines)
+
+
+# ============================================================
+# 跨轮记忆传递:从 Conversation 表加载之前轮次的对话
+# ============================================================
+
+
+def _build_history_context(db: Session, task_id, current_round_idx: int) -> str:
+    """构造之前轮次的对话记忆,作为前缀注入当前轮 user_msg
+
+    同一任务内,每轮 react_agent 启动时 messages 是重新构造的,
+    若不做记忆传递,LLM 看不到自己之前几轮做了什么、user_agent 给过什么反馈。
+
+    本函数从 Conversation 表加载 round_idx < current_round_idx 的对话,
+    每轮提取两条:
+      - react_agent 最后一条 thinking 的 content(自己当轮的总结)
+      - user_agent evaluation 的 reasoning(审核反馈:covered/missing/追问判断)
+    拼接成一段文本,单条截断到 MAX_HISTORY_MSG_CHARS,整体超 MAX_HISTORY_TOTAL_CHARS
+    时丢弃最早轮次(FIFO),控制 token 成本。
+
+    返回字符串(可能为空)。第 1 轮(current_round_idx=1)无历史,返回空串。
+    """
+    if current_round_idx <= 1:
+        return ""
+
+    # 查询当前轮之前的所有对话(按 round_idx, created_at 升序)
+    convs = (
+        db.query(Conversation)
+        .filter(
+            Conversation.task_id == task_id,
+            Conversation.round_idx < current_round_idx,
+        )
+        .order_by(Conversation.round_idx, Conversation.created_at)
+        .all()
+    )
+    if not convs:
+        return ""
+
+    # 按 round_idx 分组(只取 >= 1 的轮次;第 0 轮是 user_agent 初始评估,
+    # 内容已通过 task.user_input 传给第 1 轮 react_agent,这里不重复注入)
+    by_round: dict[int, list[Conversation]] = {}
+    for c in convs:
+        if c.round_idx >= 1:
+            by_round.setdefault(c.round_idx, []).append(c)
+
+    if not by_round:
+        return ""
+
+    # 逐轮构造记忆段,先收集后裁剪(可能丢弃最早轮次)
+    segments: list[str] = []
+    for ridx in sorted(by_round.keys()):
+        round_convs = by_round[ridx]
+
+        # react_agent 当轮最后一条 thinking(即最终总结)
+        react_thinkings = [
+            c for c in round_convs
+            if c.role == "react_agent" and c.type == "thinking" and c.content
+        ]
+        react_summary = react_thinkings[-1].content if react_thinkings else ""
+
+        # user_agent 当轮评估(优先 reasoning,含 covered/missing/判断)
+        ua_eval = next(
+            (c for c in round_convs
+             if c.role == "user_agent" and c.type == "evaluation"),
+            None,
+        )
+        ua_text = ""
+        if ua_eval:
+            ua_text = ua_eval.reasoning or ua_eval.content or ""
+
+        # 至少有一条非空才输出该轮
+        if not react_summary and not ua_text:
+            continue
+
+        # 单条截断
+        react_summary = react_summary[:MAX_HISTORY_MSG_CHARS] if react_summary else ""
+        ua_text = ua_text[:MAX_HISTORY_MSG_CHARS] if ua_text else ""
+
+        parts = [f"=== 第 {ridx} 轮 ==="]
+        if react_summary:
+            parts.append(f"[react_agent 总结]\n{react_summary}")
+        if ua_text:
+            parts.append(f"[user_agent 评估]\n{ua_text}")
+        segments.append("\n".join(parts))
+
+    if not segments:
+        return ""
+
+    # 整体超限时丢弃最早轮次(FIFO)
+    total = sum(len(s) for s in segments)
+    while total > MAX_HISTORY_TOTAL_CHARS and len(segments) > 1:
+        dropped = segments.pop(0)
+        total -= len(dropped)
+
+    return "[之前轮次的对话记忆]\n" + "\n\n".join(segments)
 
 
 def _add_conversation(
