@@ -1994,22 +1994,12 @@ function formatTime(iso: string): string {
   flex-direction: column;
   gap: var(--space-3);
   padding-left: var(--space-4);
-  border-left: 2px solid var(--color-border);
 }
 
 /* ---- step 分组(plan step,可折叠,内含多个迭代) ---- */
+/* 左竖线已移除:状态色由 step header 内的状态图标(step-status-*)承载 */
 .step-block {
   margin-bottom: var(--space-2);
-  border-left: 3px solid var(--color-border);
-  transition: border-color 0.2s ease;
-}
-
-.step-block.step-streaming {
-  border-left-color: #f59e0b;
-}
-
-.step-block.step-done {
-  border-left-color: #10b981;
 }
 
 .step-header {
