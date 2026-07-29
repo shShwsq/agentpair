@@ -2,16 +2,21 @@
 
 每个场景定义:
 - checklist:任务完成判据清单(user_agent 用它判断 react_agent 是否覆盖完整)
-- user_agent_prompt:user_agent 的 system prompt(扮演什么角色、如何评估)
+- user_agent_prompt:user_agent 的 system prompt(扮演什么角色、如何评估、如何整理结果)
 - react_agent_prompt:react_agent 的 system prompt
 - enabled_tools:启用的工具白名单
-- submit_tool_schema:submit_results 工具的参数定义(不同场景的 result 结构不同)
+- structured_result_schema:user_agent done 时输出的结构化结果 schema(分场景不同)
+- extract_results:从 user_agent 最终输出提取结构化结果(分场景不同)
 
 前端声明(场景无关 UI 驱动,阶段 7 新增):
 - form_fields:提交任务表单字段定义,前端按此动态渲染
 - result_grouping:结果清单分组维度声明,前端按此分组展示
 - result_meta_fields:结果项 metadata 字段展示声明,前端按此渲染标签
 - coverage:覆盖度看板声明,前端按此渲染维度状态
+
+职责划分(阶段 7+ 调整):
+- react_agent:执行审计/任务,输出自然语言总结(含发现、位置、建议)
+- user_agent:评估覆盖度,决定追问;done=true 时按场景 schema 整理结构化结果
 
 轻量配置:场景是 Python 类,注册到 SCENARIOS 字典,代码内 if-else 分发
 """
@@ -54,15 +59,28 @@ class Scenario(Protocol):
         ...
 
     @property
-    def submit_tool_schema(self) -> dict[str, Any]:
-        """submit_results 工具的参数定义
+    def structured_result_schema(self) -> dict[str, Any]:
+        """user_agent done=true 时输出的结构化结果 schema
 
-        不同场景的 result 结构不同,这里定义 LLM 调用 submit_results 时的参数 schema
+        不同场景的结构化结果不同(如安全场景是漏洞清单,文档场景可能是章节摘要)。
+        user_agent 在 done=true 时,按此 schema 在 JSON 输出的 results 字段里
+        提供结构化数据,orchestrator 调 extract_results 落库。
+        """
+        ...
+
+    def extract_results(self, ua_output: dict[str, Any]) -> list[dict[str, Any]]:
+        """从 user_agent 的最终输出提取结构化结果列表
+
+        参数:ua_output 是 user_agent 解析后的 JSON dict,含 covered/missing/
+        reasoning/followup_query/done,以及场景特定的 results 字段
+
+        返回:[{"title": str, "content": str, "metadata": dict}, ...]
+        每个元素对应一条 Result 记录,由 orchestrator 落库
         """
         ...
 
     def format_result(self, raw: dict[str, Any]) -> dict[str, Any]:
-        """把 LLM 提交的原始 result 转成数据库存储格式
+        """把单条原始 result 转成数据库存储格式(兜底用,extract_results 内部可调用)
 
         返回:{"title": str, "content": str, "metadata": dict}
         默认实现:直接透传 title/content,其余放 metadata

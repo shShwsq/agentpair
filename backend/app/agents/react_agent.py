@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.event_bus import publish
 from app.llm.client import LLMClient
-from app.models.task import Conversation, Result, Task
+from app.models.task import Conversation, Task
 from app.scenarios.base import get_scenario
 from app.tools.schema import execute_tool, get_tools_for_scenario, set_current_task
 
@@ -120,7 +120,6 @@ def run_react_agent(
         {"role": "user", "content": user_msg},
     ]
 
-    results_collected: list[dict[str, Any]] = []
     summary = ""
     recent_calls: list[str] = []
 
@@ -221,27 +220,7 @@ def run_react_agent(
                 content=f"{intent}\n{call_detail}",
             )
 
-            # 特殊工具:submit_results
-            if fn_name == "submit_results":
-                results_raw = fn_args.get("results", [])
-                summary = fn_args.get("summary", "")
-                # 用场景的 format_result 格式化
-                for raw in results_raw:
-                    formatted = scenario.format_result(raw)
-                    results_collected.append(formatted)
-                _add_conversation(
-                    db, task, round_idx=round_idx,
-                    role="react_agent", type="submit",
-                    content=f"提交 {len(results_collected)} 个结果。summary: {summary[:300]}",
-                )
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": f"已收到 {len(results_collected)} 个结果",
-                })
-                continue
-
-            # 普通工具:执行
+            # 普通工具:执行(submit_results 已移除,react_agent 不再提交结构化结果)
             try:
                 result = execute_tool(fn_name, fn_args)
                 result_str = json.dumps(result, ensure_ascii=False, default=str)
@@ -270,10 +249,6 @@ def run_react_agent(
                     "tool_call_id": tc["id"],
                     "content": err_msg,
                 })
-
-        # submit_results 被调用后,结束循环
-        if results_collected:
-            break
 
         # plan 提醒注入:把当前 plan 状态作为 system 消息加到 messages,
         # 让 LLM 在下一轮思考时看到进度,决定是否标 done(细粒度状态确认)
@@ -306,63 +281,41 @@ def run_react_agent(
             _add_conversation(
                 db, task, round_idx=round_idx,
                 role="react_agent", type="thinking",
-                content=f"检测到连续重复调用 {MAX_SAME_CALLS} 次,强制转入结果提交",
+                content=f"检测到连续重复调用 {MAX_SAME_CALLS} 次,强制转入总结",
             )
             messages.append({
                 "role": "user",
                 "content": (
                     "系统提示:你陷入了重复调用循环。"
-                    "请立即调用 submit_results 提交当前结果。"
-                    "若无结果,传空数组并在 summary 说明原因。"
+                    "请停止调用工具,用自然语言总结当前已确认的发现。"
                 ),
             })
     else:
-        # 循环跑满了,让 react_agent 输出自然语言总结(不再强制调 submit_results)
+        # 循环跑满了,让 react_agent 输出自然语言总结
         logger.warning(f"[task={task.id}] react_agent 达到最大迭代次数")
         messages.append({
             "role": "user",
             "content": (
                 "系统提示:已达最大迭代次数。请用自然语言总结本轮审计的发现,"
                 "包括已确认的漏洞、已检查的范围、未完成的检查项。"
-                "如果之前已通过 submit_results 提交过结构化结果,这里只需总结即可。"
             ),
         })
         try:
             reasoning_full, content_full, tool_calls_full, _conv_id = _stream_llm_response(
                 client, task, db, round_idx, MAX_ITERATIONS, messages, tools
             )
-            # 仍处理可能的 submit_results(如果 LLM 选择在这轮提交)
-            if tool_calls_full:
-                for tc in tool_calls_full:
-                    if tc["name"] == "submit_results":
-                        try:
-                            args = json.loads(tc["arguments_str"] or "{}")
-                            for raw in args.get("results", []):
-                                results_collected.append(scenario.format_result(raw))
-                        except json.JSONDecodeError:
-                            pass
             # content 作为 summary(自然语言总结)
             if content_full:
                 summary = content_full
         except Exception as e:
             logger.error(f"[task={task.id}] 最终总结失败: {e}")
 
-    # 落库 results(带 round_idx)
-    for r in results_collected:
-        result = Result(
-            task_id=task.id,
-            round_idx=round_idx,
-            title=r.get("title", "(无标题)"),
-            content=r.get("content", ""),
-            metadata_=r.get("metadata"),
-        )
-        db.add(result)
-    db.commit()
-
+    # react_agent 不再落库 results(由 user_agent 在 done 时调
+    # scenario.extract_results 提取并落库)
     if not summary:
-        summary = f"第 {round_idx} 轮完成,共 {len(results_collected)} 个结果"
+        summary = f"第 {round_idx} 轮完成"
 
-    return results_collected, summary
+    return [], summary
 
 
 # ============================================================
@@ -520,8 +473,6 @@ def _build_tool_intent(fn_name: str, fn_args: dict) -> str:
         return "查看可用技能列表"
     if fn_name == "skill":
         return f"获取技能指令: {fn_args.get('skill_name', '?')}"
-    if fn_name == "submit_results":
-        return "提交审计结果"
     return f"调用 {fn_name}"
 
 
@@ -588,7 +539,6 @@ _TOOL_STEP_KEYWORDS: dict[str, list[str]] = {
     "run_semgrep":     ["semgrep", "sast", "静态分析"],
     "list_skills":     ["skill", "技能"],
     "skill":           ["skill", "技能"],
-    "submit_results":  ["提交", "汇总", "submit"],
 }
 
 

@@ -242,20 +242,20 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
 def get_tools_for_scenario(scenario_id: str) -> list[dict[str, Any]]:
     """根据场景返回工具定义列表
 
-    = 场景白名单启用的通用工具 + submit_results(内部工具)
+    = 场景白名单启用的通用工具
+    注意:submit_results 已移除。react_agent 只输出自然语言总结,
+    user_agent 负责按场景 schema 整理结构化结果(通过 scenario.extract_results)
     """
     scenario = get_scenario(scenario_id)
     enabled = set(scenario.enabled_tools)
 
     # 按白名单过滤通用工具
     tools = [t for t in _ALL_TOOL_DEFINITIONS if t["function"]["name"] in enabled]
-    # 加 submit_results
-    tools.append(scenario.submit_tool_schema)
     return tools
 
 
 def execute_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
-    """执行通用工具调用(submit_results 不走这里,由 react_agent 内部处理)"""
+    """执行通用工具调用"""
     if tool_name not in TOOL_FUNCTIONS:
         raise ValueError(f"未知工具: {tool_name}")
     func = TOOL_FUNCTIONS[tool_name]

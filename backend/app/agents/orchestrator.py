@@ -2,14 +2,17 @@
 
 驱动 user_agent + react_agent 多轮协作:
 1. user_agent 初始评估,给出第一轮指令
-2. react_agent 执行第一轮(含 clone)
+2. react_agent 执行第一轮(含 clone),输出自然语言总结
 3. user_agent 对照 checklist 评估 react_agent 结果
 4. 若未覆盖完整,user_agent 构造追问
 5. react_agent 执行追问(不重新 clone)
 6. 循环 3-5 直到 done 或达到 MAX_ROUNDS
+7. user_agent done=true 时,按场景 schema 整理结构化结果,orchestrator 落库
 
-react_agent 自己落库 results 和 conversations(带 round_idx),
-orchestrator 只管 task 状态 + user_agent 对话 + 沙箱清理
+职责划分(阶段 7+ 调整):
+- react_agent:执行审计,输出自然语言总结(含发现、位置、建议)
+- user_agent:评估覆盖度 + 决定追问 + done 时整理结构化结果
+- orchestrator:user_agent done 时调 scenario.extract_results 落库 Result
 
 阶段 7:接入事件总线,每条对话/状态变更实时推送,前端 SSE 可见每一步
 """
@@ -22,8 +25,9 @@ from app.agents.react_agent import run_react_agent
 from app.agents.user_agent import MAX_ROUNDS, run_user_agent
 from app.event_bus import finish_task, publish
 from app.llm.client import LLMClient
-from app.models.task import Conversation, Task, TaskStatus
+from app.models.task import Conversation, Result, Task, TaskStatus
 from app.models.user_llm_config import UserLLMConfig
+from app.scenarios.base import get_scenario
 from app.tools import sandbox_tools
 
 logger = logging.getLogger(__name__)
@@ -81,7 +85,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             # 第 1 轮 followup_query=None(用初始指令,会 clone)
             # 后续轮 followup_query=追问(不 clone)
             is_first = round_idx == 1
-            results, summary = run_react_agent(
+            _results, summary = run_react_agent(
                 task, db,
                 round_idx=round_idx,
                 followup_query=None if is_first else followup,
@@ -90,10 +94,9 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
 
             react_summaries.append({
                 "round": round_idx,
-                "results": results,
+                "results": [],  # react_agent 不再返回结构化结果
                 "summary": summary,
             })
-            all_results_count += len(results)
 
             # user_agent 评估
             task.current_stage = f"第 {round_idx} 轮:user_agent 评估"
@@ -110,6 +113,24 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
 
             if ua_result.get("done"):
                 logger.info(f"[task={task.id}] user_agent 在第 {round_idx} 轮宣布完成")
+                # user_agent done=true:按场景 schema 整理结构化结果并落库
+                # react_agent 只输出自然语言总结,user_agent 从中提取结构化漏洞清单
+                scenario = get_scenario(scenario_id)
+                structured_results = scenario.extract_results(ua_result)
+                for r in structured_results:
+                    result = Result(
+                        task_id=task.id,
+                        round_idx=round_idx,
+                        title=r.get("title", "(无标题)"),
+                        content=r.get("content", ""),
+                        metadata_=r.get("metadata"),
+                    )
+                    db.add(result)
+                db.commit()
+                all_results_count += len(structured_results)
+                logger.info(
+                    f"[task={task.id}] user_agent 整理 {len(structured_results)} 个结构化结果"
+                )
                 break
 
             followup = ua_result.get("followup_query", "")

@@ -122,7 +122,7 @@ class SecurityAuditScenario:
 ## 你的职责
 1. 对照 checklist(7 大安全类别),评估 react_agent 的审计是否覆盖完整
 2. 针对未覆盖或覆盖不足的类别,构造具体的追问请求,让 react_agent 再跑一轮
-3. 当 checklist 全部覆盖且结论明确时,宣布审计完成
+3. 当 checklist 全部覆盖且结论明确时,宣布审计完成,并**整理结构化漏洞清单**
 
 ## 关键原则
 - 你**不直接审计代码**,只评估 react_agent 的结果
@@ -138,7 +138,8 @@ class SecurityAuditScenario:
   "missing": ["auth", "ssrf"],
   "reasoning": "injection 类已查到 SQL 注入,deps 已查 CVE。auth 未提及,ssrf 未提及。",
   "followup_query": "请检查认证与授权模块:1) JWT 验证是否缺失 verify=False;2) 是否存在 IDOR(DELETE/PUT 只检查登录不检查所属)。同时检查 SSRF:requests.get 是否接收用户可控 URL。",
-  "done": false
+  "done": false,
+  "results": []
 }
 
 字段说明:
@@ -147,6 +148,30 @@ class SecurityAuditScenario:
 - reasoning: 你的判断依据(简短)
 - followup_query: 给 react_agent 的追问指令(若 done=true,此字段可省略)
 - done: 是否审计完成(missing 为空且所有类别结论明确时为 true)
+- results: 结构化漏洞清单。**done=false 时留空数组**;done=true 时从 react_agent
+  的总结里提取所有确认的漏洞,按下述格式整理
+
+## results 字段格式(done=true 时必填)
+每个元素:
+{
+  "title": "[high] CWE-89 SQL注入 src/main.py:42",
+  "content": "漏洞描述 + 修复建议",
+  "metadata": {
+    "cwe": "CWE-89",
+    "severity": "high",
+    "file_path": "src/main.py",
+    "line_range": "42-45",
+    "remediation": "使用参数化查询,禁止字符串拼接 SQL"
+  }
+}
+
+- title: 简短标题,格式 "[severity] CWE-xxx 漏洞类型 文件:行号"
+- content: 漏洞描述 + 修复建议
+- metadata.cwe: CWE 编号(CVE 类用 CWE-1035)
+- metadata.severity: info / low / medium / high / critical
+- metadata.file_path: 文件路径
+- metadata.line_range: 行号或范围
+- metadata.remediation: 修复建议
 
 ## checklist(7 大类别)
 {checklist_text}
@@ -155,10 +180,12 @@ class SecurityAuditScenario:
 - covered 包含全部 7 个类别
 - 且每个类别 react_agent 都给出明确结论(有漏洞/无漏洞/无法确定)
 - 不要追求"绝对完美",7 个类别都覆盖了就结束
+- done=true 时必须从 react_agent 总结里提取所有漏洞到 results 字段
 
 ## 何时返回 done=false
 - missing 非空,或某类别结论模糊
 - followup_query 要具体到检查点,不要笼统说"再查查"
+- results 留空数组即可
 """
 
     # ---------- react_agent prompt ----------
@@ -217,24 +244,22 @@ class SecurityAuditScenario:
 - **run_semgrep**:若返回 note 提示 mock 模式不可用,直接跳过
 - **search_code**:对 skill 未覆盖的类别,自己写正则搜高危模式
 
-## 输出规范
-发现漏洞时通过 submit_results 工具提交,每个 result 包含:
-- title: 简短标题,如 "[high] CWE-89 SQL注入 src/main.py:42"
-- content: 漏洞描述 + 修复建议
-- metadata: 必须包含以下字段:
-    - cwe: CWE 编号,如 "CWE-89"
-    - severity: info / low / medium / high / critical
-    - file_path: 文件路径
-    - line_range: 行号或范围,如 "42" 或 "42-45"
-    - remediation: 修复建议
+## 发现漏洞时的记录格式(写入总结)
+审计过程中发现漏洞时,在思考过程和最终总结里用以下结构记录,
+user_agent 会从你的总结里提取这些信息整理成结构化结果:
 
-CVE 类发现的 cwe 用 "CWE-1035",content 写明 CVE id 和受影响版本。
+[漏洞] <简短标题,如 "SQL注入 src/main.py:42">
+- CWE: <CWE编号,如 CWE-89;CVE 类用 CWE-1035>
+- 严重性: info / low / medium / high / critical
+- 文件: <路径>
+- 行号: <行号或范围,如 42 或 42-45>
+- 描述: <漏洞描述,含 CVE id 和受影响版本(若是依赖漏洞)>
+- 修复: <修复建议>
 
 ## 结束方式
-- 确认漏洞后随时可调 submit_results 提交(支持多次调用累积提交)
-- 审计完成后**正常输出自然语言总结即可**,不需要再调用任何工具
-- 总结应包括:已确认的漏洞概览、已检查的范围、未完成或建议后续检查的项
-- 若无明显漏洞,直接输出总结说明已查范围,不需要调 submit_results
+- 审计完成后正常输出自然语言总结即可,不需要调用任何工具
+- 总结应包括:已确认的漏洞清单(用上述格式)、已检查的范围、未完成或建议后续检查的项
+- 若无明显漏洞,直接输出总结说明已查范围
 
 ## 注意
 - 不要漏报,但也不要误报。看上下文判断是否真的可利用
@@ -254,54 +279,37 @@ CVE 类发现的 cwe 用 "CWE-1035",content 写明 CVE id 和受影响版本。
             "list_skills", "skill",
         ]
 
-    # ---------- submit_results 工具定义 ----------
-    # 通用结构:title + content + metadata,场景无关
-    # 安全场景的 metadata 字段要求在 react_agent_prompt 里说明
+    # ---------- 结构化结果 schema(user_agent done 时输出) ----------
+    # react_agent 只输出自然语言总结,user_agent 从总结里提取漏洞,
+    # 按此 schema 在 JSON 输出的 results 字段里提供结构化数据
 
     @property
-    def submit_tool_schema(self) -> dict[str, Any]:
+    def structured_result_schema(self) -> dict[str, Any]:
         return {
-            "type": "function",
-            "function": {
-                "name": "submit_results",
-                "description": (
-                    "提交结构化审计结果(漏洞清单)。确认漏洞时可随时调用,支持多次调用累积提交。"
-                    "审计结束后不需要再调用此工具,正常输出总结即可。"
-                ),
-                "parameters": {
+            "results": {
+                "type": "array",
+                "description": "从 react_agent 总结中提取的结构化漏洞清单",
+                "items": {
                     "type": "object",
                     "properties": {
-                        "results": {
-                            "type": "array",
-                            "description": "结果列表",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "title": {
-                                        "type": "string",
-                                        "description": "简短标题",
-                                    },
-                                    "content": {
-                                        "type": "string",
-                                        "description": "详细内容/描述",
-                                    },
-                                    "metadata": {
-                                        "type": "object",
-                                        "description": "场景专用信息(如 cwe/severity/file_path 等)",
-                                    },
-                                },
-                                "required": ["title", "content"],
-                            },
-                        },
-                        "summary": {
-                            "type": "string",
-                            "description": "本轮审计的总结说明(已查范围、结论)",
+                        "title": {"type": "string", "description": "简短标题"},
+                        "content": {"type": "string", "description": "详细内容/描述"},
+                        "metadata": {
+                            "type": "object",
+                            "description": "场景专用信息(cwe/severity/file_path/line_range/remediation)",
                         },
                     },
-                    "required": ["results"],
+                    "required": ["title", "content"],
                 },
             },
         }
+
+    # ---------- 兼容旧接口(已废弃,react_agent 不再调用) ----------
+    # submit_tool_schema 保留以避免依赖旧协议的代码报错,但 react_agent 不再使用
+
+    @property
+    def submit_tool_schema(self) -> dict[str, Any]:
+        return self.structured_result_schema
 
     # ---------- result 格式化 ----------
 
@@ -324,6 +332,18 @@ CVE 类发现的 cwe 用 "CWE-1035",content 写明 CVE id 和受影响版本。
             "content": raw.get("content", ""),
             "metadata": metadata,
         }
+
+    # ---------- 结构化结果提取(user_agent done 时调用) ----------
+
+    def extract_results(self, ua_output: dict[str, Any]) -> list[dict[str, Any]]:
+        """从 user_agent 的最终输出提取结构化漏洞清单
+
+        user_agent 在 done=true 时,JSON 输出里应包含 results 字段(按
+        structured_result_schema),每项是 {title, content, metadata}。
+        这里调 format_result 做字段兜底,返回可用于落库的列表。
+        """
+        raw_results = ua_output.get("results") or []
+        return [self.format_result(raw) for raw in raw_results]
 
     # ---------- 前端声明(场景无关 UI 驱动,阶段 7) ----------
 
