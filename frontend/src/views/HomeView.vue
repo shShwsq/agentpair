@@ -28,6 +28,8 @@ function toggleWorkspace(): void {
       <template #leading>
         <WorkspaceToggleButton
           :collapsed="workspaceCollapsed"
+          expand-title="展开历史任务"
+          collapse-title="折叠历史任务"
           @toggle="toggleWorkspace"
         />
       </template>

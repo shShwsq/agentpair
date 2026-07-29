@@ -1,14 +1,24 @@
 <script setup lang="ts">
 /**
- * 工作区开关按钮
+ * 侧栏开关按钮
  *
  * 方框 + 中间偏左一竖线图标。展开态额外显示右侧一竖线(侧栏+主区)。
- * 渲染在 AppHeader 的 #leading slot 内,用于各页面切换侧栏显隐。
+ * 渲染在 AppHeader 的 #leading / #trailing slot 内,用于切换左/右侧栏显隐。
  */
-defineProps<{
-  /** 当前是否折叠 */
-  collapsed: boolean
-}>()
+withDefaults(
+  defineProps<{
+    /** 当前是否折叠 */
+    collapsed: boolean
+    /** 折叠态鼠标悬浮提示 */
+    expandTitle?: string
+    /** 展开态鼠标悬浮提示 */
+    collapseTitle?: string
+  }>(),
+  {
+    expandTitle: '展开侧栏',
+    collapseTitle: '折叠侧栏',
+  },
+)
 
 defineEmits<{
   toggle: []
@@ -19,8 +29,8 @@ defineEmits<{
   <button
     class="workspace-toggle"
     :class="{ 'is-active': !collapsed }"
-    :title="collapsed ? '展开历史任务' : '折叠历史任务'"
-    :aria-label="collapsed ? '展开历史任务' : '折叠历史任务'"
+    :title="collapsed ? expandTitle : collapseTitle"
+    :aria-label="collapsed ? expandTitle : collapseTitle"
     @click="$emit('toggle')"
   >
     <svg

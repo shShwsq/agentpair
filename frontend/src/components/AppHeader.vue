@@ -37,6 +37,10 @@ function handleLogout(): void {
           <slot name="nav" />
         </nav>
       </div>
+      <!-- 右侧前置区(如右侧栏开关按钮);空 slot 时该 div 的 margin-left:auto 仍把用户区钉到右侧 -->
+      <div class="header-trailing">
+        <slot name="trailing" />
+      </div>
       <div class="user-area">
         <span class="user-email">{{ authStore.user?.email }}</span>
         <button
@@ -86,6 +90,14 @@ function handleLogout(): void {
   flex-shrink: 0;
 }
 
+/* 右侧前置区:用 margin-left:auto 把自身及之后的用户区推到右侧;空 slot 时仍生效 */
+.header-trailing {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 /* 品牌:深色字标 + 主色图标,收紧字距,克制不张扬 */
 .brand {
   display: flex;
@@ -111,7 +123,6 @@ function handleLogout(): void {
   display: flex;
   align-items: center;
   gap: var(--space-4);
-  margin-left: auto;
 }
 
 .user-email {
