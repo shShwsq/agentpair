@@ -210,24 +210,17 @@ class LLMClient:
         )
 
     @classmethod
-    def from_user_config(cls, user_llm_config) -> "LLMClient":
-        """从用户保存的配置构造客户端(阶段 6)
+    def from_config_dict(cls, cfg: dict) -> "LLMClient":
+        """从单个配置字典构造客户端(列表式配置,阶段 6 重构)
 
-        user_llm_config: UserLLMConfig ORM 实例(或 None)
-        - None 或 llm_config 为空 → 回退到 env 默认(走 __init__ 默认参数)
-        - 有 llm_config → 用用户配置构造
+        cfg: 用户保存的某个 LLM 配置项
+        { id, name, provider, api_key, model, enable_thinking, base_url }
 
-        返回 LLMClient 实例。失败时(如缺 api_key)回退到 env 默认。
+        失败时(如缺 api_key)抛 ValueError,由调用方决定是否回退到 env 默认。
         """
-        if user_llm_config is None or not user_llm_config.llm_config:
-            return cls()
-
-        cfg = user_llm_config.llm_config
         api_key = cfg.get("api_key", "")
         if not api_key:
-            # 用户未填 api_key(可能是更新时传空串保留了空),回退到 env
-            return cls()
-
+            raise ValueError("配置缺少 api_key")
         return cls(
             provider_id=cfg.get("provider"),
             api_key=api_key,

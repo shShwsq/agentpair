@@ -25,6 +25,10 @@ class TaskCreateRequest(BaseModel):
     # 可选参数(如 repo_url、branch 等),场景专用
     params: dict[str, Any] | None = None
 
+    # 用户选择的 LLM 配置 id(对应 user_llm_configs.llm_configs[].id)
+    # 为空表示用 env 默认配置或匿名任务
+    llm_config_id: str | None = None
+
     # 兼容字段:旧 API 直接传 repo_url
     repo_url: HttpUrl | None = None
     branch: str | None = None
@@ -65,6 +69,7 @@ class TaskResponse(BaseModel):
     scenario: str
     user_input: str
     params: dict[str, Any] | None = None
+    llm_config_id: str | None = None
     status: str
     current_stage: str | None
     error_message: str | None

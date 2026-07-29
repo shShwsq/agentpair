@@ -4,6 +4,7 @@
  *
  * 表单:
  * - 场景选择(从 GET /scenarios 拉取)
+ * - 使用模型(从 GET /settings/models 拉取用户已配置的 LLM 列表)
  * - 仓库地址(必填,自动生成 user_input)
  * - 补充说明(可选,附加到 user_input)
  * - 分支(可选)
@@ -15,8 +16,10 @@ import { useRouter } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
 import { createTask, getScenarios } from '@/api/task'
+import { getMyModels } from '@/api/settings'
 import { extractErrorMessage } from '@/utils/error'
 import type { Scenario } from '@/types/task'
+import type { LLMConfigItemOut } from '@/types/settings'
 
 const router = useRouter()
 
@@ -25,15 +28,29 @@ const router = useRouter()
 const scenarios = ref<Scenario[]>([])
 const selectedScenario = ref('')
 
+// ---- 模型列表 ----
+
+const llmConfigs = ref<LLMConfigItemOut[]>([])
+const selectedLlmConfigId = ref('')
+const loadingModels = ref(true)
+
 onMounted(async () => {
   try {
-    scenarios.value = await getScenarios()
-    if (scenarios.value.length > 0) {
-      selectedScenario.value = scenarios.value[0].id
+    const [scenarioList, models] = await Promise.all([getScenarios(), getMyModels().catch(() => null)])
+    scenarios.value = scenarioList
+    if (scenarioList.length > 0) {
+      selectedScenario.value = scenarioList[0].id
+    }
+    if (models && models.llm_configs.length > 0) {
+      llmConfigs.value = models.llm_configs
+      // 默认选第一个已配置 Key 的,否则选第一个
+      const firstWithKey = models.llm_configs.find((c) => c.has_api_key)
+      selectedLlmConfigId.value = (firstWithKey ?? models.llm_configs[0]).id
     }
   } catch {
-    // 场景加载失败不阻塞,用默认值
     selectedScenario.value = 'code_security_audit'
+  } finally {
+    loadingModels.value = false
   }
 })
 
@@ -81,6 +98,7 @@ async function handleSubmit(): Promise<void> {
     const res = await createTask({
       scenario: selectedScenario.value,
       user_input: userInput,
+      llm_config_id: selectedLlmConfigId.value || undefined,
       params: {
         repo_url: url,
         ...(branch.value.trim() ? { branch: branch.value.trim() } : {}),
@@ -94,6 +112,12 @@ async function handleSubmit(): Promise<void> {
   } finally {
     loading.value = false
   }
+}
+
+/** 模型选项的显示文本 */
+function modelLabel(cfg: LLMConfigItemOut): string {
+  const name = cfg.name || cfg.model
+  return cfg.has_api_key ? name : `${name}(未配置 Key)`
 }
 </script>
 
@@ -144,6 +168,25 @@ async function handleSubmit(): Promise<void> {
               </label>
             </div>
             <p v-if="scenarios.length === 0" class="field-hint">场景加载中...</p>
+          </div>
+
+          <!-- 模型选择 -->
+          <div class="field">
+            <label>使用模型</label>
+            <select v-model="selectedLlmConfigId" :disabled="loadingModels">
+              <option value="">默认(服务器 env 配置)</option>
+              <option
+                v-for="cfg in llmConfigs"
+                :key="cfg.id"
+                :value="cfg.id"
+              >
+                {{ modelLabel(cfg) }}
+              </option>
+            </select>
+            <p v-if="llmConfigs.length === 0 && !loadingModels" class="field-hint">
+              尚未配置模型,将使用服务器默认配置。
+              <RouterLink to="/settings" class="field-link">前往模型设置 →</RouterLink>
+            </p>
           </div>
 
           <!-- 仓库地址 -->
@@ -223,51 +266,6 @@ async function handleSubmit(): Promise<void> {
   margin-bottom: var(--space-6);
 }
 
-/* ---- 加载遮罩 ---- */
-.loading-overlay {
-  position: absolute;
-  inset: 0;
-  background: rgba(255, 255, 255, 0.95);
-  border-radius: var(--radius-xl);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  padding: var(--space-8);
-  z-index: 5;
-}
-
-.loading-overlay h2 {
-  margin-top: var(--space-4);
-  font-size: var(--fs-lg);
-}
-
-.loading-overlay p {
-  margin-top: var(--space-2);
-  color: var(--color-text-secondary);
-  font-size: var(--fs-sm);
-}
-
-.loading-overlay .hint {
-  margin-top: var(--space-4);
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-}
-
-.spinner-lg {
-  width: 48px;
-  height: 48px;
-  border: 3px solid var(--color-border);
-  border-top-color: var(--color-primary);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
 /* ---- 提示 ---- */
 .alert {
   display: flex;
@@ -300,6 +298,7 @@ async function handleSubmit(): Promise<void> {
 }
 
 .field input,
+.field select,
 .field textarea {
   width: 100%;
   padding: var(--space-3);
@@ -315,6 +314,10 @@ async function handleSubmit(): Promise<void> {
   height: 42px;
 }
 
+.field select {
+  height: 42px;
+}
+
 .field textarea {
   resize: vertical;
   font-family: var(--font-sans);
@@ -326,6 +329,7 @@ async function handleSubmit(): Promise<void> {
 }
 
 .field input:focus,
+.field select:focus,
 .field textarea:focus {
   outline: none;
   border-color: var(--color-primary);
@@ -347,6 +351,15 @@ async function handleSubmit(): Promise<void> {
   margin-top: var(--space-1);
   font-size: var(--fs-xs);
   color: var(--color-text-muted);
+}
+
+.field-link {
+  color: var(--color-primary);
+  text-decoration: none;
+}
+
+.field-link:hover {
+  text-decoration: underline;
 }
 
 /* ---- 场景选择卡片 ---- */

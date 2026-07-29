@@ -1,26 +1,28 @@
 <script setup lang="ts">
 /**
- * 模型设置页
+ * 模型设置页(列表式)
  *
- * 两个独立配置区:
- * - LLM 大模型:厂商/API Key/模型/思考开关/baseUrl
- * - Embedding 模型:厂商/API Key/模型/baseUrl/维度
+ * 支持配置多个 LLM 与 Embedding 模型,每个配置有唯一 id 和自定义名称。
+ * 任务提交时从列表中选择一个使用。
  *
- * 安全约定:
- * - 已配置的 api_key 不回传原文,输入框 placeholder 提示"已配置,输入新值以替换"
- * - 保存时 api_key 为空表示保留已存的 key(首次保存必须填)
- * - 测试按钮会先保存配置,再用已存配置发起测试
- *
- * 设计参考:C:\Users\njwjx\Documents\BaiduSyncdisk\course_大四\pro\ai-plugin\popup\settings.html
+ * 交互:
+ * - 顶部"+ 添加"按钮新增配置(生成 uuid,默认展开)
+ * - 每个配置是一张卡片,可折叠/展开编辑、删除、测试连通性
+ * - 底部"保存"按钮整体提交列表(后端按 id 匹配保留 api_key)
+ * - 测试按钮:先保存当前列表,再按 config_id 测试指定配置
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 
 import AppHeader from '@/components/AppHeader.vue'
 import { getCatalog, getMyModels, saveModels, testEmbedding, testLLM } from '@/api/settings'
 import { extractErrorMessage } from '@/utils/error'
 import type {
-  EmbeddingProvider,
+  EmbeddingConfigItem,
+  EmbeddingConfigItemOut,
+  LLMConfigItem,
+  LLMConfigItemOut,
   LLMProvider,
+  EmbeddingProvider,
   ModelsCatalog,
 } from '@/types/settings'
 
@@ -28,106 +30,93 @@ import type {
 const catalog = ref<ModelsCatalog | null>(null)
 const loadingCatalog = ref(true)
 
-// ---- LLM 表单 ----
-const llmProvider = ref('')
-const llmApiKey = ref('')
-const llmModel = ref('')
-const llmEnableThinking = ref(true)
-const llmBaseUrl = ref('')
-const llmHasApiKey = ref(false)
-const llmThinkingSupported = ref(false)
-const llmThinkingOnly = ref(false) // 仅思考模式,强制开启不可关
+// ---- LLM 配置列表(带前端编辑状态) ----
+interface LLMConfigEditable extends LLMConfigItem {
+  has_api_key: boolean
+  expanded: boolean
+  testing: boolean
+}
+const llmConfigs = reactive<LLMConfigEditable[]>([])
 
-// ---- Embedding 表单 ----
-const embProvider = ref('')
-const embApiKey = ref('')
-const embModel = ref('')
-const embBaseUrl = ref('')
-const embHasApiKey = ref(false)
+// ---- Embedding 配置列表 ----
+interface EmbeddingConfigEditable extends EmbeddingConfigItem {
+  has_api_key: boolean
+  expanded: boolean
+  testing: boolean
+}
+const embConfigs = reactive<EmbeddingConfigEditable[]>([])
 
 // ---- 状态 ----
 const loadingConfig = ref(true)
 const saving = ref(false)
-const testingLlm = ref(false)
-const testingEmb = ref(false)
 const toast = ref<{ msg: string; type: 'success' | 'error' } | null>(null)
 
 // ============================================================
-// 计算属性:当前选中的厂商与模型元信息
+// 计算属性:当前选中的厂商
 // ============================================================
 
-const currentLlmProvider = computed<LLMProvider | null>(() => {
-  if (!catalog.value || !llmProvider.value) return null
-  return catalog.value.llmProviders.find((p) => p.id === llmProvider.value) ?? null
-})
+function getLlmProvider(providerId: string): LLMProvider | null {
+  if (!catalog.value || !providerId) return null
+  return catalog.value.llmProviders.find((p) => p.id === providerId) ?? null
+}
 
-const currentEmbProvider = computed<EmbeddingProvider | null>(() => {
-  if (!catalog.value || !embProvider.value) return null
-  return catalog.value.embeddingProviders.find((p) => p.id === embProvider.value) ?? null
-})
+function getEmbProvider(providerId: string): EmbeddingProvider | null {
+  if (!catalog.value || !providerId) return null
+  return catalog.value.embeddingProviders.find((p) => p.id === providerId) ?? null
+}
 
-const embDimensionHint = computed(() => {
-  if (!currentEmbProvider.value || !embModel.value) return ''
-  const m = currentEmbProvider.value.models.find((x) => x.id === embModel.value)
-  const dim = m?.dimension ?? currentEmbProvider.value.fallbackDimension ?? 1024
-  const mm = m?.multimodal ?? currentEmbProvider.value.fallbackMultimodal ?? false
-  const dp = m?.dimensionsParam ?? currentEmbProvider.value.fallbackDimensionsParam ?? false
+function embDimensionHint(cfg: EmbeddingConfigEditable): string {
+  const p = getEmbProvider(cfg.provider)
+  if (!p || !cfg.model) return ''
+  const m = p.models.find((x) => x.id === cfg.model)
+  const dim = m?.dimension ?? p.fallbackDimension ?? 1024
+  const mm = m?.multimodal ?? p.fallbackMultimodal ?? false
+  const dp = m?.dimensionsParam ?? p.fallbackDimensionsParam ?? false
   let text = `维度: ${dim}`
   if (mm) text += ' · 多模态'
   if (dp) text += ' · 通过 dimensions 参数指定'
   return text
-})
-
-// ============================================================
-// 厂商切换:自动填充 baseUrl / 刷新思考开关 / 清空模型
-// ============================================================
-
-function onLlmProviderChange(): void {
-  const p = currentLlmProvider.value
-  llmModel.value = ''
-  if (!p) {
-    llmBaseUrl.value = ''
-    llmThinkingSupported.value = false
-    llmThinkingOnly.value = false
-    return
-  }
-  llmBaseUrl.value = p.baseUrl
-  llmThinkingSupported.value = !!p.supportsThinking
-  // 选厂商后默认选第一个模型
-  if (p.models.length > 0) {
-    llmModel.value = p.models[0].id
-  }
-  updateLlmThinkingByModel()
 }
 
-function onEmbProviderChange(): void {
-  const p = currentEmbProvider.value
-  embModel.value = ''
+// ============================================================
+// 厂商切换:自动填充 baseUrl / 刷新思考开关 / 选默认模型
+// ============================================================
+
+function onLlmProviderChange(cfg: LLMConfigEditable): void {
+  const p = getLlmProvider(cfg.provider)
+  cfg.model = ''
   if (!p) {
-    embBaseUrl.value = ''
+    cfg.base_url = null
     return
   }
-  embBaseUrl.value = p.baseUrl
+  cfg.base_url = p.baseUrl
   if (p.models.length > 0) {
-    embModel.value = p.models[0].id
+    cfg.model = p.models[0].id
   }
 }
 
-function updateLlmThinkingByModel(): void {
-  const p = currentLlmProvider.value
-  if (!p || !p.supportsThinking) {
-    llmThinkingSupported.value = false
-    llmThinkingOnly.value = false
+function onEmbProviderChange(cfg: EmbeddingConfigEditable): void {
+  const p = getEmbProvider(cfg.provider)
+  cfg.model = ''
+  if (!p) {
+    cfg.base_url = null
     return
   }
-  const m = p.models.find((x) => x.id === llmModel.value)
-  const thinking = m?.thinking ?? p.fallbackThinking ?? 'none'
-  llmThinkingOnly.value = thinking === 'only'
-  if (llmThinkingOnly.value) {
-    llmEnableThinking.value = true
-  } else if (thinking === 'hybrid' && m?.thinkingDefault !== undefined) {
-    llmEnableThinking.value = m.thinkingDefault
+  cfg.base_url = p.baseUrl
+  if (p.models.length > 0) {
+    cfg.model = p.models[0].id
   }
+}
+
+function llmThinkingSupported(cfg: LLMConfigEditable): boolean {
+  return !!getLlmProvider(cfg.provider)?.supportsThinking
+}
+
+function llmThinkingOnly(cfg: LLMConfigEditable): boolean {
+  const p = getLlmProvider(cfg.provider)
+  if (!p?.supportsThinking) return false
+  const m = p.models.find((x) => x.id === cfg.model)
+  return (m?.thinking ?? p.fallbackThinking ?? 'none') === 'only'
 }
 
 // ============================================================
@@ -153,29 +142,8 @@ async function loadConfig(): Promise<void> {
   loadingConfig.value = true
   try {
     const res = await getMyModels()
-    // LLM
-    if (res.llm) {
-      llmProvider.value = res.llm.provider ?? ''
-      llmModel.value = res.llm.model ?? ''
-      llmEnableThinking.value = res.llm.enable_thinking
-      llmBaseUrl.value = res.llm.base_url ?? ''
-      llmHasApiKey.value = res.llm.has_api_key
-      // 触发思考开关刷新(不重新填 baseUrl,保留已存值)
-      if (llmProvider.value) {
-        const p = catalog.value?.llmProviders.find((x) => x.id === llmProvider.value)
-        llmThinkingSupported.value = !!p?.supportsThinking
-        const m = p?.models.find((x) => x.id === llmModel.value)
-        const thinking = m?.thinking ?? p?.fallbackThinking ?? 'none'
-        llmThinkingOnly.value = thinking === 'only'
-      }
-    }
-    // Embedding
-    if (res.embedding) {
-      embProvider.value = res.embedding.provider ?? ''
-      embModel.value = res.embedding.model ?? ''
-      embBaseUrl.value = res.embedding.base_url ?? ''
-      embHasApiKey.value = res.embedding.has_api_key
-    }
+    llmConfigs.splice(0, llmConfigs.length, ...res.llm_configs.map(llmFromOut))
+    embConfigs.splice(0, embConfigs.length, ...res.embedding_configs.map(embFromOut))
   } catch (e) {
     showToast(`配置加载失败: ${extractErrorMessage(e)}`, 'error')
   } finally {
@@ -183,57 +151,123 @@ async function loadConfig(): Promise<void> {
   }
 }
 
+function llmFromOut(out: LLMConfigItemOut): LLMConfigEditable {
+  return {
+    id: out.id,
+    name: out.name,
+    provider: out.provider,
+    api_key: '', // 空串=保留已存
+    model: out.model,
+    enable_thinking: out.enable_thinking,
+    base_url: out.base_url,
+    has_api_key: out.has_api_key,
+    expanded: false,
+    testing: false,
+  }
+}
+
+function embFromOut(out: EmbeddingConfigItemOut): EmbeddingConfigEditable {
+  return {
+    id: out.id,
+    name: out.name,
+    provider: out.provider,
+    api_key: '',
+    model: out.model,
+    base_url: out.base_url,
+    dimension: out.dimension,
+    has_api_key: out.has_api_key,
+    expanded: false,
+    testing: false,
+  }
+}
+
 // ============================================================
-// 保存
+// 增删
+// ============================================================
+
+function addLlmConfig(): void {
+  llmConfigs.push({
+    id: crypto.randomUUID(),
+    name: '',
+    provider: '',
+    api_key: '',
+    model: '',
+    enable_thinking: true,
+    base_url: null,
+    has_api_key: false,
+    expanded: true,
+    testing: false,
+  })
+}
+
+function removeLlmConfig(idx: number): void {
+  llmConfigs.splice(idx, 1)
+}
+
+function addEmbConfig(): void {
+  embConfigs.push({
+    id: crypto.randomUUID(),
+    name: '',
+    provider: '',
+    api_key: '',
+    model: '',
+    base_url: null,
+    dimension: 1024,
+    has_api_key: false,
+    expanded: true,
+    testing: false,
+  })
+}
+
+function removeEmbConfig(idx: number): void {
+  embConfigs.splice(idx, 1)
+}
+
+// ============================================================
+// 保存(整体提交)
 // ============================================================
 
 async function handleSave(): Promise<boolean> {
   saving.value = true
   toast.value = null
   try {
-    const req: import('@/types/settings').SaveModelsRequest = {}
-    // LLM:有选厂商才保存
-    if (llmProvider.value) {
-      if (!llmModel.value) {
-        showToast('请选择 LLM 模型', 'error')
+    // 校验
+    for (const cfg of llmConfigs) {
+      if (!cfg.provider || !cfg.model) {
+        showToast(`LLM 配置"${cfg.name || '未命名'}"缺少厂商或模型`, 'error')
         return false
       }
-      req.llm = {
-        provider: llmProvider.value,
-        api_key: llmApiKey.value,
-        model: llmModel.value,
-        enable_thinking: llmEnableThinking.value,
-        base_url: llmBaseUrl.value || null,
-      }
     }
-    // Embedding:有选厂商才保存
-    if (embProvider.value) {
-      if (!embModel.value) {
-        showToast('请选择 Embedding 模型', 'error')
+    for (const cfg of embConfigs) {
+      if (!cfg.provider || !cfg.model) {
+        showToast(`Embedding 配置"${cfg.name || '未命名'}"缺少厂商或模型`, 'error')
         return false
       }
-      req.embedding = {
-        provider: embProvider.value,
-        api_key: embApiKey.value,
-        model: embModel.value,
-        base_url: embBaseUrl.value || null,
-        dimension: 1024,
-      }
     }
-    if (!req.llm && !req.embedding) {
-      showToast('请至少配置一项', 'error')
-      return false
-    }
-    const res = await saveModels(req)
-    // 更新 has_api_key 状态,清空输入框(已保存到后端)
-    if (res.llm) {
-      llmHasApiKey.value = res.llm.has_api_key
-      llmApiKey.value = ''
-    }
-    if (res.embedding) {
-      embHasApiKey.value = res.embedding.has_api_key
-      embApiKey.value = ''
-    }
+
+    const res = await saveModels({
+      llm_configs: llmConfigs.map((c) => ({
+        id: c.id,
+        name: c.name,
+        provider: c.provider,
+        api_key: c.api_key,
+        model: c.model,
+        enable_thinking: c.enable_thinking,
+        base_url: c.base_url,
+      })),
+      embedding_configs: embConfigs.map((c) => ({
+        id: c.id,
+        name: c.name,
+        provider: c.provider,
+        api_key: c.api_key,
+        model: c.model,
+        base_url: c.base_url,
+        dimension: c.dimension,
+      })),
+    })
+    // 更新 has_api_key 状态 + 清空输入框
+    llmConfigs.splice(0, llmConfigs.length, ...res.llm_configs.map(llmFromOut))
+    embConfigs.splice(0, embConfigs.length, ...res.embedding_configs.map(embFromOut))
     showToast('设置已保存', 'success')
     return true
   } catch (e) {
@@ -245,47 +279,47 @@ async function handleSave(): Promise<boolean> {
 }
 
 // ============================================================
-// 测试(先保存,再用已存配置测试)
+// 测试(先保存,再按 config_id 测试)
 // ============================================================
 
-async function handleTestLLM(): Promise<void> {
-  testingLlm.value = true
+async function handleTestLLM(cfg: LLMConfigEditable): Promise<void> {
+  cfg.testing = true
   toast.value = null
   try {
     const ok = await handleSave()
     if (!ok) return
-    const res = await testLLM()
+    const res = await testLLM({ config_id: cfg.id })
     if (res.success) {
-      showToast(`LLM 测试成功 · 耗时 ${res.latency_ms ?? '?'}ms`, 'success')
+      showToast(`"${cfg.name || cfg.model}" 测试成功 · ${res.latency_ms ?? '?'}ms`, 'success')
     } else {
-      showToast(res.message, 'error')
+      showToast(`"${cfg.name || cfg.model}" 测试失败: ${res.message}`, 'error')
     }
   } catch (e) {
     showToast(`测试异常: ${extractErrorMessage(e)}`, 'error')
   } finally {
-    testingLlm.value = false
+    cfg.testing = false
   }
 }
 
-async function handleTestEmbedding(): Promise<void> {
-  testingEmb.value = true
+async function handleTestEmbedding(cfg: EmbeddingConfigEditable): Promise<void> {
+  cfg.testing = true
   toast.value = null
   try {
     const ok = await handleSave()
     if (!ok) return
-    const res = await testEmbedding()
+    const res = await testEmbedding({ config_id: cfg.id })
     if (res.success) {
       showToast(
-        `Embedding 测试成功 · 维度 ${res.dimension ?? '?'} · 耗时 ${res.latency_ms ?? '?'}ms`,
+        `"${cfg.name || cfg.model}" 测试成功 · 维度 ${res.dimension ?? '?'} · ${res.latency_ms ?? '?'}ms`,
         'success',
       )
     } else {
-      showToast(res.message, 'error')
+      showToast(`"${cfg.name || cfg.model}" 测试失败: ${res.message}`, 'error')
     }
   } catch (e) {
     showToast(`测试异常: ${extractErrorMessage(e)}`, 'error')
   } finally {
-    testingEmb.value = false
+    cfg.testing = false
   }
 }
 
@@ -303,6 +337,13 @@ function showToast(msg: string, type: 'success' | 'error'): void {
 function apiKeyPlaceholder(hasKey: boolean): string {
   return hasKey ? '已配置,输入新值以替换(留空则保留)' : 'sk-...'
 }
+
+function configTitle(name: string, model: string): string {
+  return name || model || '未命名配置'
+}
+
+const hasLlmConfigs = computed(() => llmConfigs.length > 0)
+const hasEmbConfigs = computed(() => embConfigs.length > 0)
 </script>
 
 <template>
@@ -327,7 +368,7 @@ function apiKeyPlaceholder(hasKey: boolean): string {
         <div class="page-header">
           <div>
             <h1>模型设置</h1>
-            <p class="subtitle">配置 LLM 与 Embedding 模型,任务执行时自动使用你的配置</p>
+            <p class="subtitle">配置多个 LLM 与 Embedding 模型,提交任务时选择使用</p>
           </div>
           <button class="btn-primary" :disabled="saving" @click="handleSave">
             <span v-if="saving" class="spinner-sm" />
@@ -345,126 +386,168 @@ function apiKeyPlaceholder(hasKey: boolean): string {
         <!-- ============ LLM 区 ============ -->
         <section class="config-section">
           <div class="section-header">
-            <h2>LLM 大模型</h2>
-            <button class="btn-secondary" :disabled="testingLlm" @click="handleTestLLM">
-              {{ testingLlm ? '测试中...' : '测试 LLM' }}
-            </button>
-          </div>
-          <p class="section-desc">用于 user_agent 评估与 react_agent 推理</p>
-
-          <div class="field">
-            <label>厂商</label>
-            <select v-model="llmProvider" @change="onLlmProviderChange">
-              <option value="">自定义(手动填写下方字段)</option>
-              <option v-for="p in catalog?.llmProviders" :key="p.id" :value="p.id">
-                {{ p.name }}
-              </option>
-            </select>
+            <div>
+              <h2>LLM 大模型</h2>
+              <p class="section-desc">用于 user_agent 评估与 react_agent 推理,可配置多个</p>
+            </div>
+            <button class="btn-add" @click="addLlmConfig">+ 添加</button>
           </div>
 
-          <div class="field">
-            <label>API Key</label>
-            <input
-              v-model="llmApiKey"
-              type="password"
-              :placeholder="apiKeyPlaceholder(llmHasApiKey)"
-            />
-            <p v-if="llmHasApiKey" class="field-hint field-hint-success">已配置 API Key</p>
-            <a
-              v-else-if="currentLlmProvider?.apiKeyUrl"
-              :href="currentLlmProvider.apiKeyUrl"
-              target="_blank"
-              class="field-link"
-            >
-              在 {{ currentLlmProvider.name }} 获取 API Key →
-            </a>
+          <div v-if="!hasLlmConfigs" class="empty-hint">
+            尚未配置 LLM 模型,点击"+ 添加"新增
           </div>
 
-          <div class="field">
-            <label>模型</label>
-            <select v-model="llmModel" @change="updateLlmThinkingByModel" :disabled="!llmProvider">
-              <option value="" disabled>请选择模型</option>
-              <option v-for="m in currentLlmProvider?.models" :key="m.id" :value="m.id">
-                {{ m.id }}
-              </option>
-            </select>
-          </div>
+          <div v-for="(cfg, idx) in llmConfigs" :key="cfg.id" class="config-card">
+            <div class="card-header" @click="cfg.expanded = !cfg.expanded">
+              <span class="card-toggle">{{ cfg.expanded ? '▼' : '▶' }}</span>
+              <span class="card-title">{{ configTitle(cfg.name, cfg.model) }}</span>
+              <span v-if="cfg.has_api_key" class="badge badge-ok">已配置 Key</span>
+              <span v-else class="badge badge-warn">未配置 Key</span>
+              <span v-if="cfg.provider" class="card-meta">{{ cfg.provider }} · {{ cfg.model }}</span>
+              <div class="card-actions" @click.stop>
+                <button class="btn-icon" title="测试" :disabled="cfg.testing" @click="handleTestLLM(cfg)">
+                  <span v-if="cfg.testing" class="spinner-sm" />
+                  <template v-else>⚡</template>
+                </button>
+                <button class="btn-icon btn-danger" title="删除" @click="removeLlmConfig(idx)">✕</button>
+              </div>
+            </div>
 
-          <div v-if="llmThinkingSupported" class="field field-checkbox">
-            <label>
-              <input
-                v-model="llmEnableThinking"
-                type="checkbox"
-                :disabled="llmThinkingOnly"
-              />
-              <span>启用深度思考(质量更高、耗时更长)</span>
-            </label>
-            <p v-if="llmThinkingOnly" class="field-hint">该模型为仅思考模式,无法关闭</p>
-          </div>
+            <div v-if="cfg.expanded" class="card-body">
+              <div class="field-row">
+                <div class="field">
+                  <label>名称(可选)</label>
+                  <input v-model.trim="cfg.name" type="text" placeholder="如:DeepSeek 日常" />
+                </div>
+                <div class="field">
+                  <label>厂商</label>
+                  <select v-model="cfg.provider" @change="onLlmProviderChange(cfg)">
+                    <option value="">自定义</option>
+                    <option v-for="p in catalog?.llmProviders" :key="p.id" :value="p.id">
+                      {{ p.name }}
+                    </option>
+                  </select>
+                </div>
+              </div>
 
-          <div class="field">
-            <label>Base URL(可选)</label>
-            <input v-model.trim="llmBaseUrl" type="text" placeholder="选厂商后自动填充,可手动修改" />
-            <p class="field-hint">留空使用厂商预设;自定义厂商时需手动填写</p>
+              <div class="field">
+                <label>API Key</label>
+                <input
+                  v-model="cfg.api_key"
+                  type="password"
+                  :placeholder="apiKeyPlaceholder(cfg.has_api_key)"
+                />
+                <p v-if="cfg.has_api_key" class="field-hint field-hint-success">已配置 API Key</p>
+              </div>
+
+              <div class="field-row">
+                <div class="field">
+                  <label>模型</label>
+                  <select v-model="cfg.model" :disabled="!cfg.provider">
+                    <option value="" disabled>请选择</option>
+                    <option v-for="m in getLlmProvider(cfg.provider)?.models" :key="m.id" :value="m.id">
+                      {{ m.id }}
+                    </option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label>Base URL(可选)</label>
+                  <input v-model.trim="cfg.base_url" type="text" placeholder="选厂商后自动填充" />
+                </div>
+              </div>
+
+              <div v-if="llmThinkingSupported(cfg)" class="field field-checkbox">
+                <label>
+                  <input
+                    v-model="cfg.enable_thinking"
+                    type="checkbox"
+                    :disabled="llmThinkingOnly(cfg)"
+                  />
+                  <span>启用深度思考</span>
+                </label>
+                <p v-if="llmThinkingOnly(cfg)" class="field-hint">该模型为仅思考模式,无法关闭</p>
+              </div>
+            </div>
           </div>
         </section>
 
         <!-- ============ Embedding 区 ============ -->
         <section class="config-section">
           <div class="section-header">
-            <h2>Embedding 模型</h2>
-            <button class="btn-secondary" :disabled="testingEmb" @click="handleTestEmbedding">
-              {{ testingEmb ? '测试中...' : '测试 Embedding' }}
-            </button>
-          </div>
-          <p class="section-desc">用于向量化文本(当前阶段仅存储与测试,尚未接入检索流程)</p>
-
-          <div class="field">
-            <label>厂商</label>
-            <select v-model="embProvider" @change="onEmbProviderChange">
-              <option value="">自定义(手动填写下方字段)</option>
-              <option v-for="p in catalog?.embeddingProviders" :key="p.id" :value="p.id">
-                {{ p.name }}
-              </option>
-            </select>
+            <div>
+              <h2>Embedding 模型</h2>
+              <p class="section-desc">用于向量化文本(当前仅存储与测试,尚未接入检索),可配置多个</p>
+            </div>
+            <button class="btn-add" @click="addEmbConfig">+ 添加</button>
           </div>
 
-          <div class="field">
-            <label>API Key</label>
-            <input
-              v-model="embApiKey"
-              type="password"
-              :placeholder="apiKeyPlaceholder(embHasApiKey)"
-            />
-            <p v-if="embHasApiKey" class="field-hint field-hint-success">已配置 API Key</p>
-            <a
-              v-else-if="currentEmbProvider?.apiKeyUrl"
-              :href="currentEmbProvider.apiKeyUrl"
-              target="_blank"
-              class="field-link"
-            >
-              在 {{ currentEmbProvider.name }} 获取 API Key →
-            </a>
+          <div v-if="!hasEmbConfigs" class="empty-hint">
+            尚未配置 Embedding 模型,点击"+ 添加"新增
           </div>
 
-          <div class="field">
-            <label>模型</label>
-            <select v-model="embModel" :disabled="!embProvider">
-              <option value="" disabled>请选择模型</option>
-              <option v-for="m in currentEmbProvider?.models" :key="m.id" :value="m.id">
-                {{ m.name }} ({{ m.id }})
-              </option>
-            </select>
-            <p v-if="embDimensionHint" class="field-hint">{{ embDimensionHint }}</p>
-          </div>
+          <div v-for="(cfg, idx) in embConfigs" :key="cfg.id" class="config-card">
+            <div class="card-header" @click="cfg.expanded = !cfg.expanded">
+              <span class="card-toggle">{{ cfg.expanded ? '▼' : '▶' }}</span>
+              <span class="card-title">{{ configTitle(cfg.name, cfg.model) }}</span>
+              <span v-if="cfg.has_api_key" class="badge badge-ok">已配置 Key</span>
+              <span v-else class="badge badge-warn">未配置 Key</span>
+              <span v-if="cfg.provider" class="card-meta">{{ cfg.provider }} · {{ cfg.model }}</span>
+              <div class="card-actions" @click.stop>
+                <button class="btn-icon" title="测试" :disabled="cfg.testing" @click="handleTestEmbedding(cfg)">
+                  <span v-if="cfg.testing" class="spinner-sm" />
+                  <template v-else>⚡</template>
+                </button>
+                <button class="btn-icon btn-danger" title="删除" @click="removeEmbConfig(idx)">✕</button>
+              </div>
+            </div>
 
-          <div class="field">
-            <label>Base URL(可选)</label>
-            <input v-model.trim="embBaseUrl" type="text" placeholder="选厂商后自动填充,可手动修改" />
+            <div v-if="cfg.expanded" class="card-body">
+              <div class="field-row">
+                <div class="field">
+                  <label>名称(可选)</label>
+                  <input v-model.trim="cfg.name" type="text" placeholder="如:DashScope 向量" />
+                </div>
+                <div class="field">
+                  <label>厂商</label>
+                  <select v-model="cfg.provider" @change="onEmbProviderChange(cfg)">
+                    <option value="">自定义</option>
+                    <option v-for="p in catalog?.embeddingProviders" :key="p.id" :value="p.id">
+                      {{ p.name }}
+                    </option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="field">
+                <label>API Key</label>
+                <input
+                  v-model="cfg.api_key"
+                  type="password"
+                  :placeholder="apiKeyPlaceholder(cfg.has_api_key)"
+                />
+              </div>
+
+              <div class="field-row">
+                <div class="field">
+                  <label>模型</label>
+                  <select v-model="cfg.model" :disabled="!cfg.provider">
+                    <option value="" disabled>请选择</option>
+                    <option v-for="m in getEmbProvider(cfg.provider)?.models" :key="m.id" :value="m.id">
+                      {{ m.name }} ({{ m.id }})
+                    </option>
+                  </select>
+                  <p v-if="embDimensionHint(cfg)" class="field-hint">{{ embDimensionHint(cfg) }}</p>
+                </div>
+                <div class="field">
+                  <label>Base URL(可选)</label>
+                  <input v-model.trim="cfg.base_url" type="text" placeholder="选厂商后自动填充" />
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 
-        <!-- 底部保存按钮(移动端友好) -->
+        <!-- 底部保存按钮 -->
         <div class="bottom-actions">
           <button class="btn-primary" :disabled="saving" @click="handleSave">
             <span v-if="saving" class="spinner-sm" />
@@ -483,7 +566,7 @@ function apiKeyPlaceholder(hasKey: boolean): string {
 }
 
 .main {
-  max-width: 720px;
+  max-width: 760px;
   margin: 0 auto;
   padding: var(--space-8) var(--space-6) var(--space-12);
 }
@@ -571,9 +654,10 @@ function apiKeyPlaceholder(hasKey: boolean): string {
 
 .section-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-3);
+  margin-bottom: var(--space-4);
 }
 
 .section-header h2 {
@@ -583,27 +667,119 @@ function apiKeyPlaceholder(hasKey: boolean): string {
 .section-desc {
   color: var(--color-text-secondary);
   font-size: var(--fs-sm);
-  margin: var(--space-1) 0 var(--space-5);
+  margin: var(--space-1) 0 0;
+}
+
+.empty-hint {
+  padding: var(--space-6);
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: var(--fs-sm);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+/* ---- 配置卡片 ---- */
+.config-card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-3);
+  overflow: hidden;
+}
+
+.config-card:last-child {
+  margin-bottom: 0;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface-alt);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.card-header:hover {
+  background: var(--color-border);
+}
+
+.card-toggle {
+  font-size: 10px;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.card-title {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  flex-shrink: 0;
+}
+
+.card-meta {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  margin-left: auto;
+  font-family: var(--font-mono);
+}
+
+.card-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-weight: var(--fw-medium);
+}
+
+.badge-ok {
+  background: var(--color-success-light);
+  color: var(--color-success);
+}
+
+.badge-warn {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.card-body {
+  padding: var(--space-4);
+  border-top: 1px solid var(--color-border);
 }
 
 /* ---- 表单字段 ---- */
+.field-row {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.field-row .field {
+  flex: 1;
+}
+
 .field {
-  margin-bottom: var(--space-4);
+  margin-bottom: var(--space-3);
 }
 
 .field label {
   display: block;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
-  margin-bottom: var(--space-2);
+  margin-bottom: var(--space-1);
+  color: var(--color-text-secondary);
 }
 
 .field input,
 .field select {
   width: 100%;
-  height: 42px;
+  height: 38px;
   padding: 0 var(--space-3);
-  font-size: var(--fs-base);
+  font-size: var(--fs-sm);
   color: var(--color-text);
   background: var(--color-surface);
   border: 1px solid var(--color-border-strong);
@@ -652,18 +828,6 @@ function apiKeyPlaceholder(hasKey: boolean): string {
   color: var(--color-success);
 }
 
-.field-link {
-  display: inline-block;
-  margin-top: var(--space-1);
-  font-size: var(--fs-xs);
-  color: var(--color-primary);
-  text-decoration: none;
-}
-
-.field-link:hover {
-  text-decoration: underline;
-}
-
 /* ---- 按钮 ---- */
 .btn-primary {
   display: inline-flex;
@@ -690,7 +854,7 @@ function apiKeyPlaceholder(hasKey: boolean): string {
   cursor: not-allowed;
 }
 
-.btn-secondary {
+.btn-add {
   height: 32px;
   padding: 0 var(--space-4);
   font-size: var(--fs-xs);
@@ -699,18 +863,42 @@ function apiKeyPlaceholder(hasKey: boolean): string {
   background: var(--color-primary-light);
   border: 1px solid var(--color-primary-border);
   border-radius: var(--radius-md);
+  cursor: pointer;
   transition: all var(--transition-fast);
   white-space: nowrap;
 }
 
-.btn-secondary:hover:not(:disabled) {
+.btn-add:hover {
   background: var(--color-primary);
   color: white;
 }
 
-.btn-secondary:disabled {
-  opacity: 0.6;
+.btn-icon {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  transition: all var(--transition-fast);
+}
+
+.btn-icon:hover:not(:disabled) {
+  background: var(--color-surface);
+}
+
+.btn-icon:disabled {
+  opacity: 0.5;
   cursor: not-allowed;
+}
+
+.btn-danger:hover {
+  background: var(--color-danger-light);
+  color: var(--color-danger);
 }
 
 .bottom-actions {

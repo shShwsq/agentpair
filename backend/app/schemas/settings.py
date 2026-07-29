@@ -1,26 +1,33 @@
-"""模型配置相关的 Pydantic 模型
+"""模型配置相关的 Pydantic 模型(列表式)
+
+用户可配置多个 LLM / Embedding 模型,每个配置有唯一 id 和自定义名称。
+任务提交时选择一个 llm_config_id,orchestrator 按此 id 加载对应配置。
 
 安全约定:
 - 响应(GET)绝不回传 api_key 原文,只返回 has_api_key 布尔,避免凭据经 HTTP 泄露
 - 请求(PUT)中 api_key 为空字符串表示"保留已存的 key",非空表示"更新为新 key"
-- 测试端点(POST /test)使用已保存的配置,不接收前端传来的明文 key
+- 测试端点(POST /test)按 config_id 使用已保存的配置,不接收前端传来的明文 key
 """
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ============================================================
-# 配置写入(请求体)
+# 配置写入(请求体)——单个配置项
 # ============================================================
 
 
-class LLMConfigIn(BaseModel):
-    """LLM 配置写入
+class LLMConfigItem(BaseModel):
+    """LLM 配置项(列表中的一个元素)
 
     api_key 约定:
     - 首次保存:必填,传完整 key
     - 后续更新:传空串 "" 表示保留已存的 key;传非空串表示更新为新 key
     """
 
+    # 前端生成的唯一 id(uuid),用于任务提交时引用
+    id: str
+    # 用户自定义别名,如 "DeepSeek-V3 日常"、"Qwen-QwQ 深度"
+    name: str = ""
     provider: str
     api_key: str = ""
     model: str
@@ -29,9 +36,11 @@ class LLMConfigIn(BaseModel):
     base_url: str | None = None
 
 
-class EmbeddingConfigIn(BaseModel):
-    """Embedding 配置写入(api_key 约定同 LLMConfigIn)"""
+class EmbeddingConfigItem(BaseModel):
+    """Embedding 配置项(api_key 约定同 LLMConfigItem)"""
 
+    id: str
+    name: str = ""
     provider: str
     api_key: str = ""
     model: str
@@ -40,51 +49,62 @@ class EmbeddingConfigIn(BaseModel):
 
 
 class SaveModelsRequest(BaseModel):
-    """保存模型配置请求(两区可独立保存,未传的一侧保持不变)"""
+    """保存模型配置请求(整体替换列表)
 
-    llm: LLMConfigIn | None = None
-    embedding: EmbeddingConfigIn | None = None
+    - 传 llm_configs: 整体替换 LLM 配置列表
+    - 传 embedding_configs: 整体替换 Embedding 配置列表
+    - 未传的一侧保持不变
+    """
+
+    llm_configs: list[LLMConfigItem] | None = None
+    embedding_configs: list[EmbeddingConfigItem] | None = None
 
 
 # ============================================================
-# 配置读取(响应体)
+# 配置读取(响应体)——单个配置项(不含 api_key 原文)
 # ============================================================
 
 
-class LLMConfigOut(BaseModel):
-    """LLM 配置读取(不含 api_key 原文)"""
+class LLMConfigItemOut(BaseModel):
+    """LLM 配置项读取(不含 api_key 原文)"""
 
-    provider: str | None = None
-    model: str | None = None
+    id: str
+    name: str = ""
+    provider: str
+    model: str
     enable_thinking: bool = True
     base_url: str | None = None
     has_api_key: bool = False
 
-    model_config = {"from_attributes": True}
 
+class EmbeddingConfigItemOut(BaseModel):
+    """Embedding 配置项读取(不含 api_key 原文)"""
 
-class EmbeddingConfigOut(BaseModel):
-    """Embedding 配置读取(不含 api_key 原文)"""
-
-    provider: str | None = None
-    model: str | None = None
+    id: str
+    name: str = ""
+    provider: str
+    model: str
     base_url: str | None = None
     dimension: int = 1024
     has_api_key: bool = False
 
-    model_config = {"from_attributes": True}
-
 
 class UserModelsResponse(BaseModel):
-    """用户已保存的模型配置"""
+    """用户已保存的模型配置列表"""
 
-    llm: LLMConfigOut | None = None
-    embedding: EmbeddingConfigOut | None = None
+    llm_configs: list[LLMConfigItemOut] = Field(default_factory=list)
+    embedding_configs: list[EmbeddingConfigItemOut] = Field(default_factory=list)
 
 
 # ============================================================
-# 测试连通性响应
+# 测试连通性请求与响应
 # ============================================================
+
+
+class TestRequest(BaseModel):
+    """测试连通性请求(指定要测试的配置 id)"""
+
+    config_id: str
 
 
 class TestResponse(BaseModel):

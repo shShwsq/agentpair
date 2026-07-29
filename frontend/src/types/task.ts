@@ -18,6 +18,8 @@ export interface TaskCreateRequest {
   scenario: string
   user_input?: string
   params?: Record<string, unknown>
+  /** 用户选择的 LLM 配置 id(对应 user_llm_configs.llm_configs[].id) */
+  llm_config_id?: string
   /** 兼容字段:传 repo_url 时自动生成 user_input */
   repo_url?: string
   branch?: string
@@ -65,6 +67,7 @@ export interface TaskDetail {
   scenario: string
   user_input: string
   params?: Record<string, unknown> | null
+  llm_config_id?: string | null
   status: TaskStatus
   current_stage: string | null
   error_message: string | null

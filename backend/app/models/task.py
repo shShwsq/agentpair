@@ -48,6 +48,10 @@ class Task(Base):
     # 失败时的错误信息
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # 用户提交任务时选择的 LLM 配置 id(对应 user_llm_configs.llm_configs[].id)
+    # 为空表示用 env 默认配置或匿名任务
+    llm_config_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

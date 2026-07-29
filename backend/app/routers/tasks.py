@@ -67,6 +67,7 @@ def create_task(
             user_input=user_input,
             params=params,
             user_id=current_user.id if current_user else None,
+            llm_config_id=req.llm_config_id,
             status=TaskStatus.PENDING,
             current_stage="已提交,等待执行",
         )

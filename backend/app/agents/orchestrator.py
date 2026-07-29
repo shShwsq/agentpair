@@ -40,8 +40,8 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
 
     scenario_id = task.scenario
 
-    # 阶段 6:加载用户保存的 LLM 配置(若已配置则覆盖 env 默认)
-    llm_client = _build_llm_client(db, task.user_id)
+    # 阶段 6:按 task.llm_config_id 加载用户保存的 LLM 配置(覆盖 env 默认)
+    llm_client = _build_llm_client(db, task.user_id, task.llm_config_id)
 
     # 用户原始意图
     user_intent = task.user_input
@@ -256,20 +256,29 @@ def _publish_status(task: Task) -> None:
     })
 
 
-def _build_llm_client(db: Session, user_id) -> LLMClient | None:
-    """按 task.user_id 加载用户保存的 LLM 配置,构造 LLMClient
+def _build_llm_client(db: Session, user_id, llm_config_id: str | None = None) -> LLMClient | None:
+    """按 task.user_id + task.llm_config_id 加载用户保存的 LLM 配置
 
-    - user_id 为空(匿名任务)或未配置 → 返回 None,agent 内部回退到 env 默认
-    - 用户已配置 → 返回 LLMClient.from_user_config(...)
-    - 构造失败(如 provider 已下线)→ 记日志并回退到 None
+    - user_id 为空(匿名任务)或 llm_config_id 为空 → 返回 None,agent 回退到 env 默认
+    - 找到指定配置 → 返回 LLMClient.from_config_dict(...)
+    - 找不到配置 id 或构造失败 → 记日志并回退到 None
     """
-    if user_id is None:
+    if user_id is None or not llm_config_id:
         return None
     try:
         cfg = db.query(UserLLMConfig).filter(UserLLMConfig.user_id == user_id).first()
-        if cfg is None or not cfg.llm_config:
+        if cfg is None:
             return None
-        return LLMClient.from_user_config(cfg)
+        # 从配置列表中按 id 查找
+        target = None
+        for c in cfg.llm_configs:
+            if c.get("id") == llm_config_id:
+                target = c
+                break
+        if target is None:
+            logger.warning(f"[user={user_id}] 未找到 llm_config_id={llm_config_id},回退到 env 默认")
+            return None
+        return LLMClient.from_config_dict(target)
     except Exception as e:
         logger.warning(f"[user={user_id}] 加载用户 LLM 配置失败,回退到 env 默认: {e}")
         return None

@@ -1,7 +1,8 @@
 /**
- * 模型设置相关类型定义
+ * 模型设置相关类型定义(列表式)
  *
- * 与后端 app/schemas/settings.py + app/llm/models_catalog.json 对应
+ * 用户可配置多个 LLM / Embedding 模型,每个配置有唯一 id 和自定义名称。
+ * 任务提交时选择一个 llm_config_id,后端 orchestrator 按此 id 加载对应配置。
  *
  * 安全约定:
  * - 后端响应(GET)不返回 api_key 原文,只返回 has_api_key
@@ -67,35 +68,41 @@ export interface ModelsCatalog {
 }
 
 // ============================================================
-// 用户已保存的配置(响应,不含 api_key 原文)
+// 用户已保存的配置(响应,不含 api_key 原文)——列表式
 // ============================================================
 
-export interface LLMConfigOut {
-  provider: string | null
-  model: string | null
+export interface LLMConfigItemOut {
+  id: string
+  name: string
+  provider: string
+  model: string
   enable_thinking: boolean
   base_url: string | null
   has_api_key: boolean
 }
 
-export interface EmbeddingConfigOut {
-  provider: string | null
-  model: string | null
+export interface EmbeddingConfigItemOut {
+  id: string
+  name: string
+  provider: string
+  model: string
   base_url: string | null
   dimension: number
   has_api_key: boolean
 }
 
 export interface UserModelsResponse {
-  llm: LLMConfigOut | null
-  embedding: EmbeddingConfigOut | null
+  llm_configs: LLMConfigItemOut[]
+  embedding_configs: EmbeddingConfigItemOut[]
 }
 
 // ============================================================
-// 保存配置(请求)
+// 保存配置(请求)——列表式
 // ============================================================
 
-export interface LLMConfigIn {
+export interface LLMConfigItem {
+  id: string
+  name: string
   provider: string
   /** 空串 = 保留已存的 key(更新时);首次保存必填 */
   api_key: string
@@ -105,7 +112,9 @@ export interface LLMConfigIn {
   base_url: string | null
 }
 
-export interface EmbeddingConfigIn {
+export interface EmbeddingConfigItem {
+  id: string
+  name: string
   provider: string
   api_key: string
   model: string
@@ -114,13 +123,17 @@ export interface EmbeddingConfigIn {
 }
 
 export interface SaveModelsRequest {
-  llm?: LLMConfigIn
-  embedding?: EmbeddingConfigIn
+  llm_configs?: LLMConfigItem[]
+  embedding_configs?: EmbeddingConfigItem[]
 }
 
 // ============================================================
-// 测试响应
+// 测试请求与响应
 // ============================================================
+
+export interface TestRequest {
+  config_id: string
+}
 
 export interface TestResponse {
   success: boolean
