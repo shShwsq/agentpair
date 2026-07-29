@@ -151,11 +151,12 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             content=f"执行失败: {e}",
         )
     finally:
-        # 关闭沙箱(多轮复用结束)
+        # 延迟关闭沙箱:标记任务完成,保留 session 供前端浏览工作区文件
+        # 实际清理由 workspace 路由的 cleanup_expired_sessions() 惰性触发(TTL 1 小时)
         try:
-            sandbox_tools.close_session(task_id_str)
+            sandbox_tools.mark_task_completed(task_id_str)
         except Exception as cleanup_err:
-            logger.warning(f"[task={task.id}] 关闭沙箱失败: {cleanup_err}")
+            logger.warning(f"[task={task.id}] 标记任务完成失败: {cleanup_err}")
         # 通知事件总线:任务结束,推送 done/error 终止事件
         if task.status == TaskStatus.COMPLETED:
             publish(task.id, "done", {"status": "completed"})

@@ -21,6 +21,7 @@ import { useRoute } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
 import ConversationMessage from '@/components/ConversationMessage.vue'
+import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import { getTask } from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
 import { extractErrorMessage } from '@/utils/error'
@@ -642,6 +643,14 @@ function formatTime(iso: string): string {
       </template>
     </AppHeader>
 
+    <div class="page-body">
+    <!-- 左侧:工作区文件树侧栏(可折叠) -->
+    <WorkspaceSidebar
+      v-if="task"
+      :task-id="route.params.id as string"
+      :is-running="isRunning"
+    />
+
     <main class="main">
       <!-- 加载中 -->
       <div v-if="loading" class="loading-state">
@@ -821,6 +830,7 @@ function formatTime(iso: string): string {
         </section>
       </template>
     </main>
+    </div>
   </div>
 </template>
 
@@ -830,7 +840,15 @@ function formatTime(iso: string): string {
   background: var(--color-bg);
 }
 
+.page-body {
+  display: flex;
+  align-items: flex-start;
+  min-height: calc(100vh - 56px);
+}
+
 .main {
+  flex: 1;
+  min-width: 0;
   max-width: var(--content-width);
   margin: 0 auto;
   padding: var(--space-6) var(--space-6) var(--space-12);

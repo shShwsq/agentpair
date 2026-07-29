@@ -25,10 +25,14 @@ from app.sandbox.client import SandboxSession, create_sandbox
 logger = logging.getLogger(__name__)
 
 
-# 全局缓存 task_id -> (SandboxSession, repo_path, mock_local_dir)
+# 全局缓存 task_id -> (SandboxSession, repo_path, mock_local_dir, completed_at)
 # mock 模式下,mock_local_dir 是本地临时目录,工具用 Python 直接操作
 # sandbox 模式下,repo_path 是沙箱内的路径
+# completed_at: 任务完成时间(用于延迟清理,任务结束后保留 session 供前端浏览工作区)
 _sessions: dict[str, dict[str, Any]] = {}
+
+# 任务完成后保留 session 的时间(秒),超时后自动清理
+_SESSION_TTL_AFTER_COMPLETE = 3600  # 1 小时
 
 
 def _get_or_create_session(task_id: str) -> dict[str, Any]:
@@ -48,8 +52,35 @@ def _set_repo_path(task_id: str, repo_path: str) -> None:
         _sessions[task_id]["repo_path"] = repo_path
 
 
+def mark_task_completed(task_id: str) -> None:
+    """标记任务完成(不关闭 session,延迟清理供前端浏览工作区)
+
+    orchestrator 在任务结束后调用此方法而非 close_session,
+    保留 session 让用户能在前端查看工作区文件结构。
+    实际清理由 cleanup_expired_sessions() 在后续请求中惰性触发。
+    """
+    if task_id in _sessions:
+        _sessions[task_id]["completed_at"] = time.time()
+
+
+def cleanup_expired_sessions() -> int:
+    """清理过期的已完成 session(TTL 超时)
+
+    在 workspace 路由每次访问时调用,惰性清理。
+    返回清理的 session 数。
+    """
+    now = time.time()
+    expired = [
+        tid for tid, ctx in _sessions.items()
+        if ctx.get("completed_at") and now - ctx["completed_at"] > _SESSION_TTL_AFTER_COMPLETE
+    ]
+    for tid in expired:
+        close_session(tid)
+    return len(expired)
+
+
 def close_session(task_id: str) -> None:
-    """任务结束后关闭沙箱,清理资源"""
+    """关闭沙箱,清理资源"""
     if task_id not in _sessions:
         return
     ctx = _sessions.pop(task_id)
@@ -62,6 +93,66 @@ def close_session(task_id: str) -> None:
     mock_dir = ctx.get("mock_dir")
     if mock_dir:
         shutil.rmtree(mock_dir, ignore_errors=True)
+
+
+def get_workspace_info(task_id: str) -> dict[str, Any] | None:
+    """获取任务的工作区信息(供前端浏览)
+
+    返回 None 表示 session 不存在(任务未执行 clone 或已清理)。
+    返回 dict: { repo_path, mode, completed }
+    """
+    ctx = _sessions.get(task_id)
+    if ctx is None:
+        return None
+    return {
+        "repo_path": ctx.get("repo_path", ""),
+        "mode": ctx.get("mode", ""),
+        "completed": "completed_at" in ctx,
+    }
+
+
+def browse_files(task_id: str, subdir: str = "") -> dict:
+    """面向前端的文件列表(复用 list_files 逻辑)
+
+    与 list_files 工具的区别:
+    - 不需要传 repo_path(从 _sessions 取)
+    - task_id 必填(前端按任务浏览)
+    - 返回结构一致,前端可直接渲染树
+    """
+    ctx = _sessions.get(task_id)
+    if ctx is None:
+        raise RuntimeError("工作区不可用:任务未 clone 仓库或会话已过期清理")
+
+    repo_path = ctx.get("repo_path", "")
+    if not repo_path:
+        raise RuntimeError("工作区不可用:尚未 clone 仓库")
+
+    # 复用 list_files 的实现(mock / sandbox 分支)
+    mode = ctx["mode"]
+    if mode == "mock":
+        return _list_files_mock(repo_path, subdir, 500)
+    else:
+        return _list_files_sandbox(ctx, repo_path, subdir, 500)
+
+
+def browse_read_file(task_id: str, file_path: str, offset: int = 1, max_lines: int = 500) -> dict:
+    """面向前端的文件读取(复用 read_file 逻辑)
+
+    默认读 500 行(比 LLM 工具的 200 行多,前端查看用)
+    """
+    ctx = _sessions.get(task_id)
+    if ctx is None:
+        raise RuntimeError("工作区不可用:任务未 clone 仓库或会话已过期清理")
+
+    repo_path = ctx.get("repo_path", "")
+    if not repo_path:
+        raise RuntimeError("工作区不可用:尚未 clone 仓库")
+
+    mode = ctx["mode"]
+    if mode == "mock":
+        return _read_file_mock(repo_path, file_path, max_lines, offset)
+    else:
+        return _read_file_sandbox(ctx, repo_path, file_path, max_lines, offset)
 
 
 # ============================================================
@@ -87,9 +178,13 @@ def clone_repo(repo_url: str, branch: str | None = None, task_id: str = "") -> d
     mode = ctx["mode"]
 
     if mode == "mock":
-        return _clone_repo_mock(ctx, clone_url, repo_name, branch)
+        result = _clone_repo_mock(ctx, clone_url, repo_name, branch)
     else:
-        return _clone_repo_sandbox(ctx, clone_url, repo_name, branch)
+        result = _clone_repo_sandbox(ctx, clone_url, repo_name, branch)
+
+    # 记录工作区路径(供前端 workspace 浏览 API 使用)
+    _set_repo_path(task_id, result["path"])
+    return result
 
 
 def _clone_repo_mock(ctx: dict, clone_url: str, repo_name: str, branch: str | None) -> dict:
