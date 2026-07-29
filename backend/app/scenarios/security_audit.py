@@ -194,7 +194,8 @@ class SecurityAuditScenario:
 
 - 步骤数 3-8 项为宜,太细碎反而难看
 - 状态标记:[pending] / [in_progress] / [done],首次输出全用 [pending]
-- **后续每次思考时,在 content 开头重新输出更新后的 <plan>**(把已完成的标 [done]、正在做的标 [in_progress]),让用户实时看到进度
+- **后续思考时,如果你看到了"[系统提醒] 当前计划清单状态"消息**,说明系统在帮你维护 plan 状态——你只需在 content 开头重新输出 `<plan>`,把**已完成的步骤**标为 `[done]`(系统会合并你的标注)
+- 系统会根据你调用的工具自动标记 `[in_progress]`,你不需要手动管理 in_progress,只需确认 done
 - 简单任务(如只查单个文件)可省略 plan,直接开干
 - plan 只是给用户看进度,**不改变 ReAct 执行方式**,每步内部仍正常思考→调工具→观察
 

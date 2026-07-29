@@ -124,6 +124,10 @@ def run_react_agent(
     summary = ""
     recent_calls: list[str] = []
 
+    # plan 状态(代码维护,参考 LangGraph Plan-and-Execute)
+    # 初始为空,LLM 首次思考输出 <plan> 后填充;之后每轮由代码推进 in_progress + LLM 确认 done
+    current_plan: list[dict] = []
+
     for iteration in range(1, MAX_ITERATIONS + 1):
         logger.info(f"[task={task.id}] react_agent 第 {round_idx} 轮 / 迭代 {iteration}")
 
@@ -163,13 +167,14 @@ def run_react_agent(
                 publish_event=False,
             )
             # 提取计划清单(复杂任务时 react_agent 会在 content 里输出 <plan>...</plan>)
-            # plan 数据持久化在 thinking.content 里,历史回放时前端重新提取;
-            # 在线订阅者通过 plan 事件实时收到(覆盖式更新,取最新一次)
-            plan_steps = _extract_plan(content_full)
-            if plan_steps:
+            # 合并 LLM 显式更新到 current_plan(信任 LLM 的 done 标注),
+            # 然后推送合并后的完整 plan(覆盖式更新,前端始终看到最新状态)
+            llm_plan = _extract_plan(content_full)
+            if llm_plan:
+                current_plan = _merge_plan(current_plan, llm_plan)
                 publish(task.id, "plan", {
                     "round_idx": round_idx,
-                    "steps": plan_steps,
+                    "steps": current_plan,
                 })
 
         # 没有工具调用 → agent 认为做完了
@@ -190,6 +195,22 @@ def run_react_agent(
             # 记录工具调用签名(循环检测)
             call_sig = f"{fn_name}:{json.dumps(fn_args, sort_keys=True)}"
             recent_calls.append(call_sig)
+
+            # plan 状态推进:根据工具名推断当前在执行哪个 step,标 in_progress
+            # 粗粒度(代码可判),done 标注交给 LLM 在下一轮思考时确认
+            if current_plan:
+                step_id = _infer_step_from_tool(fn_name, current_plan)
+                if step_id is not None:
+                    for s in current_plan:
+                        if s["id"] == step_id:
+                            if s["status"] == "pending":
+                                s["status"] = "in_progress"
+                                # 推送更新(状态刚变化)
+                                publish(task.id, "plan", {
+                                    "round_idx": round_idx,
+                                    "steps": current_plan,
+                                })
+                            break
 
             # 工具意图:人类可读的一句话说明,合并到 content 首行(前端拆分渲染)
             intent = _build_tool_intent(fn_name, fn_args)
@@ -253,6 +274,26 @@ def run_react_agent(
         # submit_results 被调用后,结束循环
         if results_collected:
             break
+
+        # plan 提醒注入:把当前 plan 状态作为 system 消息加到 messages,
+        # 让 LLM 在下一轮思考时看到进度,决定是否标 done(细粒度状态确认)
+        # 用可替换的 system 消息(不累积,避免 messages 膨胀):
+        # 找到上一轮注入的 plan 提醒就替换,否则追加新的
+        if current_plan:
+            reminder = _format_plan_reminder(current_plan)
+            if reminder:
+                # 查找并替换已有的 plan 提醒消息(避免累积)
+                replaced = False
+                for i in range(len(messages) - 1, -1, -1):
+                    msg = messages[i]
+                    if msg.get("role") == "system" and msg.get("content", "").startswith(
+                        "[系统提醒] 当前计划清单状态"
+                    ):
+                        msg["content"] = reminder
+                        replaced = True
+                        break
+                if not replaced:
+                    messages.append({"role": "system", "content": reminder})
 
         # 循环检测
         if (
@@ -516,6 +557,126 @@ def _extract_plan(content: str) -> list[dict] | None:
             status = "pending"
         steps.append({"id": i, "text": text, "status": status})
     return steps if steps else None
+
+
+# ---- plan 状态维护(代码驱动 + LLM 显式更新合并) ----
+#
+# 设计思路(参考 LangGraph Plan-and-Execute):
+# - 代码维护权威 current_plan,不依赖 LLM 每轮重写
+# - 工具调用前:根据 tool_name 推断当前 step,标 in_progress(粗粒度,代码可判)
+# - 工具调用后:把当前 plan 状态作为 system 提醒注入 messages,
+#              让 LLM 在下一轮思考时决定标 done(细粒度,需语义判断)
+# - LLM 在 thinking 里输出新 <plan> 时:合并到 current_plan,
+#              信任 LLM 的 done 标注(它有 tool_result 上下文,判断更准)
+# - 双向同步:代码推进 in_progress,LLM 确认 done
+
+# 工具名 → plan 步骤关键词映射(用于推断当前在执行哪个 step)
+# key 是工具名,value 是匹配 step.text 的关键词列表(任一命中即匹配)
+_TOOL_STEP_KEYWORDS: dict[str, list[str]] = {
+    "clone_repo":      ["克隆", "clone", "仓库"],
+    "list_files":      ["结构", "目录", "查看", "list"],
+    "read_file":       ["读取", "依赖", "清单", "read"],
+    "query_cve":       ["依赖", "cve", "漏洞"],
+    "search_code":     ["注入", "密钥", "反序列化", "ssrf", "路径", "认证", "授权",
+                         "审计", "代码审计", "search"],
+    "run_semgrep":     ["semgrep", "sast", "静态分析"],
+    "list_skills":     ["skill", "技能"],
+    "skill":           ["skill", "技能"],
+    "submit_results":  ["提交", "汇总", "submit"],
+}
+
+
+def _infer_step_from_tool(tool_name: str, plan_steps: list[dict]) -> int | None:
+    """根据工具名推断当前在执行哪个 plan step,返回 step id
+
+    匹配规则:tool_name 对应的关键词与 step.text 命中(大小写不敏感)。
+    优先匹配 status=pending 的 step(即将开始),其次 in_progress 的 step(正在做)。
+    无匹配返回 None。
+    """
+    keywords = _TOOL_STEP_KEYWORDS.get(tool_name)
+    if not keywords or not plan_steps:
+        return None
+
+    kw_lower = [k.lower() for k in keywords]
+    # 先找 pending 中匹配的(说明进入了新步骤)
+    for s in plan_steps:
+        if s["status"] != "pending":
+            continue
+        text_lower = s["text"].lower()
+        if any(k in text_lower for k in kw_lower):
+            return s["id"]
+    # 再找 in_progress 中匹配的(说明还在做同一步骤)
+    for s in plan_steps:
+        if s["status"] != "in_progress":
+            continue
+        text_lower = s["text"].lower()
+        if any(k in text_lower for k in kw_lower):
+            return s["id"]
+    return None
+
+
+def _merge_plan(current: list[dict], llm_update: list[dict]) -> list[dict]:
+    """把 LLM 显式输出的 plan 状态合并到 current_plan
+
+    合并策略(信任 LLM 的 done 标注,它有 tool_result 上下文):
+    - 按 step.text 匹配(忽略 id,LLM 可能重新编号)
+    - LLM 标 done → current 对应 step 标 done
+    - LLM 标 in_progress → current 对应 step 标 in_progress
+    - LLM 未提及的 step → 保持 current 原状态(代码已推进的 in_progress 不丢)
+    - LLM 新增的 step → 追加到 current 末尾
+    返回合并后的 plan(新 list,不修改入参)。
+    """
+    if not llm_update:
+        return list(current)
+    if not current:
+        return [dict(s) for s in llm_update]
+
+    # 用 text 做 key 建索引(忽略首尾空白和大小写差异)
+    def _key(text: str) -> str:
+        return text.strip().lower()
+
+    current_by_text = {_key(s["text"]): s for s in current}
+    llm_by_text = {_key(s["text"]): s for s in llm_update}
+
+    merged: list[dict] = []
+    next_id = 1
+    # 1. 遍历 current,按 LLM 更新状态(若 LLM 提到)
+    for s in current:
+        new_s = dict(s)
+        new_s["id"] = next_id
+        next_id += 1
+        k = _key(s["text"])
+        if k in llm_by_text:
+            # LLM 显式标注了,信任 LLM(尤其是 done)
+            new_s["status"] = llm_by_text[k]["status"]
+        merged.append(new_s)
+
+    # 2. 追加 LLM 新增的 step(current 里没有的)
+    for s in llm_update:
+        k = _key(s["text"])
+        if k not in current_by_text:
+            new_s = dict(s)
+            new_s["id"] = next_id
+            next_id += 1
+            merged.append(new_s)
+
+    return merged
+
+
+def _format_plan_reminder(plan_steps: list[dict]) -> str:
+    """格式化 plan 状态,作为 system 提醒注入 messages
+
+    让 LLM 在下一轮思考时看到当前进度,决定是否标 done。
+    """
+    if not plan_steps:
+        return ""
+    lines = ["[系统提醒] 当前计划清单状态(已完成的请标记 [done],正在做的标 [in_progress]):"]
+    status_symbol = {"pending": "○", "in_progress": "◌", "done": "✓"}
+    for s in plan_steps:
+        sym = status_symbol.get(s["status"], "○")
+        lines.append(f"{sym} [{s['status']}] {s['text']}")
+    lines.append("如果某个步骤已完成,请在回答开头的 <plan> 里将其标为 [done]。")
+    return "\n".join(lines)
 
 
 def _add_conversation(
