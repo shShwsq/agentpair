@@ -113,6 +113,17 @@ async function initTask(): Promise<void> {
     // 每个 round 取最后一次出现的 plan(可能被后续思考更新过状态)
     extractPlanFromHistory(taskData.conversations)
 
+    // 恢复 convCountPerRound(按 round 统计历史对话数,含 thinking)
+    // 必须和 roundGroups 里 localIdx 的基准一致(conversations 数组包含所有类型),
+    // 否则刷新后新 thinking 的 insertSeq 基准错误,seq 算错会排到历史 tool_call 之前
+    convCountPerRound.clear()
+    for (const c of taskData.conversations) {
+      convCountPerRound.set(
+        c.round_idx,
+        (convCountPerRound.get(c.round_idx) ?? 0) + 1,
+      )
+    }
+
     // 2. 若任务仍在进行,连接 SSE 接收实时事件
     if (task.value && (task.value.status === 'pending' || task.value.status === 'running')) {
       connectSSE(taskId)
@@ -254,9 +265,19 @@ function connectSSE(taskId: string): void {
       // 任务完成:拉取最终结果(含 results)
       try {
         task.value = await getTask(taskId)
-        // 重新提取 plan(最终快照可能含最后一轮的 plan 更新)
         if (task.value) {
+          // 重新提取 plan(最终快照可能含最后一轮的 plan 更新)
           extractPlanFromHistory(task.value.conversations)
+          // 恢复 convCountPerRound(最终快照含所有 thinking,需和 localIdx 对齐)
+          convCountPerRound.clear()
+          for (const c of task.value.conversations) {
+            convCountPerRound.set(
+              c.round_idx,
+              (convCountPerRound.get(c.round_idx) ?? 0) + 1,
+            )
+          }
+          // 清空流式卡片(已完成,由历史对话接管显示)
+          streamingItems.clear()
         }
       } catch (err) {
         console.error('拉取最终结果失败:', err)
@@ -277,7 +298,7 @@ function handleThinkingDelta(data: ThinkingDeltaEventData): void {
   const { conv_id, round_idx, role, phase, delta, iteration } = data
 
   if (phase === 'start') {
-    // 创建新的流式项:流式期间 reasoning 默认展开(用户能看到模型在怎么想)
+    // 创建新的流式项:reasoning 默认折叠(用户可手动展开查看思考链)
     // 记录该 round 当前已收到的正式对话数,用于后续 seq 计算(让 thinking 排在
     // 它之后的 tool_call 之前,而非所有 thinking 都挤在最前面)
     const insertSeq = convCountPerRound.get(round_idx) ?? 0
@@ -290,7 +311,7 @@ function handleThinkingDelta(data: ThinkingDeltaEventData): void {
       content: '',
       status: 'streaming',
       started_at: new Date().toISOString(),
-      reasoning_expanded: true,
+      reasoning_expanded: false,
       seq: streamingSeqCounter++,
       insertSeq,
     })
@@ -310,7 +331,7 @@ function handleThinkingDelta(data: ThinkingDeltaEventData): void {
       content: '',
       status: 'streaming',
       started_at: new Date().toISOString(),
-      reasoning_expanded: true,
+      reasoning_expanded: false,
       seq: streamingSeqCounter++,
       insertSeq,
     })
@@ -696,10 +717,14 @@ function toolCallCount(seg: IterationSegment): number {
 
 /** 迭代摘要:工具数量 + 工具名预览(最多 3 个) */
 function iterationSummary(seg: IterationSegment): string {
+  // 流式中:显示正在思考
+  if (seg.hasStreaming) {
+    return '正在思考...'
+  }
   const count = toolCallCount(seg)
   if (count === 0) {
     // 没有工具调用,可能只有 thinking(纯回答)
-    return '思考中无工具调用'
+    return '思考完成'
   }
   const names = seg.toolItems
     .filter((i) => !i.is_streaming && i.type === 'tool_call')
@@ -1086,7 +1111,6 @@ function formatTime(iso: string): string {
                 >
                   <div class="iteration-header" @click="toggleIteration(seg)">
                     <span class="iteration-toggle">{{ isIterationExpanded(seg) ? '▼' : '▶' }}</span>
-                    <span class="iteration-label">迭代 {{ seg.iterationIdx }}</span>
                     <span class="iteration-summary">{{ iterationSummary(seg) }}</span>
                     <span v-if="seg.hasStreaming" class="iteration-streaming-tag">
                       <span class="typing-dots"><span></span><span></span><span></span></span>
@@ -1678,14 +1702,6 @@ function formatTime(iso: string): string {
   font-size: var(--fs-xs);
   color: var(--color-text-secondary);
   text-align: center;
-}
-
-.iteration-label {
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-semibold);
-  color: #a855f7;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
 }
 
 .iteration-summary {
