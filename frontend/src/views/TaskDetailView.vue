@@ -836,14 +836,19 @@ function formatTime(iso: string): string {
 
 <style scoped>
 .page {
-  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
   background: var(--color-bg);
 }
 
 .page-body {
+  flex: 1;
   display: flex;
-  align-items: flex-start;
-  min-height: calc(100vh - 56px);
+  align-items: stretch;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .main {
@@ -851,6 +856,7 @@ function formatTime(iso: string): string {
   min-width: 0;
   max-width: var(--content-width);
   margin: 0 auto;
+  overflow-y: auto;
   padding: var(--space-6) var(--space-6) var(--space-12);
 }
 

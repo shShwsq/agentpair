@@ -370,11 +370,8 @@ const showFilePanel = computed(() => !collapsed.value && selectedFilePath.value 
 .workspace-container {
   display: flex;
   flex-shrink: 0;
-  align-self: flex-start;
+  height: 100%;
   overflow: hidden;
-  position: sticky;
-  top: 0;
-  min-height: calc(100vh - 56px);
 }
 
 /* ---- 侧栏 ---- */
