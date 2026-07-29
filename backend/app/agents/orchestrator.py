@@ -169,44 +169,60 @@ def _record_user_agent(
 ) -> None:
     """把 user_agent 的输出记录到 Conversation 表
 
-    一条 evaluation 卡片包含完整评估(覆盖情况 + 判断 + 追问),
-    不再单独记 followup 条目(避免与 evaluation 末尾的"追问: ..."重复)。
+    - content:精简显示,只放追问内容(前端默认展示)
+    - reasoning:完整评估(覆盖情况/判断/追问/done),用于刷新页面后回看
     react_agent 接收追问是通过函数参数传递的,不依赖 Conversation 表。
     """
     covered = ua_result.get("covered", [])
     missing = ua_result.get("missing", [])
-    reasoning = ua_result.get("reasoning", "")
+    reasoning_text = ua_result.get("reasoning", "")
     followup = ua_result.get("followup_query", "")
     done = ua_result.get("done", False)
 
-    content = (
+    # 精简 content:只显示追问
+    if done:
+        content = "评估完成,无需追问"
+    elif followup:
+        content = followup
+    else:
+        content = "(未给出追问)"
+
+    # 完整评估 reasoning(可折叠回看)
+    full_eval = (
         f"[user_agent 第 {round_idx} 轮评估]\n"
         f"已覆盖: {covered}\n"
         f"未覆盖: {missing}\n"
-        f"判断: {reasoning}\n"
+        f"判断: {reasoning_text}\n"
     )
     if followup:
-        content += f"追问: {followup}\n"
+        full_eval += f"追问: {followup}\n"
     if done:
-        content += "→ 宣布完成\n"
+        full_eval += "→ 宣布完成\n"
 
     _add_conversation(
         db, task, round_idx=round_idx,
         role="user_agent", type="evaluation",
         content=content,
+        reasoning=full_eval,
     )
 
 
 def _add_conversation(
-    db: Session, task: Task, *, round_idx: int, role: str, type: str, content: str
+    db: Session, task: Task, *, round_idx: int, role: str, type: str, content: str,
+    reasoning: str | None = None,
 ) -> None:
-    """落库一条对话,同时推送事件给前端 SSE"""
+    """落库一条对话,同时推送事件给前端 SSE
+
+    reasoning:可选,完整评估/思考链(如 user_agent evaluation 的覆盖情况+判断),
+        前端默认折叠,点击展开回看。None 时不落库该字段。
+    """
     conv = Conversation(
         task_id=task.id,
         round_idx=round_idx,
         role=role,
         type=type,
         content=content,
+        reasoning=reasoning,
     )
     db.add(conv)
     db.commit()
@@ -218,6 +234,7 @@ def _add_conversation(
         "role": conv.role,
         "type": conv.type,
         "content": conv.content,
+        "reasoning": conv.reasoning,
         "created_at": conv.created_at.isoformat() if conv.created_at else None,
     })
 

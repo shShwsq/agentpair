@@ -110,6 +110,7 @@ function connectSSE(taskId: string): void {
         role: data.role,
         type: data.type,
         content: data.content,
+        reasoning: data.reasoning ?? null,
         created_at: data.created_at || new Date().toISOString(),
       }
       task.value.conversations.push(conv)
@@ -257,6 +258,8 @@ interface DisplayItem {
   role?: string
   type?: string
   content?: string
+  /** 完整评估/思考链(如 user_agent evaluation),可折叠回看 */
+  reasoning?: string | null
   /** 流式项字段 */
   streaming?: StreamingItem
 }
@@ -422,6 +425,7 @@ const roundGroups = computed<RoundGroup[]>(() => {
         role: c.role,
         type: c.type,
         content: c.content,
+        reasoning: c.reasoning,
       })
     }
   })

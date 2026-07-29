@@ -108,6 +108,8 @@ export interface ConversationEventData {
   role: string
   type: string
   content: string
+  /** 完整评估/思考链(如 user_agent evaluation 的覆盖情况+判断),可折叠回看 */
+  reasoning?: string | null
   created_at: string | null
 }
 

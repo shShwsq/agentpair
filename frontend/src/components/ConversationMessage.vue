@@ -12,7 +12,7 @@
  * reasoning 折叠状态由父组件管理(实时流式项的状态在父的 streamingItems Map 里),
  * 通过 toggle-reasoning 事件通知父组件切换。
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 interface StreamingItem {
   conv_id: string
@@ -30,6 +30,8 @@ interface DisplayItem {
   role?: string
   type?: string
   content?: string
+  /** 完整评估(可折叠回看,如 user_agent evaluation 的覆盖情况+判断) */
+  reasoning?: string | null
   streaming?: StreamingItem
 }
 
@@ -100,6 +102,9 @@ const isActive = computed(
   () => !!(props.item.is_streaming && props.item.streaming?.status === 'streaming'),
 )
 const time = computed(() => formatTime(props.item.created_at))
+
+/** 正式对话项的 reasoning(完整评估)折叠状态:默认折叠,点击展开 */
+const evalExpanded = ref(false)
 </script>
 
 <template>
@@ -143,8 +148,25 @@ const time = computed(() => formatTime(props.item.created_at))
       </div>
     </template>
 
-    <!-- 正式对话项 -->
-    <div v-else class="msg-content">{{ item.content }}</div>
+    <!-- 正式对话项:若有 reasoning(完整评估)则可折叠展示,默认只显示精简 content -->
+    <template v-else>
+      <div v-if="item.reasoning" class="msg-reasoning">
+        <div
+          class="msg-reasoning-header"
+          @click="evalExpanded = !evalExpanded"
+        >
+          <span class="msg-reasoning-toggle">
+            {{ evalExpanded ? '▼' : '▶' }}
+          </span>
+          <span class="msg-reasoning-label">完整评估</span>
+          <span class="msg-reasoning-meta">
+            {{ item.reasoning.length }} 字符
+          </span>
+        </div>
+        <div v-if="evalExpanded" class="msg-reasoning-content">{{ item.reasoning }}</div>
+      </div>
+      <div v-if="item.content" class="msg-content">{{ item.content }}</div>
+    </template>
   </div>
 </template>
 
