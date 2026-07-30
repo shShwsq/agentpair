@@ -97,6 +97,15 @@ interface StreamingItem {
 }
 
 const streamingItems = reactive<Map<string, StreamingItem>>(new Map())
+/**
+ * 历史回放思考项的展开状态
+ * key: conv_id(形如 history:${c.id});value: 是否展开
+ *
+ * 历史思考项在 roundGroups computed 里每次重算都会新建 streamingItem 对象,
+ * 状态无法持久,且其 conv_id 未注册进 streamingItems,故 toggleReasoning 找不到。
+ * 这里用独立 Map 持久化展开状态,computed 读取它,toggle 时修改它触发重算。
+ */
+const historyReasoningExpanded = reactive<Map<string, boolean>>(new Map())
 /** 全局序号计数器:流式项到达顺序 */
 let streamingSeqCounter = 0
 /** 每 round 已收到的正式对话数(用于给 streamingItem 计算插入位置 seq) */
@@ -447,10 +456,16 @@ function handleThinkingDelta(data: ThinkingDeltaEventData): void {
 
 /** 切换流式卡片 reasoning 的展开/折叠 */
 function toggleReasoning(convId: string): void {
+  // 实时流式项:状态存在 streamingItems 里
   const item = streamingItems.get(convId)
   if (item) {
     item.reasoning_expanded = !item.reasoning_expanded
+    return
   }
+  // 历史回放项:conv_id 形如 history:xxx,未注册进 streamingItems,
+  // 用独立 Map 持久化展开状态(修改后触发 roundGroups computed 重算)
+  const cur = historyReasoningExpanded.get(convId) ?? false
+  historyReasoningExpanded.set(convId, !cur)
 }
 
 // ---- plan 提取工具(与后端 _extract_plan 正则一致)----
@@ -804,8 +819,9 @@ const roundGroups = computed<RoundGroup[]>(() => {
 
     if (c.type === 'thinking' && c.reasoning) {
       // 还原为流式卡片(只读模式)
+      const historyConvId = `history:${c.id}`
       const streamingItem: StreamingItem = {
-        conv_id: `history:${c.id}`,
+        conv_id: historyConvId,
         round_idx: c.round_idx,
         role: c.role as 'react_agent' | 'user_agent',
         reasoning: c.reasoning,
@@ -813,7 +829,8 @@ const roundGroups = computed<RoundGroup[]>(() => {
         status: 'done',
         started_at: c.created_at,
         finished_at: c.created_at,
-        reasoning_expanded: false,
+        // 从独立 Map 读取持久化的展开状态(实时流式项不在此处读取)
+        reasoning_expanded: historyReasoningExpanded.get(historyConvId) ?? false,
         seq: 0,
         insertSeq: localIdx,
       }
