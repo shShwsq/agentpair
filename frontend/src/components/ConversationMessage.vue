@@ -137,6 +137,16 @@ const streamingDisplayContent = computed(() => {
   return stripPlanBlock(c)
 })
 
+/**
+ * 流式项的 reasoning 实际内容(trim 后)。
+ * 纯空白时视为无思考链,不渲染"思考链"块;字符数与正文也基于此值,
+ * 避免"1 字符"但展开为空等怪异显示。
+ */
+const streamingReasoning = computed(() => {
+  const r = props.item.streaming?.reasoning ?? ''
+  return r.trim()
+})
+
 /** 正式对话项的展示 content(tool_call 拆分时用 detail,否则过滤 plan 块) */
 const displayContent = computed(() => {
   if (toolCallParts.value) return toolCallParts.value.detail
@@ -161,7 +171,7 @@ const displayContent = computed(() => {
 
     <!-- 流式思考项:显示 reasoning(可折叠) + content -->
     <template v-if="item.is_streaming && item.streaming">
-      <div v-if="item.streaming.reasoning" class="msg-reasoning">
+      <div v-if="streamingReasoning" class="msg-reasoning">
         <div
           class="msg-reasoning-header"
           @click="emit('toggle-reasoning', item.streaming.conv_id)"
@@ -171,13 +181,13 @@ const displayContent = computed(() => {
           </span>
           <span class="msg-reasoning-label">思考链</span>
           <span class="msg-reasoning-meta">
-            {{ item.streaming.reasoning.length }} 字符
+            {{ streamingReasoning.length }} 字符
           </span>
         </div>
         <div
           v-if="item.streaming.reasoning_expanded"
           class="msg-reasoning-content"
-        >{{ item.streaming.reasoning }}</div>
+        >{{ streamingReasoning }}</div>
       </div>
       <div v-if="streamingDisplayContent" class="msg-content">{{ streamingDisplayContent }}</div>
       <div
