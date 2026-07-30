@@ -157,6 +157,21 @@ const showStreamingHeader = computed(() => {
   return streamingReasoning.value.length > 0
 })
 
+/**
+ * 整张卡片是否渲染。
+ * 非流式项始终渲染;流式项仅在"有 reasoning / 有 content / 正在流式"时任一成立时渲染。
+ * 避免流式思考已完成(status=done)但 reasoning 与 content 均空时,
+ * 外层 .message(msg-streaming 黄色背景)仍显示一个空黄框。
+ */
+const showCard = computed(() => {
+  if (!(props.item.is_streaming && props.item.streaming)) return true
+  return (
+    streamingReasoning.value.length > 0 ||
+    streamingDisplayContent.value.length > 0 ||
+    isActive.value
+  )
+})
+
 /** 正式对话项的展示 content(tool_call 拆分时用 detail,否则过滤 plan 块) */
 const displayContent = computed(() => {
   if (toolCallParts.value) return toolCallParts.value.detail
@@ -168,7 +183,7 @@ const displayContent = computed(() => {
 </script>
 
 <template>
-  <div :class="['message', `msg-${meta.variant}`, { 'msg-streaming-active': isActive }]">
+  <div v-if="showCard" :class="['message', `msg-${meta.variant}`, { 'msg-streaming-active': isActive }]">
     <div v-if="showStreamingHeader" class="msg-header">
       <span class="msg-label">{{ meta.label }}</span>
       <span v-if="isActive" class="msg-streaming-tag">
