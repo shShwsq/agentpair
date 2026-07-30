@@ -147,6 +147,16 @@ const streamingReasoning = computed(() => {
   return r.trim()
 })
 
+/**
+ * 流式思考项是否显示 header(含 "react_agent 思考" 标签/时间戳/流式动画)。
+ * 无 reasoning 时整个卡片只是承载 content 输出,标"思考"无意义,隐藏 header。
+ * 有 reasoning 时正常显示,与思考链块语义对应。
+ */
+const showStreamingHeader = computed(() => {
+  if (!(props.item.is_streaming && props.item.streaming)) return true
+  return streamingReasoning.value.length > 0
+})
+
 /** 正式对话项的展示 content(tool_call 拆分时用 detail,否则过滤 plan 块) */
 const displayContent = computed(() => {
   if (toolCallParts.value) return toolCallParts.value.detail
@@ -159,7 +169,7 @@ const displayContent = computed(() => {
 
 <template>
   <div :class="['message', `msg-${meta.variant}`, { 'msg-streaming-active': isActive }]">
-    <div class="msg-header">
+    <div v-if="showStreamingHeader" class="msg-header">
       <span class="msg-label">{{ meta.label }}</span>
       <span v-if="isActive" class="msg-streaming-tag">
         <span class="typing-dots">
