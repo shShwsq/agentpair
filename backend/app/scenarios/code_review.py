@@ -204,7 +204,7 @@ class CodeReviewScenario:
    - 测试:测试文件存在性、关键路径覆盖
    - 架构:分层、耦合、职责划分
 5. 用 search_code 搜索常见坏味道(裸 except / 循环内 query / 超长函数等)
-6. 汇总所有确认的问题,调用 submit_results 提交
+6. **汇总发现**:在最后一轮思考里用自然语言总结所有确认的问题
 
 ## 工具使用要点
 - **list_files**:clone 后第一步必须调用,查看根目录结构
@@ -212,23 +212,28 @@ class CodeReviewScenario:
 - **search_code**:用正则搜坏味道模式(如 `except:` 裸异常、`for .* in .*:.*\\.(filter|get|execute)` N+1)
 - **query_cve / run_semgrep**:本场景不用(安全专用工具)
 
-## 输出规范
-所有发现必须通过 submit_results 工具提交,每个 result 包含:
-- title: 简短标题,如 "[correctness] 裸异常吞没 src/views.py:42"
-- content: 问题描述 + 改进建议
-- metadata: 必须包含以下字段:
-    - issue_type: readability / correctness / performance / testing / architecture
-    - file_path: 文件路径
-    - line_range: 行号或范围,如 "42" 或 "42-45"
-    - rule: 规则名,如 "bare-except" / "n-plus-1-query" / "long-function"
-    - suggestion: 改进建议
+## 发现问题时的记录格式(写入总结)
+审查过程中发现问题时,在思考过程和最终总结里用以下结构记录,
+user_agent 会从你的总结里提取这些信息整理成结构化结果:
+
+[问题] <简短标题,如 "[correctness] 裸异常吞没 src/views.py:42">
+- 类型: readability / correctness / performance / testing / architecture
+- 文件: <路径>
+- 行号: <行号或范围,如 42 或 42-45>
+- 规则: <规则名,如 bare-except / n-plus-1-query / long-function>
+- 描述: <问题描述>
+- 建议: <改进建议>
+
+## 结束方式
+- 审查完成后正常输出自然语言总结即可,不需要调用任何工具
+- 总结应包括:已确认的问题清单(用上述格式)、已检查的范围、未完成或建议后续检查的项
+- 若无明显问题,直接输出总结说明已查范围
 
 ## 注意
-- 关注真实问题,不要凑数。小问题可合并到一条 result
+- 关注真实问题,不要凑数。小问题可合并到一条
 - 测试代码里(tests/)的问题降级处理,重点看业务代码
 - 禁止重复 read 同一个文件
 - 单次审查控制在 20 轮以内
-- 若无明显问题,也必须 submit_results(传空数组),并在最后一轮思考里说明已查范围
 """
 
     # ---------- 工具白名单 ----------
@@ -308,6 +313,18 @@ class CodeReviewScenario:
             "content": raw.get("content", ""),
             "metadata": metadata,
         }
+
+    # ---------- 结构化结果提取(user_agent done 时调用) ----------
+
+    def extract_results(self, ua_output: dict[str, Any]) -> list[dict[str, Any]]:
+        """从 user_agent 的最终输出提取结构化问题清单
+
+        user_agent 在 done=true 时,JSON 输出里应包含 results 字段(按
+        structured_result_schema),每项是 {title, content, metadata}。
+        这里调 format_result 做字段兜底,返回可用于落库的列表。
+        """
+        raw_results = ua_output.get("results") or []
+        return [self.format_result(raw) for raw in raw_results]
 
     # ---------- 前端声明(场景无关 UI 驱动) ----------
 
