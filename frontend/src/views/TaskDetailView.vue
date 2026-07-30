@@ -201,11 +201,12 @@ async function initTask(): Promise<void> {
     // 每个 round 取最后一次出现的 plan(可能被后续思考更新过状态)
     extractPlanFromHistory(taskData.conversations)
 
-    // 恢复 convCountPerRound(按 round 统计历史对话数,含 thinking)
-    // 必须和 roundGroups 里 localIdx 的基准一致(conversations 数组包含所有类型),
-    // 否则刷新后新 thinking 的 insertSeq 基准错误,seq 算错会排到历史 tool_call 之前
+    // 恢复 convCountPerRound(按 round 统计历史对话数,含 thinking,跳过 user question)
+    // 必须和 roundGroups 里 localIdx 的基准一致:localIdx 跳过 user question,
+    // 这里也跳过,否则刷新后新 thinking 的 insertSeq 偏大,seq 排到 tool_call 之前
     convCountPerRound.clear()
     for (const c of taskData.conversations) {
+      if (c.role === 'user' && c.type === 'question') continue
       convCountPerRound.set(
         c.round_idx,
         (convCountPerRound.get(c.round_idx) ?? 0) + 1,
@@ -326,10 +327,16 @@ function connectSSE(taskId: string): void {
       }
       task.value.conversations.push(conv)
       // 维护该 round 的正式对话计数(供 streamingItem 计算插入位置 seq)
-      convCountPerRound.set(
-        data.round_idx,
-        (convCountPerRound.get(data.round_idx) ?? 0) + 1,
-      )
+      // 必须与 roundGroups 里 localIdx 的基准一致:localIdx 跳过 user question
+      // (user question 单独提到顶部 userDirective 渲染),这里也跳过,
+      // 否则每 round 多算 1,流式 thinking 的 insertSeq 偏大,seq 排到 tool_call 之后,
+      // 导致 thinking 不再是迭代起点,首个 tool_call 被甩进 plains(界面最底部)。
+      if (!(data.role === 'user' && data.type === 'question')) {
+        convCountPerRound.set(
+          data.round_idx,
+          (convCountPerRound.get(data.round_idx) ?? 0) + 1,
+        )
+      }
       // 自动滚动到底部
       nextTick(scrollToBottom)
 
@@ -368,9 +375,10 @@ function connectSSE(taskId: string): void {
         if (task.value) {
           // 重新提取 plan(最终快照可能含最后一轮的 plan 更新)
           extractPlanFromHistory(task.value.conversations)
-          // 恢复 convCountPerRound(最终快照含所有 thinking,需和 localIdx 对齐)
+          // 恢复 convCountPerRound(最终快照含所有 thinking,跳过 user question,与 localIdx 对齐)
           convCountPerRound.clear()
           for (const c of task.value.conversations) {
+            if (c.role === 'user' && c.type === 'question') continue
             convCountPerRound.set(
               c.round_idx,
               (convCountPerRound.get(c.round_idx) ?? 0) + 1,
