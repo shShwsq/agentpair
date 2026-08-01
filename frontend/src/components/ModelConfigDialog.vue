@@ -11,6 +11,7 @@
  * 编辑态下 api_key 始终从空串开始,留空表示"保留已存的 key"。
  */
 import { computed, reactive, watch } from 'vue'
+import ModelCombobox, { type ComboboxOption } from '@/components/ModelCombobox.vue'
 import type {
   EmbeddingConfigItem,
   EmbeddingProvider,
@@ -126,6 +127,17 @@ const embDimensionHint = computed(() => {
   return text
 })
 
+// 当前厂商的可选模型,供 ModelCombobox 渲染。
+// LLM 仅展示 id;Embedding 展示 name(主) + id(副),与原 select 视觉一致。
+const modelOptions = computed<ComboboxOption[]>(() => {
+  if (props.kind === 'llm') {
+    const p = getLlmProvider(draft.provider)
+    return (p?.models ?? []).map((m) => ({ value: m.id }))
+  }
+  const p = getEmbProvider(draft.provider)
+  return (p?.models ?? []).map((m) => ({ value: m.id, label: m.name }))
+})
+
 // ---- 厂商切换:自动填 baseUrl + 选默认模型 ----
 function onProviderChange(): void {
   draft.model = ''
@@ -151,7 +163,7 @@ const title = computed(() => {
 
 const validationError = computed<string | null>(() => {
   if (!draft.provider) return '请选择厂商'
-  if (!draft.model) return '请选择模型'
+  if (!draft.model) return '请输入或选择模型'
   if (!draft.has_api_key && !draft.api_key) return '请填写 API Key'
   return null
 })
@@ -240,23 +252,12 @@ function handleConfirm(): void {
             <div class="field-row">
               <div class="field">
                 <label>模型</label>
-                <select v-model="draft.model" :disabled="saving || !draft.provider">
-                  <option value="" disabled>请选择</option>
-                  <template v-if="kind === 'llm'">
-                    <option
-                      v-for="m in getLlmProvider(draft.provider)?.models"
-                      :key="m.id"
-                      :value="m.id"
-                    >{{ m.id }}</option>
-                  </template>
-                  <template v-else>
-                    <option
-                      v-for="m in getEmbProvider(draft.provider)?.models"
-                      :key="m.id"
-                      :value="m.id"
-                    >{{ m.name }} ({{ m.id }})</option>
-                  </template>
-                </select>
+                <ModelCombobox
+                  v-model="draft.model"
+                  :options="modelOptions"
+                  placeholder="选择或输入模型 ID"
+                  :disabled="saving || !draft.provider"
+                />
                 <p v-if="kind === 'embedding' && embDimensionHint" class="field-hint">
                   {{ embDimensionHint }}
                 </p>
