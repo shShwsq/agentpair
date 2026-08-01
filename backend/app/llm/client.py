@@ -326,7 +326,7 @@ class LLMClient:
                 finish_reason=choice.finish_reason,
             )
 
-    def test(self, prompt: str = "你好,请介绍一下你自己。") -> dict[str, Any]:
+    def test(self, prompt: str = "你好,请用一句话介绍一下你自己。") -> dict[str, Any]:
         """测试 LLM 连通性并收集完整回复
 
         返回 { success, message, latency_ms, reply }
