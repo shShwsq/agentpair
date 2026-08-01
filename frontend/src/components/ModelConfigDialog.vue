@@ -18,7 +18,7 @@ import type {
   LLMConfigItem,
   LLMProvider,
   ModelsCatalog,
-} from '@/types/settings'
+} from '@/types/model_configs'
 
 type Kind = 'llm' | 'embedding'
 

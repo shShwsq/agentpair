@@ -16,10 +16,10 @@ import AppHeader from '@/components/AppHeader.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import { createTask, getScenarios } from '@/api/task'
-import { getMyModels } from '@/api/settings'
+import { getMyModels } from '@/api/model_configs'
 import { extractErrorMessage } from '@/utils/error'
 import type { Scenario } from '@/types/task'
-import type { LLMConfigItemOut } from '@/types/settings'
+import type { LLMConfigItemOut } from '@/types/model_configs'
 
 const router = useRouter()
 

@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from app.config import settings
 from app.database import Base, engine
 from app.routers import auth, health, skills, tasks
-from app.routers import settings as settings_router
+from app.routers import model_configs as model_configs_router
 from app.routers import workspace as workspace_router
 
 # 导入场景模块,触发注册
@@ -46,7 +46,7 @@ app.include_router(health.router)
 app.include_router(tasks.router)
 app.include_router(skills.router)
 app.include_router(auth.router)
-app.include_router(settings_router.router)
+app.include_router(model_configs_router.router)
 app.include_router(workspace_router.router)
 
 

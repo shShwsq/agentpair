@@ -21,7 +21,7 @@ import AppHeader from '@/components/AppHeader.vue'
 import ModelConfigDialog from '@/components/ModelConfigDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
-import { getCatalog, getMyModels, saveModels, testEmbedding, testLLM } from '@/api/settings'
+import { getCatalog, getMyModels, saveModels, testEmbedding, testLLM } from '@/api/model_configs'
 import { extractErrorMessage } from '@/utils/error'
 import type {
   EmbeddingConfigItem,
@@ -29,7 +29,7 @@ import type {
   LLMConfigItem,
   LLMConfigItemOut,
   ModelsCatalog,
-} from '@/types/settings'
+} from '@/types/model_configs'
 
 type Kind = 'llm' | 'embedding'
 

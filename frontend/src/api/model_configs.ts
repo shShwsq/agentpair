@@ -15,7 +15,7 @@ import type {
   TestRequest,
   TestResponse,
   UserModelsResponse,
-} from '@/types/settings'
+} from '@/types/model_configs'
 
 /** 获取厂商与模型清单(无需登录,前端选厂商用) */
 export function getCatalog(): Promise<ModelsCatalog> {

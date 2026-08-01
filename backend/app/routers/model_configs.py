@@ -22,7 +22,7 @@ from app.llm.client import LLMClient, _load_catalog
 from app.llm.embedding import EmbeddingClient
 from app.models.user import User
 from app.models.user_llm_config import UserLLMConfig
-from app.schemas.settings import (
+from app.schemas.model_configs import (
     EmbeddingConfigItemOut,
     LLMConfigItemOut,
     SaveModelsRequest,
