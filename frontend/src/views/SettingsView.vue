@@ -15,7 +15,7 @@
  *
  * 由于每次增/改/删都立即持久化,页面不再保留手动「保存设置」按钮。
  */
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 
 import AppHeader from '@/components/AppHeader.vue'
 import ModelConfigDialog from '@/components/ModelConfigDialog.vue'
@@ -294,9 +294,23 @@ async function handleSave(opts?: { silent?: boolean }): Promise<boolean> {
         dimension: c.dimension,
       })),
     })
-    // 刷新 has_api_key 状态 + 清空输入框
-    llmConfigs.splice(0, llmConfigs.length, ...res.llm_configs.map(llmFromOut))
-    embConfigs.splice(0, embConfigs.length, ...res.embedding_configs.map(embFromOut))
+    // 更新现有对象字段（保留 testing 状态和引用）
+    for (const out of res.llm_configs) {
+      const existing = llmConfigs.find((c) => c.id === out.id)
+      if (existing) {
+        const testing = existing.testing
+        Object.assign(existing, llmFromOut(out))
+        existing.testing = testing
+      }
+    }
+    for (const out of res.embedding_configs) {
+      const existing = embConfigs.find((c) => c.id === out.id)
+      if (existing) {
+        const testing = existing.testing
+        Object.assign(existing, embFromOut(out))
+        existing.testing = testing
+      }
+    }
     if (!opts?.silent) showToast('设置已保存', 'success')
     return true
   } catch (e) {
@@ -328,7 +342,7 @@ async function handleTestRow(row: TableRow): Promise<void> {
     } catch (e) {
       showToast(`测试异常: ${extractErrorMessage(e)}`, 'error')
     } finally {
-      cfg.testing = false
+      await stopTestingWithDelay(cfg)
     }
   } else {
     const cfg = row.cfg as EmbeddingConfigEditable
@@ -349,9 +363,19 @@ async function handleTestRow(row: TableRow): Promise<void> {
     } catch (e) {
       showToast(`测试异常: ${extractErrorMessage(e)}`, 'error')
     } finally {
-      cfg.testing = false
+      await stopTestingWithDelay(cfg)
     }
   }
+}
+
+/**
+ * 延迟停止测试动画，确保 toast 弹窗已开始滑入动画后再停止旋转
+ * toast 动画时长 200ms (transition-base)，延迟 200ms 让视觉上同步
+ */
+async function stopTestingWithDelay(cfg: LLMConfigEditable | EmbeddingConfigEditable): Promise<void> {
+  await nextTick() // 等待 Vue 更新 DOM，toast 已插入
+  await new Promise((resolve) => setTimeout(resolve, 200)) // 等待 toast 动画完成
+  cfg.testing = false
 }
 
 // ============================================================
