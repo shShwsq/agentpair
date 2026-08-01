@@ -3,11 +3,11 @@
 用户可配置多个 LLM / Embedding 模型,任务提交时选择一个使用。
 
 端点:
-- GET  /settings/catalog        厂商与模型清单(无需登录,前端选厂商用)
-- GET  /settings/models         当前用户已保存的配置列表(鉴权)
-- PUT  /settings/models         保存配置列表(整体替换,鉴权)
-- POST /settings/llm/test       测试指定 LLM 配置连通性(按 config_id)
-- POST /settings/embedding/test 测试指定 Embedding 配置连通性(按 config_id)
+- GET  /models/catalog        厂商与模型清单(无需登录,前端选厂商用)
+- GET  /models/models         当前用户已保存的配置列表(鉴权)
+- PUT  /models/models         保存配置列表(整体替换,鉴权)
+- POST /models/llm/test       测试指定 LLM 配置连通性(按 config_id)
+- POST /models/embedding/test 测试指定 Embedding 配置连通性(按 config_id)
 
 安全约定见 schemas/settings.py 模块文档。
 """
@@ -32,7 +32,7 @@ from app.schemas.settings import (
 )
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/settings", tags=["settings"])
+router = APIRouter(prefix="/models", tags=["models"])
 
 
 @router.get("/catalog")

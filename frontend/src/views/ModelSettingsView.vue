@@ -9,7 +9,7 @@
  * - 表格列:名称 / 类型 / 厂商·模型 / Key 状态 / 操作(测试·编辑·删除)
  * - 顶部「+ 添加 LLM」「+ 添加 Embedding」→ 打开 ModelConfigDialog
  * - 点击行(非操作区)→ 打开编辑弹窗
- * - 弹窗「确定」→ 写回列表 → 立即整体保存(PUT /settings/models)
+ * - 弹窗「确定」→ 写回列表 → 立即整体保存(PUT /models/models)
  * - 删除 → 从列表移除 → 立即保存
  * - 测试:先保存当前列表,再按 config_id 测试指定配置
  *
@@ -430,7 +430,7 @@ function modelLabel(row: TableRow): string {
       <template #nav>
         <RouterLink to="/">首页</RouterLink>
         <RouterLink to="/tasks/new">提交任务</RouterLink>
-        <RouterLink to="/settings" class="router-link-active">模型设置</RouterLink>
+        <RouterLink to="/models" class="router-link-active">模型设置</RouterLink>
       </template>
     </AppHeader>
 

@@ -4,7 +4,7 @@
  *
  * 表单字段由选中场景的 form_fields 声明动态渲染(场景无关):
  * - 场景选择(从 GET /scenarios 拉取,每个场景自带表单字段定义)
- * - 使用模型(从 GET /settings/models 拉取用户已配置的 LLM 列表)
+ * - 使用模型(从 GET /models/models 拉取用户已配置的 LLM 列表)
  * - 动态字段(按场景声明渲染 text/url/textarea/select/number)
  *
  * 提交后:后端立即返回 task_id(异步执行),前端跳转详情页通过 SSE 观看实时进度。
@@ -190,7 +190,7 @@ onMounted(async () => {
       <template #nav>
         <RouterLink to="/">首页</RouterLink>
         <RouterLink to="/tasks/new" class="router-link-active">提交任务</RouterLink>
-        <RouterLink to="/settings">模型设置</RouterLink>
+        <RouterLink to="/models">模型设置</RouterLink>
       </template>
     </AppHeader>
 
@@ -251,7 +251,7 @@ onMounted(async () => {
             </select>
             <p v-if="llmConfigs.length === 0 && !loadingModels" class="field-hint">
               尚未配置模型,将使用服务器默认配置。
-              <RouterLink to="/settings" class="field-link">前往模型设置 →</RouterLink>
+              <RouterLink to="/models" class="field-link">前往模型设置 →</RouterLink>
             </p>
           </div>
 
