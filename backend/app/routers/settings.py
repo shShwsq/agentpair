@@ -4,8 +4,8 @@
 
 端点:
 - GET  /models/catalog        厂商与模型清单(无需登录,前端选厂商用)
-- GET  /models/models         当前用户已保存的配置列表(鉴权)
-- PUT  /models/models         保存配置列表(整体替换,鉴权)
+- GET  /models/configs        当前用户已保存的配置列表(鉴权)
+- PUT  /models/configs        保存配置列表(整体替换,鉴权)
 - POST /models/llm/test       测试指定 LLM 配置连通性(按 config_id)
 - POST /models/embedding/test 测试指定 Embedding 配置连通性(按 config_id)
 
@@ -44,7 +44,7 @@ def get_catalog() -> dict:
     return _load_catalog()
 
 
-@router.get("/models", response_model=UserModelsResponse)
+@router.get("/configs", response_model=UserModelsResponse)
 def get_my_models(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -59,7 +59,7 @@ def get_my_models(
     return UserModelsResponse(llm_configs=llm_out, embedding_configs=emb_out)
 
 
-@router.put("/models", response_model=UserModelsResponse)
+@router.put("/configs", response_model=UserModelsResponse)
 def save_models(
     req: SaveModelsRequest,
     current_user: User = Depends(get_current_user),

@@ -4,7 +4,7 @@
  *
  * 表单字段由选中场景的 form_fields 声明动态渲染(场景无关):
  * - 场景选择(从 GET /scenarios 拉取,每个场景自带表单字段定义)
- * - 使用模型(从 GET /models/models 拉取用户已配置的 LLM 列表)
+ * - 使用模型(从 GET /models/configs 拉取用户已配置的 LLM 列表)
  * - 动态字段(按场景声明渲染 text/url/textarea/select/number)
  *
  * 提交后:后端立即返回 task_id(异步执行),前端跳转详情页通过 SSE 观看实时进度。
