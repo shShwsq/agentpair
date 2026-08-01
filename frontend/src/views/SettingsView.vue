@@ -74,6 +74,8 @@ interface TableRow {
   model: string
   has_api_key: boolean
   testing: boolean
+  /** LLM 是否启用深度思考;Embedding 恒为 null(显示斜杠占位) */
+  enable_thinking: boolean | null
   cfg: LLMConfigEditable | EmbeddingConfigEditable
 }
 
@@ -86,6 +88,7 @@ const tableRows = computed<TableRow[]>(() => [
     model: c.model,
     has_api_key: c.has_api_key,
     testing: c.testing,
+    enable_thinking: c.enable_thinking,
     cfg: c,
   })),
   ...embConfigs.map((c) => ({
@@ -96,6 +99,7 @@ const tableRows = computed<TableRow[]>(() => [
     model: c.model,
     has_api_key: c.has_api_key,
     testing: c.testing,
+    enable_thinking: null,
     cfg: c,
   })),
 ])
@@ -448,12 +452,13 @@ function modelLabel(row: TableRow): string {
                   <th class="col-provider">厂商</th>
                   <th class="col-model">模型</th>
                   <th class="col-key">Key</th>
+                  <th class="col-thinking">思考</th>
                   <th class="col-actions">操作</th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-if="!hasRows" class="empty-row">
-                  <td colspan="6">
+                  <td colspan="7">
                     <div class="empty-hint">
                       尚未配置任何模型,点击右上角「+ 添加」新增
                     </div>
@@ -483,6 +488,12 @@ function modelLabel(row: TableRow): string {
                   <td class="col-key">
                     <span v-if="row.has_api_key" class="badge badge-ok">已配置</span>
                     <span v-else class="badge badge-warn">未配置</span>
+                  </td>
+                  <td class="col-thinking">
+                    <!-- Embedding 无思考概念,用斜杠占位 -->
+                    <span v-if="row.enable_thinking === null" class="thinking-na">—</span>
+                    <span v-else-if="row.enable_thinking" class="badge badge-thinking-on">开启</span>
+                    <span v-else class="badge badge-thinking-off">关闭</span>
                   </td>
                   <td class="col-actions" @click.stop>
                     <div class="row-actions">
@@ -762,12 +773,13 @@ function modelLabel(row: TableRow): string {
   white-space: nowrap;
 }
 
-.col-name { width: 28%; }
-.col-type { width: 110px; }
-.col-provider { width: 16%; }
-.col-model { width: 22%; }
-.col-key { width: 90px; }
-.col-actions { width: 130px; text-align: right; }
+.col-name { width: 24%; }
+.col-type { width: 100px; }
+.col-provider { width: 15%; }
+.col-model { width: 20%; }
+.col-key { width: 80px; }
+.col-thinking { width: 70px; }
+.col-actions { width: 120px; text-align: right; }
 
 .config-table tbody td {
   padding: var(--space-3) var(--space-4);
@@ -847,6 +859,22 @@ function modelLabel(row: TableRow): string {
 .badge-warn {
   background: #fef3c7;
   color: #92400e;
+}
+
+/* 思考列:开启(主色调)/ 关闭(中性)/ 不适用(斜杠) */
+.badge-thinking-on {
+  background: var(--color-primary-light);
+  color: var(--color-primary);
+}
+
+.badge-thinking-off {
+  background: var(--color-surface-alt);
+  color: var(--color-text-muted);
+}
+
+.thinking-na {
+  color: var(--color-text-muted);
+  font-size: var(--fs-sm);
 }
 
 /* ---- 空状态 ---- */
