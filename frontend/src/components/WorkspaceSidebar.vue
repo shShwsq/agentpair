@@ -78,6 +78,10 @@ function goToTaskDetail(taskId: string): void {
   router.push(`/tasks/${taskId}`)
 }
 
+function goToNewTask(): void {
+  router.push('/tasks/new')
+}
+
 // ============================================================
 // 工作区可用性
 // ============================================================
@@ -469,6 +473,7 @@ defineExpose({ openTaskFile })
           <span class="sidebar-title">历史任务</span>
           <div class="sidebar-actions">
             <button class="icon-btn" title="刷新任务列表" @click="loadTasks">↻</button>
+            <button class="icon-btn add-btn" title="提交新任务" @click="goToNewTask">+</button>
           </div>
         </div>
 
@@ -710,6 +715,13 @@ defineExpose({ openTaskFile })
 
 .back-btn {
   flex-shrink: 0;
+}
+
+/* 提交新任务按钮:加号放大显示 */
+.add-btn {
+  font-size: 18px;
+  font-weight: var(--fw-medium);
+  line-height: 1;
 }
 
 /* ---- 侧栏状态 ---- */
