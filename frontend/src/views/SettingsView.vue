@@ -1,21 +1,19 @@
 <script setup lang="ts">
 /**
- * 设置页
+ * 设置页(表格 + 弹窗)
  *
- * 两个配置区:
- * 1. 修改密码(已登录用户;OAuth 用户未设密码时只输新密码)
- * 2. 绑定/解绑 GitHub(用于任务创建时访问私有仓库)
+ * 账号相关配置合并为一张表格展示,点击行打开对应弹窗编辑:
+ * - 登录密码:已设密码 → 修改(验证当前密码);未设密码 → 设置
+ * - GitHub 账号:已绑定 → 查看 + 解绑;未绑定 → 跳转授权页绑定
  *
- * GitHub 绑定流程:
- * - 点击"绑定 GitHub"跳转 GitHub 授权页(scope=user:email repo)
- * - 授权后回调到 /auth/github/callback
- * - OAuthCallbackView 检测到用户已登录 → 调 POST /github/bind 完成绑定
- * - 未登录场景走原登录流程(避免混淆)
+ * 与 ModelSettingsView 风格一致(表格 + 弹窗 + 顶部居中 toast)。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
+import GitHubDialog from '@/components/GitHubDialog.vue'
+import PasswordDialog from '@/components/PasswordDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import { changePassword } from '@/api/auth'
@@ -34,73 +32,62 @@ function toggleWorkspace(): void {
   workspaceCollapsed.value = !workspaceCollapsed.value
 }
 
-/** OAuth 用户未设密码时为 false,此时表单跳过"当前密码"字段 */
+/** OAuth 用户未设密码时为 false */
 const hasPassword = computed(() => authStore.user?.has_password ?? false)
 
-const currentPassword = ref('')
-const newPassword = ref('')
-const confirmPassword = ref('')
-const showPassword = ref(false)
-const loading = ref(false)
-const error = ref('')
-const success = ref('')
+// ============================================================
+// Toast(顶部居中,5s 自动消失)
+// ============================================================
+const toast = ref<{ msg: string; type: 'success' | 'error' } | null>(null)
 
-const currentPasswordError = computed(() => {
-  if (!hasPassword.value) return ''
-  if (!currentPassword.value) return '请输入当前密码'
-  return ''
-})
+function showToast(msg: string, type: 'success' | 'error'): void {
+  toast.value = { msg, type }
+  setTimeout(() => {
+    toast.value = null
+  }, 5000)
+}
 
-const newPasswordError = computed(() => {
-  if (!newPassword.value) return '请输入新密码'
-  if (newPassword.value.length < 8) return '密码至少 8 位'
-  if (hasPassword.value && currentPassword.value && newPassword.value === currentPassword.value) {
-    return '新密码不能与当前密码相同'
-  }
-  if (confirmPassword.value && newPassword.value !== confirmPassword.value) {
-    return '两次输入的密码不一致'
-  }
-  return ''
-})
+// ============================================================
+// 密码弹窗
+// ============================================================
+const pwdDialogOpen = ref(false)
+const pwdLoading = ref(false)
+const pwdError = ref('')
 
-const confirmError = computed(() => {
-  if (!confirmPassword.value) return '请确认密码'
-  if (newPassword.value !== confirmPassword.value) return '两次输入的密码不一致'
-  return ''
-})
+function openPasswordDialog(): void {
+  pwdError.value = ''
+  pwdDialogOpen.value = true
+}
 
-const canSubmit = computed(
-  () => !currentPasswordError.value && !newPasswordError.value && !confirmError.value,
-)
-
-async function handleSubmit(): Promise<void> {
-  error.value = ''
-  success.value = ''
-  if (!canSubmit.value) return
-
-  loading.value = true
+async function handlePasswordConfirm(payload: {
+  current_password?: string
+  new_password: string
+}): Promise<void> {
+  pwdError.value = ''
+  pwdLoading.value = true
   try {
-    const res = await changePassword({
-      current_password: hasPassword.value ? currentPassword.value : undefined,
-      new_password: newPassword.value,
+    await changePassword({
+      current_password: payload.current_password,
+      new_password: payload.new_password,
     })
-    success.value = res.message
+    pwdDialogOpen.value = false
+    showToast('密码已修改,将自动登出...', 'success')
     // 修改成功后登出并跳转登录页
     setTimeout(() => {
       authStore.logout()
       router.push('/login')
     }, 1500)
   } catch (err) {
-    error.value = extractErrorMessage(err)
+    pwdError.value = extractErrorMessage(err)
   } finally {
-    loading.value = false
+    pwdLoading.value = false
   }
 }
 
 // ============================================================
-// GitHub 绑定区
+// GitHub 弹窗
 // ============================================================
-
+const ghDialogOpen = ref(false)
 const githubStatus = ref<GitHubStatus | null>(null)
 const githubLoading = ref(false)
 const githubAction = ref<'bind' | 'unbind' | ''>('')
@@ -113,27 +100,37 @@ async function refreshGitHubStatus(): Promise<void> {
   try {
     githubStatus.value = await getGitHubStatus()
   } catch (err) {
-    // 静默失败,不阻塞页面(只在控制台提示)
+    // 静默失败,弹窗内会显示失败态
     console.warn('加载 GitHub 状态失败:', err)
   } finally {
     githubLoading.value = false
   }
 }
 
-function startBind(): void {
-  // 跳到 GitHub 授权页(scope=user:email repo)
-  // 用户授权后回调到 /auth/github/callback,OAuthCallbackView 检测已登录后调 bind API
+function openGitHubDialog(): void {
+  githubError.value = ''
+  githubSuccess.value = ''
+  ghDialogOpen.value = true
+  if (!githubStatus.value) refreshGitHubStatus()
+}
+
+function handleBind(): void {
+  // 跳到 GitHub 授权页,回调后由 OAuthCallbackView 完成绑定
+  githubAction.value = 'bind'
   window.location.href = getGitHubBindURL()
 }
 
-async function startUnbind(): Promise<void> {
+async function handleUnbind(): Promise<void> {
   githubAction.value = 'unbind'
   githubError.value = ''
   githubSuccess.value = ''
   try {
     githubStatus.value = await unbindGitHub()
-    githubSuccess.value = '已解绑 GitHub,任务执行将无法访问你的私有仓库'
-    setTimeout(() => (githubSuccess.value = ''), 5000)
+    githubSuccess.value = '已解绑 GitHub'
+    showToast('已解绑 GitHub,任务执行将无法访问你的私有仓库', 'success')
+    setTimeout(() => {
+      githubSuccess.value = ''
+    }, 5000)
   } catch (err) {
     githubError.value = extractErrorMessage(err)
   } finally {
@@ -141,7 +138,43 @@ async function startUnbind(): Promise<void> {
   }
 }
 
+// ============================================================
+// 表格行
+// ============================================================
+interface SettingRow {
+  key: 'password' | 'github'
+  item: string
+  desc: string
+  status: string
+  statusType: 'ok' | 'warn' | 'neutral'
+}
+
+const rows = computed<SettingRow[]>(() => [
+  {
+    key: 'password',
+    item: '登录密码',
+    desc: hasPassword.value ? '修改账号登录密码' : 'OAuth 账号设置密码',
+    status: hasPassword.value ? '已设置' : '未设置',
+    statusType: hasPassword.value ? 'ok' : 'warn',
+  },
+  {
+    key: 'github',
+    item: 'GitHub 账号',
+    desc: '绑定后可访问私有仓库',
+    status: githubStatus.value?.bound
+      ? `@${githubStatus.value.github_login || 'unknown'}`
+      : '未绑定',
+    statusType: githubStatus.value?.bound ? 'ok' : 'warn',
+  },
+])
+
+function openRow(row: SettingRow): void {
+  if (row.key === 'password') openPasswordDialog()
+  else openGitHubDialog()
+}
+
 onMounted(() => {
+  // 预加载 GitHub 状态(用于表格状态列展示)
   refreshGitHubStatus()
 })
 </script>
@@ -168,172 +201,109 @@ onMounted(() => {
       <WorkspaceSidebar v-if="!workspaceCollapsed" />
 
       <main class="main">
-      <div class="page-header">
-        <div>
-          <h1>设置</h1>
-          <p class="subtitle">管理账号密码与 GitHub 集成</p>
-        </div>
-      </div>
-
-      <section class="config-section">
-        <div class="section-header">
+        <!-- 页头 -->
+        <div class="page-header">
           <div>
-            <h2>{{ hasPassword ? '修改密码' : '设置密码' }}</h2>
-            <p class="section-desc">
-              {{ hasPassword
-                ? '需先验证当前密码,新密码生效后需重新登录'
-                : '当前账号通过 GitHub OAuth 登录,设置密码后可用邮箱密码登录' }}
-            </p>
+            <h1>设置</h1>
           </div>
         </div>
 
-        <Transition name="fade">
-          <div v-if="error" class="alert alert-error" role="alert">{{ error }}</div>
-        </Transition>
-        <Transition name="fade">
-          <div v-if="success" class="alert alert-success" role="status">
-            {{ success }}(将自动登出,请用新密码登录...)
+        <!-- ============ 统一表格 ============ -->
+        <section class="table-section">
+          <div class="table-wrap">
+            <table class="config-table">
+              <thead>
+                <tr>
+                  <th class="col-item">项目</th>
+                  <th class="col-desc">说明</th>
+                  <th class="col-status">状态</th>
+                  <th class="col-actions">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="row in rows"
+                  :key="row.key"
+                  class="data-row"
+                  @click="openRow(row)"
+                >
+                  <td class="col-item">
+                    <span class="cell-title">{{ row.item }}</span>
+                  </td>
+                  <td class="col-desc">
+                    <span class="cell-desc">{{ row.desc }}</span>
+                  </td>
+                  <td class="col-status">
+                    <span :class="['badge', `badge-${row.statusType}`]">{{ row.status }}</span>
+                  </td>
+                  <td class="col-actions" @click.stop>
+                    <button class="btn-icon" :title="row.key === 'password' ? '修改密码' : '管理 GitHub'" @click="openRow(row)">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M12 20h9" />
+                        <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                      </svg>
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
-        </Transition>
+        </section>
 
-        <form v-if="!success" @submit.prevent="handleSubmit" novalidate>
-          <div v-if="hasPassword" class="field">
-            <label for="current-password">当前密码</label>
-            <div class="input-wrapper">
-              <input
-                id="current-password"
-                v-model="currentPassword"
-                :type="showPassword ? 'text' : 'password'"
-                autocomplete="current-password"
-                placeholder="输入当前密码"
-                :class="{ invalid: currentPasswordError }"
-              />
-            </div>
-            <span v-if="currentPasswordError" class="field-error">{{ currentPasswordError }}</span>
-          </div>
+        <!-- ============ 弹窗 ============ -->
+        <PasswordDialog
+          :open="pwdDialogOpen"
+          :has-password="hasPassword"
+          :loading="pwdLoading"
+          :error="pwdError"
+          @confirm="handlePasswordConfirm"
+          @cancel="pwdDialogOpen = false"
+        />
 
-          <div class="field">
-            <label for="new-password">新密码</label>
-            <div class="input-wrapper">
-              <input
-                id="new-password"
-                v-model="newPassword"
-                :type="showPassword ? 'text' : 'password'"
-                autocomplete="new-password"
-                placeholder="至少 8 位"
-                :class="{ invalid: newPasswordError }"
-              />
-              <button
-                type="button"
-                class="toggle-pwd"
-                :aria-label="showPassword ? '隐藏密码' : '显示密码'"
-                @click="showPassword = !showPassword"
-              >
-                <svg v-if="!showPassword" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                  <circle cx="12" cy="12" r="3" />
-                </svg>
-                <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
-                  <line x1="1" y1="1" x2="23" y2="23" />
-                </svg>
-              </button>
-            </div>
-            <span v-if="newPasswordError" class="field-error">{{ newPasswordError }}</span>
-          </div>
-
-          <div class="field">
-            <label for="confirm-password">确认密码</label>
-            <input
-              id="confirm-password"
-              v-model="confirmPassword"
-              :type="showPassword ? 'text' : 'password'"
-              autocomplete="new-password"
-              placeholder="再输入一次"
-              :class="{ invalid: confirmError }"
-            />
-            <span v-if="confirmError" class="field-error">{{ confirmError }}</span>
-          </div>
-
-          <button type="submit" class="btn-primary" :disabled="loading || !canSubmit">
-            <span v-if="loading" class="spinner-sm" />
-            {{ loading ? '处理中...' : (hasPassword ? '修改密码' : '设置密码') }}
-          </button>
-        </form>
-      </section>
-
-      <!-- ============================================================ -->
-      <!-- GitHub 账号绑定区                                            -->
-      <!-- ============================================================ -->
-      <section class="config-section github-section">
-        <div class="section-header">
-          <div>
-            <h2>GitHub 账号绑定</h2>
-            <p class="section-desc">
-              绑定后可在任务创建时选择你的私有仓库,授权范围: user:email (读取邮箱) + repo (访问私有仓库)
-            </p>
-          </div>
-        </div>
-
-        <Transition name="fade">
-          <div v-if="githubError" class="alert alert-error" role="alert">{{ githubError }}</div>
-        </Transition>
-        <Transition name="fade">
-          <div v-if="githubSuccess" class="alert alert-success" role="status">{{ githubSuccess }}</div>
-        </Transition>
-
-        <div v-if="githubLoading" class="status-loading">
-          <div class="spinner"></div>
-          <p>加载中...</p>
-        </div>
-
-        <div v-else-if="githubStatus" class="github-status">
-          <div v-if="githubStatus.bound" class="bound-status">
-            <div class="avatar-container">
-              <img v-if="githubStatus.avatar_url" :src="githubStatus.avatar_url" alt="GitHub 头像" class="avatar">
-              <div v-else class="avatar-placeholder">GH</div>
-            </div>
-            <div class="user-info">
-              <p class="login">@{{ githubStatus.github_login || 'unknown' }}</p>
-              <p class="desc">已绑定 GitHub 账号,可访问私有仓库</p>
-            </div>
-            <button
-              type="button"
-              class="btn-danger"
-              :disabled="githubAction === 'unbind'"
-              @click="startUnbind"
-            >
-              <span v-if="githubAction === 'unbind'" class="spinner-sm"></span>
-              {{ githubAction === 'unbind' ? '解绑中...' : '解绑 GitHub' }}
-            </button>
-          </div>
-
-          <div v-else class="unbound-status">
-            <div class="illustration">
-              <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
-              </svg>
-            </div>
-            <p class="desc">未绑定 GitHub 账号,无法访问私有仓库</p>
-            <button
-              type="button"
-              class="btn-primary"
-              @click="startBind"
-            >
-              绑定 GitHub
-            </button>
-          </div>
-        </div>
-
-        <div v-else class="status-error">
-          <p>加载 GitHub 状态失败,请刷新页面重试</p>
-          <button type="button" class="btn-text" @click="refreshGitHubStatus">
-            刷新
-          </button>
-        </div>
-      </section>
-    </main>
+        <GitHubDialog
+          :open="ghDialogOpen"
+          :status="githubStatus"
+          :loading="githubLoading"
+          :action="githubAction"
+          :error="githubError"
+          :success="githubSuccess"
+          @bind="handleBind"
+          @unbind="handleUnbind"
+          @cancel="ghDialogOpen = false"
+        />
+      </main>
     </div>
+
+    <!-- ============ 浮动提示弹窗(Teleport 到 body,顶部居中,5s 自动消失) ============ -->
+    <Teleport to="body">
+      <Transition name="toast-slide">
+        <div
+          v-if="toast"
+          :class="['toast-popup', toast.type === 'error' ? 'toast-error' : 'toast-success']"
+          role="status"
+          aria-live="polite"
+        >
+          <span class="toast-icon" aria-hidden="true">
+            <svg
+              v-if="toast.type === 'success'"
+              width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            >
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+              <polyline points="22 4 12 14.01 9 11.01" />
+            </svg>
+            <svg
+              v-else
+              width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            >
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+          </span>
+          <span class="toast-msg">{{ toast.msg }}</span>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>
 
@@ -357,10 +327,10 @@ onMounted(() => {
 .main {
   flex: 1;
   min-width: 0;
-  max-width: 560px;
+  max-width: 760px;
   margin: 0 auto;
   overflow-y: auto;
-  padding: var(--space-8) var(--space-6) var(--space-12);
+  padding: var(--space-6) var(--space-5) var(--space-8);
 }
 
 /* ---- 页头 ---- */
@@ -369,357 +339,177 @@ onMounted(() => {
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-4);
-  margin-bottom: var(--space-6);
+  margin-bottom: var(--space-5);
 }
 
 .page-header h1 {
   font-size: var(--fs-xl);
-  margin-bottom: var(--space-1);
+  margin: 0;
 }
 
-.subtitle {
-  color: var(--color-text-secondary);
+/* ---- 浮动提示弹窗(顶部居中,5s 自动消失) ---- */
+.toast-popup {
+  position: fixed;
+  top: var(--space-5);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2000;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 280px;
+  max-width: 420px;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
   font-size: var(--fs-sm);
+  line-height: var(--lh-base);
+  box-shadow: var(--shadow-lg);
+  border: 1px solid transparent;
 }
 
-/* ---- 配置区(复用 ModelSettingsView 风格) ---- */
-.config-section {
+.toast-success {
+  background: var(--color-success-light);
+  color: var(--color-success);
+  border-color: #bbf7d0;
+}
+
+.toast-error {
+  background: var(--color-danger-light);
+  color: var(--color-danger);
+  border-color: #fecaca;
+}
+
+.toast-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  margin-top: 1px;
+}
+
+.toast-msg {
+  flex: 1;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.toast-slide-enter-active,
+.toast-slide-leave-active {
+  transition: opacity var(--transition-base), transform var(--transition-base);
+}
+
+.toast-slide-enter-from,
+.toast-slide-leave-to {
+  opacity: 0;
+  transform: translate(-50%, -12px);
+}
+
+/* ---- 表格区(复用 ModelSettingsView 风格) ---- */
+.table-section {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-sm);
-  padding: var(--space-6);
+  overflow: hidden;
 }
 
-.section-header {
-  margin-bottom: var(--space-4);
+.table-wrap {
+  overflow-x: auto;
 }
 
-.section-header h2 {
-  font-size: var(--fs-lg);
-}
-
-.section-desc {
-  color: var(--color-text-secondary);
+.config-table {
+  width: 100%;
+  border-collapse: collapse;
   font-size: var(--fs-sm);
-  margin: var(--space-1) 0 0;
 }
 
-/* ---- 提示 ---- */
-.alert {
+.config-table thead th {
+  text-align: left;
   padding: var(--space-3) var(--space-4);
-  border-radius: var(--radius-md);
-  font-size: var(--fs-sm);
-  margin-bottom: var(--space-4);
-}
-
-.alert-success {
-  background: var(--color-success-light);
-  color: var(--color-success);
-  border: 1px solid #bbf7d0;
-}
-
-.alert-error {
-  background: var(--color-danger-light);
-  color: var(--color-danger);
-  border: 1px solid #fecaca;
-}
-
-/* ---- 表单字段(复用 ResetPasswordView 风格) ---- */
-.field {
-  margin-bottom: var(--space-4);
-}
-
-.field label {
-  display: block;
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
-  margin-bottom: var(--space-2);
-}
-
-.field input {
-  width: 100%;
-  height: 42px;
-  padding: 0 var(--space-3);
-  font-size: var(--fs-base);
-  color: var(--color-text);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
-}
-
-.field input::placeholder {
-  color: var(--color-text-muted);
-}
-
-.field input:focus {
-  outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px var(--color-primary-light);
-}
-
-.field input.invalid {
-  border-color: var(--color-danger);
-}
-
-.input-wrapper {
-  position: relative;
-}
-
-.input-wrapper input {
-  padding-right: 44px;
-}
-
-.toggle-pwd {
-  position: absolute;
-  right: var(--space-2);
-  top: 50%;
-  transform: translateY(-50%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  color: var(--color-text-muted);
-  border: none;
-  background: transparent;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-}
-
-.toggle-pwd:hover {
-  color: var(--color-text);
-}
-
-.field-error {
-  display: block;
-  margin-top: var(--space-1);
   font-size: var(--fs-xs);
-  color: var(--color-danger);
+  font-weight: var(--fw-semibold);
+  color: var(--color-text-secondary);
+  background: var(--color-surface-alt);
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
 }
 
-/* ---- 按钮 ---- */
-.btn-primary {
-  width: 100%;
-  height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  font-size: var(--fs-base);
-  font-weight: var(--fw-semibold);
-  color: white;
-  background: var(--color-primary);
-  border: none;
-  border-radius: var(--radius-md);
+.col-item { width: 120px; }
+.col-desc { }
+.col-status { width: 120px; }
+.col-actions { width: 72px; text-align: right; }
+
+.config-table tbody td {
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: middle;
+}
+
+.config-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.data-row {
+  cursor: pointer;
   transition: background var(--transition-fast);
 }
 
-.btn-primary:hover:not(:disabled) {
-  background: var(--color-primary-hover);
+.data-row:hover {
+  background: var(--color-surface-alt);
 }
 
-.btn-primary:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+/* ---- 单元格内容 ---- */
+.cell-title {
+  font-weight: var(--fw-semibold);
+  color: var(--color-text);
+  display: block;
 }
 
-.spinner-sm {
-  display: inline-block;
-  width: 14px;
-  height: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: white;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-/* ---- 过渡 ---- */
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity var(--transition-fast);
-}
-
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
-}
-
-/* ============================================================ */
-/* GitHub 绑定区                                                */
-/* ============================================================ */
-.github-section {
-  margin-top: var(--space-6);
-}
-
-.status-loading {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-8) 0;
+.cell-desc {
+  font-size: var(--fs-sm);
   color: var(--color-text-secondary);
 }
 
-.spinner {
-  display: inline-block;
+/* ---- 徽标 ---- */
+.badge {
+  font-size: var(--fs-xs);
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+
+.badge-ok {
+  background: var(--color-success-light);
+  color: var(--color-success);
+}
+
+.badge-warn {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.badge-neutral {
+  background: var(--color-surface-alt);
+  color: var(--color-text-muted);
+}
+
+/* ---- 操作按钮 ---- */
+.btn-icon {
   width: 28px;
   height: 28px;
-  border: 3px solid var(--color-border);
-  border-top-color: var(--color-primary);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-
-.github-status {
-  padding: var(--space-2) 0;
-}
-
-/* ---- 已绑定状态 ---- */
-.bound-status {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  padding: var(--space-4);
-  background: var(--color-success-light);
-  border: 1px solid #bbf7d0;
-  border-radius: var(--radius-md);
-}
-
-.avatar-container {
-  flex-shrink: 0;
-}
-
-.avatar {
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  border: 2px solid var(--color-surface);
-  box-shadow: var(--shadow-sm);
-}
-
-.avatar-placeholder {
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--color-primary);
-  color: white;
-  font-weight: var(--fw-semibold);
-  font-size: var(--fs-sm);
-}
-
-.user-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.user-info .login {
-  font-weight: var(--fw-semibold);
-  font-size: var(--fs-base);
-  color: var(--color-text);
-  margin-bottom: var(--space-1);
-  word-break: break-all;
-}
-
-.user-info .desc {
-  font-size: var(--fs-sm);
-  color: var(--color-text-secondary);
-  margin: 0;
-}
-
-/* ---- 未绑定状态 ---- */
-.unbound-status {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-6) var(--space-4);
-  text-align: center;
-}
-
-.illustration {
-  color: var(--color-text-muted);
-  opacity: 0.6;
-}
-
-.unbound-status .desc {
-  color: var(--color-text-secondary);
-  font-size: var(--fs-sm);
-  margin: 0;
-}
-
-.unbound-status .btn-primary {
-  width: auto;
-  padding: 0 var(--space-6);
-  margin-top: var(--space-2);
-}
-
-/* ---- 加载失败状态 ---- */
-.status-error {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-6) 0;
-  text-align: center;
-  color: var(--color-text-secondary);
-}
-
-/* ---- 危险按钮(解绑) ---- */
-.btn-danger {
-  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-2);
-  height: 36px;
-  padding: 0 var(--space-4);
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
-  color: var(--color-danger);
-  background: transparent;
-  border: 1px solid var(--color-danger);
-  border-radius: var(--radius-md);
-  transition: background var(--transition-fast), color var(--transition-fast);
-}
-
-.btn-danger:hover:not(:disabled) {
-  background: var(--color-danger);
-  color: white;
-}
-
-.btn-danger:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.btn-danger .spinner-sm {
-  border-color: rgba(220, 38, 38, 0.3);
-  border-top-color: var(--color-danger);
-}
-
-/* ---- 文本按钮(刷新) ---- */
-.btn-text {
-  background: transparent;
   border: none;
-  color: var(--color-primary);
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
+  background: transparent;
   cursor: pointer;
-  padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-sm);
-  transition: background var(--transition-fast);
+  color: var(--color-text-secondary);
+  transition: all var(--transition-fast);
 }
 
-.btn-text:hover {
-  background: var(--color-primary-light);
+.btn-icon:hover {
+  background: var(--color-surface);
+  color: var(--color-text);
 }
 </style>
