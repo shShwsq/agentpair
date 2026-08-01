@@ -74,6 +74,11 @@ def build_thinking_extras(
     """构造思考参数注入字典
 
     返回 None 表示该模型/厂商不支持思考或不需要注入
+
+    自定义模型(不在 catalog 中,model_meta 为 None)的处理:
+    - 厂商支持思考 → 按 hybrid 模式处理,尊重 enable_thinking 开关
+      (避免厂商默认开启思考却未显式关闭,如 DashScope qwen3 系列)
+    - 厂商不支持思考 → 不注入
     """
     if not provider.get("supportsThinking"):
         return None
@@ -82,7 +87,7 @@ def build_thinking_extras(
     thinking_mode = model_meta.get("thinking") if model_meta else None
     if not thinking_mode:
         # 豆包等厂商用 Endpoint ID,model_meta 可能匹配不上,用 provider 兜底
-        thinking_mode = provider.get("fallbackThinking", "none")
+        thinking_mode = provider.get("fallbackThinking", "hybrid")
 
     if thinking_mode == "none":
         return None
