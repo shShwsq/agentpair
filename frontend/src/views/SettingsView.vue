@@ -475,14 +475,44 @@ function modelLabel(row: TableRow): string {
                         @click="handleTestRow(row)"
                       >
                         <span v-if="row.testing" class="spinner-sm" />
-                        <template v-else>⚡</template>
+                        <!-- 心电图图标(Lucide activity),常用于连通性/健康检查 -->
+                        <svg
+                          v-else
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="2"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          aria-hidden="true"
+                        >
+                          <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+                        </svg>
                       </button>
                       <button
                         class="btn-icon"
                         title="编辑"
                         :disabled="saving"
                         @click="openEditRow(row)"
-                      >✎</button>
+                      >
+                        <!-- 铅笔图标(Lucide pencil) -->
+                        <svg
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="2"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          aria-hidden="true"
+                        >
+                          <path d="M12 20h9" />
+                          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                        </svg>
+                      </button>
                       <button
                         class="btn-icon btn-danger"
                         title="删除"
