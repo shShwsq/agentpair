@@ -2,14 +2,16 @@
 /**
  * GitHub OAuth 回调处理页
  *
- * 流程:
- * 1. GitHub 授权后跳转到此页,URL 带 ?code=XXX(或 ?error=access_denied)
- * 2. 提取 code 调后端 /auth/oauth/github
- * 3. 成功 → 跳首页;失败 → 显示错误 + 返回登录链接
+ * 同一个 redirect_uri 承担两种场景,按当前登录状态分流:
+ * - 已登录:用户从设置页"绑定 GitHub"过来 → 调 POST /github/bind 写入 access_token
+ * - 未登录:用户从登录页"GitHub 登录"过来 → 调 POST /auth/oauth/github 走登录
+ *
+ * 区分依据:authStore.isAuthenticated(页面刷新场景由路由守卫已 fetchMe 恢复)
  */
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import { bindGitHub } from '@/api/github'
 import { useAuthStore } from '@/stores/auth'
 import { extractErrorMessage } from '@/utils/error'
 
@@ -38,8 +40,16 @@ onMounted(async () => {
   }
 
   try {
-    await authStore.handleGitHubCallback(code)
-    await router.push('/')
+    if (authStore.isAuthenticated) {
+      // 已登录 → 绑定流程:用 code 换 token 并加密落库
+      await bindGitHub({ code })
+      // 绑定成功跳回设置页(用户能看到绑定状态)
+      await router.push('/settings')
+    } else {
+      // 未登录 → 登录流程:用 code 换 token + 创建/关联账号
+      await authStore.handleGitHubCallback(code)
+      await router.push('/')
+    }
   } catch (err) {
     status.value = 'error'
     errorMsg.value = extractErrorMessage(err)
