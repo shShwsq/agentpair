@@ -326,34 +326,45 @@ class LLMClient:
                 finish_reason=choice.finish_reason,
             )
 
-    def test(self, prompt: str = "你好,请用一句话介绍自己") -> dict[str, Any]:
-        """测试 LLM 连通性(非流式,取首个 chunk 即可)
+    def test(self, prompt: str = "你好,请介绍一下你自己。") -> dict[str, Any]:
+        """测试 LLM 连通性并收集完整回复
 
-        返回 { success, message, latency_ms }
-        用流式接口调,但只取首条有 content 的 chunk 后立即关闭,避免长回复耗时。
+        返回 { success, message, latency_ms, reply }
+        用流式接口调用,收集完整 content 后返回,供前端展示模型实际回复。
+        测试时强制关闭深度思考,避免思考链耗时过长(thinking_mode=only 的模型无法关闭)。
         """
         import time
 
         start = time.perf_counter()
+        # 临时关闭深度思考,测试完恢复
+        original_thinking = self.enable_thinking
+        self.enable_thinking = False
         try:
             messages = [{"role": "user", "content": prompt}]
-            # 取流式的前几个 chunk,拿到任意 content 即视为成功
-            for chunk in self.chat_stream(messages, max_tokens=64):
-                if chunk.content_delta or chunk.reasoning_delta:
-                    latency_ms = int((time.perf_counter() - start) * 1000)
-                    return {
-                        "success": True,
-                        "message": "LLM 测试成功",
-                        "latency_ms": latency_ms,
-                    }
-                if chunk.finish_reason in ("stop", "tool_calls"):
+            # 收集完整 content,max_tokens 限制在合理范围(一句口号)
+            collected: list[str] = []
+            has_any = False
+            for chunk in self.chat_stream(messages, max_tokens=128):
+                if chunk.content_delta:
+                    collected.append(chunk.content_delta)
+                    has_any = True
+                if chunk.finish_reason in ("stop", "tool_calls", "length"):
                     break
-            # 没拿到 content 但流正常结束,也算成功(部分模型只输出 reasoning)
             latency_ms = int((time.perf_counter() - start) * 1000)
+            reply = "".join(collected).strip()
+            if has_any and reply:
+                return {
+                    "success": True,
+                    "message": "LLM 测试成功",
+                    "latency_ms": latency_ms,
+                    "reply": reply,
+                }
+            # 没拿到 content 但流正常结束,也算成功(部分模型只输出 reasoning)
             return {
                 "success": True,
                 "message": "LLM 测试成功(未返回 content,可能仅思考)",
                 "latency_ms": latency_ms,
+                "reply": None,
             }
         except Exception as e:
             latency_ms = int((time.perf_counter() - start) * 1000)
@@ -361,7 +372,10 @@ class LLMClient:
                 "success": False,
                 "message": f"LLM 测试失败: {e}",
                 "latency_ms": latency_ms,
+                "reply": None,
             }
+        finally:
+            self.enable_thinking = original_thinking
 
 
 # ============================================================

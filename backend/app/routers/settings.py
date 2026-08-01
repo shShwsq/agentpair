@@ -119,6 +119,7 @@ def test_llm(
         success=result["success"],
         message=result["message"],
         latency_ms=result.get("latency_ms"),
+        reply=result.get("reply"),
     )
 
 

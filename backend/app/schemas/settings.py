@@ -116,3 +116,5 @@ class TestResponse(BaseModel):
     latency_ms: int | None = None
     # 仅 embedding 测试返回:实际向量维度
     dimension: int | None = None
+    # 仅 LLM 测试返回:模型的实际回复文本(供前端展示)
+    reply: str | None = None

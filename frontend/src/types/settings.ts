@@ -141,4 +141,6 @@ export interface TestResponse {
   latency_ms?: number | null
   /** 仅 embedding 测试返回 */
   dimension?: number | null
+  /** 仅 LLM 测试返回:模型的实际回复文本 */
+  reply?: string | null
 }

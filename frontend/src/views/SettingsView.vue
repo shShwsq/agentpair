@@ -335,7 +335,8 @@ async function handleTestRow(row: TableRow): Promise<void> {
       if (!ok) return
       const res = await testLLM({ config_id: cfg.id })
       if (res.success) {
-        showToast(`"${cfg.name || cfg.model}" 测试成功 · ${res.latency_ms ?? '?'}ms`, 'success')
+        const reply = res.reply ? `\n「${res.reply}」` : ''
+        showToast(`"${cfg.name || cfg.model}" 测试成功 · ${res.latency_ms ?? '?'}ms${reply}`, 'success')
       } else {
         showToast(`"${cfg.name || cfg.model}" 测试失败: ${res.message}`, 'error')
       }
@@ -716,6 +717,7 @@ function modelLabel(row: TableRow): string {
 .toast-msg {
   flex: 1;
   word-break: break-word;
+  white-space: pre-wrap;
 }
 
 /* 弹窗从顶部滑入(保留 translateX(-50%) 居中) */
