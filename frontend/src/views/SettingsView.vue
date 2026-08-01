@@ -19,6 +19,8 @@ import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 
 import AppHeader from '@/components/AppHeader.vue'
 import ModelConfigDialog from '@/components/ModelConfigDialog.vue'
+import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
+import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import { getCatalog, getMyModels, saveModels, testEmbedding, testLLM } from '@/api/settings'
 import { extractErrorMessage } from '@/utils/error'
 import type {
@@ -30,6 +32,13 @@ import type {
 } from '@/types/settings'
 
 type Kind = 'llm' | 'embedding'
+
+/** 历史任务侧栏是否折叠(默认折叠) */
+const workspaceCollapsed = ref(true)
+
+function toggleWorkspace(): void {
+  workspaceCollapsed.value = !workspaceCollapsed.value
+}
 
 // ---- 厂商清单 ----
 const catalog = ref<ModelsCatalog | null>(null)
@@ -410,6 +419,14 @@ function modelLabel(row: TableRow): string {
 <template>
   <div class="page">
     <AppHeader>
+      <template #leading>
+        <WorkspaceToggleButton
+          :collapsed="workspaceCollapsed"
+          expand-title="展开历史任务"
+          collapse-title="折叠历史任务"
+          @toggle="toggleWorkspace"
+        />
+      </template>
       <template #nav>
         <RouterLink to="/">首页</RouterLink>
         <RouterLink to="/tasks/new">提交任务</RouterLink>
@@ -417,7 +434,10 @@ function modelLabel(row: TableRow): string {
       </template>
     </AppHeader>
 
-    <main class="main">
+    <div class="page-body">
+      <WorkspaceSidebar v-if="!workspaceCollapsed" />
+
+      <main class="main">
       <!-- 加载中 -->
       <div v-if="loadingCatalog || loadingConfig" class="loading">
         <div class="spinner" />
@@ -570,6 +590,7 @@ function modelLabel(row: TableRow): string {
         />
       </template>
     </main>
+    </div>
 
     <!-- ============ 浮动提示弹窗(Teleport 到 body,右上角,5s 自动消失) ============ -->
     <Teleport to="body">
@@ -622,13 +643,27 @@ function modelLabel(row: TableRow): string {
 
 <style scoped>
 .page {
-  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
   background: var(--color-bg);
 }
 
+.page-body {
+  flex: 1;
+  display: flex;
+  align-items: stretch;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .main {
+  flex: 1;
+  min-width: 0;
   max-width: 920px;
   margin: 0 auto;
+  overflow-y: auto;
   padding: var(--space-8) var(--space-6) var(--space-12);
 }
 

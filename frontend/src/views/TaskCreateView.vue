@@ -13,6 +13,8 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
+import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
+import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import { createTask, getScenarios } from '@/api/task'
 import { getMyModels } from '@/api/settings'
 import { extractErrorMessage } from '@/utils/error'
@@ -20,6 +22,13 @@ import type { Scenario } from '@/types/task'
 import type { LLMConfigItemOut } from '@/types/settings'
 
 const router = useRouter()
+
+/** 历史任务侧栏是否折叠(默认折叠) */
+const workspaceCollapsed = ref(true)
+
+function toggleWorkspace(): void {
+  workspaceCollapsed.value = !workspaceCollapsed.value
+}
 
 // ---- 场景列表 ----
 
@@ -170,6 +179,14 @@ onMounted(async () => {
 <template>
   <div class="page">
     <AppHeader>
+      <template #leading>
+        <WorkspaceToggleButton
+          :collapsed="workspaceCollapsed"
+          expand-title="展开历史任务"
+          collapse-title="折叠历史任务"
+          @toggle="toggleWorkspace"
+        />
+      </template>
       <template #nav>
         <RouterLink to="/">首页</RouterLink>
         <RouterLink to="/tasks/new" class="router-link-active">提交任务</RouterLink>
@@ -177,7 +194,10 @@ onMounted(async () => {
       </template>
     </AppHeader>
 
-    <main class="main">
+    <div class="page-body">
+      <WorkspaceSidebar v-if="!workspaceCollapsed" />
+
+      <main class="main">
       <div class="form-card">
         <h1>提交任务</h1>
         <p class="subtitle">输入任务信息,双智能体将协作完成任务</p>
@@ -278,18 +298,33 @@ onMounted(async () => {
         </form>
       </div>
     </main>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .page {
-  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
   background: var(--color-bg);
 }
 
+.page-body {
+  flex: 1;
+  display: flex;
+  align-items: stretch;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .main {
+  flex: 1;
+  min-width: 0;
   max-width: 640px;
   margin: 0 auto;
+  overflow-y: auto;
   padding: var(--space-8) var(--space-6);
 }
 

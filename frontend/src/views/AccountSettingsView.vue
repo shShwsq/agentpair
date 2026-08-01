@@ -12,12 +12,21 @@ import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
+import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
+import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import { changePassword } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 import { extractErrorMessage } from '@/utils/error'
 
 const router = useRouter()
 const authStore = useAuthStore()
+
+/** 历史任务侧栏是否折叠(默认折叠) */
+const workspaceCollapsed = ref(true)
+
+function toggleWorkspace(): void {
+  workspaceCollapsed.value = !workspaceCollapsed.value
+}
 
 /** OAuth 用户未设密码时为 false,此时表单跳过"当前密码"字段 */
 const hasPassword = computed(() => authStore.user?.has_password ?? false)
@@ -86,6 +95,14 @@ async function handleSubmit(): Promise<void> {
 <template>
   <div class="page">
     <AppHeader>
+      <template #leading>
+        <WorkspaceToggleButton
+          :collapsed="workspaceCollapsed"
+          expand-title="展开历史任务"
+          collapse-title="折叠历史任务"
+          @toggle="toggleWorkspace"
+        />
+      </template>
       <template #nav>
         <RouterLink to="/">首页</RouterLink>
         <RouterLink to="/tasks/new">提交任务</RouterLink>
@@ -94,7 +111,10 @@ async function handleSubmit(): Promise<void> {
       </template>
     </AppHeader>
 
-    <main class="main">
+    <div class="page-body">
+      <WorkspaceSidebar v-if="!workspaceCollapsed" />
+
+      <main class="main">
       <div class="page-header">
         <div>
           <h1>账号设置</h1>
@@ -189,18 +209,33 @@ async function handleSubmit(): Promise<void> {
         </form>
       </section>
     </main>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .page {
-  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
   background: var(--color-bg);
 }
 
+.page-body {
+  flex: 1;
+  display: flex;
+  align-items: stretch;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .main {
+  flex: 1;
+  min-width: 0;
   max-width: 560px;
   margin: 0 auto;
+  overflow-y: auto;
   padding: var(--space-8) var(--space-6) var(--space-12);
 }
 
