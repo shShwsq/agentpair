@@ -428,8 +428,7 @@ function modelLabel(row: TableRow): string {
         <!-- 页头 + 添加按钮 -->
         <div class="page-header">
           <div>
-            <h1>模型设置</h1>
-            <p class="subtitle">配置多个 LLM 与 Embedding 模型,提交任务时选择使用</p>
+            <h1>我的模型</h1>
           </div>
           <div class="header-actions">
             <button class="btn-add" :disabled="saving" @click="openAddDialog('llm')">
