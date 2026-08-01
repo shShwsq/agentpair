@@ -322,7 +322,7 @@ function handleConfirm(): void {
   box-shadow: var(--shadow-xl);
   width: 100%;
   max-width: 560px;
-  max-height: 90vh;
+  max-height: 95vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;

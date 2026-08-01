@@ -9,8 +9,13 @@
  * - 键盘导航:↑/↓ 移动高亮,Enter 选中,Esc 关闭
  * - 点击外部自动关闭
  *
+ * 下拉列表通过 Teleport 挂载到 body,用 @floating-ui/dom 计算定位,
+ * 避免被弹窗(dialog-card overflow:hidden / dialog-body overflow:auto)裁剪,
+ * 列表可正常覆盖在弹窗 footer 之上显示。
+ *
  * 视觉与 .field select 保持一致,便于在表单中无缝替换。
  */
+import { autoUpdate, computePosition, flip, offset, size } from '@floating-ui/dom'
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 export interface ComboboxOption {
@@ -39,6 +44,7 @@ const emit = defineEmits<{
 
 const rootRef = ref<HTMLElement | null>(null)
 const inputRef = ref<HTMLInputElement | null>(null)
+const listRef = ref<HTMLElement | null>(null)
 const open = ref(false)
 const highlightIndex = ref(-1)
 
@@ -142,7 +148,7 @@ function onKeydown(e: KeyboardEvent): void {
 
 function scrollIntoView(): void {
   nextTick(() => {
-    const list = rootRef.value?.querySelector('.combobox-list')
+    const list = listRef.value
     const el = list?.querySelector<HTMLElement>(`[data-idx="${highlightIndex.value}"]`)
     el?.scrollIntoView({ block: 'nearest' })
   })
@@ -150,17 +156,76 @@ function scrollIntoView(): void {
 
 // 点击外部关闭
 function onDocumentClick(e: MouseEvent): void {
-  if (!rootRef.value) return
-  if (!rootRef.value.contains(e.target as Node)) closeList()
+  const t = e.target as Node
+  if (rootRef.value?.contains(t)) return
+  if (listRef.value?.contains(t)) return
+  closeList()
+}
+
+// ---- floating-ui 定位 ----
+// 打开时建立 autoUpdate(自动监听滚动/resize/锚点位移),关闭时清理。
+let cleanupFloating: (() => void) | null = null
+
+function setupFloating(): void {
+  const anchor = inputRef.value
+  const floating = listRef.value
+  if (!anchor || !floating) return
+
+  // 先同步算一次,避免列表在(0,0)闪烁
+  updatePosition(anchor, floating)
+
+  cleanupFloating?.()
+  cleanupFloating = autoUpdate(anchor, floating, () => updatePosition(anchor, floating))
+}
+
+function updatePosition(anchor: HTMLElement, floating: HTMLElement): void {
+  computePosition(anchor, floating, {
+    placement: 'bottom-start',
+    // 4px 间距,避免列表紧贴输入框
+    middleware: [
+      offset(4),
+      // 下方空间不足时翻转到上方
+      flip({ padding: 8 }),
+      // 限制列表宽度不超过锚点宽度(与 input 对齐),
+      // 同时限制最大高度,超出则内部滚动
+      size({
+        apply({ rects, elements }) {
+          Object.assign(elements.floating.style, {
+            minWidth: `${rects.reference.width}px`,
+            maxWidth: `${Math.max(rects.reference.width, 320)}px`,
+          })
+        },
+        padding: 8,
+      }),
+    ],
+  }).then(({ x, y }) => {
+    Object.assign(floating.style, {
+      left: `${x}px`,
+      top: `${y}px`,
+    })
+  })
 }
 
 watch(open, (isOpen) => {
-  if (isOpen) document.addEventListener('mousedown', onDocumentClick)
-  else document.removeEventListener('mousedown', onDocumentClick)
+  if (isOpen) {
+    document.addEventListener('mousedown', onDocumentClick)
+    // 双重等待:nextTick(Vue 更新) + rAF(浏览器布局),确保 Teleport 目标已挂载
+    nextTick(() => requestAnimationFrame(setupFloating))
+  } else {
+    document.removeEventListener('mousedown', onDocumentClick)
+    cleanupFloating?.()
+    cleanupFloating = null
+  }
+})
+
+// filtered 变化会导致 ul ↔ p 切换,listRef 重新绑定,需重新建立定位
+watch(filtered, () => {
+  if (open.value) nextTick(() => requestAnimationFrame(setupFloating))
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('mousedown', onDocumentClick)
+  cleanupFloating?.()
 })
 </script>
 
@@ -198,28 +263,40 @@ onBeforeUnmount(() => {
       </svg>
     </button>
 
-    <ul v-if="open && filtered.length > 0" class="combobox-list" role="listbox">
-      <li
-        v-for="(opt, idx) in filtered"
-        :key="opt.value"
-        :data-idx="idx"
-        class="combobox-option"
-        :class="{
-          'is-highlighted': idx === highlightIndex,
-          'is-selected': opt.value === modelValue,
-        }"
-        role="option"
-        :aria-selected="opt.value === modelValue"
-        @mousedown.prevent="selectOption(opt)"
-        @mouseenter="highlightIndex = idx"
+    <!-- 下拉列表 Teleport 到 body,由 floating-ui 定位,避免被弹窗裁剪 -->
+    <Teleport to="body">
+      <ul
+        v-if="open && filtered.length > 0"
+        ref="listRef"
+        class="combobox-list"
+        role="listbox"
       >
-        <span class="combobox-option-label">{{ opt.label ?? opt.value }}</span>
-        <span v-if="opt.label && opt.label !== opt.value" class="combobox-option-value">{{ opt.value }}</span>
-      </li>
-    </ul>
-    <p v-else-if="open && filtered.length === 0 && query.trim()" class="combobox-empty">
-      无匹配模型,将使用输入的 ID
-    </p>
+        <li
+          v-for="(opt, idx) in filtered"
+          :key="opt.value"
+          :data-idx="idx"
+          class="combobox-option"
+          :class="{
+            'is-highlighted': idx === highlightIndex,
+            'is-selected': opt.value === modelValue,
+          }"
+          role="option"
+          :aria-selected="opt.value === modelValue"
+          @mousedown.prevent="selectOption(opt)"
+          @mouseenter="highlightIndex = idx"
+        >
+          <span class="combobox-option-label">{{ opt.label ?? opt.value }}</span>
+          <span v-if="opt.label && opt.label !== opt.value" class="combobox-option-value">{{ opt.value }}</span>
+        </li>
+      </ul>
+      <p
+        v-else-if="open && filtered.length === 0 && query.trim()"
+        ref="listRef"
+        class="combobox-empty"
+      >
+        无匹配模型,将使用输入的 ID
+      </p>
+    </Teleport>
   </div>
 </template>
 
@@ -286,11 +363,12 @@ onBeforeUnmount(() => {
 }
 
 .combobox-list {
-  position: absolute;
-  top: calc(100% + 4px);
+  /* Teleport 到 body,由 floating-ui 设置 left/top;width 由 size middleware 控制 */
+  position: fixed;
+  top: 0;
   left: 0;
-  right: 0;
-  z-index: 10;
+  /* 高于弹窗(1000)与 toast(2000) */
+  z-index: 3000;
   margin: 0;
   padding: var(--space-1);
   list-style: none;
@@ -298,7 +376,7 @@ onBeforeUnmount(() => {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
-  max-height: 220px;
+  max-height: 160px;
   overflow-y: auto;
 }
 
@@ -338,11 +416,11 @@ onBeforeUnmount(() => {
 }
 
 .combobox-empty {
-  position: absolute;
-  top: calc(100% + 4px);
+  /* 同 .combobox-list,Teleport 到 body 由 floating-ui 定位 */
+  position: fixed;
+  top: 0;
   left: 0;
-  right: 0;
-  z-index: 10;
+  z-index: 3000;
   margin: 0;
   padding: var(--space-2) var(--space-3);
   font-size: var(--fs-xs);
