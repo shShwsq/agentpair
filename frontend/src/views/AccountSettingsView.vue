@@ -258,7 +258,7 @@ async function handleSubmit(): Promise<void> {
   font-size: var(--fs-sm);
 }
 
-/* ---- 配置区(复用 SettingsView 风格) ---- */
+/* ---- 配置区(复用 ModelSettingsView 风格) ---- */
 .config-section {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
