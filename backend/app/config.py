@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 1440
 
+    # GitHub access_token 加密密钥(Fernet,32 字节 base64)
+    # 留空则启动时自动生成(开发期方便,生产必须固定)
+    GITHUB_TOKEN_SECRET: str = ""
+
     # GitHub OAuth(阶段 6 用,留空则 /auth/oauth/github 报错)
     GITHUB_OAUTH_CLIENT_ID: str = ""
     GITHUB_OAUTH_CLIENT_SECRET: str = ""

@@ -1,4 +1,4 @@
-"""安全工具:密码哈希 + JWT 签发/校验
+"""安全工具:密码哈希 + JWT 签发/校验 + 对称加密
 
 双 token 设计:
 - access_token: 短期(15 分钟),用于 API 鉴权
@@ -9,12 +9,16 @@ JWT payload:
 - type: "access" | "refresh"
 - iat: 签发时间
 - exp: 过期时间
+
+对称加密(Fernet):用于加密存储第三方 OAuth token(如 GitHub access_token),
+避免凭据明文落库。密钥来自 settings.GITHUB_TOKEN_SECRET,留空则启动时随机生成。
 """
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
 import jwt as pyjwt
+from cryptography.fernet import Fernet, InvalidToken
 
 from app.config import settings
 
@@ -137,3 +141,39 @@ def extract_user_id_from_token(
         return uuid.UUID(payload["sub"])
     except (KeyError, ValueError) as e:
         raise TokenInvalidError(f"token payload 缺少 sub 或格式错: {e}") from e
+
+
+# ============================================================
+# 对称加密(Fernet)——用于加密存储第三方 OAuth token
+# ============================================================
+
+
+def _get_fernet() -> Fernet:
+    """获取 Fernet 实例
+
+    密钥来源:settings.GITHUB_TOKEN_SECRET(必须为 Fernet 兼容的 base64 串);
+    留空则启动时随机生成(开发期方便,生产环境必须固定,否则重启后旧密文无法解密)。
+    """
+    key = settings.GITHUB_TOKEN_SECRET
+    if not key:
+        # 开发期自动生成,生产环境应在 .env 固定 GITHUB_TOKEN_SECRET
+        key = Fernet.generate_key().decode("utf-8")
+    return Fernet(key.encode("utf-8"))
+
+
+def encrypt_secret(plaintext: str) -> str:
+    """加密字符串,返回 base64 密文(可安全落库)"""
+    f = _get_fernet()
+    return f.encrypt(plaintext.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_secret(ciphertext: str) -> str:
+    """解密 base64 密文,返回原文
+
+    抛出 InvalidToken 表示密文损坏或密钥不匹配
+    """
+    f = _get_fernet()
+    try:
+        return f.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+    except InvalidToken as e:
+        raise ValueError(f"密文解密失败(密钥不匹配或数据损坏): {e}") from e

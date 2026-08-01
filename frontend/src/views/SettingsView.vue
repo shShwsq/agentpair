@@ -1,20 +1,26 @@
 <script setup lang="ts">
 /**
- * 账号设置页
+ * 设置页
  *
- * 当前只提供修改密码功能。已登录用户进入此页:
- * - 普通用户(已设密码):需输入当前密码 + 新密码 + 确认
- * - OAuth 用户(未设密码):只需输入新密码 + 确认(相当于设置初始密码)
+ * 两个配置区:
+ * 1. 修改密码(已登录用户;OAuth 用户未设密码时只输新密码)
+ * 2. 绑定/解绑 GitHub(用于任务创建时访问私有仓库)
  *
- * 修改成功后自动登出并跳转登录页(出于安全考虑,旧 token 不再使用)。
+ * GitHub 绑定流程:
+ * - 点击"绑定 GitHub"跳转 GitHub 授权页(scope=user:email repo)
+ * - 授权后回调到 /auth/github/callback
+ * - OAuthCallbackView 检测到用户已登录 → 调 POST /github/bind 完成绑定
+ * - 未登录场景走原登录流程(避免混淆)
  */
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import { changePassword } from '@/api/auth'
+import { getGitHubBindURL, getGitHubStatus, unbindGitHub } from '@/api/github'
+import type { GitHubStatus } from '@/types/github'
 import { useAuthStore } from '@/stores/auth'
 import { extractErrorMessage } from '@/utils/error'
 
@@ -90,6 +96,54 @@ async function handleSubmit(): Promise<void> {
     loading.value = false
   }
 }
+
+// ============================================================
+// GitHub 绑定区
+// ============================================================
+
+const githubStatus = ref<GitHubStatus | null>(null)
+const githubLoading = ref(false)
+const githubAction = ref<'bind' | 'unbind' | ''>('')
+const githubError = ref('')
+const githubSuccess = ref('')
+
+async function refreshGitHubStatus(): Promise<void> {
+  githubLoading.value = true
+  githubError.value = ''
+  try {
+    githubStatus.value = await getGitHubStatus()
+  } catch (err) {
+    // 静默失败,不阻塞页面(只在控制台提示)
+    console.warn('加载 GitHub 状态失败:', err)
+  } finally {
+    githubLoading.value = false
+  }
+}
+
+function startBind(): void {
+  // 跳到 GitHub 授权页(scope=user:email repo)
+  // 用户授权后回调到 /auth/github/callback,OAuthCallbackView 检测已登录后调 bind API
+  window.location.href = getGitHubBindURL()
+}
+
+async function startUnbind(): Promise<void> {
+  githubAction.value = 'unbind'
+  githubError.value = ''
+  githubSuccess.value = ''
+  try {
+    githubStatus.value = await unbindGitHub()
+    githubSuccess.value = '已解绑 GitHub,任务执行将无法访问你的私有仓库'
+    setTimeout(() => (githubSuccess.value = ''), 5000)
+  } catch (err) {
+    githubError.value = extractErrorMessage(err)
+  } finally {
+    githubAction.value = ''
+  }
+}
+
+onMounted(() => {
+  refreshGitHubStatus()
+})
 </script>
 
 <template>
@@ -116,8 +170,8 @@ async function handleSubmit(): Promise<void> {
       <main class="main">
       <div class="page-header">
         <div>
-          <h1>账号设置</h1>
-          <p class="subtitle">管理账号密码与登录方式</p>
+          <h1>设置</h1>
+          <p class="subtitle">管理账号密码与 GitHub 集成</p>
         </div>
       </div>
 
@@ -206,6 +260,77 @@ async function handleSubmit(): Promise<void> {
             {{ loading ? '处理中...' : (hasPassword ? '修改密码' : '设置密码') }}
           </button>
         </form>
+      </section>
+
+      <!-- ============================================================ -->
+      <!-- GitHub 账号绑定区                                            -->
+      <!-- ============================================================ -->
+      <section class="config-section github-section">
+        <div class="section-header">
+          <div>
+            <h2>GitHub 账号绑定</h2>
+            <p class="section-desc">
+              绑定后可在任务创建时选择你的私有仓库,授权范围: user:email (读取邮箱) + repo (访问私有仓库)
+            </p>
+          </div>
+        </div>
+
+        <Transition name="fade">
+          <div v-if="githubError" class="alert alert-error" role="alert">{{ githubError }}</div>
+        </Transition>
+        <Transition name="fade">
+          <div v-if="githubSuccess" class="alert alert-success" role="status">{{ githubSuccess }}</div>
+        </Transition>
+
+        <div v-if="githubLoading" class="status-loading">
+          <div class="spinner"></div>
+          <p>加载中...</p>
+        </div>
+
+        <div v-else-if="githubStatus" class="github-status">
+          <div v-if="githubStatus.bound" class="bound-status">
+            <div class="avatar-container">
+              <img v-if="githubStatus.avatar_url" :src="githubStatus.avatar_url" alt="GitHub 头像" class="avatar">
+              <div v-else class="avatar-placeholder">GH</div>
+            </div>
+            <div class="user-info">
+              <p class="login">@{{ githubStatus.github_login || 'unknown' }}</p>
+              <p class="desc">已绑定 GitHub 账号,可访问私有仓库</p>
+            </div>
+            <button
+              type="button"
+              class="btn-danger"
+              :disabled="githubAction === 'unbind'"
+              @click="startUnbind"
+            >
+              <span v-if="githubAction === 'unbind'" class="spinner-sm"></span>
+              {{ githubAction === 'unbind' ? '解绑中...' : '解绑 GitHub' }}
+            </button>
+          </div>
+
+          <div v-else class="unbound-status">
+            <div class="illustration">
+              <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
+              </svg>
+            </div>
+            <p class="desc">未绑定 GitHub 账号,无法访问私有仓库</p>
+            <button
+              type="button"
+              class="btn-primary"
+              @click="startBind"
+            >
+              绑定 GitHub
+            </button>
+          </div>
+        </div>
+
+        <div v-else class="status-error">
+          <p>加载 GitHub 状态失败,请刷新页面重试</p>
+          <button type="button" class="btn-text" @click="refreshGitHubStatus">
+            刷新
+          </button>
+        </div>
       </section>
     </main>
     </div>
@@ -423,5 +548,178 @@ async function handleSubmit(): Promise<void> {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+/* ============================================================ */
+/* GitHub 绑定区                                                */
+/* ============================================================ */
+.github-section {
+  margin-top: var(--space-6);
+}
+
+.status-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-8) 0;
+  color: var(--color-text-secondary);
+}
+
+.spinner {
+  display: inline-block;
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.github-status {
+  padding: var(--space-2) 0;
+}
+
+/* ---- 已绑定状态 ---- */
+.bound-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  background: var(--color-success-light);
+  border: 1px solid #bbf7d0;
+  border-radius: var(--radius-md);
+}
+
+.avatar-container {
+  flex-shrink: 0;
+}
+
+.avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 2px solid var(--color-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.avatar-placeholder {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-primary);
+  color: white;
+  font-weight: var(--fw-semibold);
+  font-size: var(--fs-sm);
+}
+
+.user-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.user-info .login {
+  font-weight: var(--fw-semibold);
+  font-size: var(--fs-base);
+  color: var(--color-text);
+  margin-bottom: var(--space-1);
+  word-break: break-all;
+}
+
+.user-info .desc {
+  font-size: var(--fs-sm);
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+/* ---- 未绑定状态 ---- */
+.unbound-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-6) var(--space-4);
+  text-align: center;
+}
+
+.illustration {
+  color: var(--color-text-muted);
+  opacity: 0.6;
+}
+
+.unbound-status .desc {
+  color: var(--color-text-secondary);
+  font-size: var(--fs-sm);
+  margin: 0;
+}
+
+.unbound-status .btn-primary {
+  width: auto;
+  padding: 0 var(--space-6);
+  margin-top: var(--space-2);
+}
+
+/* ---- 加载失败状态 ---- */
+.status-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-6) 0;
+  text-align: center;
+  color: var(--color-text-secondary);
+}
+
+/* ---- 危险按钮(解绑) ---- */
+.btn-danger {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  height: 36px;
+  padding: 0 var(--space-4);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--color-danger);
+  background: transparent;
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--color-danger);
+  color: white;
+}
+
+.btn-danger:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-danger .spinner-sm {
+  border-color: rgba(220, 38, 38, 0.3);
+  border-top-color: var(--color-danger);
+}
+
+/* ---- 文本按钮(刷新) ---- */
+.btn-text {
+  background: transparent;
+  border: none;
+  color: var(--color-primary);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast);
+}
+
+.btn-text:hover {
+  background: var(--color-primary-light);
 }
 </style>

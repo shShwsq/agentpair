@@ -4,9 +4,10 @@
 - 通用工具(clone/read/search/cve/semgrep)定义在此,场景通过白名单选择启用哪些
 - submit_results 是内部工具,定义从场景取(不同场景的 result 结构不同)
 - task_id 自动注入
+- github_token 自动注入(用于 clone_repo 访问私有仓库)
 
 并发安全:用 contextvars 替代全局变量,每个后台线程有独立上下文,
-避免多任务并发执行时 task_id / scenario 互相覆盖导致工作区串台。
+避免多任务并发执行时 task_id / scenario / github_token 互相覆盖导致工作区串台。
 """
 import contextvars
 from typing import Any
@@ -21,6 +22,11 @@ from app.tools.skill_tool import list_available_skills, run_skill, set_current_s
 _CURRENT_TASK_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "current_task_id", default=""
 )
+# 当前任务的 GitHub access_token(解密后的明文,空串表示无)
+# clone_repo 工具用于克隆私有仓库,执行完即用即弃不持久化
+_CURRENT_GITHUB_TOKEN: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_github_token", default=""
+)
 
 
 def set_current_task(task_id: str, scenario_id: str = "code_security_audit") -> None:
@@ -31,6 +37,14 @@ def set_current_task(task_id: str, scenario_id: str = "code_security_audit") -> 
     """
     _CURRENT_TASK_ID.set(task_id)
     set_current_scenario(scenario_id)
+
+
+def set_current_github_token(token: str) -> None:
+    """orchestrator 在任务执行前设置当前用户的 GitHub access_token(明文)
+
+    空串表示该用户未绑定 GitHub 或未授权仓库访问,clone_repo 会回退到匿名 HTTPS/SSH。
+    """
+    _CURRENT_GITHUB_TOKEN.set(token)
 
 
 # 工具名 → 函数的映射(通用工具,所有场景共用池)
@@ -255,9 +269,15 @@ def get_tools_for_scenario(scenario_id: str) -> list[dict[str, Any]]:
 
 
 def execute_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
-    """执行通用工具调用"""
+    """执行通用工具调用
+
+    自动从 ContextVar 注入 task_id 和 github_token,LLM 看不到这两个参数。
+    github_token 只对 clone_repo 注入(其他工具不接受该参数,避免误传)。
+    """
     if tool_name not in TOOL_FUNCTIONS:
         raise ValueError(f"未知工具: {tool_name}")
     func = TOOL_FUNCTIONS[tool_name]
     arguments["task_id"] = _CURRENT_TASK_ID.get()
+    if tool_name == "clone_repo":
+        arguments["github_token"] = _CURRENT_GITHUB_TOKEN.get()
     return func(**arguments)

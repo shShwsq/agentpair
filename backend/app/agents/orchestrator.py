@@ -36,9 +36,12 @@ from app.agents.user_agent import (
 from app.event_bus import finish_task, publish
 from app.llm.client import LLMClient
 from app.models.task import Conversation, Result, Task, TaskStatus
+from app.models.user import User
 from app.models.user_llm_config import UserLLMConfig
 from app.scenarios.base import get_scenario
+from app.security import decrypt_secret
 from app.tools import sandbox_tools
+from app.tools.schema import set_current_github_token
 from app.user_interaction import (
     clear_pending_question,
     set_pending_question,
@@ -62,6 +65,11 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
     # 阶段 6:按 task.llm_config_id 加载用户保存的 LLM 配置(覆盖 env 默认)
     llm_client = _build_llm_client(db, task.user_id, task.llm_config_id)
 
+    # 加载用户的 GitHub access_token(解密),供 clone_repo 访问私有仓库
+    # 空串表示未绑定,clone_repo_with_fallback 会回退到 SSH/匿名 HTTPS
+    github_token = _load_github_token(db, task.user_id)
+    set_current_github_token(github_token)
+
     # 用户原始意图
     user_intent = task.user_input
     params = task.params or {}
@@ -83,7 +91,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         #   - 注入 user_agent:看到结构后能给更精准的初始指令/提问
         #   - 注入 react_agent 第 1 轮:跳过自主 clone,直接开始审计
         # clone 失败(https+ssh 都不行)抛异常,由外层 except 捕获 → 任务 failed
-        repo_path, repo_context = _prepare_repo_context(task, db, task_id_str)
+        repo_path, repo_context = _prepare_repo_context(task, db, task_id_str, github_token)
         if repo_context:
             effective_intent += (
                 "\n\n[已预克隆仓库结构,供你参考给出初始指令]\n" + repo_context
@@ -604,19 +612,38 @@ def _build_llm_client(db: Session, user_id, llm_config_id: str | None = None) ->
         return None
 
 
+def _load_github_token(db: Session, user_id) -> str:
+    """加载用户的 GitHub access_token(解密明文)
+
+    空串表示未绑定或解密失败,clone_repo 会回退到 SSH/匿名 HTTPS。
+    """
+    if user_id is None:
+        return ""
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user or not user.github_access_token:
+            return ""
+        return decrypt_secret(user.github_access_token)
+    except Exception as e:
+        logger.warning(f"[user={user_id}] 加载 GitHub token 失败: {e}")
+        return ""
+
+
 # ============================================================
 # 预处理:主动 clone + list_files(把仓库结构提前准备好)
 # ============================================================
 
 
 def _prepare_repo_context(
-    task: Task, db: Session, task_id_str: str,
+    task: Task, db: Session, task_id_str: str, github_token: str = "",
 ) -> tuple[str | None, str]:
     """若用户选了仓库,主动 clone + list_files,返回 (repo_path, repo_context 文本)
 
     - 无 repo_url:返回 (None, ""),走原流程(react_agent 自主 clone)
-    - 有 repo_url:先 https 后 ssh clone,失败抛异常(外层 except → 任务 failed);
+    - 有 repo_url:clone(HTTPS+token → SSH → HTTPS 匿名),失败抛异常;
       成功后 list_files 根目录,格式化成 repo_context 文本
+
+    github_token 用于访问私有仓库(空串则只试 SSH + 匿名 HTTPS)。
 
     repo_context 会注入:
       - user_agent 第 0 轮(拼到 effective_intent):看到结构给更准初始指令
@@ -632,13 +659,13 @@ def _prepare_repo_context(
 
     branch = params.get("branch")
 
-    # 主动 clone(协议回退:先 https 后 ssh,都失败抛 RuntimeError)
-    task.current_stage = "正在克隆仓库(先 HTTPS,失败回退 SSH)..."
+    # 主动 clone(协议回退:HTTPS+token → SSH → HTTPS 匿名,都失败抛 RuntimeError)
+    task.current_stage = "正在克隆仓库(HTTPS+token → SSH → 匿名)..."
     db.commit()
     _publish_status(task)
 
     clone_result = sandbox_tools.clone_repo_with_fallback(
-        repo_url, branch=branch, task_id=task_id_str,
+        repo_url, branch=branch, task_id=task_id_str, github_token=github_token,
     )
     repo_path = clone_result["path"]
     logger.info(

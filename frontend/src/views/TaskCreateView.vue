@@ -17,9 +17,11 @@ import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import { createTask, getScenarios } from '@/api/task'
 import { getMyModels } from '@/api/model_configs'
+import { getGitHubStatus, listGitHubRepos } from '@/api/github'
 import { extractErrorMessage } from '@/utils/error'
 import type { Scenario } from '@/types/task'
 import type { LLMConfigItemOut } from '@/types/model_configs'
+import type { GitHubRepoItem, GitHubStatus } from '@/types/github'
 
 const router = useRouter()
 
@@ -74,6 +76,73 @@ watch(selectedScenario, (newId) => {
 
 const loading = ref(false)
 const error = ref('')
+
+// ============================================================
+// GitHub 仓库选择(repo_url 字段专用增强)
+// ============================================================
+
+/**
+ * repo_url 字段支持两种输入方式:
+ * - 'url':手动输入公开仓库地址(默认,场景无关)
+ * - 'select':从已绑定 GitHub 账号的仓库列表中选择(可含私有仓库)
+ *
+ * 仅当用户已绑定 GitHub 且当前场景含 repo_url 字段时,显示模式切换。
+ * 未绑定时走普通 url 输入,不阻塞流程。
+ */
+const githubStatus = ref<GitHubStatus | null>(null)
+const githubBound = computed(() => githubStatus.value?.bound ?? false)
+
+const githubRepos = ref<GitHubRepoItem[]>([])
+const reposLoaded = ref(false)
+const reposLoading = ref(false)
+const reposError = ref('')
+
+/** repo_url 输入模式 */
+const repoInputMode = ref<'url' | 'select'>('url')
+/** 选择模式下,当前选中的仓库 full_name(owner/repo) */
+const selectedRepoFullName = ref('')
+
+async function loadGitHubRepos(): Promise<void> {
+  if (reposLoaded.value || reposLoading.value) return
+  reposLoading.value = true
+  reposError.value = ''
+  try {
+    const res = await listGitHubRepos()
+    githubRepos.value = res.repos
+    reposLoaded.value = true
+  } catch (err) {
+    reposError.value = extractErrorMessage(err)
+  } finally {
+    reposLoading.value = false
+  }
+}
+
+function switchToSelectMode(): void {
+  repoInputMode.value = 'select'
+  // 懒加载仓库列表(首次进入选择模式才请求)
+  if (!reposLoaded.value) loadGitHubRepos()
+}
+
+// 选中仓库 → 同步 clone_url 到 formData.repo_url,并填默认分支
+watch(selectedRepoFullName, (fullName) => {
+  if (!fullName) return
+  const repo = githubRepos.value.find((r) => r.full_name === fullName)
+  if (!repo) return
+  formData.repo_url = repo.clone_url
+  // 若场景含 branch 字段且当前为空,填默认分支
+  const hasBranch = (selectedScenarioDecl.value?.form_fields ?? []).some(
+    (f) => f.name === 'branch',
+  )
+  if (hasBranch && !String(formData.branch ?? '').trim()) {
+    formData.branch = repo.default_branch
+  }
+})
+
+// 切换场景时重置仓库选择状态(避免上一场景的选择残留)
+watch(selectedScenario, () => {
+  repoInputMode.value = 'url'
+  selectedRepoFullName.value = ''
+})
 
 /** 基于场景声明校验字段 */
 const errors = computed<Record<string, string>>(() => {
@@ -156,7 +225,11 @@ function modelLabel(cfg: LLMConfigItemOut): string {
 
 onMounted(async () => {
   try {
-    const [scenarioList, models] = await Promise.all([getScenarios(), getMyModels().catch(() => null)])
+    const [scenarioList, models, ghStatus] = await Promise.all([
+      getScenarios(),
+      getMyModels().catch(() => null),
+      getGitHubStatus().catch(() => null), // 静默失败,未绑定不影响提交
+    ])
     scenarios.value = scenarioList
     if (scenarioList.length > 0) {
       selectedScenario.value = scenarioList[0].id // 触发 watch 重置 formData
@@ -167,6 +240,7 @@ onMounted(async () => {
       const firstWithKey = models.llm_configs.find((c) => c.has_api_key)
       selectedLlmConfigId.value = (firstWithKey ?? models.llm_configs[0]).id
     }
+    if (ghStatus) githubStatus.value = ghStatus
   } catch {
     // 场景拉取失败兜底(不应发生,保留旧默认以便能提交)
     selectedScenario.value = 'code_security_audit'
@@ -264,29 +338,92 @@ onMounted(async () => {
             <label :for="`field-${f.name}`">
               {{ f.label }}<span v-if="f.required" class="required-mark"> *</span>
             </label>
-            <input
-              v-if="f.type === 'text' || f.type === 'url' || f.type === 'number'"
-              :id="`field-${f.name}`"
-              v-model.trim="formData[f.name]"
-              :type="f.type === 'number' ? 'number' : (f.type === 'url' ? 'url' : 'text')"
-              :placeholder="f.placeholder"
-              :class="{ invalid: errors[f.name] }"
-            />
-            <textarea
-              v-else-if="f.type === 'textarea'"
-              :id="`field-${f.name}`"
-              v-model="formData[f.name]"
-              rows="3"
-              :placeholder="f.placeholder"
-              :class="{ invalid: errors[f.name] }"
-            />
-            <select
-              v-else-if="f.type === 'select'"
-              :id="`field-${f.name}`"
-              v-model="formData[f.name]"
-            >
-              <option v-for="opt in f.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-            </select>
+
+            <!-- repo_url 特殊处理:已绑定 GitHub 时支持从仓库列表选择 -->
+            <template v-if="f.name === 'repo_url' && f.type === 'url' && githubBound">
+              <div class="repo-mode-toggle" role="tablist">
+                <button
+                  type="button"
+                  :class="['mode-btn', { active: repoInputMode === 'url' }]"
+                  role="tab"
+                  :aria-selected="repoInputMode === 'url'"
+                  @click="repoInputMode = 'url'"
+                >输入地址</button>
+                <button
+                  type="button"
+                  :class="['mode-btn', { active: repoInputMode === 'select' }]"
+                  role="tab"
+                  :aria-selected="repoInputMode === 'select'"
+                  @click="switchToSelectMode"
+                >从 GitHub 选择</button>
+              </div>
+
+              <!-- 手动输入模式 -->
+              <input
+                v-if="repoInputMode === 'url'"
+                :id="`field-${f.name}`"
+                v-model.trim="formData[f.name]"
+                type="url"
+                :placeholder="f.placeholder"
+                :class="{ invalid: errors[f.name] }"
+              />
+
+              <!-- 选择模式 -->
+              <div v-else class="repo-select-wrapper">
+                <select
+                  v-model="selectedRepoFullName"
+                  :disabled="reposLoading"
+                  :class="{ invalid: errors[f.name] }"
+                >
+                  <option value="">请选择仓库...</option>
+                  <option
+                    v-for="r in githubRepos"
+                    :key="r.full_name"
+                    :value="r.full_name"
+                  >
+                    {{ r.full_name }}{{ r.private ? ' (私有)' : '' }}
+                  </option>
+                </select>
+                <p v-if="reposLoading" class="field-hint">加载仓库列表...</p>
+                <p v-if="reposError" class="field-error">{{ reposError }}</p>
+                <p
+                  v-if="!reposLoading && !reposError && reposLoaded && githubRepos.length === 0"
+                  class="field-hint"
+                >你的 GitHub 账号下暂无仓库</p>
+                <p v-if="!reposLoading && !reposLoaded" class="field-hint">
+                  未绑定 GitHub?
+                  <RouterLink to="/settings" class="field-link">前往设置绑定 →</RouterLink>
+                </p>
+              </div>
+            </template>
+
+            <!-- 普通字段(非 repo_url 增强场景) -->
+            <template v-else>
+              <input
+                v-if="f.type === 'text' || f.type === 'url' || f.type === 'number'"
+                :id="`field-${f.name}`"
+                v-model.trim="formData[f.name]"
+                :type="f.type === 'number' ? 'number' : (f.type === 'url' ? 'url' : 'text')"
+                :placeholder="f.placeholder"
+                :class="{ invalid: errors[f.name] }"
+              />
+              <textarea
+                v-else-if="f.type === 'textarea'"
+                :id="`field-${f.name}`"
+                v-model="formData[f.name]"
+                rows="3"
+                :placeholder="f.placeholder"
+                :class="{ invalid: errors[f.name] }"
+              />
+              <select
+                v-else-if="f.type === 'select'"
+                :id="`field-${f.name}`"
+                v-model="formData[f.name]"
+              >
+                <option v-for="opt in f.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+              </select>
+            </template>
+
             <p v-if="f.description" class="field-hint">{{ f.description }}</p>
             <span v-if="errors[f.name]" class="field-error">{{ errors[f.name] }}</span>
           </div>
@@ -485,6 +622,43 @@ onMounted(async () => {
 .scenario-name {
   font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
+}
+
+/* ---- repo_url 输入模式切换 ---- */
+.repo-mode-toggle {
+  display: inline-flex;
+  margin-bottom: var(--space-2);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 2px;
+  gap: 2px;
+}
+
+.mode-btn {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.mode-btn:hover {
+  color: var(--color-text);
+}
+
+.mode-btn.active {
+  color: var(--color-primary);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.repo-select-wrapper select {
+  width: 100%;
 }
 
 /* ---- 按钮 ---- */

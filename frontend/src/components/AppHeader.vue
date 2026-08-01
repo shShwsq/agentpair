@@ -47,7 +47,7 @@ function handleLogout(): void {
           class="btn-settings"
           title="账号设置"
           aria-label="账号设置"
-          @click="router.push('/account')"
+          @click="router.push('/settings')"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="3" />

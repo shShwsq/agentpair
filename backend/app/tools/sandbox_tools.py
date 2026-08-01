@@ -160,31 +160,15 @@ def browse_read_file(task_id: str, file_path: str, offset: int = 1, max_lines: i
 # ============================================================
 
 
-def clone_repo(repo_url: str, branch: str | None = None, task_id: str = "") -> dict:
-    """克隆 GitHub 仓库
+def clone_repo(repo_url: str, branch: str | None = None, task_id: str = "", github_token: str = "") -> dict:
+    """克隆 GitHub 仓库(LLM 工具入口)
 
-    mock 模式:在本地临时目录用 git clone(SSH URL)
-    sandbox 模式:在沙箱里用 git clone(SSH URL)
+    内部委托给 clone_repo_with_fallback,复用同一套协议回退逻辑:
+    HTTPS+token → SSH → HTTPS 匿名。
+
+    github_token 由 execute_tool 从 ContextVar 注入,LLM 不可见。
     """
-    clone_url = _to_ssh_url(repo_url)
-
-    # 从 URL 提取仓库名
-    match = re.search(r"/([^/]+?)(?:\.git)?$", clone_url)
-    if not match:
-        raise ValueError(f"无法从 URL 解析仓库名: {repo_url}")
-    repo_name = match.group(1)
-
-    ctx = _get_or_create_session(task_id)
-    mode = ctx["mode"]
-
-    if mode == "mock":
-        result = _clone_repo_mock(ctx, clone_url, repo_name, branch)
-    else:
-        result = _clone_repo_sandbox(ctx, clone_url, repo_name, branch)
-
-    # 记录工作区路径(供前端 workspace 浏览 API 使用)
-    _set_repo_path(task_id, result["path"])
-    return result
+    return clone_repo_with_fallback(repo_url, branch, task_id, github_token)
 
 
 def _clone_repo_mock(ctx: dict, clone_url: str, repo_name: str, branch: str | None) -> dict:
@@ -817,23 +801,50 @@ def _to_https_url(repo_url: str) -> str:
     return repo_url
 
 
+def _inject_token_in_https(https_url: str, token: str) -> str:
+    """把 GitHub HTTPS URL 注入 access_token,形成带认证的 clone URL
+
+    https://github.com/owner/repo.git
+        → https://x-access-token:{token}@github.com/owner/repo.git
+
+    若 URL 非 GitHub HTTPS 或已含认证信息,原样返回。
+    """
+    if not token or not https_url.startswith("https://github.com/"):
+        return https_url
+    # 已含认证信息,不重复注入
+    if "@" in https_url.split("://", 1)[1].split("/", 1)[0]:
+        return https_url
+    return https_url.replace(
+        "https://",
+        f"https://x-access-token:{token}@",
+        1,
+    )
+
+
 def clone_repo_with_fallback(
     repo_url: str, branch: str | None = None, task_id: str = "",
+    github_token: str = "",
 ) -> dict:
-    """克隆仓库(协议回退:先 HTTPS,失败再 SSH)
+    """克隆仓库(协议回退:HTTPS+token → SSH → HTTPS 匿名)
 
-    供 orchestrator 在 user_agent 评估前主动调用(不等 react_agent 自主 clone)。
-    与 clone_repo 的区别:clone_repo 强制转 SSH;本函数先试 HTTPS,失败回退 SSH,
-    两者都失败才抛 RuntimeError(让 orchestrator 把任务标记为 failed)。
+    供 orchestrator 在 user_agent 评估前主动调用,也供 clone_repo 工具委托。
+
+    回退链(按顺序尝试,首个成功即返回):
+    1. HTTPS + token(github_token 非空时,可访问私有仓库)
+    2. SSH(依赖宿主机/沙箱的 SSH key 配置,适合公开仓库)
+    3. HTTPS 匿名(无 token,仅公开仓库)
+    三者都失败才抛 RuntimeError。
 
     复用同一套 session 管理(_get_or_create_session + _set_repo_path),
     所以 clone 完成后 react_agent / workspace 路由可直接通过 task_id 复用会话。
     """
-    # 候选 URL:去重,保持"先 https 后 ssh"顺序
-    https_url = _to_https_url(repo_url)
+    # 构造候选 URL:HTTPS+token、SSH、HTTPS 匿名(去重)
+    https_anon = _to_https_url(repo_url)
     ssh_url = _to_ssh_url(repo_url)
+    https_with_token = _inject_token_in_https(https_anon, github_token) if github_token else ""
+
     candidates: list[str] = []
-    for u in [https_url, ssh_url]:
+    for u in [https_with_token, ssh_url, https_anon]:
         if u and u not in candidates:
             candidates.append(u)
 
@@ -848,22 +859,24 @@ def clone_repo_with_fallback(
 
     errors: list[str] = []
     for idx, url in enumerate(candidates):
+        # 日志里不打印 token(脱敏)
+        safe_url = url.split("@")[-1] if "@" in url else url
         try:
             logger.info(
-                f"[clone_fallback] task={task_id} 尝试第 {idx + 1} 种协议: {url}"
+                f"[clone_fallback] task={task_id} 尝试第 {idx + 1} 种协议: {safe_url}"
             )
             if mode == "mock":
                 result = _clone_repo_mock(ctx, url, repo_name, branch)
             else:
                 result = _clone_repo_sandbox(ctx, url, repo_name, branch)
             _set_repo_path(task_id, result["path"])
-            logger.info(f"[clone_fallback] task={task_id} 克隆成功(协议 {url})")
+            logger.info(f"[clone_fallback] task={task_id} 克隆成功(协议 {safe_url})")
             return result
         except Exception as e:
             err_msg = str(e)[:300]
-            errors.append(f"[{url}] {err_msg}")
+            errors.append(f"[{safe_url}] {err_msg}")
             logger.warning(
-                f"[clone_fallback] task={task_id} 协议 {url} 克隆失败: {err_msg}"
+                f"[clone_fallback] task={task_id} 协议 {safe_url} 克隆失败: {err_msg}"
             )
             # 清理可能残留的半成品目录(mock 模式),避免下次重试撞目录
             if mode == "mock":

@@ -32,6 +32,11 @@ class User(Base):
     github_id: Mapped[str | None] = mapped_column(
         String(255), unique=True, nullable=True
     )
+    # GitHub access_token 加密密文(Fernet base64,空串表示未授权仓库访问)
+    # 由"绑定 GitHub"流程(scope=user:email repo)写入,用于克隆私有仓库
+    github_access_token: Mapped[str] = mapped_column(
+        String(2048), nullable=False, server_default=""
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
