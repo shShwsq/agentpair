@@ -362,7 +362,7 @@ function showToast(msg: string, type: 'success' | 'error'): void {
   toast.value = { msg, type }
   setTimeout(() => {
     toast.value = null
-  }, 4500)
+  }, 5000)
 }
 
 function configTitle(name: string, model: string): string {
@@ -411,13 +411,6 @@ function modelLabel(row: TableRow): string {
             </button>
           </div>
         </div>
-
-        <!-- Toast -->
-        <Transition name="fade">
-          <div v-if="toast" :class="['alert', toast.type === 'error' ? 'alert-error' : 'alert-success']">
-            <span>{{ toast.msg }}</span>
-          </div>
-        </Transition>
 
         <!-- ============ 统一表格 ============ -->
         <section class="table-section">
@@ -470,14 +463,16 @@ function modelLabel(row: TableRow): string {
                     <div class="row-actions">
                       <button
                         class="btn-icon"
-                        title="测试连通性"
+                        :class="{ 'is-testing': row.testing }"
+                        :title="row.testing ? '测试中...' : '测试连通性'"
                         :disabled="row.testing || saving"
                         @click="handleTestRow(row)"
                       >
-                        <span v-if="row.testing" class="spinner-sm" />
                         <!-- 心电图图标(Lucide activity),常用于连通性/健康检查 -->
+                        <!-- 测试中时图标自身旋转,保留语义且用 currentColor 自然可见 -->
                         <svg
-                          v-else
+                          class="icon-activity"
+                          :class="{ 'icon-spin': row.testing }"
                           width="14"
                           height="14"
                           viewBox="0 0 24 24"
@@ -540,6 +535,53 @@ function modelLabel(row: TableRow): string {
         />
       </template>
     </main>
+
+    <!-- ============ 浮动提示弹窗(Teleport 到 body,右上角,5s 自动消失) ============ -->
+    <Teleport to="body">
+      <Transition name="toast-slide">
+        <div
+          v-if="toast"
+          :class="['toast-popup', toast.type === 'error' ? 'toast-error' : 'toast-success']"
+          role="status"
+          aria-live="polite"
+        >
+          <span class="toast-icon" aria-hidden="true">
+            <!-- 成功:对勾(Lucide check-circle) -->
+            <svg
+              v-if="toast.type === 'success'"
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+              <polyline points="22 4 12 14.01 9 11.01" />
+            </svg>
+            <!-- 失败:警示(Lucide alert-circle) -->
+            <svg
+              v-else
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+          </span>
+          <span class="toast-msg">{{ toast.msg }}</span>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>
 
@@ -573,18 +615,14 @@ function modelLabel(row: TableRow): string {
   animation: spin 0.8s linear infinite;
 }
 
-.spinner-sm {
-  display: inline-block;
-  width: 14px;
-  height: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: white;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* 测试中:心电图图标自身旋转,保留语义且用 currentColor 自然可见 */
+.icon-spin {
+  animation: spin 0.9s linear infinite;
+  transform-origin: center;
 }
 
 /* ---- 页头 ---- */
@@ -612,24 +650,60 @@ function modelLabel(row: TableRow): string {
   flex-shrink: 0;
 }
 
-/* ---- 提示 ---- */
-.alert {
+/* ---- 浮动提示弹窗(顶部居中,5s 自动消失) ---- */
+.toast-popup {
+  position: fixed;
+  top: var(--space-5);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2000; /* 高于 dialog(1000),确保弹窗打开时仍可见 */
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 280px;
+  max-width: 420px;
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-md);
   font-size: var(--fs-sm);
-  margin-bottom: var(--space-4);
+  line-height: var(--lh-base);
+  box-shadow: var(--shadow-lg);
+  border: 1px solid transparent;
 }
 
-.alert-success {
+.toast-success {
   background: var(--color-success-light);
   color: var(--color-success);
-  border: 1px solid #bbf7d0;
+  border-color: #bbf7d0;
 }
 
-.alert-error {
+.toast-error {
   background: var(--color-danger-light);
   color: var(--color-danger);
-  border: 1px solid #fecaca;
+  border-color: #fecaca;
+}
+
+.toast-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  margin-top: 1px;
+}
+
+.toast-msg {
+  flex: 1;
+  word-break: break-word;
+}
+
+/* 弹窗从顶部滑入(保留 translateX(-50%) 居中) */
+.toast-slide-enter-active,
+.toast-slide-leave-active {
+  transition: opacity var(--transition-base), transform var(--transition-base);
+}
+
+.toast-slide-enter-from,
+.toast-slide-leave-to {
+  opacity: 0;
+  transform: translate(-50%, -12px);
 }
 
 /* ---- 表格区 ---- */
@@ -821,16 +895,5 @@ function modelLabel(row: TableRow): string {
 .btn-danger:hover:not(:disabled) {
   background: var(--color-danger-light);
   color: var(--color-danger);
-}
-
-/* ---- 过渡 ---- */
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity var(--transition-fast);
-}
-
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
 }
 </style>
