@@ -9,19 +9,21 @@
  * 与 ModelSettingsView 风格一致(表格 + 弹窗 + 顶部居中 toast)。
  */
 import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
+import DeleteAccountDialog from '@/components/DeleteAccountDialog.vue'
 import GitHubDialog from '@/components/GitHubDialog.vue'
 import PasswordDialog from '@/components/PasswordDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
-import { changePassword } from '@/api/auth'
-import { getGitHubBindURL, getGitHubStatus, unbindGitHub } from '@/api/github'
+import { changePassword, deleteAccount } from '@/api/auth'
+import { getGitHubBindURL, getGitHubStatus, syncEmail, unbindGitHub } from '@/api/github'
 import type { GitHubStatus } from '@/types/github'
 import { useAuthStore } from '@/stores/auth'
 import { extractErrorMessage } from '@/utils/error'
 
+const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
 
@@ -142,11 +144,12 @@ async function handleUnbind(): Promise<void> {
 // 表格行
 // ============================================================
 interface SettingRow {
-  key: 'password' | 'github'
+  key: 'password' | 'github' | 'delete'
   item: string
   desc: string
   status: string
-  statusType: 'ok' | 'warn' | 'neutral'
+  statusType: 'ok' | 'warn' | 'neutral' | 'danger'
+  actionText: string
 }
 
 const rows = computed<SettingRow[]>(() => [
@@ -156,6 +159,7 @@ const rows = computed<SettingRow[]>(() => [
     desc: hasPassword.value ? '修改账号登录密码' : 'OAuth 账号设置密码',
     status: hasPassword.value ? '已设置' : '未设置',
     statusType: hasPassword.value ? 'ok' : 'warn',
+    actionText: hasPassword.value ? '修改' : '设置',
   },
   {
     key: 'github',
@@ -165,17 +169,94 @@ const rows = computed<SettingRow[]>(() => [
       ? `@${githubStatus.value.github_login || 'unknown'}`
       : '未绑定',
     statusType: githubStatus.value?.bound ? 'ok' : 'warn',
+    actionText: githubStatus.value?.bound ? '管理' : '绑定',
+  },
+  {
+    key: 'delete',
+    item: '删除账号',
+    desc: '永久删除账号及所有数据',
+    status: '不可恢复',
+    statusType: 'danger',
+    actionText: '删除',
   },
 ])
 
 function openRow(row: SettingRow): void {
   if (row.key === 'password') openPasswordDialog()
-  else openGitHubDialog()
+  else if (row.key === 'github') openGitHubDialog()
+  else if (row.key === 'delete') openDeleteDialog()
+}
+
+// ============================================================
+// 删除账号弹窗
+// ============================================================
+const deleteDialogOpen = ref(false)
+const deleteLoading = ref(false)
+const deleteError = ref('')
+const currentEmail = computed(() => authStore.user?.email ?? '')
+
+function openDeleteDialog(): void {
+  deleteError.value = ''
+  deleteDialogOpen.value = true
+}
+
+async function handleDeleteConfirm(email: string): Promise<void> {
+  deleteError.value = ''
+  deleteLoading.value = true
+  try {
+    await deleteAccount(email)
+    deleteDialogOpen.value = false
+    // 删除成功 → 登出并跳转登录页
+    authStore.logout()
+    await router.push('/login')
+    showToast('账号已删除', 'success')
+  } catch (err) {
+    deleteError.value = extractErrorMessage(err)
+  } finally {
+    deleteLoading.value = false
+  }
+}
+
+// ============================================================
+// 邮箱同步弹窗(绑定后 GitHub 邮箱与账号邮箱不一致时触发)
+// ============================================================
+const syncDialogOpen = ref(false)
+const syncGithubEmail = ref('')
+const syncCurrentEmail = ref('')
+const syncLoading = ref(false)
+const syncError = ref('')
+
+async function handleSyncConfirm(): Promise<void> {
+  syncError.value = ''
+  syncLoading.value = true
+  try {
+    await syncEmail()
+    // 重新拉取用户信息,更新本地 email
+    await authStore.fetchMe()
+    syncDialogOpen.value = false
+    showToast('邮箱已同步为 GitHub 邮箱', 'success')
+    // 同步后刷新 GitHub 状态(绑定状态不变,但邮箱已更新)
+    refreshGitHubStatus()
+  } catch (err) {
+    syncError.value = extractErrorMessage(err)
+  } finally {
+    syncLoading.value = false
+  }
 }
 
 onMounted(() => {
   // 预加载 GitHub 状态(用于表格状态列展示)
   refreshGitHubStatus()
+
+  // 检测 OAuthCallbackView 带来的邮箱不一致 query → 弹窗询问
+  if (route.query.email_mismatch === '1') {
+    syncGithubEmail.value = (route.query.github_email as string) || ''
+    syncCurrentEmail.value = (route.query.current_email as string) || ''
+    syncError.value = ''
+    syncDialogOpen.value = true
+    // 清除 query,避免刷新重复弹窗
+    router.replace({ path: '/settings' })
+  }
 })
 </script>
 
@@ -224,11 +305,11 @@ onMounted(() => {
                 <tr
                   v-for="row in rows"
                   :key="row.key"
-                  class="data-row"
+                  :class="['data-row', { 'row-danger': row.statusType === 'danger' }]"
                   @click="openRow(row)"
                 >
                   <td class="col-item">
-                    <span class="cell-title">{{ row.item }}</span>
+                    <span :class="['cell-title', { 'text-danger': row.statusType === 'danger' }]">{{ row.item }}</span>
                   </td>
                   <td class="col-desc">
                     <span class="cell-desc">{{ row.desc }}</span>
@@ -237,12 +318,11 @@ onMounted(() => {
                     <span :class="['badge', `badge-${row.statusType}`]">{{ row.status }}</span>
                   </td>
                   <td class="col-actions" @click.stop>
-                    <button class="btn-icon" :title="row.key === 'password' ? '修改密码' : '管理 GitHub'" @click="openRow(row)">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <path d="M12 20h9" />
-                        <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
-                      </svg>
-                    </button>
+                    <button
+                      class="btn-link"
+                      :class="{ 'link-danger': row.statusType === 'danger' }"
+                      @click="openRow(row)"
+                    >{{ row.actionText }}</button>
                   </td>
                 </tr>
               </tbody>
@@ -271,6 +351,73 @@ onMounted(() => {
           @unbind="handleUnbind"
           @cancel="ghDialogOpen = false"
         />
+
+        <DeleteAccountDialog
+          :open="deleteDialogOpen"
+          :current-email="currentEmail"
+          :loading="deleteLoading"
+          :error="deleteError"
+          @confirm="handleDeleteConfirm"
+          @cancel="deleteDialogOpen = false"
+        />
+
+        <!-- ============ 邮箱同步确认弹窗 ============ -->
+        <Teleport to="body">
+          <Transition name="dialog-fade">
+            <div v-if="syncDialogOpen" class="dialog-mask" @click.self="syncDialogOpen = false">
+              <div class="dialog-card" role="dialog" aria-modal="true">
+                <header class="dialog-header">
+                  <h3>邮箱不一致</h3>
+                  <button
+                    class="dialog-close"
+                    :disabled="syncLoading"
+                    aria-label="关闭"
+                    @click="syncDialogOpen = false"
+                  >×</button>
+                </header>
+
+                <div class="dialog-body">
+                  <p class="sync-tip">
+                    检测到 GitHub 邮箱与当前账号邮箱不一致,是否将账号邮箱更新为 GitHub 邮箱?
+                  </p>
+                  <div class="email-compare">
+                    <div class="email-row">
+                      <span class="email-label">当前账号</span>
+                      <span class="email-value">{{ syncCurrentEmail || '—' }}</span>
+                    </div>
+                    <div class="email-row">
+                      <span class="email-label">GitHub</span>
+                      <span class="email-value">{{ syncGithubEmail || '—' }}</span>
+                    </div>
+                  </div>
+                  <p class="sync-note">
+                    更新后此邮箱将成为登录邮箱;GitHub verified primary email 视为已验证。
+                  </p>
+                </div>
+
+                <footer class="dialog-footer">
+                  <span v-if="syncError" class="validation-error">{{ syncError }}</span>
+                  <span v-else></span>
+                  <div class="footer-actions">
+                    <button
+                      class="btn btn-secondary"
+                      :disabled="syncLoading"
+                      @click="syncDialogOpen = false"
+                    >保持原邮箱</button>
+                    <button
+                      class="btn btn-primary"
+                      :disabled="syncLoading"
+                      @click="handleSyncConfirm"
+                    >
+                      <span v-if="syncLoading" class="btn-spinner" />
+                      {{ syncLoading ? '同步中...' : '更新为 GitHub 邮箱' }}
+                    </button>
+                  </div>
+                </footer>
+              </div>
+            </div>
+          </Transition>
+        </Teleport>
       </main>
     </div>
 
@@ -436,7 +583,9 @@ onMounted(() => {
 .col-item { width: 120px; }
 .col-desc { }
 .col-status { width: 120px; }
-.col-actions { width: 72px; text-align: right; }
+.col-actions { width: 96px; text-align: center; }
+.config-table thead th.col-actions { text-align: center; }
+.config-table tbody td.col-actions { text-align: center; }
 
 .config-table tbody td {
   padding: var(--space-4);
@@ -457,11 +606,20 @@ onMounted(() => {
   background: var(--color-surface-alt);
 }
 
+/* 危险行(删除账号):hover 用危险色浅底 */
+.data-row.row-danger:hover {
+  background: var(--color-danger-light);
+}
+
 /* ---- 单元格内容 ---- */
 .cell-title {
   font-weight: var(--fw-semibold);
   color: var(--color-text);
   display: block;
+}
+
+.text-danger {
+  color: var(--color-danger);
 }
 
 .cell-desc {
@@ -493,23 +651,230 @@ onMounted(() => {
   color: var(--color-text-muted);
 }
 
-/* ---- 操作按钮 ---- */
-.btn-icon {
-  width: 28px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+.badge-danger {
+  background: var(--color-danger-light);
+  color: var(--color-danger);
+}
+
+/* ---- 操作文字按钮 ---- */
+.btn-link {
+  background: none;
   border: none;
-  background: transparent;
+  padding: 4px 8px;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--color-primary);
   cursor: pointer;
   border-radius: var(--radius-sm);
-  color: var(--color-text-secondary);
   transition: all var(--transition-fast);
 }
 
-.btn-icon:hover {
+.btn-link:hover {
+  background: var(--color-primary-light);
+  color: var(--color-primary-hover);
+}
+
+.btn-link.link-danger {
+  color: var(--color-danger);
+}
+
+.btn-link.link-danger:hover {
+  background: var(--color-danger-light);
+  color: var(--color-danger);
+}
+
+/* ============================================================ */
+/* 邮箱同步确认弹窗(复用 dialog 视觉语言)                       */
+/* ============================================================ */
+.dialog-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: var(--space-4);
+}
+
+.dialog-card {
   background: var(--color-surface);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-xl);
+  width: 100%;
+  max-width: 460px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.dialog-header h3 {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  margin: 0;
   color: var(--color-text);
+}
+
+.dialog-close {
+  background: none;
+  border: none;
+  font-size: 24px;
+  line-height: 1;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.dialog-close:hover:not(:disabled) {
+  background: var(--color-surface-alt);
+  color: var(--color-text);
+}
+
+.dialog-close:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.dialog-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-5);
+}
+
+.sync-tip {
+  font-size: var(--fs-sm);
+  color: var(--color-text);
+  margin: 0 0 var(--space-4);
+}
+
+.email-compare {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface-alt);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-3);
+}
+
+.email-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--fs-sm);
+}
+
+.email-label {
+  flex-shrink: 0;
+  width: 64px;
+  color: var(--color-text-secondary);
+  font-size: var(--fs-xs);
+}
+
+.email-value {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--color-text);
+  word-break: break-all;
+}
+
+.sync-note {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  margin: 0;
+  line-height: var(--lh-relaxed);
+}
+
+.dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-5);
+  border-top: 1px solid var(--color-border);
+}
+
+.validation-error {
+  font-size: var(--fs-sm);
+  color: var(--color-danger);
+  flex: 1;
+}
+
+.footer-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.btn {
+  height: 38px;
+  padding: 0 var(--space-4);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--color-primary);
+  color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+}
+
+.btn-secondary {
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  border-color: var(--color-border);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.btn-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: btn-spin 0.8s linear infinite;
+}
+
+@keyframes btn-spin {
+  to { transform: rotate(360deg); }
+}
+
+.dialog-fade-enter-active,
+.dialog-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.dialog-fade-enter-from,
+.dialog-fade-leave-to {
+  opacity: 0;
 }
 </style>

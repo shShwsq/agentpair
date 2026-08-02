@@ -42,9 +42,21 @@ onMounted(async () => {
   try {
     if (authStore.isAuthenticated) {
       // 已登录 → 绑定流程:用 code 换 token 并加密落库
-      await bindGitHub({ code })
-      // 绑定成功跳回设置页(用户能看到绑定状态)
-      await router.push('/settings')
+      const res = await bindGitHub({ code })
+      // 邮箱不一致时带 query 跳设置页,由设置页弹窗询问是否同步
+      if (res.email_mismatch && res.github_email) {
+        await router.push({
+          path: '/settings',
+          query: {
+            email_mismatch: '1',
+            github_email: res.github_email,
+            current_email: res.current_email ?? '',
+          },
+        })
+      } else {
+        // 绑定成功跳回设置页(用户能看到绑定状态)
+        await router.push('/settings')
+      }
     } else {
       // 未登录 → 登录流程:用 code 换 token + 创建/关联账号
       await authStore.handleGitHubCallback(code)

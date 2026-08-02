@@ -59,6 +59,12 @@ export function changePassword(req: ChangePasswordRequest): Promise<MessageRespo
   return client.post('/auth/password/change', req).then((r) => r.data)
 }
 
+// ---- 删除账号(硬删除,需输入邮箱二次确认) ----
+
+export function deleteAccount(email: string): Promise<MessageResponse> {
+  return client.delete('/auth/account', { data: { email } }).then((r) => r.data)
+}
+
 // ---- GitHub OAuth ----
 
 export function githubOAuth(code: string): Promise<TokenResponse> {

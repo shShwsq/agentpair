@@ -17,6 +17,7 @@ import type {
   GitHubBindRequest,
   GitHubReposResponse,
   GitHubStatus,
+  SyncEmailResponse,
 } from '@/types/github'
 
 /** 绑定 GitHub:用 OAuth code 换 token 并加密落库 */
@@ -32,6 +33,11 @@ export function getGitHubStatus(): Promise<GitHubStatus> {
 /** 解绑 GitHub(清除 access_token,保留 github_id 关联) */
 export function unbindGitHub(): Promise<GitHubStatus> {
   return client.delete('/github/bind').then((r) => r.data)
+}
+
+/** 同步邮箱:将账号邮箱更新为 GitHub verified primary email(用户确认后调用) */
+export function syncEmail(): Promise<SyncEmailResponse> {
+  return client.patch('/github/sync-email').then((r) => r.data)
 }
 
 /** 列出当前用户 GitHub 仓库(含私有,按更新时间倒序) */

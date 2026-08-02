@@ -4,12 +4,14 @@
 任务执行时解密传给 clone_repo 工具,用于克隆私有仓库。
 
 端点:
-- POST /github/bind         用授权码换取 token 并加密落库(绑定/升级 scope)
-- GET  /github/status       查看当前用户 GitHub 绑定状态
-- DELETE /github/bind       解绑(清除 token,保留 github_id 关联)
-- GET  /github/repos        列出当前用户 GitHub 仓库(含私有)
+- POST   /github/bind         用授权码换取 token 并加密落库(绑定/升级 scope)
+- GET    /github/status       查看当前用户 GitHub 绑定状态
+- DELETE /github/bind         解绑(清除 token,保留 github_id 关联)
+- GET    /github/repos        列出当前用户 GitHub 仓库(含私有)
+- PATCH  /github/sync-email   将账号邮箱同步为 GitHub 邮箱(用户确认后调用)
 """
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -20,6 +22,7 @@ from app.deps import get_current_user
 from app.github_oauth import (
     GitHubOAuthError,
     GitHubUserInfo,
+    get_github_user_emails,
     get_github_user_info,
     list_github_repos,
 )
@@ -48,6 +51,10 @@ class GitHubStatusResponse(BaseModel):
     github_id: str | None  # GitHub 用户 ID(可能登录时绑定但未授权 repo)
     github_login: str | None  # GitHub 用户名(实时查 /user,失败则空)
     avatar_url: str | None  # 头像
+    # 邮箱不一致提示(仅 bind 响应中可能为 true,status 查询恒为 false)
+    email_mismatch: bool = False
+    github_email: str | None = None  # GitHub verified primary email
+    current_email: str | None = None  # 账号当前邮箱
 
 
 class GitHubRepoItem(BaseModel):
@@ -63,6 +70,13 @@ class GitHubRepoItem(BaseModel):
 
 class GitHubReposResponse(BaseModel):
     repos: list[GitHubRepoItem]
+
+
+class SyncEmailResponse(BaseModel):
+    """邮箱同步结果"""
+
+    email: str  # 更新后的邮箱
+    email_verified: bool  # 是否已验证(GitHub verified primary 视为已验证)
 
 
 # ============================================================
@@ -119,11 +133,28 @@ def bind_github(
         info.github_id,
     )
 
+    # 邮箱不一致检测:公开 email 为空时尝试拿 verified primary
+    # 不一致时返回 True,前端弹窗让用户决定是否同步
+    github_email = info.email
+    if not github_email:
+        try:
+            emails = get_github_user_emails(access_token)
+            if emails:
+                github_email = emails[0]
+        except GitHubOAuthError:
+            pass  # 拿不到就不做对比,不阻塞绑定
+    email_mismatch = bool(
+        github_email and github_email.lower() != current_user.email.lower()
+    )
+
     return GitHubStatusResponse(
         bound=True,
         github_id=current_user.github_id,
         github_login=info.name,
         avatar_url=info.avatar_url,
+        email_mismatch=email_mismatch,
+        github_email=github_email,
+        current_email=current_user.email,
     )
 
 
@@ -181,6 +212,94 @@ def unbind_github(
         github_id=current_user.github_id,
         github_login=None,
         avatar_url=None,
+    )
+
+
+@router.patch("/sync-email", response_model=SyncEmailResponse)
+def sync_email(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> SyncEmailResponse:
+    """将账号邮箱同步为 GitHub 邮箱
+
+    仅在绑定后发现 GitHub verified primary email 与账号邮箱不一致时,
+    由用户在前端确认后调用。GitHub verified primary 视为已验证邮箱。
+
+    安全考虑:
+    - 未绑定 GitHub → 403
+    - 拿不到 GitHub email → 400
+    - GitHub 邮箱已被其他账号占用 → 409(不自动更新,避免账号合并风险)
+    """
+    if not current_user.github_access_token:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="尚未绑定 GitHub,无法同步邮箱",
+        )
+
+    try:
+        token = decrypt_secret(current_user.github_access_token)
+        info = get_github_user_info(token)
+    except (GitHubOAuthError, ValueError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"获取 GitHub 用户信息失败: {e}",
+        ) from e
+
+    github_email = info.email
+    if not github_email:
+        try:
+            emails = get_github_user_emails(token)
+            if emails:
+                github_email = emails[0]
+        except GitHubOAuthError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"获取 GitHub 邮箱失败: {e}",
+            ) from e
+
+    if not github_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="GitHub 账号无可用 verified primary email",
+        )
+
+    # 邮箱一致,无需更新
+    if github_email.lower() == current_user.email.lower():
+        return SyncEmailResponse(
+            email=current_user.email,
+            email_verified=current_user.is_email_verified,
+        )
+
+    # 查重:GitHub 邮箱已被其他账号占用 → 拒绝,避免账号合并风险
+    existing = (
+        db.query(User)
+        .filter(User.email == github_email, User.id != current_user.id)
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="该 GitHub 邮箱已被其他账号占用,无法同步",
+        )
+
+    old_email = current_user.email
+    current_user.email = github_email
+    # GitHub verified primary email 视为已验证
+    if not current_user.email_verified_at:
+        current_user.email_verified_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(current_user)
+
+    logger.info(
+        "user %s 同步邮箱: %s -> %s",
+        current_user.id,
+        old_email,
+        github_email,
+    )
+
+    return SyncEmailResponse(
+        email=current_user.email,
+        email_verified=current_user.is_email_verified,
     )
 
 

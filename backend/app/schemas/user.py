@@ -122,3 +122,12 @@ class MessageResponse(BaseModel):
     """通用消息响应"""
 
     message: str
+
+
+class DeleteAccountRequest(BaseModel):
+    """删除账号请求体
+
+    要求用户输入完整邮箱作为二次确认,后端校验匹配后才执行硬删除。
+    """
+
+    email: str

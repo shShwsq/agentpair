@@ -11,6 +11,7 @@
 - POST   /auth/password/reset        重置密码
 - POST   /auth/password/change       修改密码(需登录)
 - POST   /auth/oauth/github          GitHub OAuth 登录
+- DELETE /auth/account               删除账号(硬删除,连带 task+配置+token)
 """
 import logging
 import uuid
@@ -31,9 +32,12 @@ from app.email_service import (
 )
 from app.github_oauth import GitHubOAuthError, github_oauth_login
 from app.models.email_token import EmailTokenType
+from app.models.task import Task
 from app.models.user import User
+from app.models.user_llm_config import UserLLMConfig
 from app.schemas.user import (
     ChangePasswordRequest,
+    DeleteAccountRequest,
     ForgotPasswordRequest,
     GitHubOAuthRequest,
     LoginRequest,
@@ -308,6 +312,49 @@ def change_password(
     db.commit()
 
     return MessageResponse(message="密码修改成功" if has_password else "密码设置成功")
+
+
+# ============================================================
+# 删除账号
+# ============================================================
+
+
+@router.delete("/account", response_model=MessageResponse)
+def delete_account(
+    req: DeleteAccountRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> MessageResponse:
+    """删除账号(硬删除,不可恢复)
+
+    要求用户输入完整邮箱作为二次确认,后端校验匹配后执行硬删除:
+    - 连带删除该用户的 task、user_llm_config(email_token 已 CASCADE)
+    - 解除 GitHub 关联(github_id 释放,可被其他账号绑定)
+
+    安全考虑:
+    - 邮箱不匹配 → 400,不执行删除
+    - 只删除当前登录用户,不影响他人
+    """
+    # 二次确认:输入的邮箱必须与当前账号邮箱完全一致(忽略大小写)
+    if req.email.strip().lower() != user.email.lower():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="邮箱不匹配,无法删除账号",
+        )
+
+    # 连带删除关联数据(task 外键无 ondelete,需显式删)
+    db.query(Task).filter(Task.user_id == user.id).delete(synchronize_session=False)
+    db.query(UserLLMConfig).filter(UserLLMConfig.user_id == user.id).delete(
+        synchronize_session=False
+    )
+    # email_token 有 ondelete=CASCADE,删 user 时自动级联,这里不重复删
+
+    db.delete(user)
+    db.commit()
+
+    logger.info("用户 %s (%s) 已删除账号", user.id, user.email)
+
+    return MessageResponse(message="账号已删除")
 
 
 # ============================================================
