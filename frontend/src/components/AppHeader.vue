@@ -71,7 +71,7 @@ function handleLogout(): void {
 
 .header-inner {
   /* 顶栏内容撑满宽度,侧栏按钮紧贴左边缘;用户区靠 margin-left:auto 钉到右侧 */
-  padding: var(--space-4) var(--space-6) var(--space-4) var(--space-4);
+  padding: var(--space-2) var(--space-6) var(--space-2) var(--space-4);
   display: flex;
   align-items: center;
   justify-content: flex-start;

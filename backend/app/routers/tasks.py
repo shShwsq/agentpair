@@ -21,13 +21,14 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response, StreamingResponse
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.agents.orchestrator import run_dual_agent_audit
 from app.database import SessionLocal, get_db
 from app.deps import get_optional_user, get_optional_user_sse
 from app.event_bus import publish, subscribe, unsubscribe
-from app.models.task import Conversation, Task, TaskStatus
+from app.models.task import Conversation, Result, Task, TaskStatus
 from app.models.user import User
 from app.pause_controller import (
     clear_pause_state,
@@ -66,12 +67,20 @@ def list_all_scenarios() -> list[dict[str, Any]]:
 def list_tasks(
     limit: int = 50,
     offset: int = 0,
+    q: str | None = None,
     db: Session = Depends(get_db),
     current_user: User | None = Depends(get_optional_user),
 ) -> list[Task]:
     """列出当前用户可见的任务(自己的 + 匿名的),按创建时间倒序
 
     用于侧栏历史任务列表。精简字段(不含对话/结果),降低传输成本。
+
+    可选 q 参数:全文搜索(大小写不敏感)。匹配范围:
+    - 任务标题(title)
+    - 用户输入(user_input)
+    - 对话内容(conversation.content / reasoning)
+    - 结果内容(result.title / content)
+    命中任一字段即返回该任务。
     """
     query = db.query(Task)
     if current_user:
@@ -82,6 +91,34 @@ def list_tasks(
     else:
         # 未登录:只返回匿名任务
         query = query.filter(Task.user_id.is_(None))
+
+    # 全文搜索:用 ILIKE 做大小写不敏感匹配,通过 EXISTS 子查询避免 JOIN 产生重复行
+    keyword = (q or "").strip()
+    if keyword:
+        kw = f"%{keyword}%"
+        conv_match = select(Conversation.id).where(
+            Conversation.task_id == Task.id,
+            or_(
+                Conversation.content.ilike(kw),
+                Conversation.reasoning.ilike(kw),
+            ),
+        )
+        result_match = select(Result.id).where(
+            Result.task_id == Task.id,
+            or_(
+                Result.title.ilike(kw),
+                Result.content.ilike(kw),
+            ),
+        )
+        query = query.filter(
+            or_(
+                Task.title.ilike(kw),
+                Task.user_input.ilike(kw),
+                conv_match.exists(),
+                result_match.exists(),
+            )
+        )
+
     return (
         query.order_by(Task.created_at.desc())
         .offset(max(0, offset))

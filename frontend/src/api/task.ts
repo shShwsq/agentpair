@@ -26,10 +26,14 @@ export function getScenarios(): Promise<Scenario[]> {
  * 列出当前用户可见的任务(自己的 + 匿名的)
  *
  * 用于侧栏历史任务列表。按创建时间倒序。
+ *
+ * 可选 q:全文搜索关键词(后端 ILIKE 匹配 title / user_input /
+ * conversation.content / conversation.reasoning / result.title / result.content)。
  */
 export function listTasks(params?: {
   limit?: number
   offset?: number
+  q?: string
 }): Promise<TaskListItem[]> {
   return client.get('/tasks', { params }).then((r) => r.data)
 }

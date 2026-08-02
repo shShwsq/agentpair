@@ -52,11 +52,87 @@ const tasks = ref<TaskListItem[]>([])
 const loadingTasks = ref(false)
 const tasksError = ref('')
 
+// ---- 全文搜索(任务标题 + 对话/结果内容) ----
+/** 搜索输入框是否展开 */
+const searchOpen = ref(false)
+/** 搜索输入框当前值 */
+const searchQuery = ref('')
+/** 搜索输入框引用(展开时聚焦) */
+const searchInputRef = ref<HTMLInputElement | null>(null)
+/** 防抖计时器 */
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+/** 是否处于搜索态(已输入关键词,列表展示的是搜索结果) */
+const isSearching = computed(() => searchQuery.value.trim().length > 0)
+
+/** 切换搜索框展开/收起;收起时清空查询并恢复原始列表 */
+function toggleSearch(): void {
+  if (searchOpen.value) {
+    // 已展开:点击图标 = 收起 + 清空
+    closeSearch()
+  } else {
+    searchOpen.value = true
+    nextTick(() => searchInputRef.value?.focus())
+  }
+}
+
+/** 收起搜索框并清空查询(若之前有查询则重新加载原始列表) */
+function closeSearch(): void {
+  searchOpen.value = false
+  if (searchTimer) {
+    clearTimeout(searchTimer)
+    searchTimer = null
+  }
+  if (searchQuery.value) {
+    searchQuery.value = ''
+    void loadTasks()
+  }
+}
+
+/** 清空输入(不收起框),触发列表恢复 */
+function clearSearchQuery(): void {
+  if (searchTimer) {
+    clearTimeout(searchTimer)
+    searchTimer = null
+  }
+  searchQuery.value = ''
+  void loadTasks()
+  nextTick(() => searchInputRef.value?.focus())
+}
+
+/** 输入时防抖触发搜索(空字符串则恢复原始列表) */
+function onSearchInput(): void {
+  if (searchTimer) {
+    clearTimeout(searchTimer)
+    searchTimer = null
+  }
+  searchTimer = setTimeout(() => {
+    void loadTasks()
+  }, 350)
+}
+
+/** 输入框键盘:Enter 立即搜索,Esc 收起 */
+function onSearchKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    e.stopPropagation()
+    if (searchTimer) {
+      clearTimeout(searchTimer)
+      searchTimer = null
+    }
+    void loadTasks()
+  } else if (e.key === 'Escape') {
+    e.preventDefault()
+    e.stopPropagation()
+    closeSearch()
+  }
+}
+
 async function loadTasks(): Promise<void> {
   loadingTasks.value = true
   tasksError.value = ''
   try {
-    tasks.value = await listTasks({ limit: 50 })
+    const q = searchQuery.value.trim()
+    tasks.value = await listTasks({ limit: 50, ...(q ? { q } : {}) })
   } catch (e) {
     tasksError.value = extractErrorMessage(e)
   } finally {
@@ -701,19 +777,80 @@ defineExpose({ openTaskFile })
         <div class="sidebar-header">
           <span class="sidebar-title">历史任务</span>
           <div class="sidebar-actions">
+            <button
+              class="icon-btn"
+              :class="{ 'icon-btn-active': searchOpen }"
+              title="搜索任务"
+              aria-label="搜索任务"
+              @click="toggleSearch"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <circle cx="11" cy="11" r="8" />
+                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+              </svg>
+            </button>
             <button class="icon-btn" title="刷新任务列表" @click="loadTasks">↻</button>
             <button class="icon-btn add-btn" title="提交新任务" @click="goToNewTask">+</button>
           </div>
         </div>
 
+        <!-- 搜索输入框(展开时显示在 header 下方) -->
+        <div v-if="searchOpen" class="sidebar-search">
+          <span class="sidebar-search-icon" aria-hidden="true">
+            <svg
+              viewBox="0 0 24 24"
+              width="12"
+              height="12"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <line x1="21" y1="21" x2="16.65" y2="16.65" />
+            </svg>
+          </span>
+          <input
+            ref="searchInputRef"
+            v-model="searchQuery"
+            class="sidebar-search-input"
+            type="text"
+            maxlength="200"
+            placeholder="搜索标题或全文..."
+            @input="onSearchInput"
+            @keydown="onSearchKeydown"
+          />
+          <button
+            v-if="searchQuery"
+            class="sidebar-search-clear"
+            title="清空"
+            aria-label="清空"
+            @click="clearSearchQuery"
+          >×</button>
+          <span v-else-if="loadingTasks" class="sidebar-search-spinner" aria-hidden="true">
+            <span class="spinner-sm" />
+          </span>
+        </div>
+
         <div v-if="loadingTasks && tasks.length === 0" class="sidebar-status">
-          <span class="spinner-sm" /> 加载任务...
+          <span class="spinner-sm" /> {{ isSearching ? '搜索中...' : '加载任务...' }}
         </div>
         <div v-else-if="tasksError" class="sidebar-status sidebar-status-muted">
           <p>{{ tasksError }}</p>
         </div>
         <div v-else-if="tasks.length === 0" class="empty-tree">
-          暂无任务
+          {{ isSearching ? '无匹配任务' : '暂无任务' }}
         </div>
         <div v-else class="task-list">
           <div
@@ -1122,6 +1259,87 @@ defineExpose({ openTaskFile })
   font-size: 18px;
   font-weight: var(--fw-medium);
   line-height: 1;
+}
+
+/* 搜索按钮激活态:高亮提示当前处于搜索模式 */
+.icon-btn-active {
+  background: var(--color-primary-light);
+  color: var(--color-primary);
+}
+
+.icon-btn-active:hover:not(:disabled) {
+  color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+/* ---- 搜索输入框 ---- */
+.sidebar-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+  flex-shrink: 0;
+}
+
+.sidebar-search-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-muted);
+}
+
+.sidebar-search-input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 2px;
+  font-size: var(--fs-sm);
+  font-family: var(--font-sans);
+  color: var(--color-text);
+  background: transparent;
+  border: none;
+  outline: none;
+}
+
+.sidebar-search-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.sidebar-search-clear {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.sidebar-search-clear:hover {
+  background: var(--color-surface-alt);
+  color: var(--color-text);
+}
+
+.sidebar-search-spinner {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebar-search-spinner .spinner-sm {
+  width: 10px;
+  height: 10px;
 }
 
 /* ---- 侧栏状态 ---- */
