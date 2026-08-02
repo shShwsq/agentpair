@@ -582,7 +582,9 @@ onMounted(() => {
 
 .col-item { width: 120px; }
 .col-desc { }
-.col-status { width: 120px; }
+.col-status { width: 120px; text-align: center; }
+.config-table thead th.col-status { text-align: center; }
+.config-table tbody td.col-status { text-align: center; }
 .col-actions { width: 96px; text-align: center; }
 .config-table thead th.col-actions { text-align: center; }
 .config-table tbody td.col-actions { text-align: center; }
