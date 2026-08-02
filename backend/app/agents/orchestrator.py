@@ -153,8 +153,8 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             answer_text = _format_user_answers(questions, answers)
             if answer_text:
                 effective_intent = user_intent + answer_text
-            # 记录用户答案为 Conversation
-            _record_user_answer(db, task, questions, answers, ask_round)
+            # 注意:answer 落库已移到 API 端点(submit_task_answer → _record_answer)
+            # 同步执行,确保刷新时数据库已有记录。此处不再重复落库。
             ask_round += 1
             # 继续循环:再调 user_agent 评估,可能再次 ask_user 或给出 followup_query
 
@@ -433,65 +433,8 @@ def _format_user_answers(
     return "\n".join(lines)
 
 
-def _record_user_answer(
-    db: Session,
-    task: Task,
-    questions: list[dict],
-    answers: list[dict],
-    ask_round: int,
-) -> None:
-    """把用户的答案落库为 Conversation(role=user, type=answer)"""
-    # 按 question_id 索引
-    answer_map: dict[str, dict] = {}
-    for a in answers:
-        qid = a.get("question_id")
-        if qid:
-            answer_map[qid] = a
-
-    # 拼接可读文本
-    parts = []
-    for i, q in enumerate(questions, 1):
-        qid = q.get("id", f"q_{i}")
-        q_text = q.get("question", f"问题 {i}")
-        a = answer_map.get(qid)
-        if a is None:
-            continue
-        value = a.get("value")
-        if value is None or value == "":
-            continue
-        if isinstance(value, list):
-            value_text = ", ".join(str(v) for v in value)
-        else:
-            value_text = str(value)
-        if qid == "_supplement" and not value_text.strip():
-            continue
-        parts.append(f"Q: {q_text}\nA: {value_text}")
-
-    content = "\n\n".join(parts) if parts else "(用户未填写有效答案)"
-
-    conv = Conversation(
-        task_id=task.id,
-        round_idx=0,
-        role="user",
-        type="answer",
-        content=content,
-        reasoning=json.dumps(
-            {"ask_round": ask_round, "answers": answers},
-            ensure_ascii=False,
-        ),
-    )
-    db.add(conv)
-    db.commit()
-    db.refresh(conv)
-    publish(task.id, "conversation", {
-        "id": str(conv.id),
-        "round_idx": conv.round_idx,
-        "role": conv.role,
-        "type": conv.type,
-        "content": conv.content,
-        "reasoning": conv.reasoning,
-        "created_at": conv.created_at.isoformat() if conv.created_at else None,
-    })
+# 注意:用户答案落库(_record_user_answer)已迁移到 API 端点
+# submit_task_answer → _record_answer,同步执行,确保刷新时数据库已有记录。
 
 
 # ============================================================

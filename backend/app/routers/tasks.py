@@ -47,7 +47,6 @@ from app.schemas.task import (
 )
 from app.user_interaction import (
     get_pending_question,
-    has_pending_question,
     submit_answers,
 )
 
@@ -172,7 +171,9 @@ def get_task_pending_question(
 ) -> PendingQuestion | None:
     """查询任务当前待回答的问题(刷新页面后恢复弹窗用)
 
-    无待回答问题时返回 None(HTTP 200 + 空 body),前端据此关闭弹窗。
+    纯查数据库,不依赖 in-memory 状态(避免多 worker/时序窗口导致的残留)。
+    判定逻辑:最新一条 user_agent question 是否已有对应 ask_round 的 answer。
+    无待回答问题时返回 None。
     """
     task = db.get(Task, task_id)
     if not task:
@@ -181,14 +182,55 @@ def get_task_pending_question(
         if current_user is None or current_user.id != task.user_id:
             raise HTTPException(status_code=403, detail="无权访问此任务")
 
-    payload = get_pending_question(task_id)
-    if payload is None:
+    # 任务已结束,不恢复弹窗
+    if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
         return None
+
+    # 查最新一条 user_agent question(提问记录,reasoning 存 JSON payload)
+    latest_question = (
+        db.query(Conversation)
+        .filter(
+            Conversation.task_id == task_id,
+            Conversation.role == "user_agent",
+            Conversation.type == "question",
+        )
+        .order_by(Conversation.created_at.desc())
+        .first()
+    )
+    if not latest_question or not latest_question.reasoning:
+        return None
+
+    try:
+        payload = json.loads(latest_question.reasoning)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    ask_round = payload.get("ask_round", 0)
+
+    # 查最新一条 user answer,若其 ask_round >= 当前提问的 ask_round,说明已回答
+    latest_answer = (
+        db.query(Conversation)
+        .filter(
+            Conversation.task_id == task_id,
+            Conversation.role == "user",
+            Conversation.type == "answer",
+        )
+        .order_by(Conversation.created_at.desc())
+        .first()
+    )
+    if latest_answer and latest_answer.reasoning:
+        try:
+            ans_data = json.loads(latest_answer.reasoning)
+            if int(ans_data.get("ask_round", -1)) >= ask_round:
+                return None  # 已回答,不弹窗
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
     return PendingQuestion(
-        ask_round=payload.get("ask_round", 0),
+        ask_round=ask_round,
         questions=payload.get("questions", []),
         reasoning=payload.get("reasoning", ""),
-        conversation_id=payload.get("conversation_id"),
+        conversation_id=str(latest_question.id),
     )
 
 
@@ -201,7 +243,7 @@ def submit_task_answer(
 ) -> AnswerResponse:
     """提交用户对澄清问题的答案
 
-    后端收到后唤醒阻塞的后台线程,把答案拼回 user_intent 重新评估。
+    同步落库 answer(确保刷新时数据库已有记录),再唤醒后台线程。
     若当前 task 没有待回答问题(重复提交或任务已结束),返回 accepted=false。
     """
     task = db.get(Task, task_id)
@@ -209,7 +251,7 @@ def submit_task_answer(
         raise HTTPException(status_code=404, detail="任务不存在")
     if task.user_id is not None:
         if current_user is None or current_user.id != task.user_id:
-            raise HTTPException(status_code=403, detail="无权访问此任务")
+            raise HTTPException(status_code=403, detail="无权操作此任务")
 
     if task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.PAUSED):
         return AnswerResponse(
@@ -217,7 +259,9 @@ def submit_task_answer(
             message=f"任务已结束({task.status.value}),无法提交答案",
         )
 
-    if not has_pending_question(task_id):
+    # 拿 pending payload(含 questions,用于落库 answer)
+    payload = get_pending_question(task_id)
+    if payload is None:
         return AnswerResponse(
             accepted=False,
             message="当前没有待回答的问题(可能已回答或任务已结束)",
@@ -228,6 +272,13 @@ def submit_task_answer(
         {"question_id": a.question_id, "value": a.value}
         for a in req.answers
     ]
+    ask_round = payload.get("ask_round", 0)
+    questions = payload.get("questions", [])
+
+    # 同步落库 answer(在唤醒后台线程之前,确保刷新时数据库已有记录)。
+    _record_answer(db, task, questions, answers, ask_round)
+
+    # 唤醒后台线程
     ok = submit_answers(task_id, answers)
     if not ok:
         return AnswerResponse(
@@ -235,6 +286,68 @@ def submit_task_answer(
             message="提交失败:可能已被回答过或状态异常",
         )
     return AnswerResponse(accepted=True, message="答案已提交,智能体将继续评估")
+
+
+def _record_answer(
+    db: Session,
+    task: Task,
+    questions: list[dict],
+    answers: list[dict],
+    ask_round: int,
+) -> None:
+    """同步落库用户答案为 Conversation(role=user, type=answer)
+
+    逻辑与 orchestrator._record_user_answer 一致,迁移到 API 端点同步执行。
+    """
+    answer_map: dict[str, dict] = {}
+    for a in answers:
+        qid = a.get("question_id")
+        if qid:
+            answer_map[qid] = a
+
+    parts = []
+    for i, q in enumerate(questions, 1):
+        qid = q.get("id", f"q_{i}")
+        q_text = q.get("question", f"问题 {i}")
+        a = answer_map.get(qid)
+        if a is None:
+            continue
+        value = a.get("value")
+        if value is None or value == "":
+            continue
+        if isinstance(value, list):
+            value_text = ", ".join(str(v) for v in value)
+        else:
+            value_text = str(value)
+        if qid == "_supplement" and not value_text.strip():
+            continue
+        parts.append(f"Q: {q_text}\nA: {value_text}")
+
+    content = "\n\n".join(parts) if parts else "(用户未填写有效答案)"
+
+    conv = Conversation(
+        task_id=task.id,
+        round_idx=0,
+        role="user",
+        type="answer",
+        content=content,
+        reasoning=json.dumps(
+            {"ask_round": ask_round, "answers": answers},
+            ensure_ascii=False,
+        ),
+    )
+    db.add(conv)
+    db.commit()
+    db.refresh(conv)
+    publish(task.id, "conversation", {
+        "id": str(conv.id),
+        "round_idx": conv.round_idx,
+        "role": conv.role,
+        "type": conv.type,
+        "content": conv.content,
+        "reasoning": conv.reasoning,
+        "created_at": conv.created_at.isoformat() if conv.created_at else None,
+    })
 
 
 # ============================================================

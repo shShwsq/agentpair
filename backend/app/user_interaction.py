@@ -83,6 +83,9 @@ def wait_for_answers(task_id: str | UUID) -> list[dict[str, Any]]:
 
     无限等待,直到 submit_answers 被调用。任务被取消时由调用方处理。
     返回答案列表;若 question_payload 被外部清除(任务取消),返回空列表。
+
+    注意:question_payload 的清理已在 submit_answers 中完成(消除竞态),
+    这里只清 answers,避免后台线程长期持有已读数据。
     """
     task_id_str = str(task_id)
     pq = _get_or_create(task_id_str)
@@ -90,8 +93,7 @@ def wait_for_answers(task_id: str | UUID) -> list[dict[str, Any]]:
     pq.event.wait()
     with pq.lock:
         answers = pq.answers or []
-        # 清理:这轮提问已结束
-        pq.question_payload = None
+        # question_payload 已在 submit_answers 中清理,这里只清 answers
         pq.answers = None
     return answers
 
@@ -118,6 +120,10 @@ def submit_answers(
             # 已经被唤醒过(重复提交)
             return False
         pq.answers = answers
+        # 立即清理 question_payload:避免 submit 返回后、后台线程唤醒清理前
+        # 的时间窗口内,前端 get_pending_question 拿到旧 payload 重复弹窗。
+        # (原先清理放在 wait_for_answers 里,依赖后台线程被调度,存在竞态)
+        pq.question_payload = None
     pq.event.set()
     logger.info(f"[task={task_id_str}] 收到用户答案,{len(answers)} 项")
     return True

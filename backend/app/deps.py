@@ -78,16 +78,19 @@ def get_optional_user(
     authorization: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> User | None:
-    """可选登录:有 token 且有效 → User,否则 → None
+    """可选登录:有 token 且有效 → User,无 token → None
 
-    用于「公开但可识别用户」的端点
+    用于「公开但可识别用户」的端点。
+
+    注意:token 过期/无效时(有 Authorization header 但解析失败)仍抛 401,
+    而非吞成 None。这样前端 401 拦截器能触发 refresh;若吞成 None,
+    权限校验会返回 403,前端不拦截 403,导致无法自动刷新 token。
+    无 Authorization header(匿名访问)才返回 None。
     """
     if not authorization:
         return None
-    try:
-        return get_current_user(authorization=authorization, db=db)
-    except HTTPException:
-        return None
+    # 有 header 但解析失败 → 抛 401(让前端拦截器 refresh),不吞成 None
+    return get_current_user(authorization=authorization, db=db)
 
 
 def get_optional_user_sse(
