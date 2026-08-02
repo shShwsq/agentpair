@@ -74,3 +74,33 @@ h1, h2, h3, h4, h5, h6 {
 .text-center { text-align: center; }
 .text-secondary { color: var(--color-text-secondary); }
 .text-muted { color: var(--color-text-muted); }
+
+/* ---- 滚动条(无背景 + 圆角) ---- */
+/* WebKit (Chrome / Edge / Safari) */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent; /* 无背景 */
+}
+*::-webkit-scrollbar-thumb {
+  background-color: var(--color-text-muted);
+  border-radius: 9999px; /* 全圆角(药丸形) */
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-text-secondary);
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Firefox(必须用 @-moz-document 限定,否则 Chrome 121+/Edge 121+
+   会因支持标准 scrollbar-width 而改用标准滚动条,忽略上面的 ::-webkit-scrollbar
+   样式,导致 border-radius 失效、变回方角) */
+@-moz-document url-prefix() {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-text-muted) transparent;
+  }
+}

@@ -128,6 +128,8 @@ const fileOffset = ref(1)
 const fileContentRef = ref<HTMLElement | null>(null)
 /** 高亮行号(由结果清单点击跳转设置,滚动定位后保留高亮) */
 const highlightLine = ref<number | null>(null)
+/** 文件查看面板是否被手动隐藏(点击隐藏按钮后为 true,重新选文件时重置) */
+const filePanelHidden = ref(false)
 
 /** 文件内容按行拆分(用于行号渲染 + 高亮定位) */
 const fileContentLines = computed<string[]>(() => {
@@ -149,6 +151,7 @@ function resetFileTree(): void {
   unavailableReason.value = ''
   errorMsg.value = ''
   initialized = false
+  filePanelHidden.value = false
 }
 
 // ============================================================
@@ -278,7 +281,20 @@ async function selectFile(node: TreeNode): Promise<void> {
   selectedFilePath.value = node.path
   fileOffset.value = 1
   highlightLine.value = null // 手动选文件时清除高亮
+  filePanelHidden.value = false // 重新选文件时恢复面板显示
   await loadFileContent()
+}
+
+/** 手动隐藏文件查看面板(保留选中状态,便于恢复) */
+function hideFilePanel(): void {
+  filePanelHidden.value = true
+}
+
+/** 恢复显示文件查看面板(已选中文件时使用) */
+function showFilePanelAgain(): void {
+  if (selectedFilePath.value) {
+    filePanelHidden.value = false
+  }
 }
 
 async function loadFileContent(): Promise<void> {
@@ -348,7 +364,17 @@ const selectedFileName = computed(() => {
 const hasPrevPage = computed(() => fileOffset.value > 1)
 const hasNextPage = computed(() => fileTruncated.value)
 const showFilePanel = computed(
-  () => view.value === 'workspace' && selectedFilePath.value !== null,
+  () =>
+    view.value === 'workspace' &&
+    selectedFilePath.value !== null &&
+    !filePanelHidden.value,
+)
+/** 文件被选中但被手动隐藏时,文件树中显示恢复按钮 */
+const showRestoreBtn = computed(
+  () =>
+    view.value === 'workspace' &&
+    selectedFilePath.value !== null &&
+    filePanelHidden.value,
 )
 
 // ============================================================
@@ -602,6 +628,17 @@ defineExpose({ openTaskFile })
             </span>
             <span class="tree-name">{{ item.node.name }}</span>
             <span v-if="item.node.loading" class="tree-loading">...</span>
+            <!-- 当前选中文件被手动隐藏时,显示恢复查看按钮 -->
+            <button
+              v-if="
+                showRestoreBtn &&
+                item.node.type === 'file' &&
+                selectedFilePath === item.node.path
+              "
+              class="tree-restore-btn"
+              title="显示文件查看面板"
+              @click.stop="showFilePanelAgain"
+            >↗</button>
           </div>
           <div v-if="treeRoot.loaded && treeRoot.children.length === 0" class="empty-tree">
             (空目录)
@@ -613,7 +650,7 @@ defineExpose({ openTaskFile })
       </template>
     </aside>
 
-    <!-- 文件查看面板(右侧,仅工作区视图且选中文件时显示) -->
+    <!-- 文件查看面板(右侧,仅工作区视图且选中文件且未手动隐藏时显示) -->
     <section v-if="showFilePanel" class="file-panel">
       <div class="file-panel-header">
         <span class="file-path" :title="selectedFilePath ?? undefined">{{ selectedFileName }}</span>
@@ -628,6 +665,11 @@ defineExpose({ openTaskFile })
             ↓
           </button>
         </div>
+        <button
+          class="icon-btn file-close-btn"
+          title="隐藏文件查看面板"
+          @click="hideFilePanel"
+        >×</button>
       </div>
       <div ref="fileContentRef" class="file-content">
         <div v-if="loadingFile" class="file-loading">
@@ -907,6 +949,7 @@ defineExpose({ openTaskFile })
 }
 
 .tree-name {
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -918,6 +961,29 @@ defineExpose({ openTaskFile })
 
 .tree-dir .tree-name {
   font-weight: var(--fw-medium);
+}
+
+/* 文件被选中但查看面板被手动隐藏时,文件树中显示的恢复按钮 */
+.tree-restore-btn {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  color: var(--color-primary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.tree-restore-btn:hover {
+  background: var(--color-surface-alt);
+  color: var(--color-primary-dark, var(--color-primary));
 }
 
 /* ---- 文件查看面板 ---- */
@@ -990,6 +1056,18 @@ defineExpose({ openTaskFile })
   color: var(--color-text-muted);
   font-family: var(--font-mono);
   white-space: nowrap;
+}
+
+/* 文件查看面板头部的隐藏按钮 */
+.file-close-btn {
+  flex-shrink: 0;
+  font-size: 16px;
+  font-weight: var(--fw-medium);
+  line-height: 1;
+}
+
+.file-close-btn:hover {
+  color: var(--color-danger);
 }
 
 .file-content {
