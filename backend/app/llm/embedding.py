@@ -182,16 +182,24 @@ class EmbeddingClient:
         return embeddings[0]["embedding"]
 
     def _embed_dashscope_multimodal(self, text: str) -> list[float]:
-        """DashScope 原生 multimodal-embedding 端点(tongyi-embedding-vision-plus)
+        """DashScope 原生 multimodal-embedding 端点(qwen3-vl-embedding / tongyi-embedding-vision-plus)
 
         POST {base_url}/services/embeddings/multimodal-embedding/multimodal-embedding
-        body: { model, input: { contents: [{ text }] } }
+        body: { model, input: { contents: [{ text }] }, parameters?: { dimension: 1024 } }
+
+        注意:DashScope 的维度参数是 `dimension`(单数),放在 `parameters` 对象里,
+        与 OpenAI 兼容路径的 `dimensions`(复数,顶层)不同。
+        各模型默认维度不同(qwen3-vl-embedding=2560, tongyi-...-plus=1152),
+        不传 dimension 参数会返回默认维度,与 catalog 标记的 1024 不一致,
+        故 dimensionsParam=true 时显式传 parameters.dimension=expected_dimension 强制对齐。
         """
         url = f"{self.base_url}/services/embeddings/multimodal-embedding/multimodal-embedding"
-        body = {
+        body: dict[str, Any] = {
             "model": self.model,
             "input": {"contents": [{"text": text}]},
         }
+        if self.dimensions_param:
+            body["parameters"] = {"dimension": self.expected_dimension}
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -206,7 +214,9 @@ class EmbeddingClient:
         )
         if not embeddings or "embedding" not in embeddings[0]:
             raise ValueError(f"响应缺少 embedding 字段: {str(data)[:200]}")
-        return embeddings[0]["embedding"]
+        vec = embeddings[0]["embedding"]
+        self._check_dimension(vec)
+        return vec
 
     # ============================================================
     # OpenAI 兼容 /embeddings

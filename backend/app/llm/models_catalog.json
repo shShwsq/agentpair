@@ -100,7 +100,8 @@
       "apiKeyUrl": "https://dashscope.console.aliyun.com/",
       "models": [
         { "id": "text-embedding-v4", "name": "Text-Embedding-V4 (纯文本)", "dimension": 1024, "multimodal": false },
-        { "id": "tongyi-embedding-vision-plus-2026-03-06", "name": "Tongyi-Embedding-Vision-Plus (多模态)", "dimension": 1024, "multimodal": true }
+        { "id": "qwen3-vl-embedding", "name": "Qwen3-VL-Embedding (多模态,默认2560维,通过dimension参数指定1024)", "dimension": 1024, "multimodal": true, "dimensionsParam": true },
+        { "id": "tongyi-embedding-vision-plus-2026-03-06", "name": "Tongyi-Embedding-Vision-Plus (多模态,默认1152维,通过dimension参数指定1024)", "dimension": 1024, "multimodal": true, "dimensionsParam": true }
       ]
     },
     {
