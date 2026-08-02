@@ -32,9 +32,7 @@ from app.email_service import (
 )
 from app.github_oauth import GitHubOAuthError, github_oauth_login
 from app.models.email_token import EmailTokenType
-from app.models.task import Conversation, Result, Task
 from app.models.user import User
-from app.models.user_llm_config import UserLLMConfig
 from app.schemas.user import (
     ChangePasswordRequest,
     DeleteAccountRequest,
@@ -342,20 +340,8 @@ def delete_account(
             detail="邮箱不匹配,无法删除账号",
         )
 
-    # 连带删除关联数据(按外键依赖顺序:conversations/results → tasks → 配置)
-    # email_token 有 ondelete=CASCADE,删 user 时自动级联,这里不重复删
-    task_ids_subquery = db.query(Task.id).filter(Task.user_id == user.id).subquery()
-    db.query(Conversation).filter(
-        Conversation.task_id.in_(task_ids_subquery)
-    ).delete(synchronize_session=False)
-    db.query(Result).filter(
-        Result.task_id.in_(task_ids_subquery)
-    ).delete(synchronize_session=False)
-    db.query(Task).filter(Task.user_id == user.id).delete(synchronize_session=False)
-    db.query(UserLLMConfig).filter(UserLLMConfig.user_id == user.id).delete(
-        synchronize_session=False
-    )
-
+    # 删 user 即可,所有关联数据由数据库外键 ondelete=CASCADE 自动级联删除:
+    # user → tasks → conversations/results, user → user_llm_config, user → email_token
     db.delete(user)
     db.commit()
 

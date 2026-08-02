@@ -28,7 +28,7 @@ class Task(Base):
     )
     # 阶段 0 暂不鉴权,user_id 可空
     user_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True
     )
 
     # 场景标识:字符串,支持任意场景注册(见 app/scenarios/)
@@ -80,7 +80,7 @@ class Conversation(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     task_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=False, index=True
+        UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
     )
     # 协作轮次(第几轮,从 0 开始;0 = 初始评估)
     round_idx: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -124,7 +124,7 @@ class Result(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     task_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=False, index=True
+        UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
     )
     # 由第几轮 react_agent 产出(从 1 开始)
     round_idx: Mapped[int] = mapped_column(Integer, default=1, nullable=False)

@@ -27,7 +27,7 @@ class UserLLMConfig(Base):
     )
     # 一对一关联用户
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), unique=True, nullable=False
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False
     )
 
     # LLM 配置列表(可多个)
