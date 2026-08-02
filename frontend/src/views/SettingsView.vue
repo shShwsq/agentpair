@@ -150,6 +150,7 @@ interface SettingRow {
   status: string
   statusType: 'ok' | 'warn' | 'neutral' | 'danger'
   actionText: string
+  loading?: boolean
 }
 
 const rows = computed<SettingRow[]>(() => [
@@ -160,6 +161,7 @@ const rows = computed<SettingRow[]>(() => [
     status: hasPassword.value ? '已设置' : '未设置',
     statusType: hasPassword.value ? 'ok' : 'warn',
     actionText: hasPassword.value ? '修改' : '设置',
+    loading: false,
   },
   {
     key: 'github',
@@ -167,9 +169,16 @@ const rows = computed<SettingRow[]>(() => [
     desc: '绑定后可访问私有仓库',
     status: githubStatus.value?.bound
       ? `@${githubStatus.value.github_login || 'unknown'}`
-      : '未绑定',
-    statusType: githubStatus.value?.bound ? 'ok' : 'warn',
+      : githubStatus.value === null
+        ? ''  // 加载中,由 template 渲染 spinner
+        : '未绑定',
+    statusType: githubStatus.value?.bound
+      ? 'ok'
+      : githubStatus.value === null
+        ? 'neutral'
+        : 'warn',
     actionText: githubStatus.value?.bound ? '管理' : '绑定',
+    loading: githubStatus.value === null,
   },
   {
     key: 'delete',
@@ -315,12 +324,14 @@ onMounted(() => {
                     <span class="cell-desc">{{ row.desc }}</span>
                   </td>
                   <td class="col-status">
-                    <span :class="['badge', `badge-${row.statusType}`]">{{ row.status }}</span>
+                    <span v-if="row.loading" class="status-spinner" aria-label="加载中" />
+                    <span v-else :class="['badge', `badge-${row.statusType}`]">{{ row.status }}</span>
                   </td>
                   <td class="col-actions" @click.stop>
                     <button
                       class="btn-link"
                       :class="{ 'link-danger': row.statusType === 'danger' }"
+                      :disabled="row.loading"
                       @click="openRow(row)"
                     >{{ row.actionText }}</button>
                   </td>
@@ -656,6 +667,21 @@ onMounted(() => {
 .badge-danger {
   background: var(--color-danger-light);
   color: var(--color-danger);
+}
+
+/* 状态列加载动画 */
+.status-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: status-spin 0.8s linear infinite;
+}
+
+@keyframes status-spin {
+  to { transform: rotate(360deg); }
 }
 
 /* ---- 操作文字按钮 ---- */
