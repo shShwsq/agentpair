@@ -808,12 +808,22 @@ function modelLabel(row: TableRow): string {
 }
 
 .col-name { width: 24%; }
-.col-type { width: 100px; }
+.col-type { width: 100px; text-align: center; }
 .col-provider { width: 15%; }
 .col-model { width: 20%; }
-.col-key { width: 80px; }
-.col-thinking { width: 70px; }
+.col-key { width: 80px; text-align: center; }
+.col-thinking { width: 70px; text-align: center; }
 .col-actions { width: 120px; text-align: right; }
+
+/* 表头与正文同步对齐:类型 / Key / 思考 居中 */
+.config-table thead th.col-type,
+.config-table thead th.col-key,
+.config-table thead th.col-thinking,
+.config-table tbody td.col-type,
+.config-table tbody td.col-key,
+.config-table tbody td.col-thinking {
+  text-align: center;
+}
 
 .config-table tbody td {
   padding: var(--space-3) var(--space-4);
