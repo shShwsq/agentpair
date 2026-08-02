@@ -45,10 +45,18 @@ class GitHubOAuthError(Exception):
 class GitHubUserInfo:
     """GitHub 用户信息(从 /user 接口拿到)"""
 
-    def __init__(self, github_id: str, email: str | None, name: str | None, avatar_url: str | None):
+    def __init__(
+        self,
+        github_id: str,
+        email: str | None,
+        login: str | None,
+        name: str | None,
+        avatar_url: str | None,
+    ):
         self.github_id = github_id
         self.email = email
-        self.name = name
+        self.login = login  # 用户名(如 octocat),永远有值
+        self.name = name  # 显示名(很多人不填,可能为 None)
         self.avatar_url = avatar_url
 
 
@@ -110,12 +118,14 @@ def get_github_user_info(access_token: str) -> GitHubUserInfo:
 
     # email 可能是 private,需另外调 /user/emails,这里先取公开 email
     email = data.get("email")
-    name = data.get("name") or data.get("login")
+    login = data.get("login")  # 用户名(如 octocat),永远有值
+    name = data.get("name")  # 显示名(很多人不填,可能为 None)
     avatar_url = data.get("avatar_url")
 
     return GitHubUserInfo(
         github_id=github_id,
         email=email,
+        login=login,
         name=name,
         avatar_url=avatar_url,
     )

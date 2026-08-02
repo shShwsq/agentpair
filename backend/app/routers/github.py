@@ -150,7 +150,7 @@ def bind_github(
     return GitHubStatusResponse(
         bound=True,
         github_id=current_user.github_id,
-        github_login=info.name,
+        github_login=info.login,
         avatar_url=info.avatar_url,
         email_mismatch=email_mismatch,
         github_email=github_email,
@@ -177,7 +177,7 @@ def get_github_status(
         try:
             token = decrypt_secret(current_user.github_access_token)
             info = get_github_user_info(token)
-            github_login = info.name
+            github_login = info.login
             avatar_url = info.avatar_url
         except (GitHubOAuthError, ValueError) as e:
             # token 失效或解密失败,只标记 bound 但不抛错
