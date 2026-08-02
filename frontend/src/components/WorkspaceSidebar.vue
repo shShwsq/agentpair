@@ -947,8 +947,8 @@ defineExpose({ openTaskFile })
           <button class="task-menu-item" @click="startEditTitle(openMenuTask)">
             <svg
               viewBox="0 0 24 24"
-              width="14"
-              height="14"
+              width="12"
+              height="12"
               fill="none"
               stroke="currentColor"
               stroke-width="2"
@@ -964,8 +964,8 @@ defineExpose({ openTaskFile })
           <button class="task-menu-item task-menu-danger" @click="openDeleteDialog(openMenuTask)">
             <svg
               viewBox="0 0 24 24"
-              width="14"
-              height="14"
+              width="12"
+              height="12"
               fill="none"
               stroke="currentColor"
               stroke-width="2"
@@ -1581,26 +1581,27 @@ defineExpose({ openTaskFile })
 .task-menu {
   position: fixed;
   z-index: 1101;
-  min-width: 160px;
+  /* 宽度自适应内容,避免短文本被 min-width 撑出右边空白 */
+  width: max-content;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
-  padding: 4px;
+  padding: 3px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 
 .task-menu-item {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
   border: none;
   background: transparent;
   color: var(--color-text);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-xs);
   cursor: pointer;
   border-radius: var(--radius-sm);
   transition: background var(--transition-fast), color var(--transition-fast);
