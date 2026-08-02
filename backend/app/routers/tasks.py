@@ -26,9 +26,14 @@ from sqlalchemy.orm import Session
 from app.agents.orchestrator import run_dual_agent_audit
 from app.database import SessionLocal, get_db
 from app.deps import get_optional_user, get_optional_user_sse
-from app.event_bus import subscribe, unsubscribe
+from app.event_bus import publish, subscribe, unsubscribe
 from app.models.task import Conversation, Task, TaskStatus
 from app.models.user import User
+from app.pause_controller import (
+    clear_pause_state,
+    pause_task,
+    resume_task,
+)
 from app.scenarios.base import get_scenario, list_scenarios
 from app.schemas.task import (
     AnswerRequest,
@@ -206,7 +211,7 @@ def submit_task_answer(
         if current_user is None or current_user.id != task.user_id:
             raise HTTPException(status_code=403, detail="无权访问此任务")
 
-    if task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
+    if task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.PAUSED):
         return AnswerResponse(
             accepted=False,
             message=f"任务已结束({task.status.value}),无法提交答案",
@@ -230,6 +235,87 @@ def submit_task_answer(
             message="提交失败:可能已被回答过或状态异常",
         )
     return AnswerResponse(accepted=True, message="答案已提交,智能体将继续评估")
+
+
+# ============================================================
+# 任务暂停/恢复
+# ============================================================
+
+
+@router.post("/tasks/{task_id}/pause")
+def pause_task_endpoint(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> dict[str, Any]:
+    """暂停正在运行的任务
+
+    后台线程会在下一个检查点(迭代边界/工具调用前)阻塞。
+    立即把 task.status 改为 PAUSED 并推送 status 事件,
+    前端据此把"暂停"按钮变成"恢复"按钮。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    if task.status != TaskStatus.RUNNING:
+        raise HTTPException(
+            status_code=409,
+            detail=f"任务状态为 {task.status.value},仅 RUNNING 可暂停",
+        )
+
+    # 标记 in-memory 暂停门控(后台线程下一次检查时会阻塞)
+    pause_task(task.id)
+    # 持久化状态变更 + 推送事件(前端立即看到 UI 切换)
+    task.status = TaskStatus.PAUSED
+    task.current_stage = "已暂停(等待恢复)"
+    db.commit()
+    _publish_task_status(task)
+    return {"status": task.status.value, "message": "任务已暂停"}
+
+
+@router.post("/tasks/{task_id}/resume")
+def resume_task_endpoint(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> dict[str, Any]:
+    """恢复已暂停的任务
+
+    唤醒在检查点阻塞的后台线程,task.status 改回 RUNNING。
+    current_stage 恢复到暂停前的描述不现实(已覆盖),改为通用提示。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    if task.status != TaskStatus.PAUSED:
+        raise HTTPException(
+            status_code=409,
+            detail=f"任务状态为 {task.status.value},仅 PAUSED 可恢复",
+        )
+
+    # 唤醒后台线程(若已阻塞在 wait_if_paused)
+    resume_task(task.id)
+    task.status = TaskStatus.RUNNING
+    task.current_stage = "已恢复,继续执行"
+    db.commit()
+    _publish_task_status(task)
+    return {"status": task.status.value, "message": "任务已恢复"}
+
+
+def _publish_task_status(task: Task) -> None:
+    """推送任务状态变更事件(供 pause/resume 端点复用)"""
+    publish(task.id, "status", {
+        "status": task.status.value if hasattr(task.status, "value") else str(task.status),
+        "current_stage": task.current_stage,
+    })
 
 
 @router.get("/tasks/{task_id}/coverage")
@@ -769,6 +855,8 @@ def _run_task_in_background(task_id: str) -> None:
             pass
     finally:
         db.close()
+        # 清理 in-memory 暂停状态(防止任务结束但状态卡住)
+        clear_pause_state(task_id)
 
 
 # ============================================================

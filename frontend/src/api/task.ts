@@ -113,3 +113,26 @@ export function submitTaskAnswer(
 ): Promise<AnswerResponse> {
   return client.post(`/tasks/${taskId}/answer`, req).then((r) => r.data)
 }
+
+// ============================================================
+// 任务暂停/恢复
+// ============================================================
+
+/**
+ * 暂停正在运行的任务
+ *
+ * 后台线程会在下一个检查点(迭代边界/工具调用前)阻塞。
+ * task.status 变为 paused,前端把"暂停"按钮切换为"恢复"按钮。
+ */
+export function pauseTask(taskId: string): Promise<{ status: string; message: string }> {
+  return client.post(`/tasks/${taskId}/pause`).then((r) => r.data)
+}
+
+/**
+ * 恢复已暂停的任务
+ *
+ * 唤醒在检查点阻塞的后台线程,task.status 变回 running。
+ */
+export function resumeTask(taskId: string): Promise<{ status: string; message: string }> {
+  return client.post(`/tasks/${taskId}/resume`).then((r) => r.data)
+}

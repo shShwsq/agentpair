@@ -59,7 +59,8 @@ const selectedTask = computed<TaskListItem | null>(() =>
 const selectedTaskRunning = computed(
   () =>
     selectedTask.value?.status === 'pending' ||
-    selectedTask.value?.status === 'running',
+    selectedTask.value?.status === 'running' ||
+    selectedTask.value?.status === 'paused',
 )
 
 function openWorkspace(taskId: string): void {
@@ -357,6 +358,7 @@ const showFilePanel = computed(
 const statusClassMap: Record<TaskStatus, string> = {
   pending: 'badge-pending',
   running: 'badge-running',
+  paused: 'badge-paused',
   completed: 'badge-completed',
   failed: 'badge-failed',
 }
@@ -364,6 +366,7 @@ const statusClassMap: Record<TaskStatus, string> = {
 const statusLabelMap: Record<TaskStatus, string> = {
   pending: '等待',
   running: '进行',
+  paused: '暂停',
   completed: '完成',
   failed: '失败',
 }
@@ -797,6 +800,10 @@ defineExpose({ openTaskFile })
 .task-status-tag.badge-running {
   background: var(--color-info-light);
   color: var(--color-info);
+}
+.task-status-tag.badge-paused {
+  background: var(--color-warning-light);
+  color: var(--color-warning);
 }
 .task-status-tag.badge-completed {
   background: var(--color-success-light);

@@ -95,6 +95,7 @@
     {
       "id": "dashscope",
       "name": "阿里云百炼 DashScope",
+      "backend": "dashscope",
       "baseUrl": "https://dashscope.aliyuncs.com/api/v1",
       "apiKeyUrl": "https://dashscope.console.aliyun.com/",
       "models": [
@@ -105,6 +106,7 @@
     {
       "id": "zhipu",
       "name": "智谱 AI (BigModel)",
+      "backend": "openai",
       "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
       "apiKeyUrl": "https://open.bigmodel.cn/usercenter/apikeys",
       "models": [
@@ -114,6 +116,7 @@
     {
       "id": "baidu",
       "name": "百度千帆",
+      "backend": "openai",
       "baseUrl": "https://qianfan.baidubce.com/v2",
       "apiKeyUrl": "https://console.bce.baidu.com/iam/#/iam/apikey/list",
       "models": [
@@ -124,6 +127,7 @@
     {
       "id": "volcengine",
       "name": "火山引擎豆包",
+      "backend": "openai",
       "baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
       "apiKeyUrl": "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
       "fallbackDimension": 1024,
@@ -137,6 +141,7 @@
     {
       "id": "jina",
       "name": "Jina AI",
+      "backend": "openai",
       "baseUrl": "https://api.jina.ai/v1",
       "apiKeyUrl": "https://jina.ai/api-dashboard/",
       "models": [

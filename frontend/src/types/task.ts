@@ -5,7 +5,7 @@
  */
 
 /** 任务状态(后端 TaskStatus 枚举的字符串值) */
-export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed'
+export type TaskStatus = 'pending' | 'running' | 'paused' | 'completed' | 'failed'
 
 // ============================================================
 // 阶段 8:user_agent 向用户提问澄清意图

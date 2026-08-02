@@ -38,6 +38,7 @@ from app.llm.client import LLMClient
 from app.models.task import Conversation, Result, Task, TaskStatus
 from app.models.user import User
 from app.models.user_llm_config import UserLLMConfig
+from app.pause_controller import clear_pause_state, wait_if_paused
 from app.scenarios.base import get_scenario
 from app.security import decrypt_secret
 from app.tools import sandbox_tools
@@ -172,6 +173,9 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
 
         # ---------- 协作循环 ----------
         for round_idx in range(1, MAX_ROUNDS + 1):
+            # 暂停检查点:每轮开始前(粗粒度,react_agent 内部还有细粒度检查点)
+            wait_if_paused(task.id)
+
             task.current_stage = f"第 {round_idx} 轮:react_agent 执行"
             db.commit()
             _publish_status(task)
@@ -196,6 +200,9 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             })
 
             # user_agent 评估
+            # 暂停检查点:react_agent 跑完后、user_agent 评估前
+            wait_if_paused(task.id)
+
             task.current_stage = f"第 {round_idx} 轮:user_agent 评估"
             db.commit()
             _publish_status(task)
@@ -275,6 +282,11 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             clear_pending_question(task.id)
         except Exception as cleanup_err:
             logger.warning(f"[task={task.id}] 清理待回答问题失败: {cleanup_err}")
+        # 清理暂停状态(防止任务结束时仍有 in-memory 残留)
+        try:
+            clear_pause_state(task.id)
+        except Exception as cleanup_err:
+            logger.warning(f"[task={task.id}] 清理暂停状态失败: {cleanup_err}")
         # 延迟关闭沙箱:标记任务完成,保留 session 供前端浏览工作区文件
         # 实际清理由 workspace 路由的 cleanup_expired_sessions() 惰性触发(TTL 1 小时)
         try:

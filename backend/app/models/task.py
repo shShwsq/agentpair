@@ -16,6 +16,8 @@ from app.database import Base
 class TaskStatus(str, PyEnum):
     PENDING = "pending"
     RUNNING = "running"
+    # 用户暂停:后台线程在检查点阻塞,等待恢复
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
 

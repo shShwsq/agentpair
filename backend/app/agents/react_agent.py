@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from app.event_bus import publish
 from app.llm.client import LLMClient
 from app.models.task import Conversation, Task
+from app.pause_controller import wait_if_paused
 from app.scenarios.base import get_scenario
 from app.tools.schema import execute_tool, get_tools_for_scenario, set_current_task
 
@@ -146,6 +147,9 @@ def run_react_agent(
     for iteration in range(1, MAX_ITERATIONS + 1):
         logger.info(f"[task={task.id}] react_agent 第 {round_idx} 轮 / 迭代 {iteration}")
 
+        # 暂停检查点 1:迭代边界(若用户已暂停,在此阻塞直到恢复)
+        wait_if_paused(task.id)
+
         # 流式调用 LLM,累积 reasoning / content / tool_calls
         # 同时通过 event_bus 实时推送 thinking_delta 给前端
         reasoning_full, content_full, tool_calls_full, _conv_id = _stream_llm_response(
@@ -206,6 +210,9 @@ def run_react_agent(
                 fn_args = json.loads(tc["arguments_str"] or "{}")
             except json.JSONDecodeError:
                 fn_args = {}
+
+            # 暂停检查点 2:工具调用前(细粒度,长工具链中也能及时响应暂停)
+            wait_if_paused(task.id)
 
             # 记录工具调用签名(循环检测)
             call_sig = f"{fn_name}:{json.dumps(fn_args, sort_keys=True)}"

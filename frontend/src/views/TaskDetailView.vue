@@ -31,6 +31,8 @@ import {
   getTask,
   getTaskCoverage,
   getTaskReportHtml,
+  pauseTask,
+  resumeTask,
   submitTaskAnswer,
 } from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
@@ -213,8 +215,8 @@ async function initTask(): Promise<void> {
       )
     }
 
-    // 2. 若任务仍在进行,连接 SSE 接收实时事件
-    if (task.value && (task.value.status === 'pending' || task.value.status === 'running')) {
+    // 2. 若任务仍在进行(含暂停态),连接 SSE 接收实时事件
+    if (task.value && (task.value.status === 'pending' || task.value.status === 'running' || task.value.status === 'paused')) {
       connectSSE(taskId)
       // 恢复可能存在的待回答问题弹窗(刷新页面 / 迟到订阅者场景)
       // 后端 user_agent 可能已发出 ask_user,但 SSE 事件在连接前已错过,
@@ -1090,15 +1092,43 @@ const resultGroups = computed<ResultGroup[]>(() => {
 const statusConfig: Record<TaskStatus, { label: string; class: string }> = {
   pending: { label: '等待中', class: 'badge-pending' },
   running: { label: '进行中', class: 'badge-running' },
+  paused: { label: '已暂停', class: 'badge-paused' },
   completed: { label: '已完成', class: 'badge-completed' },
   failed: { label: '已失败', class: 'badge-failed' },
 }
 
 // ---- 是否运行中(控制滚动区域提示) ----
-
+// paused 也算"活跃"状态:仍在 SSE 订阅,UI 显示暂停徽标 + 恢复按钮
 const isRunning = computed(
-  () => task.value?.status === 'pending' || task.value?.status === 'running',
+  () =>
+    task.value?.status === 'pending' ||
+    task.value?.status === 'running' ||
+    task.value?.status === 'paused',
 )
+
+/** 是否处于暂停态(控制按钮文案:暂停 ↔ 恢复) */
+const isPaused = computed(() => task.value?.status === 'paused')
+
+/** 暂停/恢复按钮 loading 态(防止重复点击) */
+const pausing = ref(false)
+
+/** 点击暂停/恢复按钮:根据当前状态调对应 API */
+async function handleTogglePause(): Promise<void> {
+  if (!task.value?.id || pausing.value) return
+  pausing.value = true
+  try {
+    if (isPaused.value) {
+      await resumeTask(String(task.value.id))
+    } else if (task.value.status === 'running' || task.value.status === 'pending') {
+      await pauseTask(String(task.value.id))
+    }
+    // 状态变更由 SSE status 事件驱动更新,这里不本地改写
+  } catch (err) {
+    error.value = extractErrorMessage(err)
+  } finally {
+    pausing.value = false
+  }
+}
 
 // ---- 结果卡片 metadata 渲染:由场景声明驱动 ----
 //
@@ -1238,9 +1268,21 @@ function formatTime(iso: string): string {
         <!-- 协作对话流(无外框,顶部仅在运行时显示实时徽标) -->
         <section v-if="roundGroups.length > 0 || isRunning" ref="conversationRef" class="conversation-section">
           <div v-if="isRunning" class="conv-header">
-            <span class="live-indicator">
+            <!-- 暂停态:橙色徽标 + 恢复按钮;运行态:红色实时徽标 + 暂停按钮 -->
+            <span v-if="isPaused" class="paused-indicator">
+              <span class="paused-bars" /><span>已暂停</span>
+            </span>
+            <span v-else class="live-indicator">
               <span class="live-dot" />实时
             </span>
+            <button
+              class="btn-pause"
+              :disabled="pausing"
+              :title="isPaused ? '恢复执行' : '暂停执行'"
+              @click="handleTogglePause"
+            >
+              {{ pausing ? '处理中...' : isPaused ? '恢复' : '暂停' }}
+            </button>
           </div>
           <!-- 用户指令(右对齐,像聊天界面的用户消息气泡) -->
           <div v-if="userDirective" class="user-directive">
@@ -1365,11 +1407,16 @@ function formatTime(iso: string): string {
           </div>
           <!-- 运行中等待提示(没有流式项时才显示) -->
           <!-- 优先用后端推送的 current_stage(如"正在克隆仓库..."),无则回退通用文案 -->
-          <div v-if="isRunning && streamingItems.size === 0" class="waiting-hint">
-            <span class="typing-dots">
+          <!-- 暂停态:不显示打字动画(已暂停,不再思考) -->
+          <div
+            v-if="isRunning && streamingItems.size === 0"
+            class="waiting-hint"
+            :class="{ 'waiting-hint-paused': isPaused }"
+          >
+            <span v-if="!isPaused" class="typing-dots">
               <span></span><span></span><span></span>
             </span>
-            {{ task?.current_stage || '智能体思考中...' }}
+            {{ isPaused ? '已暂停,点击恢复按钮继续执行' : (task?.current_stage || '智能体思考中...') }}
           </div>
         </section>
       </template>
@@ -1710,6 +1757,7 @@ function formatTime(iso: string): string {
 
 .badge-pending { background: var(--color-surface-alt); color: var(--color-text-secondary); }
 .badge-running { background: var(--color-info-light); color: var(--color-info); }
+.badge-paused { background: var(--color-warning-light); color: var(--color-warning); }
 .badge-completed { background: var(--color-success-light); color: var(--color-success); }
 .badge-failed { background: var(--color-danger-light); color: var(--color-danger); }
 
@@ -2291,6 +2339,7 @@ function formatTime(iso: string): string {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  gap: var(--space-2);
   margin-bottom: var(--space-3);
 }
 
@@ -2304,6 +2353,60 @@ function formatTime(iso: string): string {
   padding: var(--space-1) var(--space-3);
   background: var(--color-danger-light);
   border-radius: var(--radius-full);
+}
+
+/* 暂停徽标:橙色,带两条竖线图标(CSS 绘制,不用 emoji) */
+.paused-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--color-warning);
+  padding: var(--space-1) var(--space-3);
+  background: var(--color-warning-light);
+  border-radius: var(--radius-full);
+}
+
+.paused-bars {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  /* 两条竖线 = 暂停符号,用线性渐变绘制 */
+  background:
+    linear-gradient(
+      to right,
+      var(--color-warning) 0,
+      var(--color-warning) 2px,
+      transparent 2px,
+      transparent 3px,
+      var(--color-warning) 3px,
+      var(--color-warning) 5px,
+      transparent 5px
+    );
+}
+
+/* 暂停/恢复按钮:与实时徽标并排 */
+.btn-pause {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.btn-pause:hover:not(:disabled) {
+  border-color: var(--color-warning);
+  color: var(--color-warning);
+}
+
+.btn-pause:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .live-dot {
@@ -2330,6 +2433,12 @@ function formatTime(iso: string): string {
   font-size: var(--fs-sm);
   background: var(--color-surface-alt);
   border-radius: var(--radius-lg);
+}
+
+/* 暂停态:橙色提示,不闪烁 */
+.waiting-hint-paused {
+  color: var(--color-warning);
+  background: var(--color-warning-light);
 }
 
 .typing-dots {
