@@ -173,3 +173,148 @@ def has_pending_question(task_id: str | UUID) -> bool:
         return False
     with pq.lock:
         return pq.question_payload is not None
+
+
+# ============================================================
+# 覆盖度清单编辑阻塞机制(场景降级后:user_agent 动态生成 checklist,
+# 用户可编辑确认,后台线程阻塞等待)
+# ============================================================
+
+
+class _PendingChecklist:
+    """单个 task 的待确认覆盖度清单状态"""
+
+    def __init__(self) -> None:
+        # 后台线程阻塞在此 Event 上,API 提交编辑后 set()
+        self.event: threading.Event = threading.Event()
+        # 用户编辑后的 checklist(API 写入,后台线程读取)
+        # None 表示用户选择"直接采用 LLM 生成结果"(不编辑)
+        self.edited_checklist: list[dict[str, Any]] | None = None
+        # LLM 生成的原始 checklist 快照(供前端展示/编辑)
+        self.checklist_payload: list[dict[str, Any]] | None = None
+        # 锁
+        self.lock = threading.Lock()
+
+
+# 全局注册表:task_id(str)→ _PendingChecklist
+_pending_checklist: dict[str, _PendingChecklist] = {}
+_pending_checklist_lock = threading.Lock()
+
+
+def _get_or_create_checklist(task_id: str) -> _PendingChecklist:
+    with _pending_checklist_lock:
+        if task_id not in _pending_checklist:
+            _pending_checklist[task_id] = _PendingChecklist()
+        return _pending_checklist[task_id]
+
+
+def set_pending_checklist(
+    task_id: str | UUID,
+    checklist: list[dict[str, Any]],
+) -> _PendingChecklist:
+    """设置 task 的待确认覆盖度清单(后台线程调用)
+
+    在后台线程阻塞前调用:把 user_agent 生成的 checklist 存起来供 API/前端查询。
+
+    返回:_PendingChecklist,后台线程随后调 .event.wait() 阻塞
+    """
+    task_id_str = str(task_id)
+    pc = _get_or_create_checklist(task_id_str)
+    with pc.lock:
+        pc.event = threading.Event()
+        pc.edited_checklist = None
+        pc.checklist_payload = checklist
+    return pc
+
+
+def wait_for_checklist_confirmation(
+    task_id: str | UUID,
+) -> list[dict[str, Any]]:
+    """阻塞等待用户确认/编辑覆盖度清单(后台线程调用)
+
+    无限等待,直到 submit_checklist 被调用。
+    返回最终生效的 checklist:
+      - 用户编辑过:返回编辑后的 checklist
+      - 用户选择"直接采用":返回 LLM 生成的原始 checklist
+    """
+    task_id_str = str(task_id)
+    pc = _get_or_create_checklist(task_id_str)
+    pc.event.wait()
+    with pc.lock:
+        edited = pc.edited_checklist
+        original = pc.checklist_payload or []
+        # 清理 payload(已确认)
+        pc.checklist_payload = None
+    return edited if edited is not None else original
+
+
+def submit_checklist(
+    task_id: str | UUID,
+    edited_checklist: list[dict[str, Any]] | None,
+) -> bool:
+    """提交编辑后的覆盖度清单,唤醒后台线程(API 端点调用)
+
+    参数:
+        edited_checklist: 用户编辑后的 checklist。None 表示"直接采用 LLM 生成结果"
+
+    返回 True 表示成功唤醒;False 表示当前 task 没有待确认清单
+    (可能重复提交,或任务已结束)。
+    """
+    task_id_str = str(task_id)
+    with _pending_checklist_lock:
+        pc = _pending_checklist.get(task_id_str)
+    if pc is None:
+        return False
+    with pc.lock:
+        if pc.checklist_payload is None:
+            return False
+        if pc.event.is_set():
+            return False
+        pc.edited_checklist = edited_checklist
+        # 立即清理 payload,避免竞态
+        pc.checklist_payload = None
+    pc.event.set()
+    logger.info(f"[task={task_id_str}] 收到覆盖度清单确认")
+    return True
+
+
+def get_pending_checklist(
+    task_id: str | UUID,
+) -> list[dict[str, Any]] | None:
+    """查询 task 当前的待确认覆盖度清单(前端恢复弹窗用)
+
+    返回 checklist_payload;无待确认清单返回 None。
+    """
+    task_id_str = str(task_id)
+    with _pending_checklist_lock:
+        pc = _pending_checklist.get(task_id_str)
+    if pc is None:
+        return None
+    with pc.lock:
+        if pc.checklist_payload is None:
+            return None
+        # 返回深拷贝,避免外部修改
+        import copy
+        return copy.deepcopy(pc.checklist_payload)
+
+
+def clear_pending_checklist(task_id: str | UUID) -> None:
+    """清除 task 的待确认覆盖度清单(任务结束/失败时调用)"""
+    task_id_str = str(task_id)
+    with _pending_checklist_lock:
+        pc = _pending_checklist.pop(task_id_str, None)
+    if pc is not None:
+        with pc.lock:
+            pc.checklist_payload = None
+        pc.event.set()
+
+
+def has_pending_checklist(task_id: str | UUID) -> bool:
+    """task 是否有待确认覆盖度清单(快速判断)"""
+    task_id_str = str(task_id)
+    with _pending_checklist_lock:
+        pc = _pending_checklist.get(task_id_str)
+    if pc is None:
+        return False
+    with pc.lock:
+        return pc.checklist_payload is not None

@@ -1,20 +1,20 @@
 """双智能体协作编排器(阶段 4)
 
 驱动 user_agent + react_agent 多轮协作:
-1. user_agent 初始评估,给出第一轮指令
-2. react_agent 执行第一轮(含 clone),输出自然语言总结
-3. user_agent 对照 checklist 评估 react_agent 结果
-4. 若未覆盖完整,user_agent 构造追问
-5. react_agent 执行追问(不重新 clone)
-6. 循环 3-5 直到 done 或达到 MAX_ROUNDS
-7. user_agent done=true 时,按场景 schema 整理结构化结果,orchestrator 落库
+1. user_agent 初始评估,动态生成覆盖度清单(checklist)+ 给出第一轮指令
+2. 用户编辑确认 checklist(orchestrator 阻塞等待)
+3. react_agent 执行第一轮(含 clone),输出自然语言总结
+4. user_agent 对照 checklist 评估 react_agent 结果
+5. 若未覆盖完整,user_agent 构造追问
+6. react_agent 执行追问(不重新 clone)
+7. 循环 4-6 直到 done 或达到 MAX_ROUNDS
+8. user_agent done=true 时,输出结构化结果(results + grouping),orchestrator 落库
 
-职责划分(阶段 7+ 调整):
-- react_agent:执行审计,输出自然语言总结(含发现、位置、建议)
-- user_agent:评估覆盖度 + 决定追问 + done 时整理结构化结果
-- orchestrator:user_agent done 时调 scenario.extract_results 落库 Result
-
-阶段 7:接入事件总线,每条对话/状态变更实时推送,前端 SSE 可见每一步
+场景降级后的变更:
+- checklist 不再从场景读取,由 user_agent 第 0 轮动态生成 + 用户编辑确认
+- 结果提取不再调 scenario.extract_results,改为直接取 ua_result["results"]
+- 结果分组不再从场景声明,改为从 ua_result["grouping"] 读取
+- allowed_skills 传给 react_agent(set_current_task),按用户选择过滤 skill
 
 阶段 8(用户澄清):第 0 轮初始评估时,user_agent 可输出 ask_user=true
 触发用户澄清弹窗。orchestrator 推送 question 事件,后台线程阻塞等待
@@ -39,14 +39,16 @@ from app.models.task import Conversation, Result, Task, TaskStatus
 from app.models.user import User
 from app.models.user_llm_config import UserLLMConfig
 from app.pause_controller import clear_pause_state, wait_if_paused
-from app.scenarios.base import get_scenario
 from app.security import decrypt_secret
 from app.tools import sandbox_tools
-from app.tools.schema import set_current_github_token
+from app.tools.schema import set_current_github_token, set_current_task
 from app.user_interaction import (
+    clear_pending_checklist,
     clear_pending_question,
+    set_pending_checklist,
     set_pending_question,
     wait_for_answers,
+    wait_for_checklist_confirmation,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +72,11 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
     # 空串表示未绑定,clone_repo_with_fallback 会回退到 SSH/匿名 HTTPS
     github_token = _load_github_token(db, task.user_id)
     set_current_github_token(github_token)
+
+    # 场景降级后:设置 task 上下文(含 allowed_skills,供 skill 工具按用户选择过滤)
+    # allowed_skills 为 None/空 表示全部 skill 可用(默认)
+    allowed_skills = task.allowed_skills
+    set_current_task(task_id_str, scenario_id, allowed_skills)
 
     # 用户原始意图
     user_intent = task.user_input
@@ -170,6 +177,34 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 "ask_user": False,
             }
 
+        # ---------- 场景降级后:user_agent 第 0 轮动态生成 checklist,用户编辑确认 ----------
+        # user_agent 在 round 0 输出 checklist 字段(动态生成的覆盖度维度)。
+        # orchestrator 推送给前端,阻塞等待用户编辑或"直接采用"。
+        # 确认后的 checklist 落库到 task.checklist,后续协作轮 user_agent 按此评估。
+        generated_checklist = ua_result_0.get("checklist")
+        task_checklist: list[dict] | None = None
+        if generated_checklist and isinstance(generated_checklist, list):
+            task.current_stage = "等待用户确认覆盖度清单"
+            db.commit()
+            _publish_status(task)
+
+            # 推送 checklist 给前端,并阻塞等待用户确认
+            set_pending_checklist(task.id, generated_checklist)
+            publish(task.id, "checklist_review", {
+                "checklist": generated_checklist,
+                "reasoning": ua_result_0.get("reasoning", ""),
+            })
+
+            # 阻塞后台线程,直到用户提交编辑/直接采用(无限等待)
+            task_checklist = wait_for_checklist_confirmation(task.id)
+
+            # 落库到 task.checklist
+            task.checklist = task_checklist
+            db.commit()
+            logger.info(
+                f"[task={task.id}] 覆盖度清单已确认,{len(task_checklist)} 个维度"
+            )
+
         followup = ua_result_0.get("followup_query", effective_intent)
 
         # ---------- 协作循环 ----------
@@ -216,15 +251,16 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 scenario_id=scenario_id,
                 client=llm_client,
                 ask_round=MAX_ASKS,  # 协作循环阶段不允许再提问
+                task_checklist=task_checklist,  # 场景降级后:传已确认的 checklist
             )
             _record_user_agent(db, task, round_idx, ua_result)
 
             if ua_result.get("done"):
                 logger.info(f"[task={task.id}] user_agent 在第 {round_idx} 轮宣布完成")
-                # user_agent done=true:按场景 schema 整理结构化结果并落库
-                # react_agent 只输出自然语言总结,user_agent 从中提取结构化漏洞清单
-                scenario = get_scenario(scenario_id)
-                structured_results = scenario.extract_results(ua_result)
+                # 场景降级后:结果提取通用化,直接取 ua_result["results"]
+                # user_agent done=true 时输出 results + grouping
+                structured_results = ua_result.get("results") or []
+                grouping = ua_result.get("grouping")
                 for r in structured_results:
                     result = Result(
                         task_id=task.id,
@@ -236,6 +272,13 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                     db.add(result)
                 db.commit()
                 all_results_count += len(structured_results)
+                # 把 grouping 存到 task.params 供前端读取(结果分组声明)
+                if grouping and task.params is not None:
+                    task.params = {**(task.params or {}), "_grouping": grouping}
+                    db.commit()
+                elif grouping and task.params is None:
+                    task.params = {"_grouping": grouping}
+                    db.commit()
                 logger.info(
                     f"[task={task.id}] user_agent 整理 {len(structured_results)} 个结构化结果"
                 )
@@ -285,6 +328,11 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             clear_pending_question(task.id)
         except Exception as cleanup_err:
             logger.warning(f"[task={task.id}] 清理待回答问题失败: {cleanup_err}")
+        # 场景降级后:清理可能残留的待确认 checklist 状态
+        try:
+            clear_pending_checklist(task.id)
+        except Exception as cleanup_err:
+            logger.warning(f"[task={task.id}] 清理待确认清单失败: {cleanup_err}")
         # 清理暂停状态(防止任务结束时仍有 in-memory 残留)
         try:
             clear_pause_state(task.id)

@@ -8,6 +8,7 @@ import client from './client'
 import type {
   AnswerRequest,
   AnswerResponse,
+  ChecklistDimension,
   PendingQuestion,
   Scenario,
   TaskCoverage,
@@ -56,7 +57,7 @@ export function getTask(taskId: string): Promise<TaskDetail> {
 /**
  * 查询任务覆盖度看板数据
  *
- * 仅当任务场景声明了 coverage 时可用(404 表示无看板)。
+ * 仅当任务有 checklist(user_agent 第 0 轮动态生成)时可用(404 表示无看板)。
  * 返回各维度覆盖状态,基于最新一条 user_agent evaluation。
  */
 export function getTaskCoverage(taskId: string): Promise<TaskCoverage> {
@@ -116,6 +117,39 @@ export function submitTaskAnswer(
   req: AnswerRequest,
 ): Promise<AnswerResponse> {
   return client.post(`/tasks/${taskId}/answer`, req).then((r) => r.data)
+}
+
+// ============================================================
+// 覆盖度清单:user_agent 动态生成 → 用户编辑确认
+// ============================================================
+
+/**
+ * 查询任务当前待确认的覆盖度清单
+ *
+ * 用于刷新页面后恢复清单确认弹窗。无待确认清单时返回 null。
+ * 后端 user_agent 第 0 轮动态生成 checklist 后会推送 checklist_review SSE 事件,
+ * 若 SSE 事件在连接前已错过,通过此接口拉取当前待确认清单。
+ */
+export function getPendingChecklist(taskId: string): Promise<ChecklistDimension[] | null> {
+  return client.get(`/tasks/${taskId}/pending_checklist`).then((r) => r.data)
+}
+
+/**
+ * 提交用户编辑后的覆盖度清单
+ *
+ * - 传 null:直接采用 user_agent 生成的清单(用户不编辑)
+ * - 传数组:用户编辑后的清单(增删改维度或检查项)
+ *
+ * 后端唤醒阻塞的后台线程,把确认后的清单落库并继续评估。
+ * 返回 accepted=false 表示任务已结束 / 重复提交 / 状态异常。
+ */
+export function submitTaskChecklist(
+  taskId: string,
+  checklist: ChecklistDimension[] | null,
+): Promise<{ accepted: boolean; message: string }> {
+  return client
+    .post(`/tasks/${taskId}/checklist`, { checklist })
+    .then((r) => r.data)
 }
 
 // ============================================================

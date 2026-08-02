@@ -4,11 +4,15 @@
  *
  * 三大区域:
  * 1. 任务概览:状态徽章、场景、创建时间、当前阶段、错误信息
- * 2. 结果清单:分组由场景声明 result_grouping 驱动(安全场景按 severity),展示 title/content/meta
+ * 2. 结果清单:分组由 task.params._grouping 驱动(user_agent done 时声明),
+ *    展示 title/content/meta(meta 字段从 results 的 metadata keys 动态推断)
  * 3. 协作对话流:按 round_idx 分组,展示 user_agent 与 react_agent 的来回
  *
  * 实时更新:SSE 接收每条对话/状态变更 + thinking_delta(流式 token 增量)。
  * 初始加载 GET /tasks/{id} 拿快照(补历史),然后 SSE 接收增量。
+ *
+ * 覆盖度看板:从 task.checklist 读取维度(user_agent 第 0 轮动态生成,
+ * 用户可通过 ChecklistReviewDialog 编辑确认),不再从场景声明。
  *
  * 流式思考显示(thinking_delta):
  * - 一次 LLM 调用对应一个 conv_id,前端按 conv_id 累积 reasoning + content
@@ -20,31 +24,33 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { useRoute, useRouter } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
+import ChecklistReviewDialog from '@/components/ChecklistReviewDialog.vue'
 import ConversationMessage from '@/components/ConversationMessage.vue'
 import QuestionDialog from '@/components/QuestionDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import {
   downloadTaskReportMarkdown,
+  getPendingChecklist,
   getPendingQuestion,
-  getScenarios,
   getTask,
   getTaskCoverage,
   getTaskReportHtml,
   pauseTask,
   resumeTask,
   submitTaskAnswer,
+  submitTaskChecklist,
 } from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
 import { extractErrorMessage } from '@/utils/error'
 import type {
   AnswerItem,
+  ChecklistDimension,
   ClarificationQuestion,
   Conversation,
   PlanStep,
   QuestionEventData,
-  Scenario,
-  ScenarioResultMetaField,
+  ChecklistReviewEventData,
   TaskCoverage,
   TaskDetail,
   TaskResult,
@@ -67,9 +73,6 @@ const workspaceCollapsed = ref(true)
 
 /** 任务详情侧栏是否折叠(右侧栏,默认展开;折叠时完全隐藏,主区聚焦对话) */
 const detailCollapsed = ref(false)
-
-/** 场景声明列表(从 /scenarios 拉取,驱动结果分组/meta 渲染) */
-const scenarios = ref<Scenario[]>([])
 
 function toggleWorkspace(): void {
   workspaceCollapsed.value = !workspaceCollapsed.value
@@ -184,18 +187,76 @@ async function restorePendingQuestion(taskId: string): Promise<void> {
   }
 }
 
+// ---- 覆盖度清单确认弹窗(checklist_review 事件)----
+// user_agent 在第 0 轮动态生成覆盖度清单后推送 checklist_review 事件,
+// 前端弹出 ChecklistReviewDialog 让用户编辑确认。刷新页面后通过
+// getPendingChecklist 恢复弹窗。
+const checklistOpen = ref(false)
+const checklistData = reactive<{
+  checklist: ChecklistDimension[]
+  reasoning: string
+}>({
+  checklist: [],
+  reasoning: '',
+})
+const submittingChecklist = ref(false)
+
+/** 从 ChecklistReviewEventData / 待确认清单 填充弹窗数据并打开 */
+function openChecklistDialog(payload: {
+  checklist: ChecklistDimension[]
+  reasoning?: string
+}): void {
+  checklistData.checklist = payload.checklist ?? []
+  checklistData.reasoning = payload.reasoning ?? ''
+  checklistOpen.value = true
+}
+
+/** 用户提交清单:null=直接采用,数组=用户编辑后的清单 */
+async function handleSubmitChecklist(
+  checklist: ChecklistDimension[] | null,
+): Promise<void> {
+  if (!task.value?.id || submittingChecklist.value) return
+  submittingChecklist.value = true
+  try {
+    const resp = await submitTaskChecklist(String(task.value.id), checklist)
+    if (resp.accepted) {
+      checklistOpen.value = false
+    } else {
+      error.value = resp.message || '清单提交失败,任务可能已结束'
+    }
+  } catch (err) {
+    error.value = extractErrorMessage(err)
+  } finally {
+    submittingChecklist.value = false
+  }
+}
+
+/** 用户取消清单弹窗(直接关闭,不提交) */
+function handleCancelChecklist(): void {
+  checklistOpen.value = false
+}
+
+/** 刷新页面后恢复待确认清单弹窗(若后端有 pending checklist) */
+async function restorePendingChecklist(taskId: string): Promise<void> {
+  try {
+    const pending = await getPendingChecklist(taskId)
+    if (pending && pending.length > 0) {
+      openChecklistDialog({ checklist: pending })
+    }
+  } catch {
+    // 无 pending checklist 或任务已结束,静默忽略
+  }
+}
+
 // ---- 加载 + SSE 订阅 ----
 
 async function initTask(): Promise<void> {
   const taskId = route.params.id as string
   try {
-    // 并行:拉任务快照 + 拉场景声明(场景声明驱动结果分组/meta 渲染)
-    const [taskData, scenarioList] = await Promise.all([
-      getTask(taskId),
-      getScenarios().catch(() => [] as Scenario[]),
-    ])
+    // 拉任务快照(场景降级后不再需要单独拉 /scenarios:结果分组/meta
+    // 从 task.params._grouping 和 results 的 metadata keys 推断)
+    const taskData = await getTask(taskId)
     task.value = taskData
-    scenarios.value = scenarioList
     error.value = ''
     loading.value = false
 
@@ -223,9 +284,11 @@ async function initTask(): Promise<void> {
       // 后端 user_agent 可能已发出 ask_user,但 SSE 事件在连接前已错过,
       // 通过 GET /pending_question 拉取当前待回答问题
       void restorePendingQuestion(taskId)
+      // 恢复可能存在的待确认清单弹窗(同理,SSE 事件可能已错过)
+      void restorePendingChecklist(taskId)
     }
 
-    // 3. 加载覆盖度看板(场景声明了 coverage 才拉取)
+    // 3. 加载覆盖度看板(task.checklist 存在才拉取)
     void loadCoverage()
   } catch (err) {
     error.value = extractErrorMessage(err)
@@ -233,20 +296,18 @@ async function initTask(): Promise<void> {
   }
 }
 
-/** 当前任务对应的场景声明(从列表里 find) */
-const scenarioDecl = computed<Scenario | null>(() => {
-  const sid = task.value?.scenario
-  if (!sid) return null
-  return scenarios.value.find((s) => s.id === sid) ?? null
-})
-
-// ---- 覆盖度看板(仅当场景声明了 coverage 时启用) ----
+// ---- 覆盖度看板(仅当 task.checklist 存在时启用) ----
 
 const coverageData = ref<TaskCoverage | null>(null)
 
-/** 拉取覆盖度数据;场景无 coverage 或任务无 evaluation 时静默置空 */
+/**
+ * 拉取覆盖度数据;task.checklist 不存在或任务无 evaluation 时静默置空。
+ *
+ * 场景降级后,覆盖度维度从 task.checklist 读取(由 user_agent 第 0 轮动态生成),
+ * 不再从场景声明 coverage 读取。
+ */
 async function loadCoverage(): Promise<void> {
-  if (!task.value?.id || !scenarioDecl.value?.coverage) return
+  if (!task.value?.id || !task.value.checklist?.length) return
   try {
     coverageData.value = await getTaskCoverage(String(task.value.id))
   } catch {
@@ -369,6 +430,13 @@ function connectSSE(taskId: string): void {
         questions: data.questions,
         reasoning: data.reasoning,
         ask_round: data.ask_round,
+      })
+    },
+    onChecklistReview: (data: ChecklistReviewEventData) => {
+      // user_agent 动态生成覆盖度清单:弹出 ChecklistReviewDialog 让用户编辑确认
+      openChecklistDialog({
+        checklist: data.checklist,
+        reasoning: data.reasoning,
       })
     },
     onDone: async () => {
@@ -536,8 +604,6 @@ onUnmounted(() => {
 
 /**
  * 切换任务时清理旧任务状态(组件复用,route.params.id 变化)
- *
- * 不清理 scenarios(场景列表与任务无关,缓存复用)。
  */
 function resetTaskState(): void {
   // 断开旧 SSE,避免向旧任务写数据
@@ -552,6 +618,8 @@ function resetTaskState(): void {
   historyReasoningExpanded.clear()
   // 关闭提问弹窗
   questionOpen.value = false
+  // 关闭清单确认弹窗
+  checklistOpen.value = false
   // 重置任务视图态
   task.value = null
   coverageData.value = null
@@ -1052,14 +1120,39 @@ function planProgress(steps: PlanStep[]): string {
   return `${done}/${steps.length}`
 }
 
-// ---- 结果分组:由场景声明驱动 ----
+// ---- 结果分组:由 task.params._grouping 驱动 ----
 //
-// 场景声明 result_grouping 决定分组方式:
-// - 声明为 null:不分组,所有结果放入单个"结果"组平铺
+// 场景降级后,分组声明由 user_agent 在 done 时写入 task.params._grouping,
+// 不再从场景声明读取。grouping 结构与原 ScenarioResultGrouping 一致:
+// - 无 _grouping:不分组,所有结果放入单个"结果"组平铺
 // - type=ordered:按声明 values 的 order 排序,metadata 缺失该字段用 default 组
 // - type=dynamic:按 metadata 实际值动态分组,缺失用 default 组
 //
 // color 与前端 sev-<color> CSS class 对齐(安全场景保留原视觉)
+
+/** 分组枚举值(对应原 ScenarioResultGroupValue) */
+interface ResultGroupValue {
+  value: string
+  label: string
+  /** 颜色 key,对应前端 CSS class 后缀(如 critical/high/medium) */
+  color: string
+  /** 排序序号 */
+  order: number
+}
+
+/** 分组声明(对应原 ScenarioResultGrouping,从 task.params._grouping 读取) */
+interface ResultGrouping {
+  /** 从 result.metadata 取该字段分组 */
+  field: string
+  /** ordered(固定枚举+顺序) | dynamic(按值动态分组) */
+  type: 'ordered' | 'dynamic'
+  /** ordered 时的固定枚举值 */
+  values: ResultGroupValue[]
+  /** 元数据缺失该字段时的分组名 */
+  default_label: string
+  /** 默认分组颜色 key(对应前端 sev-<color> CSS class) */
+  default_color: string
+}
 
 interface ResultGroup {
   /** 分组 key(severity 值或 '__default__' / 'all') */
@@ -1070,10 +1163,18 @@ interface ResultGroup {
   results: TaskResult[]
 }
 
+/** 从 task.params._grouping 读取分组声明(可能不存在) */
+const resultGrouping = computed<ResultGrouping | null>(() => {
+  const g = task.value?.params?.['_grouping'] as Partial<ResultGrouping> | undefined
+  if (!g || !g.field) return null
+  // 形态校验通过即可,字段完整性由后端保证
+  return g as ResultGrouping
+})
+
 const resultGroups = computed<ResultGroup[]>(() => {
   if (!task.value?.results) return []
   const results = task.value.results
-  const grouping = scenarioDecl.value?.result_grouping
+  const grouping = resultGrouping.value
 
   // 不分组:单个平铺组
   if (!grouping) {
@@ -1166,21 +1267,51 @@ async function handleTogglePause(): Promise<void> {
   }
 }
 
-// ---- 结果卡片 metadata 渲染:由场景声明驱动 ----
+// ---- 结果卡片 metadata 渲染:动态推断 ----
 //
-// 场景声明 result_meta_fields 决定展示哪些 metadata 字段:
-// - type=text:普通标签
-// - type=file:文件标签(加 meta-file class,B1 阶段加 @click 跳转源码)
+// 场景降级后,展示字段不再由场景声明 result_meta_fields 决定,
+// 而是从所有 results 的 metadata keys 动态推断:
+// - 收集所有 results 的 metadata keys 的并集(保持首次出现顺序)
+// - file_path 视为 file 类型(可点击跳转源码),其余视为 text
+// - 单条 result 渲染时,只展示该 result 实际有值(非空)的字段
+
+/** 推断的 metadata 展示字段 */
+interface InferredMetaField {
+  name: string
+  type: 'text' | 'file'
+}
 
 interface ResultMetaItem {
-  field: ScenarioResultMetaField
+  field: InferredMetaField
   value: string
 }
 
+/**
+ * 推断结果 metadata 展示字段:从所有 results 的 metadata keys 动态收集
+ *
+ * 取并集(保持首次出现顺序),file_path 视为 file 类型,其余为 text。
+ */
+const inferredMetaFields = computed<InferredMetaField[]>(() => {
+  const results = task.value?.results ?? []
+  const seen = new Set<string>()
+  const fields: InferredMetaField[] = []
+  for (const r of results) {
+    if (!r.metadata_) continue
+    for (const key of Object.keys(r.metadata_)) {
+      if (seen.has(key)) continue
+      seen.add(key)
+      fields.push({
+        name: key,
+        type: key === 'file_path' ? 'file' : 'text',
+      })
+    }
+  }
+  return fields
+})
+
 function getResultMetaItems(r: TaskResult): ResultMetaItem[] {
-  const fields = scenarioDecl.value?.result_meta_fields || []
   const items: ResultMetaItem[] = []
-  for (const f of fields) {
+  for (const f of inferredMetaFields.value) {
     const v = r.metadata_?.[f.name]
     if (v != null && v !== '') {
       items.push({ field: f, value: String(v) })
@@ -1290,7 +1421,7 @@ function formatTime(iso: string): string {
 
       <!-- 任务详情(主区聚焦结果清单 + 协作对话流;任务详情/覆盖度看板在右侧栏) -->
       <template v-else-if="task">
-        <!-- 结果清单(分组由场景声明驱动) -->
+        <!-- 结果清单(分组由 task.params._grouping 驱动) -->
         <section v-if="task.results.length > 0" class="results-section">
           <h2>结果清单 <span class="count">({{ task.results.length }})</span></h2>
           <div v-for="group in resultGroups" :key="group.key" class="severity-group">
@@ -1494,8 +1625,8 @@ function formatTime(iso: string): string {
         />
       </div>
       <div class="detail-sidebar-body">
-        <!-- 覆盖度(场景声明了 coverage 时显示,置顶以便无需滚动即可查看) -->
-        <section v-if="scenarioDecl?.coverage && coverageData" class="coverage-section">
+        <!-- 覆盖度(task.checklist 存在时显示,置顶以便无需滚动即可查看) -->
+        <section v-if="task.checklist?.length && coverageData" class="coverage-section">
           <h2>
             覆盖度
             <span class="count">{{ coverageData.covered_count }}/{{ coverageData.total_count }}</span>
@@ -1602,6 +1733,16 @@ function formatTime(iso: string): string {
       :submitting="submittingAnswer"
       @submit="handleSubmitAnswer"
       @cancel="handleCancelQuestion"
+    />
+
+    <!-- 覆盖度清单确认弹窗(user_agent 动态生成 checklist 后触发) -->
+    <ChecklistReviewDialog
+      :open="checklistOpen"
+      :checklist="checklistData.checklist"
+      :reasoning="checklistData.reasoning"
+      :submitting="submittingChecklist"
+      @submit="handleSubmitChecklist"
+      @cancel="handleCancelChecklist"
     />
   </div>
 </template>

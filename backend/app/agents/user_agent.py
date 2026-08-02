@@ -1,30 +1,32 @@
 """user_agent:用户代理智能体(阶段 4 核心创新)
 
-角色:扮演挑剔的用户,对照场景 checklist 评估 react_agent 的执行结果,
+角色:扮演挑剔的用户,对照覆盖度清单(checklist)评估 react_agent 的执行结果,
 针对未覆盖的类别追问 react_agent 再跑一轮。
+
+场景降级后的设计(关键变更):
+- 不再从场景读取固定 checklist。第 0 轮时,user_agent 根据用户意图动态生成
+  checklist(覆盖度维度),用户可编辑确认后,后续轮次按此 checklist 评估。
+- prompt 通用化,不再场景特化。详见 USER_AGENT_SYSTEM_PROMPT。
+- 协作轮(round_idx>=1)从 task.checklist 读取已确认的 checklist。
 
 设计要点:
 - user_agent 不直接调工具(不 clone/read/search),只做评估和追问
-- 它的判断依据是场景提供的 checklist
 - 输出结构化 JSON:covered / missing / followup_query / done
+  + round 0 额外输出 checklist(动态生成的覆盖度维度)
+  + done=true 时输出 grouping(结果分组声明)与 results(结构化结果)
 - done=true 表示覆盖完整,user_agent 认为任务可以结束
 
 流程:
-1. user_agent 第一次执行,只有用户原始意图,没有 react_agent 结果
-   → 输出初始任务描述给 react_agent
-2. react_agent 跑一轮,返回 results + summary
+1. 第 0 轮:user_agent 根据用户意图生成 checklist + 初始 followup_query
+   → orchestrator 推送 checklist 给用户编辑,阻塞等待
+   → 用户确认后,checklist 落库 task.checklist
+2. react_agent 跑一轮,返回 summary
 3. user_agent 对照 checklist 评估 react_agent 的 summary:
-   - 哪些类别覆盖了
-   - 哪些类别漏了
+   - 哪些类别覆盖了 / 哪些类别漏了
    - 针对漏的类别构造 followup_query
-4. 若 missing 为空或 done=true,任务结束
+4. 若 missing 为空或 done=true,任务结束(done 时输出 results + grouping)
 5. 否则把 followup_query 发给 react_agent 再跑一轮
-6. 循环 3-5,最多 MAX_ROUNDS 轮(防止无限循环)
-
-通用化:user_agent 的 prompt 从场景取,不绑定任何具体场景语义
-
-阶段 7+:LLM 调用流式,reasoning/content 实时推送 thinking_delta 事件,
-前端可见 user_agent 的思考过程。
+6. 循环 3-5,最多 MAX_ROUNDS 轮
 
 阶段 8(用户澄清):第 0 轮初始评估时,user_agent 若认为用户意图不清晰,
 可输出 ask_user=true + questions 列表,orchestrator 推送给前端弹窗,
@@ -41,7 +43,6 @@ from sqlalchemy.orm import Session
 from app.event_bus import publish
 from app.llm.client import LLMClient
 from app.models.task import Conversation
-from app.scenarios.base import get_scenario
 
 logger = logging.getLogger(__name__)
 
@@ -68,21 +69,119 @@ SUPPLEMENT_QUESTION = {
 }
 
 
-def _load_checklist(scenario_id: str) -> list[dict[str, Any]]:
-    """从场景加载 checklist"""
-    scenario = get_scenario(scenario_id)
-    return scenario.checklist
+# ============================================================
+# 通用 system prompt(场景降级后,不再从场景读取)
+# ============================================================
+
+USER_AGENT_SYSTEM_PROMPT = """你是 user_agent(用户代理智能体),扮演一位严谨的技术评审。
+
+## 你的职责
+你负责评估 react_agent(执行智能体)的工作是否充分覆盖了任务应有的维度。
+你不直接执行代码审计/审查,而是判断 react_agent 的总结是否覆盖完整,
+针对遗漏维度追问,直到覆盖完整后宣布结束并整理结构化结果。
+
+## 覆盖度清单(checklist)
+{checklist_section}
+
+## 工作流程
+1. **第 0 轮(初始评估)**:根据用户意图,生成覆盖度清单(checklist),
+   定义本任务应覆盖哪些维度。同时输出初始 followup_query 指导 react_agent 第一轮执行。
+2. **协作轮(第 1 轮起)**:对照 checklist 评估 react_agent 的总结,
+   标记已覆盖(covered)和未覆盖(missing)的维度,
+   针对未覆盖维度构造 followup_query 追问。
+3. **结束**:所有维度覆盖完整(done=true)或已达最大轮次时,
+   整理结构化结果(results)并声明结果分组方式(grouping)。
+
+## 输出格式(严格 JSON)
+
+### 第 0 轮(初始评估)输出:
+```json
+{
+  "checklist": [
+    {"id": "dim_id", "name": "维度名称", "description": "维度说明", "checklist": ["子项1", "子项2"]}
+  ],
+  "covered": [],
+  "missing": [],
+  "reasoning": "生成 checklist 的理由 + 初始指令说明",
+  "followup_query": "给 react_agent 的初始执行指令",
+  "done": false,
+  "ask_user": false,
+  "questions": []
+}
+```
+
+### 协作轮输出:
+```json
+{
+  "covered": ["dim_id1"],
+  "missing": ["dim_id2"],
+  "reasoning": "评估理由:为什么这些已覆盖,那些未覆盖",
+  "followup_query": "针对 missing 维度的追问指令(空字符串若 done)",
+  "done": false,
+  "ask_user": false,
+  "questions": []
+}
+```
+
+### done=true 时的输出(附加 results + grouping):
+```json
+{
+  "covered": ["所有维度id"],
+  "missing": [],
+  "reasoning": "最终评估理由",
+  "followup_query": "",
+  "done": true,
+  "ask_user": false,
+  "questions": [],
+  "results": [
+    {"title": "结果标题", "content": "结果详细内容", "metadata": {"自定义字段": "值"}}
+  ],
+  "grouping": {"field": "metadata中的分组字段名", "values": [{"value": "值", "label": "显示名", "color": "颜色key"}]}
+}
+```
+grouping 可为 null(不分组,平铺展示)。
+
+## checklist 生成原则(第 0 轮)
+- 根据用户意图自适应:安全审计任务生成安全维度(注入/认证/反序列化等),
+  代码审查任务生成质量维度(可读性/正确性/性能等),其他任务按语义生成。
+- 3-8 个维度为宜,每个维度含 3-6 个子项(checklist)。
+- 维度 id 用英文下划线命名(如 injection / readability),name 用中文。
+- 维度应覆盖该任务类型的主要关注点,不遗漏重要类别。
+
+## 评估原则
+- 基于 react_agent 的总结判断覆盖情况,不要臆测未提及的维度已覆盖。
+- missing 列表为空是 done 的必要条件,但非充分条件——还需结果质量足够。
+- followup_query 应具体可执行,指明 react_agent 需要补充哪些维度的分析。
+- 保持覆盖度判断连续性:之前已标 covered 的维度,本轮若 react_agent 未推翻,继续保持。
+
+## 结果整理原则(done=true 时)
+- results 从 react_agent 各轮总结中提取结构化发现。
+- 每条 result 含 title(简短标题)、content(详细内容)、metadata(自定义字段)。
+- grouping 声明前端如何分组展示:field 指定 metadata 中的分组字段,
+  values 列出分组枚举(含显示名和颜色)。无明确分组维度时 grouping=null。
+"""
 
 
-def _format_checklist_for_prompt(checklist: list[dict[str, Any]]) -> str:
-    """把 checklist 格式化成 prompt 友好的文本(通用,只取标准字段)"""
-    lines = []
+def _format_checklist_for_prompt(checklist: list[dict[str, Any]] | None) -> str:
+    """把已确认的 checklist 格式化成 prompt 友好的文本
+
+    协作轮(round_idx>=1)使用:从 task.checklist 读取已确认的清单注入 prompt。
+    第 0 轮时 checklist 为 None,prompt 提示 LLM 自行生成。
+    """
+    if not checklist:
+        return (
+            "本轮尚未有 checklist。请你根据用户意图**动态生成**覆盖度清单,\n"
+            "定义本任务应覆盖哪些维度(3-8 个),每个维度含子项。"
+        )
+    lines = ["以下是已确认的覆盖度清单(用户可能已编辑),你需对照它评估覆盖情况:"]
     for cat in checklist:
-        lines.append(f"- id: {cat['id']}, 名称: {cat['name']}")
+        lines.append(f"- id: {cat.get('id', '?')}, 名称: {cat.get('name', '?')}")
         lines.append(f"  描述: {cat.get('description', '')}")
-        lines.append("  必查子项:")
-        for item in cat.get("checklist", []):
-            lines.append(f"    * {item}")
+        items = cat.get("checklist", [])
+        if items:
+            lines.append("  子项:")
+            for item in items:
+                lines.append(f"    * {item}")
     return "\n".join(lines)
 
 
@@ -97,10 +196,11 @@ def run_user_agent(
     task_id: UUID | str,
     db: Session | None = None,
     round_idx: int = 0,
-    scenario_id: str = "code_security_audit",
+    scenario_id: str = "general",
     client: LLMClient | None = None,
     ask_round: int = 0,
     repo_context: str | None = None,
+    task_checklist: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """执行一次 user_agent 评估
 
@@ -108,21 +208,16 @@ def run_user_agent(
         user_intent: 用户原始意图(如"审计这个仓库: https://...")
         client: 可选的 LLMClient(阶段 6:从用户配置构造),None 时回退到 env 默认
         react_agent_summaries: react_agent 之前几轮的执行结果列表
-            每个元素:{"round": 1, "summary": "..."}(results 字段已移除,
-            react_agent 只输出自然语言总结,user_agent 从 summary 评估)
+            每个元素:{"round": 1, "summary": "..."}
         task_id: 任务 ID(必填,用于推送 thinking_delta 事件)
         db: 数据库会话(可选)。传入时用于加载 user_agent 自己之前各轮的评估记录,
             让 user_agent 跨轮记住 covered/missing 判断,避免反复摇摆。
-            None 时不加载历史(向后兼容)。
-        round_idx: 当前协作轮次(用于推送 thinking_delta 事件)
-        scenario_id: 场景标识,用于加载 prompt 和 checklist
+        round_idx: 当前协作轮次(0=初始评估,1+=协作轮)
+        scenario_id: 场景标识(场景降级后仅作模板标识,不再驱动 prompt/checklist)
         ask_round: 第 0 轮初始评估时的提问轮次(0=首次评估,1=用户回答后重新评估)
-            仅 round_idx=0 且 ask_round < MAX_ASKS 时,user_agent 被允许输出
-            ask_user=true 触发用户澄清。
-        repo_context: 修复 9。第 0 轮专用,orchestrator 主动 clone 后的仓库结构
-            上下文。非空时注入到 round 0 的 user_msg(供 user_agent 给更精准的
-            初始指令/提问),但不拼到 user_intent(避免膨胀协作轮次的输入)。
-            协作轮(round_idx>=1)应传 None。
+        repo_context: 第 0 轮专用,orchestrator 主动 clone 后的仓库结构上下文。
+        task_checklist: 已确认的覆盖度清单(场景降级后从 task.checklist 读取)。
+            round_idx=0 时传 None(LLM 动态生成);round_idx>=1 时传已确认清单。
 
     返回:user_agent 的结构化输出
         {
@@ -131,16 +226,16 @@ def run_user_agent(
             "reasoning": str,
             "followup_query": str,
             "done": bool,
-            "ask_user": bool,           # 阶段 8 新增
-            "questions": [...],         # ask_user=true 时提供
+            "ask_user": bool,
+            "questions": [...],
+            "checklist": [...],         # 仅 round 0 输出(动态生成)
+            "results": [...],           # 仅 done=true 时输出
+            "grouping": {...} | null,   # 仅 done=true 时输出
         }
     """
-    scenario = get_scenario(scenario_id)
-    checklist = _load_checklist(scenario_id)
-    checklist_text = _format_checklist_for_prompt(checklist)
-
-    # 从场景取 system prompt,替换 checklist 占位符
-    system_prompt = scenario.user_agent_prompt.replace("{checklist_text}", checklist_text)
+    # 场景降级后:用通用 prompt,checklist 从 task_checklist 注入
+    checklist_text = _format_checklist_for_prompt(task_checklist)
+    system_prompt = USER_AGENT_SYSTEM_PROMPT.replace("{checklist_section}", checklist_text)
 
     # 构造 user 消息:包含用户意图 + react_agent 之前的所有摘要
     if not react_agent_summaries:

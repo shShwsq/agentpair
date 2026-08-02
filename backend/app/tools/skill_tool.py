@@ -1,14 +1,18 @@
 """SKILL 工具入口(阶段 5)
 
 暴露给 react_agent 的两个工具:
-- list_skills:列出当前场景的所有 skill(name + description)
+- list_skills:列出可用 skill(name + description)
 - skill:获取某个 skill 的 SKILL.md body 内容,让 LLM 按指令自行执行后续工具
 
 设计要点:
 - skill 工具不直接执行任何审计操作,只返回 SKILL.md 文本
 - LLM 看完 SKILL.md 后,自己决定调用 search_code / read_file / run_in_sandbox 等底层工具
 - 这符合 Trae / Claude Code 的 skill 规范:Markdown 指令驱动,而非程序化 steps
-- scenario 上下文从 react_agent 注入(set_current_scenario)
+
+场景降级后的变更:
+- 不再按 scenario 过滤 skill。改为按 task.allowed_skills 过滤(用户创建任务时选择)。
+- allowed_skills 为 None/空 表示全部 skill 可用(默认)。
+- skill 目录改为全局可见(skills/ 下所有子目录),不再按场景前缀组织。
 
 并发安全:用 contextvars 替代全局变量,每个后台线程有独立上下文。
 """
@@ -20,18 +24,45 @@ from app.skills import loader as skill_loader
 logger = logging.getLogger(__name__)
 
 
-# 当前 scenario(由 react_agent 在每轮开始时注入,每个线程独立)
-_CURRENT_SCENARIO: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "current_scenario", default="code_security_audit"
+# 当前任务允许调用的 skill 名称列表(由 react_agent 在每轮开始时注入,每个线程独立)
+# None/空 表示全部 skill 可用(默认)
+_CURRENT_ALLOWED_SKILLS: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "current_allowed_skills", default=None
 )
 
 
-def set_current_scenario(scenario_id: str) -> None:
-    """react_agent 调用工具前,注入当前任务的场景
+def set_current_allowed_skills(allowed_skills: list[str] | None) -> None:
+    """react_agent 调用工具前,注入当前任务允许的 skill 列表
 
+    allowed_skills: skill 名称列表。None 或空列表表示全部可用。
     使用 ContextVar,每个后台线程的 set 只影响该线程自身。
     """
-    _CURRENT_SCENARIO.set(scenario_id)
+    _CURRENT_ALLOWED_SKILLS.set(allowed_skills if allowed_skills else None)
+
+
+def _get_all_skills():
+    """获取所有已注册的 skill(跨所有场景目录)
+
+    skill_loader.REGISTRY 内部按 scenario 组织,场景降级后我们遍历所有 scenario
+    汇总 skill 列表。若 skill_loader 支持全局列举则直接用,否则遍历已知 scenario。
+    """
+    # 尝试调用 REGISTRY 的全局列举方法(若存在)
+    if hasattr(skill_loader.REGISTRY, "list_all"):
+        return skill_loader.REGISTRY.list_all()
+
+    # 兜底:遍历已注册的 scenario 目录(从 REGISTRY 内部结构推断)
+    # skill_loader 通常按 _SCENARIOS 或类似结构组织,这里兼容性处理
+    all_skills = []
+    seen_names = set()
+    # 遍历 REGISTRY 内部的 scenario → skills 映射
+    scenarios_map = getattr(skill_loader.REGISTRY, "_scenarios", None) or \
+                    getattr(skill_loader.REGISTRY, "scenarios", None) or {}
+    for scenario_id, skills in scenarios_map.items():
+        for s in skills:
+            if s.name not in seen_names:
+                all_skills.append(s)
+                seen_names.add(s.name)
+    return all_skills
 
 
 # ============================================================
@@ -40,26 +71,37 @@ def set_current_scenario(scenario_id: str) -> None:
 
 
 def list_available_skills(task_id: str = "") -> dict:
-    """列出当前场景的所有可用 skill
+    """列出当前任务可用的 skill
 
     返回:{
-        "scenario": "code_security_audit",
         "skills": [
             {"name": "check_sql_injection", "description": "..."},
             ...
         ],
-        "total": int
+        "total": int,
+        "filtered": bool  # 是否按 allowed_skills 过滤
     }
     """
-    scenario = _CURRENT_SCENARIO.get()
-    skills = skill_loader.REGISTRY.list_for_scenario(scenario)
+    allowed = _CURRENT_ALLOWED_SKILLS.get()
+    all_skills = _get_all_skills()
+
+    if allowed:
+        # 按 allowed_skills 过滤(用户创建任务时选择的)
+        allowed_set = set(allowed)
+        skills = [s for s in all_skills if s.name in allowed_set]
+        filtered = True
+    else:
+        # 全部可用(默认)
+        skills = all_skills
+        filtered = False
+
     return {
-        "scenario": scenario,
         "skills": [
             {"name": s.name, "description": s.description}
             for s in skills
         ],
         "total": len(skills),
+        "filtered": filtered,
     }
 
 
@@ -82,19 +124,34 @@ def run_skill(skill_name: str, task_id: str = "") -> dict:
 
     LLM 拿到 instructions 后,按其指引自行调用底层工具执行
     """
-    scenario = _CURRENT_SCENARIO.get()
-    skill = skill_loader.REGISTRY.get(scenario, skill_name)
-    if not skill:
-        available = [s.name for s in skill_loader.REGISTRY.list_for_scenario(scenario)]
+    allowed = _CURRENT_ALLOWED_SKILLS.get()
+    all_skills = _get_all_skills()
+
+    # 查找目标 skill
+    target = None
+    for s in all_skills:
+        if s.name == skill_name:
+            target = s
+            break
+
+    if target is None:
+        available = [s.name for s in all_skills]
         return {
             "error": f"未知 skill: {skill_name}",
-            "scenario": scenario,
             "available_skills": available,
             "hint": "先调用 list_skills 查可用 skill 名称",
         }
 
+    # 若设置了 allowed_skills 过滤,检查是否在允许列表内
+    if allowed and skill_name not in set(allowed):
+        return {
+            "error": f"skill {skill_name} 不在当前任务的允许列表内",
+            "allowed_skills": allowed,
+            "hint": "此 skill 未被用户授权调用,请用 allowed 内的 skill",
+        }
+
     return {
-        "skill_name": skill.name,
-        "description": skill.description,
-        "instructions": skill.body,
+        "skill_name": target.name,
+        "description": target.description,
+        "instructions": target.body,
     }

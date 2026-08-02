@@ -59,79 +59,33 @@ export interface AnswerResponse {
   message?: string
 }
 
-/** 场景信息(后端 ScenarioInfo) */
+/**
+ * 场景信息(后端 ScenarioInfo,精简模板)
+ *
+ * 场景降级为模板后,仅保留 id/名称/描述/预设 prompt/推荐 skill,
+ * 不再声明 checklist/prompt/工具白名单/结果 schema。
+ */
 export interface Scenario {
   id: string
   name: string
-  /** 提交表单字段定义,前端按此动态渲染 */
-  form_fields: ScenarioFormField[]
-  /** 结果分组维度声明,null 表示平铺不分组 */
-  result_grouping: ScenarioResultGrouping | null
-  /** 结果项 metadata 字段展示声明 */
-  result_meta_fields: ScenarioResultMetaField[]
-  /** 覆盖度看板声明,null 表示不显示看板 */
-  coverage: ScenarioCoverage | null
-}
-
-/** 场景表单字段定义 */
-export interface ScenarioFormField {
-  /** 字段名(提交时作为 params 的 key) */
-  name: string
-  /** text / url / textarea / select / number */
-  type: 'text' | 'url' | 'textarea' | 'select' | 'number'
-  label: string
-  required: boolean
-  placeholder?: string
-  default?: string
   description?: string
-  /** type=select 时的选项 */
-  options?: { value: string; label: string }[]
+  /** 预设 prompt:选择场景时预填到用户输入框,用户可自由编辑 */
+  preset_prompt?: string
+  /** 推荐使用的 skill 列表(展示给用户参考,不强制) */
+  recommended_skills?: string[]
 }
 
-/** 结果分组维度声明 */
-export interface ScenarioResultGrouping {
-  /** 从 result.metadata 取该字段分组 */
-  field: string
-  /** ordered(固定枚举+顺序) | dynamic(按值动态分组) */
-  type: 'ordered' | 'dynamic'
-  /** ordered 时的固定枚举值 */
-  values: ScenarioResultGroupValue[]
-  /** 元数据缺失该字段时的分组名 */
-  default_label: string
-  /** 默认分组颜色 key(对应前端 sev-<color> CSS class) */
-  default_color: string
-}
-
-/** 分组枚举值 */
-export interface ScenarioResultGroupValue {
-  value: string
-  label: string
-  /** 颜色 key,对应前端 CSS class 后缀(如 critical/high/medium) */
-  color: string
-  /** 排序序号 */
-  order: number
-}
-
-/** 结果 meta 字段展示声明 */
-export interface ScenarioResultMetaField {
-  /** metadata 中的 key */
-  name: string
-  label: string
-  /** text / file(file 类型可点击跳转源码位置) */
-  type: 'text' | 'file'
-}
-
-/** 覆盖度看板声明 */
-export interface ScenarioCoverage {
-  /** 维度列表(通常派生自场景 checklist) */
-  dimensions: ScenarioCoverageDimension[]
-}
-
-/** 覆盖度维度 */
-export interface ScenarioCoverageDimension {
+/**
+ * 覆盖度清单维度(user_agent 第 0 轮动态生成,用户可编辑确认)
+ *
+ * 维度对应一类检查目标,checklist 是该维度下的具体检查项。
+ */
+export interface ChecklistDimension {
   id: string
   name: string
   description: string
+  /** 该维度下的检查项列表 */
+  checklist: string[]
 }
 
 /** 任务覆盖度看板数据(GET /tasks/{id}/coverage) */
@@ -147,9 +101,12 @@ export interface TaskCoverage {
 }
 
 /** 任务覆盖度维度(含运行时覆盖状态) */
-export interface TaskCoverageDimension extends ScenarioCoverageDimension {
+export interface TaskCoverageDimension {
   /** 是否已覆盖 */
   covered: boolean
+  id: string
+  name: string
+  description: string
 }
 
 /** 提交任务请求(后端 TaskCreateRequest) */
@@ -165,6 +122,13 @@ export interface TaskCreateRequest {
   repo_url?: string
   branch?: string
   scope?: string
+  /**
+   * 用户选择的 skill 列表(可选)
+   *
+   * 不传(undefined)= 使用全部可用 skill;传空数组 = 禁用所有 skill;
+   * 传非空数组 = 仅允许使用列表中的 skill。
+   */
+  allowed_skills?: string[]
 }
 
 /** 提交任务响应(后端 TaskCreateResponse) */
@@ -218,6 +182,15 @@ export interface TaskDetail {
   completed_at: string | null
   results: TaskResult[]
   conversations: Conversation[]
+  /**
+   * 覆盖度清单(user_agent 第 0 轮动态生成,用户确认后落库)
+   *
+   * null/未定义 = 未生成清单(任务尚未进入清单生成阶段,或场景不使用清单)。
+   * 覆盖度看板据此判断是否展示。
+   */
+  checklist?: ChecklistDimension[] | null
+  /** 用户选择的 skill 列表(null/未定义 = 全部可用) */
+  allowed_skills?: string[] | null
 }
 
 /** 任务列表项(后端 TaskListItem,精简版用于侧栏) */
@@ -246,6 +219,7 @@ export type SSEEventType =
   | 'thinking_delta'
   | 'plan'
   | 'question'
+  | 'checklist_review'
   | 'done'
   | 'error'
 
@@ -354,4 +328,17 @@ export interface QuestionEventData {
   reasoning?: string
   /** 对应的 Conversation 记录 id(落库的提问记录) */
   conversation_id?: string | null
+}
+
+/**
+ * checklist_review 事件 data(覆盖度清单动态生成)
+ *
+ * user_agent 在第 0 轮动态生成覆盖度清单后推送此事件,前端弹出 ChecklistReviewDialog
+ * 让用户编辑确认。用户提交后通过 POST /tasks/{id}/checklist 唤醒后台线程继续评估。
+ */
+export interface ChecklistReviewEventData {
+  /** user_agent 生成的覆盖度维度列表 */
+  checklist: ChecklistDimension[]
+  /** user_agent 生成清单的依据(展示给用户参考,可选) */
+  reasoning?: string
 }

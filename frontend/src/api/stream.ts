@@ -15,6 +15,7 @@
  */
 import { getAccessToken } from './client'
 import type {
+  ChecklistReviewEventData,
   ConnectedData,
   ConversationEventData,
   DoneEventData,
@@ -37,6 +38,8 @@ export interface StreamCallbacks {
   onPlan?: (data: PlanEventData) => void
   /** 用户澄清提问(阶段 8:user_agent 输出 ask_user=true 时触发) */
   onQuestion?: (data: QuestionEventData) => void
+  /** 覆盖度清单确认(user_agent 第 0 轮动态生成 checklist 后触发) */
+  onChecklistReview?: (data: ChecklistReviewEventData) => void
   onDone?: (data: DoneEventData) => void
   onError?: (data: DoneEventData) => void
 }
@@ -65,6 +68,7 @@ export function subscribeTaskStream(
     'thinking_delta',
     'plan',
     'question',
+    'checklist_review',
     'done',
     'error',
   ]
@@ -93,6 +97,9 @@ export function subscribeTaskStream(
             break
           case 'question':
             callbacks.onQuestion?.(data as unknown as QuestionEventData)
+            break
+          case 'checklist_review':
+            callbacks.onChecklistReview?.(data as unknown as ChecklistReviewEventData)
             break
           case 'done':
             callbacks.onDone?.(data as unknown as DoneEventData)

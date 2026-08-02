@@ -42,7 +42,12 @@ function toggleWorkspace(): void {
 const scenarios = ref<Scenario[]>([])
 const selectedScenario = ref('')
 
-/** 当前选中场景声明(用于读取 note 字段 placeholder 等元信息) */
+/**
+ * 当前选中场景(用于读取 preset_prompt 等元信息)
+ *
+ * 场景已降级为模板:仅提供 preset_prompt 预填到输入框,
+ * 不再声明 form_fields/result_grouping/coverage 等。
+ */
 const selectedScenarioDecl = computed<Scenario | null>(() =>
   scenarios.value.find((s) => s.id === selectedScenario.value) ?? null,
 )
@@ -126,9 +131,10 @@ watch(selectedRepoFullName, (fullName) => {
   }
 })
 
-// 切换场景时重置输入(避免上一场景的选择残留)
+// 切换场景时:把场景的 preset_prompt 预填到 userInput(用户可自由编辑),
+// 并重置其他字段(避免上一场景的选择残留)
 watch(selectedScenario, () => {
-  userInput.value = ''
+  userInput.value = selectedScenarioDecl.value?.preset_prompt ?? ''
   taskTitle.value = ''
   repoUrl.value = ''
   branch.value = ''
@@ -153,16 +159,8 @@ const canSubmit = computed(() => {
   return hasInput || hasRepo
 })
 
-/** textarea placeholder:优先用场景声明 note 字段的 placeholder */
-const chatPlaceholder = computed(() => {
-  const noteField = selectedScenarioDecl.value?.form_fields.find(
-    (f) => f.name === 'note',
-  )
-  return (
-    noteField?.placeholder ??
-    '请输入任务说明,如:审计 src/ 目录的 SQL 注入风险'
-  )
-})
+/** textarea placeholder(固定文案;场景降级后不再从场景声明读取) */
+const chatPlaceholder = '请输入任务说明,如:审计这个仓库的安全风险,或分析代码质量'
 
 // ---- 自动调整 textarea 高度 ----
 
@@ -256,7 +254,7 @@ onMounted(async () => {
     if (ghStatus) githubStatus.value = ghStatus
   } catch {
     // 场景拉取失败兜底(不应发生,保留旧默认以便能提交)
-    selectedScenario.value = 'code_security_audit'
+    selectedScenario.value = 'general'
   } finally {
     loadingModels.value = false
   }

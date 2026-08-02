@@ -33,9 +33,10 @@ class Task(Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True
     )
 
-    # 场景标识:字符串,支持任意场景注册(见 app/scenarios/)
+    # 场景标识:字符串。场景已降级为"快捷模板"(预填提示词 + 推荐 skill),
+    # 不再硬编码 checklist/prompt/工具白名单。默认 "general" 表示未选模板
     scenario: Mapped[str] = mapped_column(
-        String(64), default="code_security_audit", nullable=False
+        String(64), default="general", nullable=False
     )
     # 任务标题:用户可自定义,便于在历史列表中识别;为空时前端用 user_input 截断展示
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -43,6 +44,14 @@ class Task(Base):
     user_input: Mapped[str] = mapped_column(Text, nullable=False)
     # 可选的补充参数(如 repo_url、branch、scope 等),放 metadata
     params: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    # 动态覆盖度清单:user_agent 第 0 轮根据用户意图生成,用户可编辑。
+    # 结构:[{"id": "cat_injection", "name": "注入类", "description": "...", "checklist": ["SQL 注入", ...]}]
+    # 取代原场景预定义的 checklist;为空表示尚未生成(第 0 轮前)
+    checklist: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # 用户在创建任务时选择的允许调用的 skill 名称列表。
+    # None 或空列表表示全部 skill 可用(默认);非空时 react_agent 的 skill 工具按此过滤
+    allowed_skills: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     status: Mapped[TaskStatus] = mapped_column(
         Enum(TaskStatus), default=TaskStatus.PENDING, nullable=False

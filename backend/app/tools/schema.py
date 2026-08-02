@@ -1,21 +1,20 @@
 """OpenAI function-calling 工具定义
 
-阶段 4 重构:场景化工具配置
-- 通用工具(clone/read/search/cve/semgrep)定义在此,场景通过白名单选择启用哪些
-- submit_results 是内部工具,定义从场景取(不同场景的 result 结构不同)
+场景降级后:工具全部开放,不再按场景白名单过滤。
+skill 过滤改为按 task.allowed_skills(用户创建任务时选择)。
+
 - task_id 自动注入
 - github_token 自动注入(用于 clone_repo 访问私有仓库)
 
 并发安全:用 contextvars 替代全局变量,每个后台线程有独立上下文,
-避免多任务并发执行时 task_id / scenario / github_token 互相覆盖导致工作区串台。
+避免多任务并发执行时 task_id / allowed_skills / github_token 互相覆盖。
 """
 import contextvars
 from typing import Any
 
-from app.scenarios.base import get_scenario
 from app.tools import sandbox_tools
 from app.tools.cve_tools import query_cve
-from app.tools.skill_tool import list_available_skills, run_skill, set_current_scenario
+from app.tools.skill_tool import list_available_skills, run_skill, set_current_allowed_skills
 
 
 # 当前任务的上下文(每个线程独立,避免并发任务互相覆盖)
@@ -29,14 +28,20 @@ _CURRENT_GITHUB_TOKEN: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 
 
-def set_current_task(task_id: str, scenario_id: str = "code_security_audit") -> None:
-    """react_agent 调用工具前,设置当前任务 ID 和场景
+def set_current_task(
+    task_id: str,
+    scenario_id: str = "general",
+    allowed_skills: list[str] | None = None,
+) -> None:
+    """react_agent 调用工具前,设置当前任务 ID 和允许的 skill 列表
 
-    scenario_id 用于 skill 工具按场景过滤可用 skill。
+    allowed_skills: 用户创建任务时选择的 skill 名称列表。
+        None 或空列表表示全部 skill 可用(默认);
+        非空时 skill 工具按此过滤。
     使用 ContextVar,每个后台线程的 set 只影响该线程自身。
     """
     _CURRENT_TASK_ID.set(task_id)
-    set_current_scenario(scenario_id)
+    set_current_allowed_skills(allowed_skills)
 
 
 def set_current_github_token(token: str) -> None:
@@ -253,19 +258,12 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
 ]
 
 
-def get_tools_for_scenario(scenario_id: str) -> list[dict[str, Any]]:
-    """根据场景返回工具定义列表
+def get_all_tools() -> list[dict[str, Any]]:
+    """返回全部工具定义(场景降级后:工具不再按场景白名单过滤,全部开放)
 
-    = 场景白名单启用的通用工具
-    注意:submit_results 已移除。react_agent 只输出自然语言总结,
-    user_agent 负责按场景 schema 整理结构化结果(通过 scenario.extract_results)
+    react_agent 自主判断哪些工具适用当前任务。
     """
-    scenario = get_scenario(scenario_id)
-    enabled = set(scenario.enabled_tools)
-
-    # 按白名单过滤通用工具
-    tools = [t for t in _ALL_TOOL_DEFINITIONS if t["function"]["name"] in enabled]
-    return tools
+    return list(_ALL_TOOL_DEFINITIONS)
 
 
 def execute_tool(tool_name: str, arguments: dict[str, Any]) -> Any:

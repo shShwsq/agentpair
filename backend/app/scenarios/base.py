@@ -1,157 +1,56 @@
-"""场景抽象基类
+"""场景模板(降级后:仅作快捷模板,不再硬编码 prompt/checklist/工具白名单)
 
-每个场景定义:
-- checklist:任务完成判据清单(user_agent 用它判断 react_agent 是否覆盖完整)
-- user_agent_prompt:user_agent 的 system prompt(扮演什么角色、如何评估、如何整理结果)
-- react_agent_prompt:react_agent 的 system prompt
-- enabled_tools:启用的工具白名单
-- structured_result_schema:user_agent done 时输出的结构化结果 schema(分场景不同)
-- extract_results:从 user_agent 最终输出提取结构化结果(分场景不同)
+场景降级后的职责:
+- 提供预设提示词(preset_prompt):用户选场景后预填到输入框
+- 推荐技能列表(recommended_skills):创建任务时默认勾选的 skill
 
-前端声明(场景无关 UI 驱动,阶段 7 新增):
-- form_fields:提交任务表单字段定义,前端按此动态渲染
-- result_grouping:结果清单分组维度声明,前端按此分组展示
-- result_meta_fields:结果项 metadata 字段展示声明,前端按此渲染标签
-- coverage:覆盖度看板声明,前端按此渲染维度状态
-
-职责划分(阶段 7+ 调整):
-- react_agent:执行审计/任务,输出自然语言总结(含发现、位置、建议)
-- user_agent:评估覆盖度,决定追问;done=true 时按场景 schema 整理结构化结果
-
-轻量配置:场景是 Python 类,注册到 SCENARIOS 字典,代码内 if-else 分发
+不再承担:
+- checklist(改为 user_agent 动态生成 + 用户编辑)
+- user_agent_prompt / react_agent_prompt(改为通用 prompt)
+- enabled_tools(改为全部开放)
+- extract_results / format_result(改为通用提取)
+- form_fields / result_grouping / result_meta_fields / coverage(改为通用化/动态化)
 """
 from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
-class Scenario(Protocol):
-    """场景协议:定义场景必须实现的接口"""
+class ScenarioTemplate(Protocol):
+    """场景模板协议:降级后的精简接口"""
 
     id: str
     name: str
+    description: str
 
     @property
-    def checklist(self) -> list[dict[str, Any]]:
-        """任务完成判据清单
+    def preset_prompt(self) -> str:
+        """预设提示词:用户选此场景后预填到输入框
 
-        通用结构:[{"id": "xxx", "name": "xxx", "description": "xxx", "checklist": [...]}]
-        场景可自由扩展额外字段(如安全场景加 cwe),user_agent 格式化时只取通用字段
+        示例(安全审计):"请审计这个仓库的安全漏洞,关注注入类、认证授权、
+        反序列化、SSRF、配置泄露等类别,给出具体文件位置和修复建议。"
         """
         ...
 
     @property
-    def user_agent_prompt(self) -> str:
-        """user_agent 的 system prompt
+    def recommended_skills(self) -> list[str]:
+        """推荐的 skill 名称列表:创建任务时默认勾选
 
-        定义 user_agent 扮演的角色、评估依据、输出格式等。
-        prompt 中用 {checklist_text} 占位符,运行时替换为格式化后的 checklist 文本
-        """
-        ...
-
-    @property
-    def react_agent_prompt(self) -> str:
-        """react_agent 的 system prompt"""
-        ...
-
-    @property
-    def enabled_tools(self) -> list[str]:
-        """启用的工具白名单(工具名列表,对应 TOOL_FUNCTIONS 的 key)"""
-        ...
-
-    @property
-    def structured_result_schema(self) -> dict[str, Any]:
-        """user_agent done=true 时输出的结构化结果 schema
-
-        不同场景的结构化结果不同(如安全场景是漏洞清单,文档场景可能是章节摘要)。
-        user_agent 在 done=true 时,按此 schema 在 JSON 输出的 results 字段里
-        提供结构化数据,orchestrator 调 extract_results 落库。
-        """
-        ...
-
-    def extract_results(self, ua_output: dict[str, Any]) -> list[dict[str, Any]]:
-        """从 user_agent 的最终输出提取结构化结果列表
-
-        参数:ua_output 是 user_agent 解析后的 JSON dict,含 covered/missing/
-        reasoning/followup_query/done,以及场景特定的 results 字段
-
-        返回:[{"title": str, "content": str, "metadata": dict}, ...]
-        每个元素对应一条 Result 记录,由 orchestrator 落库
-        """
-        ...
-
-    def format_result(self, raw: dict[str, Any]) -> dict[str, Any]:
-        """把单条原始 result 转成数据库存储格式(兜底用,extract_results 内部可调用)
-
-        返回:{"title": str, "content": str, "metadata": dict}
-        默认实现:直接透传 title/content,其余放 metadata
-        """
-        ...
-
-    # ---------- 前端声明(场景无关 UI 驱动) ----------
-
-    @property
-    def form_fields(self) -> list[dict[str, Any]]:
-        """提交任务表单字段定义,前端按此动态渲染
-
-        每个字段:
-        - name: 字段名(提交时作为 params 的 key)
-        - type: text / url / textarea / select / number
-        - label: 显示标签
-        - required: 是否必填
-        - placeholder: 占位提示(可选)
-        - default: 默认值(可选)
-        - description: 字段说明(可选)
-        - options: type=select 时的选项列表 [{"value":..., "label":...}](可选)
-        """
-        ...
-
-    @property
-    def result_grouping(self) -> dict[str, Any] | None:
-        """结果清单分组维度声明,前端按此分组展示。None 表示不分组(平铺)
-
-        结构:
-        - field: 从 result.metadata 取该字段分组
-        - type: "ordered"(固定枚举+顺序) | "dynamic"(按值动态分组)
-        - values: ordered 时提供 [{"value":..., "label":..., "color":..., "order":...}]
-        - default_label: 元数据缺失该字段时的分组名
-        - default_color: 默认分组颜色 key
-        """
-        ...
-
-    @property
-    def result_meta_fields(self) -> list[dict[str, Any]]:
-        """结果项 metadata 字段展示声明,前端按此渲染标签
-
-        每个字段:
-        - name: metadata 中的 key
-        - label: 显示标签
-        - type: "text" / "file"(file 类型可点击跳转源码位置)
-        """
-        ...
-
-    @property
-    def coverage(self) -> dict[str, Any] | None:
-        """覆盖度看板声明,前端按此渲染维度状态。None 表示不显示看板
-
-        结构:
-        - dimensions: 维度列表 [{"id":..., "name":..., "description":...}]
-          通常派生自 checklist
-        - 数据来源固定:从 user_agent type=evaluation 的 reasoning 解析 covered/missing
+        空列表表示不特别推荐(用户自行选择)。skill 名称对应 skills/ 目录下的子目录名。
         """
         ...
 
 
-# 场景注册表
-SCENARIOS: dict[str, "Scenario"] = {}
+# 场景模板注册表
+SCENARIOS: dict[str, "ScenarioTemplate"] = {}
 
 
-def register_scenario(scenario: "Scenario") -> None:
-    """注册场景"""
+def register_scenario(scenario: "ScenarioTemplate") -> None:
+    """注册场景模板"""
     SCENARIOS[scenario.id] = scenario
 
 
-def get_scenario(scenario_id: str) -> "Scenario":
-    """获取场景,不存在则报错"""
+def get_scenario(scenario_id: str) -> "ScenarioTemplate":
+    """获取场景模板,不存在则报错"""
     if scenario_id not in SCENARIOS:
         raise ValueError(
             f"未知场景: {scenario_id},已注册: {list(SCENARIOS.keys())}"
@@ -160,25 +59,24 @@ def get_scenario(scenario_id: str) -> "Scenario":
 
 
 def list_scenarios() -> list[dict[str, Any]]:
-    """列出所有场景的完整声明(给前端动态渲染用)
+    """列出所有场景模板的精简声明(给前端展示用)
 
-    返回每个场景的 id/name + 四项前端声明(form_fields/result_grouping/
-    result_meta_fields/coverage)。声明缺失时兜底为空值,保证前端兼容。
+    降级后只返回 id/name/description/preset_prompt/recommended_skills。
+    前端用 preset_prompt 预填输入框,用 recommended_skills 默认勾选 skill。
     """
     result: list[dict[str, Any]] = []
     for s in SCENARIOS.values():
         result.append({
             "id": s.id,
             "name": s.name,
-            "form_fields": _get_prop(s, "form_fields", []),
-            "result_grouping": _get_prop(s, "result_grouping", None),
-            "result_meta_fields": _get_prop(s, "result_meta_fields", []),
-            "coverage": _get_prop(s, "coverage", None),
+            "description": _get_attr(s, "description", ""),
+            "preset_prompt": _get_attr(s, "preset_prompt", ""),
+            "recommended_skills": _get_attr(s, "recommended_skills", []),
         })
     return result
 
 
-def _get_prop(scenario: "Scenario", name: str, default: Any) -> Any:
+def _get_attr(scenario: "ScenarioTemplate", name: str, default: Any) -> Any:
     """安全获取场景的可选属性,缺失时返回默认值"""
     try:
         val = getattr(scenario, name)

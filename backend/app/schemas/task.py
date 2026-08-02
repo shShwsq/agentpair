@@ -119,21 +119,17 @@ class TaskCreateResponse(BaseModel):
 
 
 class ScenarioInfo(BaseModel):
-    """场景信息(给前端展示用)
+    """场景模板信息(给前端展示用)
 
-    除 id/name 外,携带四项场景声明,驱动前端场景无关渲染:
-    - form_fields: 提交表单字段定义
-    - result_grouping: 结果分组维度(None 表示平铺)
-    - result_meta_fields: 结果 meta 字段展示
-    - coverage: 覆盖度看板声明(None 表示不显示)
+    场景降级后:仅提供预设提示词 + 推荐 skill,不再驱动表单/分组/覆盖度。
+    前端用 preset_prompt 预填输入框,用 recommended_skills 默认勾选 skill。
     """
 
     id: str
     name: str
-    form_fields: list[dict[str, Any]] = []
-    result_grouping: dict[str, Any] | None = None
-    result_meta_fields: list[dict[str, Any]] = []
-    coverage: dict[str, Any] | None = None
+    description: str = ""
+    preset_prompt: str = ""
+    recommended_skills: list[str] = []
 
 
 # ============================================================
@@ -196,3 +192,26 @@ class AnswerResponse(BaseModel):
 
     accepted: bool
     message: str = ""
+
+
+# ============================================================
+# 覆盖度清单动态生成 + 用户编辑(场景降级后)
+# ============================================================
+
+
+class ChecklistDimension(BaseModel):
+    """覆盖度清单的一个维度(由 user_agent 动态生成,用户可编辑)"""
+
+    id: str
+    name: str
+    description: str = ""
+    checklist: list[str] = []
+
+
+class ChecklistReviewRequest(BaseModel):
+    """用户编辑覆盖度清单后提交(POST /tasks/{id}/checklist)
+
+    checklist 为 None 表示"直接采用 LLM 生成结果"(不编辑)。
+    """
+
+    checklist: list[ChecklistDimension] | None = None

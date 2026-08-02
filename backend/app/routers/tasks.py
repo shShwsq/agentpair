@@ -35,10 +35,12 @@ from app.pause_controller import (
     pause_task,
     resume_task,
 )
-from app.scenarios.base import get_scenario, list_scenarios
+from app.scenarios.base import list_scenarios
 from app.schemas.task import (
     AnswerRequest,
     AnswerResponse,
+    ChecklistDimension,
+    ChecklistReviewRequest,
     PendingQuestion,
     ScenarioInfo,
     TaskCreateRequest,
@@ -49,8 +51,12 @@ from app.schemas.task import (
 )
 from app.tools import sandbox_tools
 from app.user_interaction import (
+    clear_pending_checklist,
+    clear_pending_question,
+    get_pending_checklist,
     get_pending_question,
     submit_answers,
+    submit_checklist,
 )
 
 logger = logging.getLogger(__name__)
@@ -330,6 +336,77 @@ def submit_task_answer(
     return AnswerResponse(accepted=True, message="答案已提交,智能体将继续评估")
 
 
+# ============================================================
+# 覆盖度清单动态生成 + 用户编辑(场景降级后)
+# ============================================================
+
+
+@router.get("/tasks/{task_id}/pending_checklist")
+def get_task_pending_checklist(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> list[ChecklistDimension] | None:
+    """查询任务当前待确认的覆盖度清单(刷新页面后恢复弹窗用)
+
+    无待确认清单返回 None。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权访问此任务")
+
+    if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+        return None
+
+    payload = get_pending_checklist(task_id)
+    if payload is None:
+        return None
+    return [ChecklistDimension(**d) if isinstance(d, dict) else d for d in payload]
+
+
+@router.post("/tasks/{task_id}/checklist")
+def submit_task_checklist(
+    task_id: uuid.UUID,
+    req: ChecklistReviewRequest,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> dict[str, Any]:
+    """提交编辑后的覆盖度清单,唤醒后台线程
+
+    req.checklist 为 None 表示"直接采用 LLM 生成结果"。
+    返回 {"accepted": bool, "message": str}。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    if task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.PAUSED):
+        return {"accepted": False, "message": f"任务已结束({task.status.value})"}
+
+    # 转为 dict 列表(None 保持 None,表示直接采用)
+    edited = None
+    if req.checklist is not None:
+        edited = [d.model_dump() for d in req.checklist]
+
+    ok = submit_checklist(task_id, edited)
+    if not ok:
+        return {"accepted": False, "message": "当前没有待确认的清单(可能已确认或任务已结束)"}
+
+    # 同步落库到 task.checklist(确保刷新时数据库已有记录)
+    final_checklist = edited if edited is not None else get_pending_checklist(task_id)
+    if final_checklist:
+        task.checklist = final_checklist
+        db.commit()
+
+    return {"accepted": True, "message": "覆盖度清单已确认,智能体将继续执行"}
+
+
 def _record_answer(
     db: Session,
     task: Task,
@@ -545,8 +622,8 @@ def get_task_coverage(
 ) -> dict[str, Any]:
     """覆盖度看板:从 user_agent 最新一轮 evaluation 解析各维度覆盖状态
 
-    仅当任务场景声明了 coverage 时可用。维度定义来自场景声明,
-    覆盖状态来自最新一条 user_agent evaluation 的 covered/missing。
+    仅当 task.checklist 已生成(第 0 轮 user_agent 动态生成 + 用户确认)时可用。
+    维度定义来自 task.checklist,覆盖状态来自最新一条 user_agent evaluation。
     """
     task = db.get(Task, task_id)
     if not task:
@@ -557,23 +634,22 @@ def get_task_coverage(
 
     result = _compute_task_coverage(task, db)
     if result is None:
-        raise HTTPException(status_code=404, detail="该场景无覆盖度看板")
+        raise HTTPException(status_code=404, detail="该任务无覆盖度清单(尚未生成)")
     return result
 
 
 def _compute_task_coverage(task: Task, db: Session) -> dict[str, Any] | None:
     """计算任务覆盖度(供 coverage 端点和报告导出共用)
 
-    返回各维度覆盖状态 dict;场景无 coverage 声明时返回 None。
+    场景降级后:维度从 task.checklist 读取(动态生成 + 用户编辑确认的清单),
+    不再从 scenario.coverage 读取。task.checklist 为空时返回 None(无看板)。
     """
-    try:
-        scenario = get_scenario(task.scenario)
-    except ValueError:
+    # 场景降级后:从 task.checklist 取维度(动态生成的覆盖度清单)
+    checklist = task.checklist
+    if not checklist:
         return None
-    coverage_decl = getattr(scenario, "coverage", None)
-    if not coverage_decl:
-        return None
-    dimensions_decl = coverage_decl.get("dimensions", [])
+    # checklist 结构:[{"id":..., "name":..., "description":..., "checklist":[...]}]
+    dimensions_decl = checklist
 
     # 取最新一条 user_agent evaluation
     latest_eval = (
@@ -595,10 +671,10 @@ def _compute_task_coverage(task: Task, db: Session) -> dict[str, Any] | None:
 
     dims = [
         {
-            "id": d["id"],
-            "name": d["name"],
+            "id": d.get("id", ""),
+            "name": d.get("name", ""),
             "description": d.get("description", ""),
-            "covered": d["id"] in covered_set,
+            "covered": d.get("id", "") in covered_set,
         }
         for d in dimensions_decl
     ]
@@ -609,6 +685,38 @@ def _compute_task_coverage(task: Task, db: Session) -> dict[str, Any] | None:
         "total_count": len(dims),
         "last_round": last_round,
     }
+
+
+def _get_result_display_config(
+    task: Task, results: list,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """获取结果展示配置(场景降级后:grouping 从 task.params._grouping 读取,
+    meta_fields 从 results 的 metadata keys 动态推断)
+
+    返回:(grouping, meta_fields)
+      - grouping: user_agent done 时声明的分组配置,无则 None(平铺)
+      - meta_fields: 从所有 results 的 metadata keys 汇总,每个 key 作为一个展示字段
+    """
+    # grouping:user_agent done 时存到 task.params["_grouping"]
+    params = task.params or {}
+    grouping = params.get("_grouping") if isinstance(params, dict) else None
+
+    # meta_fields:从 results 的 metadata keys 动态推断
+    # 收集所有 result 的 metadata keys(保留出现顺序)
+    seen_keys: list[str] = []
+    for r in results:
+        meta = r.metadata_ or {}
+        if isinstance(meta, dict):
+            for k in meta.keys():
+                if k not in seen_keys and not k.startswith("_"):
+                    seen_keys.append(k)
+    # file_path 类型的 key 标记为 file(可点击跳转),其余为 text
+    meta_fields = []
+    for k in seen_keys:
+        field_type = "file" if k in ("file_path", "path", "file") else "text"
+        meta_fields.append({"name": k, "label": k, "type": field_type})
+
+    return grouping, meta_fields
 
 
 def _parse_evaluation_reasoning(reasoning: str) -> tuple[set[str], set[str]]:
@@ -733,12 +841,11 @@ def _build_markdown_report(
             lines.append(f"- [{mark}] {d['name']}{desc}")
         lines.append("")
 
-    # 结果清单(按场景声明分组)
+    # 结果清单(场景降级后:grouping 从 task.params._grouping 读取,
+    # meta_fields 从 results 的 metadata keys 动态推断)
     results = list(task.results)
     if results:
-        scenario = get_scenario(task.scenario)
-        grouping = getattr(scenario, "result_grouping", None)
-        meta_fields = getattr(scenario, "result_meta_fields", [])
+        grouping, meta_fields = _get_result_display_config(task, results)
         lines.append("## 结果清单")
         lines.append("")
         if grouping:
@@ -886,9 +993,7 @@ def _build_html_report(
     # 结果清单
     results = list(task.results)
     if results:
-        scenario = get_scenario(task.scenario)
-        grouping = getattr(scenario, "result_grouping", None)
-        meta_fields = getattr(scenario, "result_meta_fields", [])
+        grouping, meta_fields = _get_result_display_config(task, results)
         parts.append("<h2>结果清单</h2>")
         if grouping:
             _append_grouped_results_html(parts, results, grouping, meta_fields)

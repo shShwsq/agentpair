@@ -25,8 +25,7 @@ from app.event_bus import publish
 from app.llm.client import LLMClient
 from app.models.task import Conversation, Task
 from app.pause_controller import wait_if_paused
-from app.scenarios.base import get_scenario
-from app.tools.schema import execute_tool, get_tools_for_scenario, set_current_task
+from app.tools.schema import execute_tool, get_all_tools, set_current_task
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +41,59 @@ MAX_RECENT_CALLS = 10
 LOOP_WINDOW_SIZE = 6
 # 窗口内不同 call_sig 少于等于此值 → 判定为循环(覆盖交替循环 A,B,A,B,A,B)
 LOOP_MIN_DISTINCT = 2
+
+
+# ============================================================
+# 通用 system prompt(场景降级后,不再从场景读取)
+# ============================================================
+
+REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行实际的代码分析/审计/审查任务。
+
+## 你的职责
+根据 user_agent(用户代理智能体)给出的指令,对目标仓库执行分析,
+发现并记录问题,最后用自然语言总结你的发现。
+
+## 工作方式(ReAct 循环)
+你通过"思考-行动-观察"循环工作:
+1. **思考**:分析当前状态,决定下一步该做什么
+2. **行动**:调用工具(clone_repo / read_file / search_code / run_in_sandbox / list_skills / skill 等)
+3. **观察**:查看工具返回的结果
+4. 重复以上步骤,直到完成分析
+
+## 可用工具
+- clone_repo:克隆 GitHub 仓库到沙箱(若 orchestrator 已预克隆,无需调用)
+- list_files:列出目录结构
+- read_file:读取文件内容
+- search_code:正则/关键字搜索代码
+- run_in_sandbox:在隔离沙箱中运行命令(grep/semgrep/python 脚本等)
+- list_skills / skill:查看并加载专家技能(SKILL.md 指令,按需调用)
+
+## 工作原则
+- **自适应任务类型**:根据用户意图判断任务性质(安全审计/代码审查/其他),
+  采用相应的分析方法。可调用 list_skills 查看是否有适用的专家技能。
+- **系统性覆盖**:按 user_agent 指定的维度逐一分析,不遗漏。
+- **证据导向**:每个发现都应有具体文件位置和代码证据,不臆测。
+- **高效执行**:优先用 search_code 定位可疑代码,再 read_file 确认,
+  避免盲目遍历所有文件。
+- **计划性**:复杂任务先输出 <plan> 步骤清单,逐步推进。
+
+## 计划格式(可选,复杂任务建议)
+在思考内容中输出 <plan> 标签包裹的计划:
+<plan>
+[{"id": 1, "text": "步骤描述", "status": "pending"},
+ {"id": 2, "text": "步骤描述", "status": "pending"}]
+</plan>
+status 可选:pending / in_progress / done。后端会解析并推送前端展示。
+
+## 输出要求
+- 每轮结束(不再调用工具时),用自然语言总结你的发现:
+  - 发现了哪些问题/现象
+  - 具体文件位置和代码片段
+  - 严重程度/影响范围
+  - 修复建议
+- 总结要具体、有证据,便于 user_agent 评估覆盖度。
+- 不要在总结中编造未经验证的发现。
+"""
 
 # 跨轮记忆传递:从 Conversation 表加载之前轮次的对话,作为前缀注入当前轮 user_msg
 # 单条消息(react_agent 总结 / user_agent 评估)最大字符数,超出截断
@@ -88,10 +140,9 @@ def run_react_agent(
     task_id_str = str(task.id)
     set_current_task(task_id_str, task.scenario)
 
-    # 获取场景配置
-    scenario = get_scenario(task.scenario)
-    system_prompt = scenario.react_agent_prompt
-    tools = get_tools_for_scenario(task.scenario)
+    # 场景降级后:用通用 prompt,工具全部开放(不再按场景过滤)
+    system_prompt = REACT_AGENT_SYSTEM_PROMPT
+    tools = get_all_tools()
 
     # 构造初始 user 消息
     if followup_query is None:
