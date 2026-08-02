@@ -670,11 +670,14 @@ def _build_history_context(db: Session, task_id, current_round_idx: int) -> str:
     若不做记忆传递,LLM 看不到自己之前几轮做了什么、user_agent 给过什么反馈。
 
     本函数从 Conversation 表加载 round_idx < current_round_idx 的对话,
-    每轮提取两条:
+    每轮提取三类信息:
+      - react_agent 的工具调用摘要(intent + 结果片段):让 LLM 记住第 1 轮在
+        tool_result 里发现的关键证据,即使没写进最终总结(修复 3)
       - react_agent 最后一条 thinking 的 content(自己当轮的总结)
       - user_agent evaluation 的 reasoning(审核反馈:covered/missing/追问判断)
     拼接成一段文本,单条截断到 MAX_HISTORY_MSG_CHARS,整体超 MAX_HISTORY_TOTAL_CHARS
-    时丢弃最早轮次(FIFO),控制 token 成本。
+    时按重要性保留(missing 非空的轮次优先,其次 done=false,同优先级 FIFO),
+    控制 token 成本。
 
     返回字符串(可能为空)。第 1 轮(current_round_idx=1)无历史,返回空串。
     """
@@ -704,10 +707,41 @@ def _build_history_context(db: Session, task_id, current_round_idx: int) -> str:
     if not by_round:
         return ""
 
-    # 逐轮构造记忆段,先收集后裁剪(可能丢弃最早轮次)
+    # 工具调用摘要单轮最大字符数(避免单轮工具调用过多撑爆 history)
+    MAX_TOOL_HISTORY_CHARS = 2000
+
+    # 逐轮构造记忆段,先收集后裁剪(可能按优先级丢弃)
     segments: list[str] = []
+    priorities: list[int] = []  # 裁剪用:user_agent 标 missing 的轮次优先级更高
     for ridx in sorted(by_round.keys()):
         round_convs = by_round[ridx]
+
+        # react_agent 当轮工具调用摘要(intent + 结果片段)
+        # tool_call content 格式:"{intent}\n{call_detail}",第一行是意图
+        # tool_result content 是结果片段(已截断 500 字符)
+        tool_calls = [
+            c for c in round_convs
+            if c.role == "react_agent" and c.type == "tool_call" and c.content
+        ]
+        tool_results = [
+            c for c in round_convs
+            if c.role == "react_agent" and c.type == "tool_result" and c.content
+        ]
+        tool_lines: list[str] = []
+        for i, tc in enumerate(tool_calls):
+            # intent 是 tool_call content 的第一行(如"读取文件 src/main.py")
+            intent_line = tc.content.split("\n", 1)[0] if tc.content else ""
+            # 配对同序号的 tool_result,取前 200 字符作结果片段
+            result_snippet = ""
+            if i < len(tool_results):
+                result_snippet = tool_results[i].content[:200]
+            if result_snippet:
+                tool_lines.append(f"  - {intent_line} → {result_snippet}")
+            else:
+                tool_lines.append(f"  - {intent_line}")
+        tool_summary = "\n".join(tool_lines)
+        if tool_summary:
+            tool_summary = tool_summary[:MAX_TOOL_HISTORY_CHARS]
 
         # react_agent 当轮最后一条 thinking(即最终总结)
         react_thinkings = [
@@ -727,7 +761,7 @@ def _build_history_context(db: Session, task_id, current_round_idx: int) -> str:
             ua_text = ua_eval.reasoning or ua_eval.content or ""
 
         # 至少有一条非空才输出该轮
-        if not react_summary and not ua_text:
+        if not react_summary and not ua_text and not tool_summary:
             continue
 
         # 单条截断
@@ -735,19 +769,36 @@ def _build_history_context(db: Session, task_id, current_round_idx: int) -> str:
         ua_text = ua_text[:MAX_HISTORY_MSG_CHARS] if ua_text else ""
 
         parts = [f"=== 第 {ridx} 轮 ==="]
+        if tool_summary:
+            parts.append(f"[react_agent 工具调用]\n{tool_summary}")
         if react_summary:
             parts.append(f"[react_agent 总结]\n{react_summary}")
         if ua_text:
             parts.append(f"[user_agent 评估]\n{ua_text}")
         segments.append("\n".join(parts))
 
+        # 优先级判定:user_agent 评估里 missing 非空 → 高优先级(还有未覆盖项)
+        # done=false → 中优先级;其他(如 done=true 或无 ua 评估)→ 低优先级
+        priority = 0
+        if ua_text:
+            if "未覆盖:" in ua_text:
+                missing_part = ua_text.split("未覆盖:")[1].split("\n")[0]
+                if missing_part.strip() and missing_part.strip() != "[]":
+                    priority = 2
+            if priority == 0 and "→ 宣布完成" not in ua_text:
+                priority = 1
+        priorities.append(priority)
+
     if not segments:
         return ""
 
-    # 整体超限时丢弃最早轮次(FIFO)
+    # 整体超限时按优先级裁剪:优先级低的先丢;同优先级 FIFO 丢最早
     total = sum(len(s) for s in segments)
     while total > MAX_HISTORY_TOTAL_CHARS and len(segments) > 1:
-        dropped = segments.pop(0)
+        min_priority = min(priorities)
+        drop_idx = priorities.index(min_priority)
+        dropped = segments.pop(drop_idx)
+        priorities.pop(drop_idx)
         total -= len(dropped)
 
     return "[之前轮次的对话记忆]\n" + "\n\n".join(segments)

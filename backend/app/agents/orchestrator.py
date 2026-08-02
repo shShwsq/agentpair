@@ -108,7 +108,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         while True:
             ua_result_0 = run_user_agent(
                 effective_intent, [],
-                task_id=task.id, round_idx=0,
+                task_id=task.id, db=db, round_idx=0,
                 scenario_id=scenario_id,
                 client=llm_client,
                 ask_round=ask_round,
@@ -195,7 +195,6 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
 
             react_summaries.append({
                 "round": round_idx,
-                "results": [],  # react_agent 不再返回结构化结果
                 "summary": summary,
             })
 
@@ -209,7 +208,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
 
             ua_result = run_user_agent(
                 effective_intent, react_summaries,
-                task_id=task.id, round_idx=round_idx,
+                task_id=task.id, db=db, round_idx=round_idx,
                 scenario_id=scenario_id,
                 client=llm_client,
                 ask_round=MAX_ASKS,  # 协作循环阶段不允许再提问

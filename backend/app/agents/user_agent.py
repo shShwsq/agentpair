@@ -36,8 +36,11 @@ import uuid
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy.orm import Session
+
 from app.event_bus import publish
 from app.llm.client import LLMClient
+from app.models.task import Conversation
 from app.scenarios.base import get_scenario
 
 logger = logging.getLogger(__name__)
@@ -48,6 +51,11 @@ MAX_ROUNDS = 4
 
 # 第 0 轮初始评估时,最多向用户提问的次数(含首次)
 MAX_ASKS = 2
+
+# 跨轮记忆传递:user_agent 之前各轮评估的单条最大字符数与总字符数上限
+# 与 react_agent 的对应常量保持一致,避免两边不一致
+MAX_HISTORY_MSG_CHARS = 3000
+MAX_HISTORY_TOTAL_CHARS = 12000
 
 # 固定追加的"是否有其他补充"问题(由后端追加,LLM 不负责生成)
 SUPPLEMENT_QUESTION_ID = "_supplement"
@@ -87,6 +95,7 @@ def run_user_agent(
     user_intent: str,
     react_agent_summaries: list[dict[str, Any]],
     task_id: UUID | str,
+    db: Session | None = None,
     round_idx: int = 0,
     scenario_id: str = "code_security_audit",
     client: LLMClient | None = None,
@@ -98,8 +107,12 @@ def run_user_agent(
         user_intent: 用户原始意图(如"审计这个仓库: https://...")
         client: 可选的 LLMClient(阶段 6:从用户配置构造),None 时回退到 env 默认
         react_agent_summaries: react_agent 之前几轮的执行结果列表
-            每个元素:{"round": 1, "results": [...], "summary": "..."}
+            每个元素:{"round": 1, "summary": "..."}(results 字段已移除,
+            react_agent 只输出自然语言总结,user_agent 从 summary 评估)
         task_id: 任务 ID(必填,用于推送 thinking_delta 事件)
+        db: 数据库会话(可选)。传入时用于加载 user_agent 自己之前各轮的评估记录,
+            让 user_agent 跨轮记住 covered/missing 判断,避免反复摇摆。
+            None 时不加载历史(向后兼容)。
         round_idx: 当前协作轮次(用于推送 thinking_delta 事件)
         scenario_id: 场景标识,用于加载 prompt 和 checklist
         ask_round: 第 0 轮初始评估时的提问轮次(0=首次评估,1=用户回答后重新评估)
@@ -152,22 +165,39 @@ def run_user_agent(
             + ask_hint
         )
     else:
-        # 后续轮次:把 react_agent 的结果给 user_agent 评估(不允许再提问)
+        # 后续轮次:把 react_agent 的自然语言总结给 user_agent 评估(不允许再提问)
+        # 注意:react_agent 只输出自然语言 summary,不再有结构化 results 字段
         rounds_text = []
         for i, r in enumerate(react_agent_summaries, 1):
-            results_summary = _summarize_results(r.get("results", []))
+            summary = r.get("summary", "(无 summary)")
             rounds_text.append(
-                f"### 第 {i} 轮 react_agent 结果\n"
-                f"results({len(r.get('results', []))} 个):\n{results_summary}\n"
-                f"summary: {r.get('summary', '(无 summary)')}"
+                f"### 第 {i} 轮 react_agent 自然语言总结\n{summary}"
             )
-        user_msg = (
-            f"用户原始意图:{user_intent}\n\n"
-            f"以下是 react_agent 已执行的 {len(react_agent_summaries)} 轮结果:\n\n"
+
+        # 跨轮记忆注入:user_agent 看到自己之前各轮的评估记录,
+        # 避免在 covered/missing 之间反复摇摆(第 2 轮起注入)
+        history_prefix = ""
+        if db is not None and round_idx >= 2:
+            history_prefix = _build_user_agent_history(db, task_id, round_idx)
+
+        user_msg_parts = [
+            f"用户原始意图:{user_intent}\n",
+        ]
+        if history_prefix:
+            user_msg_parts.append(history_prefix)
+        user_msg_parts.append(
+            f"\n以下是 react_agent 已执行的 {len(react_agent_summaries)} 轮自然语言总结:\n\n"
             + "\n\n".join(rounds_text)
             + "\n\n请评估覆盖情况,决定是否追问或结束。"
             + "\n\n[当前不允许提问] react_agent 已开始执行,ask_user 必须为 false。"
         )
+        if history_prefix:
+            user_msg_parts.append(
+                "\n[记忆提示] 上面已附上你之前各轮的评估记录,请保持覆盖度判断的连续性:"
+                "之前已标 covered 的类别,本轮若 react_agent 未推翻结论,继续保持 covered,"
+                "不要无意义反复追问。"
+            )
+        user_msg = "\n".join(user_msg_parts)
 
     # 调 LLM(流式)
     client = client or LLMClient()
@@ -186,14 +216,21 @@ def run_user_agent(
         result = _parse_json_response(content)
     except Exception as e:
         logger.error(f"user_agent 输出解析失败: {e},raw: {content[:500]}")
-        # 兜底:从 checklist 取所有 category id 作为 missing,让流程继续
-        all_ids = [cat["id"] for cat in checklist]
+        # 兜底:直接宣布完成,避免无意义重跑把所有类别再来一遍(浪费 token)
+        # results 留空,orchestrator 落库 0 个结果;reasoning 记录失败原因供回查
+        last_summary = (
+            react_agent_summaries[-1].get("summary", "")
+            if react_agent_summaries else ""
+        )
         result = {
             "covered": [],
-            "missing": all_ids,
-            "reasoning": f"user_agent 输出解析失败,兜底全部 missing: {e}",
-            "followup_query": "请重新执行,覆盖所有类别。",
-            "done": False,
+            "missing": [],
+            "reasoning": (
+                f"user_agent 输出解析失败({e}),直接结束避免无意义重跑。"
+                f"最后一条 react_agent 总结:\n{last_summary[:500]}"
+            ),
+            "followup_query": "",
+            "done": True,
             "ask_user": False,
         }
 
@@ -342,23 +379,84 @@ def _stream_user_agent_llm(
 # ============================================================
 
 
-def _summarize_results(results: list[dict[str, Any]]) -> str:
-    """把 results 列表摘要成简短文本(通用,不绑定场景字段)"""
-    if not results:
-        return "(无结果)"
-    lines = []
-    for r in results:
-        title = r.get("title", "?")[:80]
-        content = r.get("content", "")[:60]
-        # 通用展示:若有 metadata,取其 keys 拼到行尾(不假设具体字段名)
-        metadata = r.get("metadata") or {}
-        meta_hint = ""
-        if metadata:
-            # 取前 3 个 key 做提示
-            keys = list(metadata.keys())[:3]
-            meta_hint = f" [{', '.join(keys)}]"
-        lines.append(f"  - {title} - {content}{meta_hint}")
-    return "\n".join(lines)
+def _build_user_agent_history(
+    db: Session, task_id, current_round_idx: int,
+) -> str:
+    """加载 user_agent 自己之前各轮的评估记录,作为前缀注入 user_msg
+
+    同一任务内,user_agent 每次调用都是无状态的(messages 只含 system + 当前 user)。
+    若不做记忆传递,user_agent 看不到自己之前几轮的 covered/missing 判断,
+    可能在 covered/missing 之间反复摇摆,或忘记之前已认定的覆盖情况。
+
+    本函数从 Conversation 表加载 round_idx < current_round_idx 的
+    user_agent type=evaluation 记录,提取其 reasoning(完整评估含 covered/
+    missing/判断/追问),拼接成文本。单条截断到 MAX_HISTORY_MSG_CHARS,
+    整体超 MAX_HISTORY_TOTAL_CHARS 时按"重要性"保留(修复 5):
+      - 优先保留 missing 非空的轮次(还有未覆盖项,对决策更有参考价值)
+      - 其次保留 done=false 的轮次
+      - 同优先级内 FIFO 丢最早轮次
+
+    返回字符串(可能为空)。current_round_idx < 2 时返回空(第 1 轮之前
+    只有初始评估,刚输出过,注入意义不大)。
+    """
+    if current_round_idx < 2:
+        return ""
+
+    convs = (
+        db.query(Conversation)
+        .filter(
+            Conversation.task_id == task_id,
+            Conversation.round_idx < current_round_idx,
+            Conversation.role == "user_agent",
+            Conversation.type == "evaluation",
+        )
+        .order_by(Conversation.round_idx, Conversation.created_at)
+        .all()
+    )
+    if not convs:
+        return ""
+
+    # 逐轮构造记忆段
+    segments: list[str] = []
+    # 同时记录每段的"重要性"(用于超限时裁剪):missing 非空 > done=false > 其他
+    priorities: list[int] = []
+    for c in convs:
+        # reasoning 是 _record_user_agent 写入的 full_eval(含 covered/missing/判断/追问)
+        text = c.reasoning or c.content or ""
+        if not text:
+            continue
+        text = text[:MAX_HISTORY_MSG_CHARS]
+
+        # 解析重要性(从 reasoning 文本粗判)
+        # full_eval 格式:"已覆盖: [...]\n未覆盖: [...]\n判断: ..."
+        priority = 0
+        if "未覆盖: []" not in text and "未覆盖: []" not in text.replace(" ", ""):
+            # missing 列表非空 → 最高优先级
+            if "未覆盖:" in text:
+                missing_part = text.split("未覆盖:")[1].split("\n")[0]
+                if missing_part.strip() and missing_part.strip() != "[]":
+                    priority = 2
+        if priority == 0 and "→ 宣布完成" not in text:
+            # done=false → 中等优先级
+            priority = 1
+
+        segments.append(f"=== 第 {c.round_idx} 轮 user_agent 评估 ===\n{text}")
+        priorities.append(priority)
+
+    if not segments:
+        return ""
+
+    # 整体超限时按优先级裁剪:优先级低的先丢;同优先级 FIFO 丢最早
+    total = sum(len(s) for s in segments)
+    while total > MAX_HISTORY_TOTAL_CHARS and len(segments) > 1:
+        # 找最低优先级中最早的一条
+        min_priority = min(priorities)
+        drop_idx = priorities.index(min_priority)
+        dropped = segments.pop(drop_idx)
+        priorities.pop(drop_idx)
+        total -= len(dropped)
+
+    return "[你之前各轮的评估记录(保持覆盖度判断连续性)]\n" + "\n\n".join(segments)
 
 
 def _parse_json_response(content: str) -> dict[str, Any]:
