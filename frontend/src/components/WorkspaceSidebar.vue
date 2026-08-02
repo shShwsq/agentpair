@@ -17,12 +17,25 @@ import {
   listWorkspaceFiles,
   readWorkspaceFile,
 } from '@/api/workspace'
-import { listTasks } from '@/api/task'
+import {
+  deleteTask,
+  listTasks,
+  updateTaskTitle,
+} from '@/api/task'
 import { extractErrorMessage } from '@/utils/error'
 import type { TaskListItem, TaskStatus } from '@/types/task'
 import type { WorkspaceEntry } from '@/types/workspace'
 
 const router = useRouter()
+
+// ============================================================
+// 对外事件:任务被删除/标题被修改时通知父组件(父可据此跳转/同步状态)
+// ============================================================
+
+const emit = defineEmits<{
+  (e: 'task-deleted', taskId: string): void
+  (e: 'task-title-updated', taskId: string, title: string | null): void
+}>()
 
 // ============================================================
 // 视图状态
@@ -82,6 +95,193 @@ function goToTaskDetail(taskId: string): void {
 function goToNewTask(): void {
   router.push('/tasks/new')
 }
+
+// ============================================================
+// 任务项"更多操作"菜单(三个点按钮)+ 修改标题 / 删除任务
+// ============================================================
+
+/** 当前展开菜单的任务 id(null=无菜单展开) */
+const openMenuTaskId = ref<string | null>(null)
+/** 菜单定位(基于按钮 boundingClientRect,固定到视口) */
+const menuPos = reactive({ top: 0, right: 0 })
+
+/** 当前展开菜单对应的任务对象(便于模板渲染菜单项) */
+const openMenuTask = computed<TaskListItem | null>(() => {
+  if (!openMenuTaskId.value) return null
+  return tasks.value.find((t) => t.id === openMenuTaskId.value) ?? null
+})
+
+function toggleTaskMenu(task: TaskListItem, event: MouseEvent): void {
+  event.stopPropagation()
+  if (openMenuTaskId.value === task.id) {
+    closeTaskMenu()
+    return
+  }
+  const btn = event.currentTarget as HTMLElement
+  const rect = btn.getBoundingClientRect()
+  // 菜单宽度 ~160px,放在按钮左下方,右边缘对齐按钮右边缘
+  menuPos.top = rect.bottom + 4
+  menuPos.right = Math.max(8, window.innerWidth - rect.right)
+  openMenuTaskId.value = task.id
+}
+
+function closeTaskMenu(): void {
+  openMenuTaskId.value = null
+}
+
+// ---- 修改标题(就地内联编辑) ----
+
+/** 当前正在编辑标题的任务 id(null=不在编辑) */
+const editingTaskId = ref<string | null>(null)
+/** 编辑中的标题草稿 */
+const editingDraft = ref('')
+/** 编辑中的原标题(用于比较是否变化、Esc 还原) */
+const editingOriginal = ref('')
+/** 编辑中是否正在提交(禁用输入框) */
+const editingLoading = ref(false)
+/** 输入框引用(用于打开编辑时聚焦 + 选中文本) */
+const editInputRef = ref<HTMLInputElement | null>(null)
+
+/** 进入编辑模式:点击"修改标题"菜单项后,任务项标题就地变输入框 */
+function startEditTitle(task: TaskListItem): void {
+  closeTaskMenu()
+  editingTaskId.value = task.id
+  editingOriginal.value = task.title ?? ''
+  editingDraft.value = task.title ?? ''
+  editingLoading.value = false
+  // 下一个 tick 聚焦 + 选中文本,便于直接覆盖输入
+  nextTick(() => {
+    const el = editInputRef.value
+    if (el) {
+      el.focus()
+      el.select()
+    }
+  })
+}
+
+function cancelEditTitle(): void {
+  if (editingLoading.value) return
+  editingTaskId.value = null
+  editingDraft.value = ''
+  editingOriginal.value = ''
+}
+
+async function commitEditTitle(): Promise<void> {
+  if (!editingTaskId.value || editingLoading.value) return
+  const taskId = editingTaskId.value
+  const trimmed = editingDraft.value.trim()
+  // 标题无变化直接退出编辑(不算失败)
+  if (trimmed === editingOriginal.value.trim()) {
+    editingTaskId.value = null
+    return
+  }
+  editingLoading.value = true
+  try {
+    await updateTaskTitle(taskId, trimmed)
+    // 同步本地列表
+    const idx = tasks.value.findIndex((t) => t.id === taskId)
+    if (idx >= 0) {
+      tasks.value[idx] = {
+        ...tasks.value[idx],
+        title: trimmed || null,
+      }
+    }
+    emit('task-title-updated', taskId, trimmed || null)
+    editingTaskId.value = null
+  } catch (e) {
+    // 失败:保留编辑态,把光标还给输入框,让用户看到错误后修改
+    editingLoading.value = false
+    // 把错误信息写到任务列表的临时提示位(避免用 alert)
+    const idx = tasks.value.findIndex((t) => t.id === taskId)
+    if (idx >= 0) {
+      ;(tasks.value[idx] as TaskListItem & { _editError?: string })._editError =
+        extractErrorMessage(e)
+    }
+    nextTick(() => editInputRef.value?.focus())
+  } finally {
+    editingLoading.value = false
+  }
+}
+
+/** 编辑中按键盘:Enter 提交,Esc 取消 */
+function onEditKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    void commitEditTitle()
+  } else if (e.key === 'Escape') {
+    e.preventDefault()
+    cancelEditTitle()
+  }
+}
+
+// ---- 删除任务确认弹窗 ----
+
+const deleteState = reactive({
+  open: false,
+  task: null as TaskListItem | null,
+  loading: false,
+  error: '' as string,
+})
+
+function openDeleteDialog(task: TaskListItem): void {
+  closeTaskMenu()
+  deleteState.task = task
+  deleteState.error = ''
+  deleteState.loading = false
+  deleteState.open = true
+}
+
+function closeDeleteDialog(): void {
+  if (deleteState.loading) return
+  deleteState.open = false
+  deleteState.task = null
+}
+
+/** 删除的任务是否处于运行/暂停状态(需额外警告) */
+const deleteTargetRunning = computed(
+  () =>
+    deleteState.task?.status === 'running' ||
+    deleteState.task?.status === 'paused' ||
+    deleteState.task?.status === 'pending',
+)
+
+async function confirmDeleteTask(): Promise<void> {
+  if (!deleteState.task) return
+  const taskId = deleteState.task.id
+  deleteState.loading = true
+  deleteState.error = ''
+  try {
+    await deleteTask(taskId)
+    // 从本地列表移除
+    tasks.value = tasks.value.filter((t) => t.id !== taskId)
+    // 若删除的是当前展开工作区的任务,返回任务列表视图
+    if (selectedTaskId.value === taskId) {
+      backToTasks()
+    }
+    emit('task-deleted', taskId)
+    deleteState.open = false
+    deleteState.task = null
+  } catch (e) {
+    deleteState.error = extractErrorMessage(e)
+  } finally {
+    deleteState.loading = false
+  }
+}
+
+// ESC 关闭菜单(编辑态由输入框自己的 keydown 处理)
+function onGlobalKeydown(e: KeyboardEvent): void {
+  if (e.key !== 'Escape') return
+  if (deleteState.open) return // 删除弹窗自有取消按钮
+  if (editingTaskId.value) return // 编辑态输入框已处理 Esc
+  closeTaskMenu()
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onGlobalKeydown)
+})
+onUnmounted(() => {
+  window.removeEventListener('keydown', onGlobalKeydown)
+})
 
 // ============================================================
 // 工作区可用性
@@ -529,8 +729,48 @@ defineExpose({ openTaskFile })
                 </span>
                 <span class="task-time">{{ formatTaskTime(t.created_at) }}</span>
               </div>
-              <p class="task-input">{{ truncateInput(t.user_input) }}</p>
+              <!-- 标题:编辑态显示输入框,非编辑态显示文本 -->
+              <input
+                v-if="editingTaskId === t.id"
+                ref="editInputRef"
+                v-model="editingDraft"
+                class="task-title-edit"
+                type="text"
+                maxlength="255"
+                placeholder="输入标题(留空回退到任务输入)"
+                :disabled="editingLoading"
+                @click.stop
+                @keydown="onEditKeydown"
+                @blur="commitEditTitle"
+              />
+              <p
+                v-else
+                class="task-input"
+                :title="t.title || t.user_input"
+              >
+                {{ truncateInput(t.title || t.user_input) }}
+              </p>
             </div>
+            <!-- 更多操作(三个点):修改标题 / 删除任务 -->
+            <button
+              class="more-btn"
+              :class="{ active: openMenuTaskId === t.id }"
+              title="更多操作"
+              aria-label="更多操作"
+              @click.stop="toggleTaskMenu(t, $event)"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                fill="currentColor"
+                aria-hidden="true"
+              >
+                <circle cx="5" cy="12" r="2" />
+                <circle cx="12" cy="12" r="2" />
+                <circle cx="19" cy="12" r="2" />
+              </svg>
+            </button>
             <button
               class="workspace-btn"
               title="查看工作区"
@@ -690,6 +930,121 @@ defineExpose({ openTaskFile })
         <pre v-else><code>(空文件)</code></pre>
       </div>
     </section>
+
+    <!-- 任务项"更多操作"下拉菜单(三个点按钮触发) -->
+    <Teleport to="body">
+      <div
+        v-if="openMenuTask"
+        class="task-menu-backdrop"
+        @click="closeTaskMenu"
+        @contextmenu.prevent="closeTaskMenu"
+      >
+        <div
+          class="task-menu"
+          :style="{ top: `${menuPos.top}px`, right: `${menuPos.right}px` }"
+          @click.stop
+        >
+          <button class="task-menu-item" @click="startEditTitle(openMenuTask)">
+            <svg
+              viewBox="0 0 24 24"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+            </svg>
+            <span>修改标题</span>
+          </button>
+          <button class="task-menu-item task-menu-danger" @click="openDeleteDialog(openMenuTask)">
+            <svg
+              viewBox="0 0 24 24"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+            </svg>
+            <span>删除任务</span>
+          </button>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- 删除任务确认弹窗 -->
+    <Teleport to="body">
+      <Transition name="dialog-fade">
+        <div
+          v-if="deleteState.open && deleteState.task"
+          class="title-dialog-mask"
+          @click.self="closeDeleteDialog"
+        >
+          <div class="title-dialog-card title-dialog-danger" role="dialog" aria-modal="true">
+            <header class="title-dialog-header">
+              <div class="title-dialog-title-row">
+                <span class="title-dialog-danger-icon" aria-hidden="true">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                    <line x1="12" y1="9" x2="12" y2="13" />
+                    <line x1="12" y1="17" x2="12.01" y2="17" />
+                  </svg>
+                </span>
+                <h3>删除任务</h3>
+              </div>
+              <button
+                class="title-dialog-close"
+                :disabled="deleteState.loading"
+                aria-label="关闭"
+                @click="closeDeleteDialog"
+              >×</button>
+            </header>
+            <div class="title-dialog-body">
+              <div class="title-dialog-warning">
+                <p class="warning-title">此操作不可恢复</p>
+                <p class="warning-desc">
+                  将永久删除该任务及其所有对话记录和结果。
+                  <template v-if="deleteTargetRunning">
+                    <strong>任务正在运行中,删除会同时终止后台执行。</strong>
+                  </template>
+                </p>
+                <p class="warning-target" :title="deleteState.task.title || deleteState.task.user_input">
+                  {{ truncateInput(deleteState.task.title || deleteState.task.user_input, 60) }}
+                </p>
+              </div>
+              <p v-if="deleteState.error" class="title-dialog-error">
+                {{ deleteState.error }}
+              </p>
+            </div>
+            <footer class="title-dialog-footer">
+              <button
+                class="title-btn title-btn-secondary"
+                :disabled="deleteState.loading"
+                @click="closeDeleteDialog"
+              >取消</button>
+              <button
+                class="title-btn title-btn-danger"
+                :disabled="deleteState.loading"
+                @click="confirmDeleteTask"
+              >
+                <span v-if="deleteState.loading" class="title-btn-spinner" />
+                {{ deleteState.loading ? '删除中...' : '确认删除' }}
+              </button>
+            </footer>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>
 
@@ -872,7 +1227,36 @@ defineExpose({ openTaskFile })
   line-height: 1.4;
 }
 
-.workspace-btn {
+/* 任务标题就地编辑输入框(替换 .task-input 文本) */
+.task-title-edit {
+  width: 100%;
+  height: 22px;
+  padding: 0 4px;
+  margin: -1px -4px; /* 抵消 padding,与文本基线对齐 */
+  font-size: var(--fs-xs);
+  font-family: var(--font-sans);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-sm);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-primary-light);
+  /* 防止长文本撑开布局 */
+  min-width: 0;
+}
+
+.task-title-edit::placeholder {
+  color: var(--color-text-muted);
+}
+
+.task-title-edit:disabled {
+  background: var(--color-surface-alt);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+/* 三个点"更多操作"按钮(查看工作区按钮左侧) */
+.more-btn {
   flex-shrink: 0;
   width: 28px;
   height: 28px;
@@ -886,6 +1270,28 @@ defineExpose({ openTaskFile })
   border-radius: var(--radius-sm);
   transition: all var(--transition-fast);
   margin-left: var(--space-2);
+}
+
+.more-btn:hover:not(.active),
+.more-btn.active {
+  background: var(--color-surface-alt);
+  color: var(--color-text);
+}
+
+.workspace-btn {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+  margin-left: 2px;
 }
 
 .workspace-btn:hover {
@@ -1156,5 +1562,266 @@ defineExpose({ openTaskFile })
   background: var(--color-danger-light);
   border-top: 1px solid #fecaca;
   flex-shrink: 0;
+}
+
+/* ============================================================
+ * 任务项"更多操作"下拉菜单 + 修改标题/删除任务弹窗
+ * (元素经 Teleport 渲染到 body,样式仍属本组件 scoped 范围)
+ * ============================================================ */
+
+/* ---- 下拉菜单 ---- */
+.task-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  /* 透明背景:仅用于捕获外部点击以关闭菜单 */
+  background: transparent;
+}
+
+.task-menu {
+  position: fixed;
+  z-index: 1101;
+  min-width: 160px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.task-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast), color var(--transition-fast);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.task-menu-item:hover {
+  background: var(--color-surface-alt);
+}
+
+.task-menu-item svg {
+  flex-shrink: 0;
+  color: var(--color-text-secondary);
+}
+
+.task-menu-danger {
+  color: var(--color-danger);
+}
+
+.task-menu-danger:hover {
+  background: var(--color-danger-light);
+}
+
+.task-menu-danger svg {
+  color: var(--color-danger);
+}
+
+/* ---- 弹窗通用(mask + card) ---- */
+.title-dialog-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1200;
+  padding: var(--space-4);
+}
+
+.title-dialog-card {
+  background: var(--color-surface);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-xl);
+  width: 100%;
+  max-width: 440px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.title-dialog-danger {
+  border: 1px solid var(--color-danger);
+}
+
+.title-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.title-dialog-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.title-dialog-danger-icon {
+  display: inline-flex;
+  color: var(--color-danger);
+}
+
+.title-dialog-header h3 {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  margin: 0;
+  color: var(--color-text);
+}
+
+.title-dialog-close {
+  background: none;
+  border: none;
+  font-size: 24px;
+  line-height: 1;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.title-dialog-close:hover:not(:disabled) {
+  background: var(--color-surface-alt);
+  color: var(--color-text);
+}
+
+.title-dialog-close:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.title-dialog-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-5);
+}
+
+.title-dialog-error {
+  margin: var(--space-3) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--color-danger);
+}
+
+/* ---- 删除确认:警告横幅 ---- */
+.title-dialog-warning {
+  background: var(--color-danger-light);
+  border: 1px solid #fecaca;
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+}
+
+.title-dialog-warning .warning-title {
+  font-weight: var(--fw-semibold);
+  color: var(--color-danger);
+  margin: 0 0 var(--space-1);
+  font-size: var(--fs-sm);
+}
+
+.title-dialog-warning .warning-desc {
+  font-size: var(--fs-sm);
+  color: var(--color-text);
+  margin: 0 0 var(--space-2);
+  line-height: var(--lh-relaxed);
+}
+
+.title-dialog-warning .warning-target {
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+/* ---- 弹窗 footer ---- */
+.title-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-5);
+  border-top: 1px solid var(--color-border);
+}
+
+.title-btn {
+  height: 36px;
+  padding: 0 var(--space-4);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.title-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.title-btn-secondary {
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  border-color: var(--color-border);
+}
+
+.title-btn-secondary:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.title-btn-danger {
+  background: var(--color-danger);
+  color: white;
+}
+
+.title-btn-danger:hover:not(:disabled) {
+  background: #b91c1c;
+}
+
+.title-btn-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: title-btn-spin 0.8s linear infinite;
+}
+
+@keyframes title-btn-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ---- 弹窗过渡 ---- */
+.dialog-fade-enter-active,
+.dialog-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.dialog-fade-enter-from,
+.dialog-fade-leave-to {
+  opacity: 0;
 }
 </style>

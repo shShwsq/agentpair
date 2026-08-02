@@ -17,7 +17,7 @@
  *   (reasoning 不入正式对话表,只在流式卡片临时显示)
  */
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
 import ConversationMessage from '@/components/ConversationMessage.vue'
@@ -53,6 +53,7 @@ import type {
 } from '@/types/task'
 
 const route = useRoute()
+const router = useRouter()
 
 const task = ref<TaskDetail | null>(null)
 const loading = ref(true)
@@ -1176,6 +1177,27 @@ async function onResultFileClick(r: TaskResult): Promise<void> {
   await sidebarRef.value?.openTaskFile(String(task.value.id), path, startLine)
 }
 
+// ---- 侧栏事件:任务被删除 / 标题被修改 ----
+
+/** 侧栏删除任务后:若删除的是当前详情页任务,跳转离开(避免停在 404 页) */
+function onSidebarTaskDeleted(taskId: string): void {
+  if (task.value && task.value.id === taskId) {
+    // 关闭 SSE 等资源
+    if (eventSource) {
+      eventSource.close()
+      eventSource = null
+    }
+    router.replace('/tasks/new')
+  }
+}
+
+/** 侧栏修改标题后:若改的是当前详情页任务,同步本地 task.title */
+function onSidebarTaskTitleUpdated(taskId: string, title: string | null): void {
+  if (task.value && task.value.id === taskId) {
+    task.value = { ...task.value, title }
+  }
+}
+
 // ---- 格式化时间 ----
 
 function formatTime(iso: string): string {
@@ -1214,6 +1236,8 @@ function formatTime(iso: string): string {
     <WorkspaceSidebar
       v-if="task && !workspaceCollapsed"
       ref="sidebarRef"
+      @task-deleted="onSidebarTaskDeleted"
+      @task-title-updated="onSidebarTaskTitleUpdated"
     />
 
     <main class="main">

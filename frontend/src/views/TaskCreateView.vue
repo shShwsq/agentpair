@@ -57,6 +57,8 @@ const loadingModels = ref(true)
 
 /** 用户主输入(对话式 textarea,对应 note 字段) */
 const userInput = ref('')
+/** 任务标题(可选,便于在历史列表识别;留空回退到 user_input 截断展示) */
+const taskTitle = ref('')
 /** GitHub 仓库地址(对应 repo_url 字段) */
 const repoUrl = ref('')
 /** 分支(对应 branch 字段) */
@@ -127,6 +129,7 @@ watch(selectedRepoFullName, (fullName) => {
 // 切换场景时重置输入(避免上一场景的选择残留)
 watch(selectedScenario, () => {
   userInput.value = ''
+  taskTitle.value = ''
   repoUrl.value = ''
   branch.value = ''
   repoInputMode.value = 'url'
@@ -212,6 +215,7 @@ async function handleSubmit(): Promise<void> {
     // 后端立即返回 task_id(后台线程异步执行)
     const res = await createTask({
       scenario: selectedScenario.value,
+      title: taskTitle.value.trim() || undefined,
       user_input: finalUserInput,
       llm_config_id: selectedLlmConfigId.value || undefined,
       params,
@@ -338,6 +342,21 @@ onMounted(async () => {
 
         <!-- 对话式输入框 -->
         <div class="chat-card">
+          <!-- 任务标题(可选) -->
+          <div class="title-row">
+            <input
+              v-model.trim="taskTitle"
+              type="text"
+              class="title-input"
+              maxlength="255"
+              placeholder="任务标题(可选,便于在历史列表识别)"
+              aria-label="任务标题"
+            />
+          </div>
+
+          <!-- 分隔线 -->
+          <div class="chat-divider" />
+
           <!-- 主体:大 textarea -->
           <textarea
             ref="textareaRef"
@@ -654,6 +673,30 @@ onMounted(async () => {
 
 .chat-input::placeholder {
   color: var(--color-text-muted);
+}
+
+/* ---- 任务标题输入(可选) ---- */
+.title-row {
+  display: flex;
+}
+
+.title-input {
+  width: 100%;
+  height: 32px;
+  padding: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  font-family: var(--font-sans);
+  color: var(--color-text);
+  background: transparent;
+  border: none;
+  outline: none;
+  transition: color var(--transition-fast);
+}
+
+.title-input::placeholder {
+  color: var(--color-text-muted);
+  font-weight: var(--fw-normal);
 }
 
 .chat-divider {

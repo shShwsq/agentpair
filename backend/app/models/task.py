@@ -37,6 +37,8 @@ class Task(Base):
     scenario: Mapped[str] = mapped_column(
         String(64), default="code_security_audit", nullable=False
     )
+    # 任务标题:用户可自定义,便于在历史列表中识别;为空时前端用 user_input 截断展示
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # 用户原始输入(意图)。通用化:不再固定 repo_url,而是 user_input
     user_input: Mapped[str] = mapped_column(Text, nullable=False)
     # 可选的补充参数(如 repo_url、branch、scope 等),放 metadata

@@ -155,6 +155,8 @@ export interface TaskCoverageDimension extends ScenarioCoverageDimension {
 /** 提交任务请求(后端 TaskCreateRequest) */
 export interface TaskCreateRequest {
   scenario: string
+  /** 任务标题:可选,用户自定义便于在历史列表识别;为空时前端用 user_input 截断展示 */
+  title?: string
   user_input?: string
   params?: Record<string, unknown>
   /** 用户选择的 LLM 配置 id(对应 user_llm_configs.llm_configs[].id) */
@@ -204,6 +206,8 @@ export interface Conversation {
 export interface TaskDetail {
   id: string
   scenario: string
+  /** 任务标题:可空,前端按 null 回退到 user_input 截断展示 */
+  title: string | null
   user_input: string
   params?: Record<string, unknown> | null
   llm_config_id?: string | null
@@ -220,6 +224,8 @@ export interface TaskDetail {
 export interface TaskListItem {
   id: string
   scenario: string
+  /** 任务标题:可空,前端按 null 回退到 user_input 截断展示 */
+  title: string | null
   user_input: string
   status: TaskStatus
   current_stage: string | null

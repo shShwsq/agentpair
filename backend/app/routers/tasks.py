@@ -44,7 +44,9 @@ from app.schemas.task import (
     TaskCreateResponse,
     TaskListItem,
     TaskResponse,
+    TaskTitleUpdateRequest,
 )
+from app.tools import sandbox_tools
 from app.user_interaction import (
     get_pending_question,
     submit_answers,
@@ -107,8 +109,11 @@ def create_task(
     # 用独立 session 创建 task(不依赖请求级 session,因为要立即返回)
     db = SessionLocal()
     try:
+        # 标题:trim 后为空则存 None(前端按 None 回退到 user_input 截断展示)
+        raw_title = (req.title or "").strip()
         task = Task(
             scenario=req.scenario,
+            title=raw_title or None,
             user_input=user_input,
             params=params,
             user_id=current_user.id if current_user else None,
@@ -429,6 +434,70 @@ def _publish_task_status(task: Task) -> None:
         "status": task.status.value if hasattr(task.status, "value") else str(task.status),
         "current_stage": task.current_stage,
     })
+
+
+# ============================================================
+# 任务标题修改 / 任务删除
+# ============================================================
+
+
+@router.patch("/tasks/{task_id}/title", response_model=TaskResponse)
+def update_task_title(
+    task_id: uuid.UUID,
+    req: TaskTitleUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> Task:
+    """修改任务标题
+
+    title 为空字符串(trim 后)等价于清除自定义标题,前端回退到 user_input 截断展示。
+    权限:与查看一致,匿名任务任何人可改,归属任务仅 owner 可改。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    new_title = req.title.strip()
+    task.title = new_title or None
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+@router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_task(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> Response:
+    """删除任务
+
+    级联删除 conversations / results(数据库层 ondelete=CASCADE)。
+    同时清理 in-memory 暂停状态 + 沙箱 session(若存在),避免资源泄漏。
+
+    注意:运行中的任务被删除时,后台线程可能在下次写库时报错并被自身 try/except 兜底,
+    不会影响进程稳定性。前端可在此后引导用户离开详情页。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    # 先清理 in-memory 资源(暂停门控 + 沙箱 session),再删数据库记录
+    clear_pause_state(str(task_id))
+    try:
+        sandbox_tools.close_session(str(task_id))
+    except Exception as e:
+        logger.warning(f"[task={task_id}] 删除任务时关闭沙箱失败: {e}")
+
+    db.delete(task)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/tasks/{task_id}/coverage")

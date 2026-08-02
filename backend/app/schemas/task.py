@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl
 
 
 class TaskCreateRequest(BaseModel):
@@ -20,6 +20,8 @@ class TaskCreateRequest(BaseModel):
 
     # 场景标识,对应已注册的场景(见 app/scenarios/)
     scenario: str = "code_security_audit"
+    # 任务标题:可选,用户自定义便于识别;为空时前端用 user_input 截断展示
+    title: str | None = Field(default=None, max_length=255)
     # 用户意图文本(必填,若提供 repo_url 则自动生成)
     user_input: str | None = None
     # 可选参数(如 repo_url、branch 等),场景专用
@@ -33,6 +35,15 @@ class TaskCreateRequest(BaseModel):
     repo_url: HttpUrl | None = None
     branch: str | None = None
     scope: str | None = None
+
+
+class TaskTitleUpdateRequest(BaseModel):
+    """修改任务标题的请求
+
+    title 为空字符串等价于清除自定义标题(回退到用 user_input 展示)。
+    """
+
+    title: str = Field(max_length=255)
 
 
 class ResultResponse(BaseModel):
@@ -67,6 +78,7 @@ class TaskResponse(BaseModel):
 
     id: uuid.UUID
     scenario: str
+    title: str | None = None
     user_input: str
     params: dict[str, Any] | None = None
     llm_config_id: str | None = None
@@ -86,6 +98,7 @@ class TaskListItem(BaseModel):
 
     id: uuid.UUID
     scenario: str
+    title: str | None = None
     user_input: str
     status: str
     current_stage: str | None

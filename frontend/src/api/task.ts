@@ -136,3 +136,27 @@ export function pauseTask(taskId: string): Promise<{ status: string; message: st
 export function resumeTask(taskId: string): Promise<{ status: string; message: string }> {
   return client.post(`/tasks/${taskId}/resume`).then((r) => r.data)
 }
+
+// ============================================================
+// 任务标题修改 / 任务删除
+// ============================================================
+
+/**
+ * 修改任务标题
+ *
+ * 传空字符串等价于清除自定义标题(后端存 null,前端回退到 user_input 截断展示)。
+ * 返回最新的任务详情,父组件可据此刷新本地状态。
+ */
+export function updateTaskTitle(taskId: string, title: string): Promise<TaskDetail> {
+  return client.patch(`/tasks/${taskId}/title`, { title }).then((r) => r.data)
+}
+
+/**
+ * 删除任务
+ *
+ * 后端级联删除对话/结果,并清理沙箱 session。
+ * 删除当前正在浏览的任务后,前端需自行跳转离开详情页。
+ */
+export function deleteTask(taskId: string): Promise<void> {
+  return client.delete(`/tasks/${taskId}`).then(() => undefined)
+}
