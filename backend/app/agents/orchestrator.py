@@ -85,18 +85,18 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
     # react_agent 历轮结果摘要(给 user_agent 评估用)
     react_summaries: list[dict] = []
     all_results_count = 0
+    # 修复 4:跨轮 plan 状态(react_agent 之间传递,避免重新规划已完成项)
+    current_plan: list[dict] = []
 
     try:
         # ---------- 预处理:若用户选了仓库,主动 clone + list_files ----------
         # 把仓库结构和 repo_path 提前准备好:
-        #   - 注入 user_agent:看到结构后能给更精准的初始指令/提问
+        #   - 注入 user_agent 第 0 轮:看到结构后能给更精准的初始指令/提问
         #   - 注入 react_agent 第 1 轮:跳过自主 clone,直接开始审计
+        # 修复 9:repo_context 不再拼到 effective_intent(避免膨胀所有轮次的
+        #   user_agent 输入),改为单独传参给 round 0 的 user_agent 调用
         # clone 失败(https+ssh 都不行)抛异常,由外层 except 捕获 → 任务 failed
         repo_path, repo_context = _prepare_repo_context(task, db, task_id_str, github_token)
-        if repo_context:
-            effective_intent += (
-                "\n\n[已预克隆仓库结构,供你参考给出初始指令]\n" + repo_context
-            )
 
         # ---------- 第 0 轮:user_agent 初始评估(含用户澄清循环) ----------
         task.current_stage = "user_agent 初始评估"
@@ -112,6 +112,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 scenario_id=scenario_id,
                 client=llm_client,
                 ask_round=ask_round,
+                repo_context=repo_context,  # 修复 9:仅 round 0 注入,不膨胀 effective_intent
             )
 
             # user_agent 没请求提问 → 提问循环结束,进入协作阶段
@@ -184,13 +185,16 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             # 第 1 轮 followup_query=None(用初始指令);若已主动 clone,传 repo_context
             #   让 react_agent 跳过自主 clone,直接基于已 clone 的仓库开始审计
             # 后续轮 followup_query=追问(不 clone,不传 repo_context)
+            # 修复 4:传入上轮 plan(previous_plan),让本轮从已有进度续接;
+            #   返回本轮结束时的 plan 供下一轮使用
             is_first = round_idx == 1
-            _results, summary = run_react_agent(
+            _results, summary, current_plan = run_react_agent(
                 task, db,
                 round_idx=round_idx,
                 followup_query=None if is_first else followup,
                 client=llm_client,
                 repo_context=repo_context if is_first else None,
+                previous_plan=current_plan if not is_first else None,
             )
 
             react_summaries.append({

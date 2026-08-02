@@ -35,6 +35,13 @@ logger = logging.getLogger(__name__)
 MAX_ITERATIONS = 30
 # 连续相同工具调用的容忍次数,超过就打破循环
 MAX_SAME_CALLS = 3
+# 修复 12:循环检测滑动窗口参数
+# recent_calls 仅保留最近 MAX_RECENT_CALLS 条(避免无限增长 + 限制检测范围)
+MAX_RECENT_CALLS = 10
+# 滑动窗口大小:检查最近 WINDOW_SIZE 次调用是否构成循环
+LOOP_WINDOW_SIZE = 6
+# 窗口内不同 call_sig 少于等于此值 → 判定为循环(覆盖交替循环 A,B,A,B,A,B)
+LOOP_MIN_DISTINCT = 2
 
 # 跨轮记忆传递:从 Conversation 表加载之前轮次的对话,作为前缀注入当前轮 user_msg
 # 单条消息(react_agent 总结 / user_agent 评估)最大字符数,超出截断
@@ -50,7 +57,8 @@ def run_react_agent(
     followup_query: str | None = None,
     client: LLMClient | None = None,
     repo_context: str | None = None,
-) -> tuple[list[dict[str, Any]], str]:
+    previous_plan: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
     """跑一轮 react_agent
 
     参数:
@@ -63,10 +71,16 @@ def run_react_agent(
             (含 repo_path + 根目录结构)。非空时,第 1 轮 user_msg 会注入它并
             提示"仓库已 clone,不要调用 clone_repo,直接开始审计"。
             None 表示未主动 clone(走原流程,LLM 自主 clone)。
+        previous_plan: 上一轮结束时的 plan 状态(修复 4)。None 或空表示第一轮
+            或上轮无 plan。传入时,本轮启动即从该 plan 继续(避免跨轮重新规划
+            已完成项),并在首轮 LLM 调用前作为 system 提醒注入。
 
-    返回:(results 列表, summary 文本)
-        results: [{"title": str, "content": str, "metadata": dict}]
+    返回:(results 列表, summary 文本, final_plan)
+        results: [{"title": str, "content": str, "metadata": dict}](始终为空,
+            结构化结果由 user_agent 在 done 时通过 scenario.extract_results 提取)
         summary: react_agent 的总结说明
+        final_plan: 本轮结束时的 plan 状态(可能为空 list),供 orchestrator
+            传给下一轮实现跨轮延续
 
     注意:本函数不管理 task 状态(不标记 COMPLETED),不关闭沙箱
     """
@@ -141,8 +155,21 @@ def run_react_agent(
     recent_calls: list[str] = []
 
     # plan 状态(代码维护,参考 LangGraph Plan-and-Execute)
-    # 初始为空,LLM 首次思考输出 <plan> 后填充;之后每轮由代码推进 in_progress + LLM 确认 done
-    current_plan: list[dict] = []
+    # 修复 4:从上一轮的 plan 继续,避免跨轮重新规划已完成项
+    # 初始为 previous_plan(深拷贝,避免修改入参);LLM 首次思考可输出 <plan> 更新
+    current_plan: list[dict] = [dict(s) for s in (previous_plan or [])]
+
+    # 跨轮 plan 续接:若有上轮 plan,作为 system 提醒注入首轮 messages,
+    # 让 LLM 看到之前进度(已完成的步骤保持 done,只推进未完成项)
+    if current_plan:
+        initial_reminder = _format_plan_reminder(current_plan)
+        if initial_reminder:
+            messages.append({"role": "system", "content": initial_reminder})
+            # 推送 plan 事件让前端也同步显示跨轮 plan 状态
+            publish(task.id, "plan", {
+                "round_idx": round_idx,
+                "steps": current_plan,
+            })
 
     for iteration in range(1, MAX_ITERATIONS + 1):
         logger.info(f"[task={task.id}] react_agent 第 {round_idx} 轮 / 迭代 {iteration}")
@@ -217,6 +244,10 @@ def run_react_agent(
             # 记录工具调用签名(循环检测)
             call_sig = f"{fn_name}:{json.dumps(fn_args, sort_keys=True)}"
             recent_calls.append(call_sig)
+            # 修复 12:裁剪到滑动窗口范围,避免 recent_calls 无限增长
+            # (仅保留最近 MAX_RECENT_CALLS 条,足够支撑连续检测 + 窗口检测)
+            if len(recent_calls) > MAX_RECENT_CALLS:
+                del recent_calls[: len(recent_calls) - MAX_RECENT_CALLS]
 
             # plan 状态推进:根据工具名推断当前在执行哪个 step,标 in_progress
             # 粗粒度(代码可判),done 标注交给 LLM 在下一轮思考时确认
@@ -293,18 +324,34 @@ def run_react_agent(
                 if not replaced:
                     messages.append({"role": "system", "content": reminder})
 
-        # 循环检测
+        # 循环检测(修复 12:在连续相同检测基础上,增加滑动窗口检测)
+        # 1) 连续 MAX_SAME_CALLS 次完全相同调用 → 死循环(A,A,A)
+        # 2) 滑动窗口 LOOP_WINDOW_SIZE 内不同 call_sig ≤ LOOP_MIN_DISTINCT →
+        #    交替循环(A,B,A,B,A,B 或 A,A,B,A,A,B 这类低多样性重复)
+        is_loop = False
+        loop_reason = ""
         if (
             len(recent_calls) >= MAX_SAME_CALLS
             and len(set(recent_calls[-MAX_SAME_CALLS:])) == 1
         ):
-            logger.warning(
-                f"[task={task.id}] 检测到连续 {MAX_SAME_CALLS} 次相同调用,打破循环"
-            )
+            is_loop = True
+            loop_reason = f"连续 {MAX_SAME_CALLS} 次相同调用"
+        elif len(recent_calls) >= LOOP_WINDOW_SIZE:
+            window = recent_calls[-LOOP_WINDOW_SIZE:]
+            distinct = len(set(window))
+            if distinct <= LOOP_MIN_DISTINCT:
+                is_loop = True
+                loop_reason = (
+                    f"最近 {LOOP_WINDOW_SIZE} 次调用仅 {distinct} 种不同签名"
+                    f"(交替循环),如 {window[:3]}..."
+                )
+
+        if is_loop:
+            logger.warning(f"[task={task.id}] 检测到循环({loop_reason}),打破")
             _add_conversation(
                 db, task, round_idx=round_idx,
                 role="react_agent", type="thinking",
-                content=f"检测到连续重复调用 {MAX_SAME_CALLS} 次,强制转入总结",
+                content=f"检测到调用循环({loop_reason}),强制转入总结",
             )
             messages.append({
                 "role": "user",
@@ -338,7 +385,8 @@ def run_react_agent(
     if not summary:
         summary = f"第 {round_idx} 轮完成"
 
-    return [], summary
+    # 修复 4:返回本轮结束时的 plan 状态,供 orchestrator 传给下一轮
+    return [], summary, current_plan
 
 
 # ============================================================

@@ -100,6 +100,7 @@ def run_user_agent(
     scenario_id: str = "code_security_audit",
     client: LLMClient | None = None,
     ask_round: int = 0,
+    repo_context: str | None = None,
 ) -> dict[str, Any]:
     """执行一次 user_agent 评估
 
@@ -118,6 +119,10 @@ def run_user_agent(
         ask_round: 第 0 轮初始评估时的提问轮次(0=首次评估,1=用户回答后重新评估)
             仅 round_idx=0 且 ask_round < MAX_ASKS 时,user_agent 被允许输出
             ask_user=true 触发用户澄清。
+        repo_context: 修复 9。第 0 轮专用,orchestrator 主动 clone 后的仓库结构
+            上下文。非空时注入到 round 0 的 user_msg(供 user_agent 给更精准的
+            初始指令/提问),但不拼到 user_intent(避免膨胀协作轮次的输入)。
+            协作轮(round_idx>=1)应传 None。
 
     返回:user_agent 的结构化输出
         {
@@ -164,6 +169,12 @@ def run_user_agent(
             f"输出 followup_query 给 react_agent 的第一轮指令。done=false。"
             + ask_hint
         )
+        # 修复 9:repo_context 仅注入到 round 0 的 user_msg(不拼到 user_intent,
+        # 避免被协作轮 user_agent 反复带入)。供 user_agent 参考仓库结构给更精准指令
+        if repo_context:
+            user_msg += (
+                "\n\n[已预克隆仓库结构,供你参考给出初始指令]\n" + repo_context
+            )
     else:
         # 后续轮次:把 react_agent 的自然语言总结给 user_agent 评估(不允许再提问)
         # 注意:react_agent 只输出自然语言 summary,不再有结构化 results 字段
