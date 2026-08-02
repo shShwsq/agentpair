@@ -16,7 +16,7 @@
  * - 流式结束后(phase='end')延迟 800ms 移除卡片,由后续 conversation 事件接管
  *   (reasoning 不入正式对话表,只在流式卡片临时显示)
  */
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
@@ -533,6 +533,41 @@ onMounted(initTask)
 onUnmounted(() => {
   if (eventSource) eventSource.close()
 })
+
+/**
+ * 切换任务时清理旧任务状态(组件复用,route.params.id 变化)
+ *
+ * 不清理 scenarios(场景列表与任务无关,缓存复用)。
+ */
+function resetTaskState(): void {
+  // 断开旧 SSE,避免向旧任务写数据
+  if (eventSource) {
+    eventSource.close()
+    eventSource = null
+  }
+  // 清空流式/计划/对话计数等运行态
+  streamingItems.clear()
+  planPerRound.clear()
+  convCountPerRound.clear()
+  historyReasoningExpanded.clear()
+  // 关闭提问弹窗
+  questionOpen.value = false
+  // 重置任务视图态
+  task.value = null
+  coverageData.value = null
+  loading.value = true
+  error.value = ''
+}
+
+// 同一组件复用下,route.params.id 变化时重新加载任务
+watch(
+  () => route.params.id,
+  (newId, oldId) => {
+    if (!newId || newId === oldId) return
+    resetTaskState()
+    void initTask()
+  },
+)
 
 // ---- 对话流分组:按 round_idx → 按 plan step 分组迭代 → 再按迭代分段 ----
 //
@@ -1234,7 +1269,7 @@ function formatTime(iso: string): string {
     <div class="page-body">
     <!-- 左侧:历史任务栏 + 按需切换工作区(折叠时完全隐藏) -->
     <WorkspaceSidebar
-      v-if="task && !workspaceCollapsed"
+      v-if="!workspaceCollapsed"
       ref="sidebarRef"
       @task-deleted="onSidebarTaskDeleted"
       @task-title-updated="onSidebarTaskTitleUpdated"
