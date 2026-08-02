@@ -1,15 +1,20 @@
 <script setup lang="ts">
 /**
- * 提交任务页
+ * 提交任务页(对话式输入框)
  *
- * 表单字段由选中场景的 form_fields 声明动态渲染(场景无关):
- * - 场景选择(从 GET /scenarios 拉取,每个场景自带表单字段定义)
- * - 使用模型(从 GET /models/configs 拉取用户已配置的 LLM 列表)
- * - 动态字段(按场景声明渲染 text/url/textarea/select/number)
+ * 布局类似常见大模型 Web 聊天输入框:
+ * - 顶部:场景(mode)选择 + 使用模型选择
+ * - 中部:大尺寸 textarea(用户主输入,提交时作为 user_input 拼到智能体上下文)
+ * - 输入框底部:GitHub 仓库选择/输入 + 分支 + 发送按钮
+ *
+ * 字段映射(对齐后端 params):
+ * - userInput → user_input(用户主输入)
+ * - repoUrl   → params.repo_url
+ * - branch    → params.branch
  *
  * 提交后:后端立即返回 task_id(异步执行),前端跳转详情页通过 SSE 观看实时进度。
  */
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
@@ -37,7 +42,7 @@ function toggleWorkspace(): void {
 const scenarios = ref<Scenario[]>([])
 const selectedScenario = ref('')
 
-/** 当前选中场景的声明(驱动表单字段渲染) */
+/** 当前选中场景声明(用于读取 note 字段 placeholder 等元信息) */
 const selectedScenarioDecl = computed<Scenario | null>(() =>
   scenarios.value.find((s) => s.id === selectedScenario.value) ?? null,
 )
@@ -48,31 +53,17 @@ const llmConfigs = ref<LLMConfigItemOut[]>([])
 const selectedLlmConfigId = ref('')
 const loadingModels = ref(true)
 
-// ---- 动态表单数据 ----
+// ---- 表单数据(扁平化,对应场景声明字段) ----
 
-/** 表单字段值,key 对应场景声明 form_fields[].name */
-const formData = reactive<Record<string, string>>({})
+/** 用户主输入(对话式 textarea,对应 note 字段) */
+const userInput = ref('')
+/** GitHub 仓库地址(对应 repo_url 字段) */
+const repoUrl = ref('')
+/** 分支(对应 branch 字段) */
+const branch = ref('')
 
-/** 通用 URL 校验(不绑定 github,场景无关) */
+/** 通用 URL 校验 */
 const urlPattern = /^https?:\/\/[^\s/$.?#].[^\s]*$/
-
-/** 按选中场景声明重置表单字段(切场景时调用) */
-function resetFormData(s: Scenario | null): void {
-  // 清空旧字段
-  Object.keys(formData).forEach((k) => delete formData[k])
-  // 按声明填默认值
-  if (s) {
-    for (const f of s.form_fields) {
-      formData[f.name] = f.default ?? ''
-    }
-  }
-}
-
-// 切换场景时重置表单
-watch(selectedScenario, (newId) => {
-  const s = scenarios.value.find((x) => x.id === newId) ?? null
-  resetFormData(s)
-})
 
 const loading = ref(false)
 const error = ref('')
@@ -86,8 +77,7 @@ const error = ref('')
  * - 'url':手动输入公开仓库地址(默认,场景无关)
  * - 'select':从已绑定 GitHub 账号的仓库列表中选择(可含私有仓库)
  *
- * 仅当用户已绑定 GitHub 且当前场景含 repo_url 字段时,显示模式切换。
- * 未绑定时走普通 url 输入,不阻塞流程。
+ * 仅当用户已绑定 GitHub 时显示模式切换;未绑定时走普通 url 输入,不阻塞流程。
  */
 const githubStatus = ref<GitHubStatus | null>(null)
 const githubBound = computed(() => githubStatus.value?.bound ?? false)
@@ -123,87 +113,106 @@ function switchToSelectMode(): void {
   if (!reposLoaded.value) loadGitHubRepos()
 }
 
-// 选中仓库 → 同步 clone_url 到 formData.repo_url,并填默认分支
+// 选中仓库 → 同步 clone_url 到 repoUrl,并填默认分支
 watch(selectedRepoFullName, (fullName) => {
   if (!fullName) return
   const repo = githubRepos.value.find((r) => r.full_name === fullName)
   if (!repo) return
-  formData.repo_url = repo.clone_url
-  // 若场景含 branch 字段且当前为空,填默认分支
-  const hasBranch = (selectedScenarioDecl.value?.form_fields ?? []).some(
-    (f) => f.name === 'branch',
-  )
-  if (hasBranch && !String(formData.branch ?? '').trim()) {
-    formData.branch = repo.default_branch
+  repoUrl.value = repo.clone_url
+  if (!branch.value.trim()) {
+    branch.value = repo.default_branch
   }
 })
 
-// 切换场景时重置仓库选择状态(避免上一场景的选择残留)
+// 切换场景时重置输入(避免上一场景的选择残留)
 watch(selectedScenario, () => {
+  userInput.value = ''
+  repoUrl.value = ''
+  branch.value = ''
   repoInputMode.value = 'url'
   selectedRepoFullName.value = ''
+  nextTick(autoResize)
 })
 
-/** 基于场景声明校验字段 */
-const errors = computed<Record<string, string>>(() => {
-  const e: Record<string, string> = {}
-  const s = selectedScenarioDecl.value
-  if (!s) return e
-  for (const f of s.form_fields) {
-    const v = String(formData[f.name] ?? '').trim()
-    if (f.required && !v) {
-      e[f.name] = `${f.label}不能为空`
-      continue
-    }
-    if (v && f.type === 'url' && !urlPattern.test(v)) {
-      e[f.name] = `请输入有效的 ${f.label}`
-    }
+// ---- 校验 ----
+
+const repoUrlError = computed(() => {
+  const v = repoUrl.value.trim()
+  if (!v) return '' // 仓库地址可选(用户可只输入文字说明)
+  if (!urlPattern.test(v)) return '请输入有效的仓库地址'
+  return ''
+})
+
+const canSubmit = computed(() => {
+  if (loading.value) return false
+  const hasInput = userInput.value.trim().length > 0
+  const hasRepo = repoUrl.value.trim().length > 0 && !repoUrlError.value
+  return hasInput || hasRepo
+})
+
+/** textarea placeholder:优先用场景声明 note 字段的 placeholder */
+const chatPlaceholder = computed(() => {
+  const noteField = selectedScenarioDecl.value?.form_fields.find(
+    (f) => f.name === 'note',
+  )
+  return (
+    noteField?.placeholder ??
+    '请输入任务说明,如:审计 src/ 目录的 SQL 注入风险'
+  )
+})
+
+// ---- 自动调整 textarea 高度 ----
+
+const textareaRef = ref<HTMLTextAreaElement | null>(null)
+
+function autoResize(): void {
+  const el = textareaRef.value
+  if (!el) return
+  el.style.height = 'auto'
+  // 限制最大高度 ~240px,超过则内部滚动
+  el.style.height = Math.min(el.scrollHeight, 240) + 'px'
+}
+
+watch(userInput, () => {
+  nextTick(autoResize)
+})
+
+function onTextareaKeydown(e: KeyboardEvent): void {
+  // Enter 提交,Shift+Enter 换行
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault()
+    if (canSubmit.value) handleSubmit()
   }
-  return e
-})
-
-const canSubmit = computed(() => Object.keys(errors.value).length === 0 && !loading.value)
+}
 
 // ---- 提交 ----
 
 async function handleSubmit(): Promise<void> {
   error.value = ''
-  if (Object.keys(errors.value).length > 0) return
+  if (!canSubmit.value) return
 
   loading.value = true
   try {
-    // 构造 params:从 formData 取场景声明字段的值
     const params: Record<string, unknown> = {}
-    const s = selectedScenarioDecl.value
-    if (s) {
-      for (const f of s.form_fields) {
-        const v = String(formData[f.name] ?? '').trim()
-        if (v) params[f.name] = v
-      }
-    }
+    const repoUrlVal = repoUrl.value.trim()
+    const branchVal = branch.value.trim()
+    if (repoUrlVal) params.repo_url = repoUrlVal
+    if (branchVal) params.branch = branchVal
 
-    // user_input 生成:repo_url 优先,否则用所有字段拼成文本
-    // (A5 阶段会进一步场景化,这里先保证通用可用)
-    let userInput = ''
-    if (params.repo_url) {
-      userInput = `请处理这个仓库: ${params.repo_url}`
-      if (params.branch) userInput += `\n分支: ${params.branch}`
-      if (params.note) userInput += `\n补充说明: ${params.note}`
-    } else {
-      const parts: string[] = []
-      if (s) {
-        for (const f of s.form_fields) {
-          const v = String(formData[f.name] ?? '').trim()
-          if (v) parts.push(`${f.label}: ${v}`)
-        }
-      }
-      userInput = parts.join('\n') || '(无明确指令)'
+    // user_input 优先用用户主输入;若为空但仓库地址已填,自动兜底生成
+    let finalUserInput = userInput.value.trim()
+    if (!finalUserInput && repoUrlVal) {
+      finalUserInput = `请处理这个仓库: ${repoUrlVal}`
+    }
+    if (!finalUserInput) {
+      error.value = '请输入任务说明或仓库地址'
+      return
     }
 
     // 后端立即返回 task_id(后台线程异步执行)
     const res = await createTask({
       scenario: selectedScenario.value,
-      user_input: userInput,
+      user_input: finalUserInput,
       llm_config_id: selectedLlmConfigId.value || undefined,
       params,
     })
@@ -232,7 +241,7 @@ onMounted(async () => {
     ])
     scenarios.value = scenarioList
     if (scenarioList.length > 0) {
-      selectedScenario.value = scenarioList[0].id // 触发 watch 重置 formData
+      selectedScenario.value = scenarioList[0].id
     }
     if (models && models.llm_configs.length > 0) {
       llmConfigs.value = models.llm_configs
@@ -247,6 +256,11 @@ onMounted(async () => {
   } finally {
     loadingModels.value = false
   }
+  nextTick(() => {
+    autoResize()
+    // 自动聚焦输入框
+    textareaRef.value?.focus()
+  })
 })
 </script>
 
@@ -272,9 +286,43 @@ onMounted(async () => {
       <WorkspaceSidebar v-if="!workspaceCollapsed" />
 
       <main class="main">
-      <div class="form-card">
-        <h1>提交任务</h1>
-        <p class="subtitle">输入任务信息,双智能体将协作完成任务</p>
+        <!-- 顶部:场景模式选择 + 模型选择 -->
+        <div class="topbar">
+          <div class="scenario-segmented" role="tablist" aria-label="场景选择">
+            <button
+              v-for="s in scenarios"
+              :key="s.id"
+              type="button"
+              :class="['seg-btn', { active: selectedScenario === s.id }]"
+              role="tab"
+              :aria-selected="selectedScenario === s.id"
+              @click="selectedScenario = s.id"
+            >{{ s.name }}</button>
+            <span v-if="scenarios.length === 0" class="seg-loading">场景加载中...</span>
+          </div>
+
+          <div class="model-select">
+            <select
+              v-model="selectedLlmConfigId"
+              :disabled="loadingModels"
+              aria-label="使用模型"
+            >
+              <option value="">默认模型</option>
+              <option
+                v-for="cfg in llmConfigs"
+                :key="cfg.id"
+                :value="cfg.id"
+              >
+                {{ modelLabel(cfg) }}
+              </option>
+            </select>
+            <RouterLink
+              v-if="llmConfigs.length === 0 && !loadingModels"
+              to="/models"
+              class="model-empty-link"
+            >配置 →</RouterLink>
+          </div>
+        </div>
 
         <!-- 错误提示 -->
         <Transition name="fade">
@@ -288,60 +336,32 @@ onMounted(async () => {
           </div>
         </Transition>
 
-        <form @submit.prevent="handleSubmit" novalidate>
-          <!-- 场景选择 -->
-          <div class="field">
-            <label>场景</label>
-            <div class="scenario-list">
-              <label
-                v-for="s in scenarios"
-                :key="s.id"
-                :class="['scenario-card', { active: selectedScenario === s.id }]"
+        <!-- 对话式输入框 -->
+        <div class="chat-card">
+          <!-- 主体:大 textarea -->
+          <textarea
+            ref="textareaRef"
+            v-model="userInput"
+            class="chat-input"
+            rows="3"
+            :placeholder="chatPlaceholder"
+            @keydown="onTextareaKeydown"
+          />
+
+          <!-- 分隔线 -->
+          <div class="chat-divider" />
+
+          <!-- 底部:GitHub 仓库 + 分支 + 提交按钮 -->
+          <div class="chat-footer">
+            <!-- 仓库输入/选择区 -->
+            <div class="repo-area">
+              <!-- 模式切换(已绑定 GitHub 才显示) -->
+              <div
+                v-if="githubBound"
+                class="repo-mode-toggle"
+                role="tablist"
+                aria-label="仓库输入方式"
               >
-                <input
-                  type="radio"
-                  v-model="selectedScenario"
-                  :value="s.id"
-                  name="scenario"
-                />
-                <span class="scenario-name">{{ s.name }}</span>
-              </label>
-            </div>
-            <p v-if="scenarios.length === 0" class="field-hint">场景加载中...</p>
-          </div>
-
-          <!-- 模型选择 -->
-          <div class="field">
-            <label>使用模型</label>
-            <select v-model="selectedLlmConfigId" :disabled="loadingModels">
-              <option value="">默认(服务器 env 配置)</option>
-              <option
-                v-for="cfg in llmConfigs"
-                :key="cfg.id"
-                :value="cfg.id"
-              >
-                {{ modelLabel(cfg) }}
-              </option>
-            </select>
-            <p v-if="llmConfigs.length === 0 && !loadingModels" class="field-hint">
-              尚未配置模型,将使用服务器默认配置。
-              <RouterLink to="/models" class="field-link">前往模型设置 →</RouterLink>
-            </p>
-          </div>
-
-          <!-- 动态字段(由选中场景的 form_fields 声明驱动) -->
-          <div
-            v-for="f in selectedScenarioDecl?.form_fields ?? []"
-            :key="f.name"
-            class="field"
-          >
-            <label :for="`field-${f.name}`">
-              {{ f.label }}<span v-if="f.required" class="required-mark"> *</span>
-            </label>
-
-            <!-- repo_url 特殊处理:已绑定 GitHub 时支持从仓库列表选择 -->
-            <template v-if="f.name === 'repo_url' && f.type === 'url' && githubBound">
-              <div class="repo-mode-toggle" role="tablist">
                 <button
                   type="button"
                   :class="['mode-btn', { active: repoInputMode === 'url' }]"
@@ -355,27 +375,37 @@ onMounted(async () => {
                   role="tab"
                   :aria-selected="repoInputMode === 'select'"
                   @click="switchToSelectMode"
-                >从 GitHub 选择</button>
+                >GitHub 选择</button>
               </div>
 
-              <!-- 手动输入模式 -->
-              <input
-                v-if="repoInputMode === 'url'"
-                :id="`field-${f.name}`"
-                v-model.trim="formData[f.name]"
-                type="url"
-                :placeholder="f.placeholder"
-                :class="{ invalid: errors[f.name] }"
-              />
+              <!-- URL 输入 + 分支(同一行) -->
+              <div v-if="repoInputMode === 'url'" class="repo-input-row">
+                <input
+                  v-model.trim="repoUrl"
+                  type="url"
+                  class="repo-input"
+                  :class="{ invalid: repoUrlError }"
+                  placeholder="https://github.com/owner/repo"
+                  aria-label="GitHub 仓库地址"
+                />
+                <input
+                  v-model.trim="branch"
+                  type="text"
+                  class="branch-input"
+                  placeholder="默认分支"
+                  aria-label="分支"
+                />
+              </div>
 
               <!-- 选择模式 -->
-              <div v-else class="repo-select-wrapper">
+              <div v-else class="repo-select-row">
                 <select
                   v-model="selectedRepoFullName"
                   :disabled="reposLoading"
-                  :class="{ invalid: errors[f.name] }"
+                  class="repo-select"
+                  aria-label="选择 GitHub 仓库"
                 >
-                  <option value="">请选择仓库...</option>
+                  <option value="">选择仓库...</option>
                   <option
                     v-for="r in githubRepos"
                     :key="r.full_name"
@@ -384,57 +414,72 @@ onMounted(async () => {
                     {{ r.full_name }}{{ r.private ? ' (私有)' : '' }}
                   </option>
                 </select>
-                <p v-if="reposLoading" class="field-hint">加载仓库列表...</p>
-                <p v-if="reposError" class="field-error">{{ reposError }}</p>
-                <p
-                  v-if="!reposLoading && !reposError && reposLoaded && githubRepos.length === 0"
-                  class="field-hint"
-                >你的 GitHub 账号下暂无仓库</p>
-                <p v-if="!reposLoading && !reposLoaded" class="field-hint">
-                  未绑定 GitHub?
-                  <RouterLink to="/settings" class="field-link">前往设置绑定 →</RouterLink>
-                </p>
+                <input
+                  v-model.trim="branch"
+                  type="text"
+                  class="branch-input"
+                  placeholder="默认分支"
+                  aria-label="分支"
+                />
               </div>
-            </template>
 
-            <!-- 普通字段(非 repo_url 增强场景) -->
-            <template v-else>
-              <input
-                v-if="f.type === 'text' || f.type === 'url' || f.type === 'number'"
-                :id="`field-${f.name}`"
-                v-model.trim="formData[f.name]"
-                :type="f.type === 'number' ? 'number' : (f.type === 'url' ? 'url' : 'text')"
-                :placeholder="f.placeholder"
-                :class="{ invalid: errors[f.name] }"
-              />
-              <textarea
-                v-else-if="f.type === 'textarea'"
-                :id="`field-${f.name}`"
-                v-model="formData[f.name]"
-                rows="3"
-                :placeholder="f.placeholder"
-                :class="{ invalid: errors[f.name] }"
-              />
-              <select
-                v-else-if="f.type === 'select'"
-                :id="`field-${f.name}`"
-                v-model="formData[f.name]"
+              <!-- 仓库加载/错误提示 -->
+              <p v-if="reposLoading" class="repo-hint">加载仓库列表...</p>
+              <p v-if="reposError" class="repo-error">{{ reposError }}</p>
+              <p v-if="repoUrlError" class="repo-error">{{ repoUrlError }}</p>
+              <p
+                v-if="repoInputMode === 'select'
+                  && !reposLoading
+                  && !reposError
+                  && reposLoaded
+                  && githubRepos.length === 0"
+                class="repo-hint"
+              >你的 GitHub 账号下暂无仓库</p>
+              <p
+                v-if="repoInputMode === 'select'
+                  && !reposLoading
+                  && !reposLoaded"
+                class="repo-hint"
               >
-                <option v-for="opt in f.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-              </select>
-            </template>
+                未绑定 GitHub?
+                <RouterLink to="/settings" class="repo-link">前往设置绑定 →</RouterLink>
+              </p>
+            </div>
 
-            <p v-if="f.description" class="field-hint">{{ f.description }}</p>
-            <span v-if="errors[f.name]" class="field-error">{{ errors[f.name] }}</span>
+            <!-- 发送按钮 -->
+            <button
+              type="button"
+              class="send-btn"
+              :disabled="!canSubmit"
+              :title="loading ? '处理中...' : '开始任务 (Enter)'"
+              aria-label="开始任务"
+              @click="handleSubmit"
+            >
+              <span v-if="loading" class="spinner" />
+              <svg
+                v-else
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <line x1="22" y1="2" x2="11" y2="13" />
+                <polygon points="22 2 15 22 11 13 2 9 22 2" />
+              </svg>
+            </button>
           </div>
+        </div>
 
-          <button type="submit" class="btn-primary" :disabled="!canSubmit">
-            <span v-if="loading" class="spinner" />
-            {{ loading ? '处理中...' : '开始任务' }}
-          </button>
-        </form>
-      </div>
-    </main>
+        <!-- 操作提示 -->
+        <p class="chat-tip">
+          <kbd>Enter</kbd> 发送 ·
+          <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行
+        </p>
+      </main>
     </div>
   </div>
 </template>
@@ -459,33 +504,99 @@ onMounted(async () => {
 .main {
   flex: 1;
   min-width: 0;
-  max-width: 640px;
+  max-width: 768px;
   margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
   overflow-y: auto;
-  padding: var(--space-8) var(--space-6);
+  padding: var(--space-6) var(--space-6) var(--space-8);
 }
 
-.form-card {
-  position: relative;
+/* ---- 顶部:场景模式 + 模型 ---- */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.scenario-segmented {
+  display: inline-flex;
+  align-items: center;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-sm);
-  padding: var(--space-8);
+  border-radius: var(--radius-full);
+  padding: 3px;
+  gap: 2px;
 }
 
-.form-card h1 {
-  font-size: var(--fs-xl);
-  margin-bottom: var(--space-2);
-}
-
-.subtitle {
-  color: var(--color-text-secondary);
+.seg-btn {
+  padding: var(--space-2) var(--space-4);
   font-size: var(--fs-sm);
-  margin-bottom: var(--space-6);
+  font-weight: var(--fw-medium);
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
 }
 
-/* ---- 提示 ---- */
+.seg-btn:hover {
+  color: var(--color-text);
+}
+
+.seg-btn.active {
+  color: white;
+  background: var(--color-primary);
+}
+
+.seg-loading {
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--fs-sm);
+  color: var(--color-text-muted);
+}
+
+.model-select {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.model-select select {
+  height: 36px;
+  padding: 0 var(--space-3);
+  font-size: var(--fs-sm);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: border-color var(--transition-fast);
+  max-width: 200px;
+}
+
+.model-select select:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+
+.model-empty-link {
+  font-size: var(--fs-xs);
+  color: var(--color-primary);
+  text-decoration: none;
+}
+
+.model-empty-link:hover {
+  text-decoration: underline;
+}
+
+/* ---- 错误提示 ---- */
 .alert {
   display: flex;
   align-items: flex-start;
@@ -496,7 +607,10 @@ onMounted(async () => {
   margin-bottom: var(--space-4);
 }
 
-.alert svg { flex-shrink: 0; margin-top: 2px; }
+.alert svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
 
 .alert-error {
   background: var(--color-danger-light);
@@ -504,130 +618,68 @@ onMounted(async () => {
   border: 1px solid #fecaca;
 }
 
-/* ---- 表单字段 ---- */
-.field {
-  margin-bottom: var(--space-5);
-}
-
-.field label {
-  display: block;
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
-  margin-bottom: var(--space-2);
-}
-
-.field input,
-.field select,
-.field textarea {
-  width: 100%;
-  padding: var(--space-3);
-  font-size: var(--fs-base);
-  color: var(--color-text);
+/* ---- 对话式输入框 ---- */
+.chat-card {
   background: var(--color-surface);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-md);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
   transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
-.field input {
-  height: 42px;
+.chat-card:focus-within {
+  border-color: var(--color-primary-border);
+  box-shadow: 0 0 0 3px var(--color-primary-light), var(--shadow-md);
 }
 
-.field select {
-  height: 42px;
-}
-
-.field textarea {
-  resize: vertical;
+.chat-input {
+  width: 100%;
+  min-height: 96px;
+  max-height: 240px;
+  padding: 0;
+  font-size: var(--fs-base);
   font-family: var(--font-sans);
-}
-
-.field input::placeholder,
-.field textarea::placeholder {
-  color: var(--color-text-muted);
-}
-
-.field input:focus,
-.field select:focus,
-.field textarea:focus {
+  color: var(--color-text);
+  background: transparent;
+  border: none;
   outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px var(--color-primary-light);
+  resize: none;
+  line-height: var(--lh-relaxed);
+  overflow-y: auto;
 }
 
-.field input.invalid {
-  border-color: var(--color-danger);
-}
-
-.field-error {
-  display: block;
-  margin-top: var(--space-1);
-  font-size: var(--fs-xs);
-  color: var(--color-danger);
-}
-
-.required-mark {
-  color: var(--color-danger);
-  font-weight: var(--fw-semibold);
-}
-
-.field-hint {
-  margin-top: var(--space-1);
-  font-size: var(--fs-xs);
+.chat-input::placeholder {
   color: var(--color-text-muted);
 }
 
-.field-link {
-  color: var(--color-primary);
-  text-decoration: none;
+.chat-divider {
+  height: 1px;
+  background: var(--color-border);
+  margin: 0 calc(-1 * var(--space-4));
 }
 
-.field-link:hover {
-  text-decoration: underline;
-}
-
-/* ---- 场景选择卡片 ---- */
-.scenario-list {
+.chat-footer {
   display: flex;
-  flex-wrap: wrap;
+  align-items: flex-end;
   gap: var(--space-3);
 }
 
-.scenario-card {
+/* ---- 仓库输入区 ---- */
+.repo-area {
+  flex: 1;
+  min-width: 0;
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: all var(--transition-fast);
 }
 
-.scenario-card:hover {
-  border-color: var(--color-primary-border);
-}
-
-.scenario-card.active {
-  border-color: var(--color-primary);
-  background: var(--color-primary-light);
-}
-
-.scenario-card input {
-  width: auto;
-  height: auto;
-  margin: 0;
-}
-
-.scenario-name {
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
-}
-
-/* ---- repo_url 输入模式切换 ---- */
 .repo-mode-toggle {
   display: inline-flex;
-  margin-bottom: var(--space-2);
+  align-self: flex-start;
   background: var(--color-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -637,7 +689,7 @@ onMounted(async () => {
 
 .mode-btn {
   padding: var(--space-1) var(--space-3);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
   color: var(--color-text-secondary);
   background: transparent;
@@ -645,6 +697,7 @@ onMounted(async () => {
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: all var(--transition-fast);
+  white-space: nowrap;
 }
 
 .mode-btn:hover {
@@ -657,32 +710,95 @@ onMounted(async () => {
   box-shadow: var(--shadow-sm);
 }
 
-.repo-select-wrapper select {
-  width: 100%;
+.repo-input-row,
+.repo-select-row {
+  display: flex;
+  gap: var(--space-2);
 }
 
-/* ---- 按钮 ---- */
-.btn-primary {
-  width: 100%;
-  height: 44px;
+.repo-input,
+.repo-select,
+.branch-input {
+  height: 36px;
+  padding: 0 var(--space-3);
+  font-size: var(--fs-sm);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  outline: none;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.repo-input,
+.repo-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.branch-input {
+  flex: 0 0 120px;
+}
+
+.repo-input:focus,
+.repo-select:focus,
+.branch-input:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+
+.repo-input.invalid {
+  border-color: var(--color-danger);
+  box-shadow: 0 0 0 3px var(--color-danger-light);
+}
+
+.repo-hint,
+.repo-error {
+  font-size: var(--fs-xs);
+  margin: 0;
+}
+
+.repo-hint {
+  color: var(--color-text-muted);
+}
+
+.repo-error {
+  color: var(--color-danger);
+}
+
+.repo-link {
+  color: var(--color-primary);
+  text-decoration: none;
+}
+
+.repo-link:hover {
+  text-decoration: underline;
+}
+
+/* ---- 发送按钮 ---- */
+.send-btn {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-2);
-  font-size: var(--fs-base);
-  font-weight: var(--fw-semibold);
   color: white;
   background: var(--color-primary);
+  border: none;
   border-radius: var(--radius-md);
+  cursor: pointer;
   transition: background var(--transition-fast);
 }
 
-.btn-primary:hover:not(:disabled) {
+.send-btn:hover:not(:disabled) {
   background: var(--color-primary-hover);
 }
 
-.btn-primary:disabled {
-  opacity: 0.6;
+.send-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: var(--color-text-muted);
 }
 
 .spinner {
@@ -694,11 +810,60 @@ onMounted(async () => {
   animation: spin 0.6s linear infinite;
 }
 
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- 提示 ---- */
+.chat-tip {
+  margin: var(--space-3) 0 0;
+  text-align: center;
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+}
+
+.chat-tip kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: var(--fs-xs);
+  font-family: var(--font-sans);
+  color: var(--color-text-secondary);
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 1px 0 var(--color-border-strong);
+}
+
 /* ---- 过渡 ---- */
-.fade-enter-active, .fade-leave-active {
+.fade-enter-active,
+.fade-leave-active {
   transition: opacity var(--transition-base);
 }
-.fade-enter-from, .fade-leave-to {
+
+.fade-enter-from,
+.fade-leave-to {
   opacity: 0;
+}
+
+/* ---- 小屏适配 ---- */
+@media (max-width: 640px) {
+  .topbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .model-select {
+    justify-content: flex-end;
+  }
+
+  .model-select select {
+    max-width: 100%;
+  }
+
+  .branch-input {
+    flex: 0 0 96px;
+  }
 }
 </style>
