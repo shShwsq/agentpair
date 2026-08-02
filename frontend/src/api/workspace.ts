@@ -28,7 +28,7 @@ export function listWorkspaceFiles(
     .then((r) => r.data)
 }
 
-/** 读取工作区内文件内容(带行号 + 分页) */
+/** 读取工作区内文件内容(原始文本 + 分页,前端自行渲染行号) */
 export function readWorkspaceFile(
   taskId: string,
   path: string,

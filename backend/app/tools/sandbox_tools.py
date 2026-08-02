@@ -136,9 +136,12 @@ def browse_files(task_id: str, subdir: str = "") -> dict:
 
 
 def browse_read_file(task_id: str, file_path: str, offset: int = 1, max_lines: int = 500) -> dict:
-    """面向前端的文件读取(复用 read_file 逻辑)
+    """面向前端的文件读取(复用 read_file 逻辑,但不带行号)
 
-    默认读 500 行(比 LLM 工具的 200 行多,前端查看用)
+    默认读 500 行(比 LLM 工具的 200 行多,前端查看用)。
+    与 read_file 工具的区别:content 返回原始文本(不带行号前缀),
+    因为前端 WorkspaceSidebar 会自己渲染行号列(start_line + i),
+    若后端再带行号会造成两列行号重复。
     """
     ctx = _sessions.get(task_id)
     if ctx is None:
@@ -150,9 +153,9 @@ def browse_read_file(task_id: str, file_path: str, offset: int = 1, max_lines: i
 
     mode = ctx["mode"]
     if mode == "mock":
-        return _read_file_mock(repo_path, file_path, max_lines, offset)
+        return _read_file_mock(repo_path, file_path, max_lines, offset, with_line_numbers=False)
     else:
-        return _read_file_sandbox(ctx, repo_path, file_path, max_lines, offset)
+        return _read_file_sandbox(ctx, repo_path, file_path, max_lines, offset, with_line_numbers=False)
 
 
 # ============================================================
@@ -413,8 +416,16 @@ def _format_numbered_lines(lines: list[str], start_line: int) -> str:
     )
 
 
-def _read_file_mock(repo_path: str, file_path: str, max_lines: int, offset: int) -> dict:
-    """mock 模式:直接用 Python 读"""
+def _read_file_mock(
+    repo_path: str, file_path: str, max_lines: int, offset: int,
+    with_line_numbers: bool = True,
+) -> dict:
+    """mock 模式:直接用 Python 读
+
+    with_line_numbers:
+        True(LLM 工具 read_file):content 带 cat -n 风格行号前缀
+        False(前端 browse_read_file):content 为原始文本,前端自行渲染行号列
+    """
     full_path = Path(repo_path) / file_path
     # 防路径穿越
     if not full_path.resolve().is_relative_to(Path(repo_path).resolve()):
@@ -446,9 +457,14 @@ def _read_file_mock(repo_path: str, file_path: str, max_lines: int, offset: int)
     start_line = start_idx + 1
     end_line = start_idx + len(selected)
 
+    if with_line_numbers:
+        body = _format_numbered_lines(selected, start_line)
+    else:
+        body = "\n".join(selected)
+
     return {
         "path": file_path,
-        "content": _format_numbered_lines(selected, start_line),
+        "content": body,
         "start_line": start_line,
         "end_line": end_line,
         "total_lines": total_lines,
@@ -457,9 +473,15 @@ def _read_file_mock(repo_path: str, file_path: str, max_lines: int, offset: int)
 
 
 def _read_file_sandbox(
-    ctx: dict, repo_path: str, file_path: str, max_lines: int, offset: int
+    ctx: dict, repo_path: str, file_path: str, max_lines: int, offset: int,
+    with_line_numbers: bool = True,
 ) -> dict:
-    """sandbox 模式:在沙箱里用 awk 读(带行号 + 范围)"""
+    """sandbox 模式:在沙箱里用 awk 读(带行号 + 范围)
+
+    with_line_numbers:
+        True(LLM 工具 read_file):content 带 cat -n 风格行号前缀
+        False(前端 browse_read_file):content 为原始文本,前端自行渲染行号列
+    """
     session: SandboxSession = ctx["session"]
     full_path = f"{repo_path.rstrip('/')}/{file_path.lstrip('/')}"
 
@@ -473,10 +495,16 @@ def _read_file_sandbox(
     # 用 awk 一次性完成:行号格式化 + 范围截取
     start = max(1, offset)
     end = start + max_lines - 1
-    awk_script = (
-        f"NR>={start} && NR<={end} "
-        f"{{printf \"%6d: %s\\n\", NR, $0}}"
-    )
+    if with_line_numbers:
+        awk_script = (
+            f"NR>={start} && NR<={end} "
+            f"{{printf \"%6d: %s\\n\", NR, $0}}"
+        )
+    else:
+        awk_script = (
+            f"NR>={start} && NR<={end} "
+            f"{{printf \"%s\\n\", $0}}"
+        )
     content = session.run_command(
         f"awk '{awk_script}' {shlex.quote(full_path)}"
     )

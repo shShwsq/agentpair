@@ -5,7 +5,7 @@
 端点:
 - GET /tasks/{task_id}/workspace          工作区信息(是否可用、repo_path)
 - GET /tasks/{task_id}/workspace/files    列出目录(懒加载树,单层)
-- GET /tasks/{task_id}/workspace/file     读取文件内容(带行号 + 分页)
+- GET /tasks/{task_id}/workspace/file     读取文件内容(原始文本 + 分页,前端自行渲染行号)
 
 session 生命周期:
 - 任务运行中:clone 完成后即可浏览
@@ -117,17 +117,21 @@ def read_workspace_file(
     db: Session = Depends(get_db),
     current_user: User | None = Depends(get_optional_user),
 ) -> dict:
-    """读取工作区内文件内容(带行号,支持分页)
+    """读取工作区内文件内容(原始文本,支持分页)
 
-    返回结构与 read_file 工具一致:
+    返回结构:
     {
         "path": str,
-        "content": str,       # 带行号的内容
+        "content": str,       # 原始文本(不带行号前缀,前端自行渲染行号列)
         "start_line": int,
         "end_line": int,
         "total_lines": int,
         "truncated": bool,
     }
+
+    注意:与 LLM 工具 read_file 不同,此处 content 不带行号前缀。
+    前端 WorkspaceSidebar 用 start_line + 行索引自行渲染行号,
+    若后端再带行号会造成两列行号重复。
     """
     _check_task_access(task_id, db, current_user)
     sandbox_tools.cleanup_expired_sessions()
