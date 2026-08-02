@@ -23,6 +23,7 @@ import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import { createTask, getScenarios } from '@/api/task'
 import { getMyModels } from '@/api/model_configs'
 import { getGitHubStatus, listGitHubRepos } from '@/api/github'
+import { getSkills, type SkillSummary } from '@/api/skill'
 import { extractErrorMessage } from '@/utils/error'
 import type { Scenario } from '@/types/task'
 import type { LLMConfigItemOut } from '@/types/model_configs'
@@ -57,6 +58,69 @@ const selectedScenarioDecl = computed<Scenario | null>(() =>
 const llmConfigs = ref<LLMConfigItemOut[]>([])
 const selectedLlmConfigId = ref('')
 const loadingModels = ref(true)
+
+// ---- Skill 多选(高级选项) ----
+
+/** 所有可用 skill(从后端 GET /skills 加载) */
+const allSkills = ref<SkillSummary[]>([])
+/** skill 列表加载错误(静默失败,不阻塞提交) */
+const skillsError = ref('')
+/** 高级选项面板是否展开(默认折叠) */
+const advancedOpen = ref(false)
+/**
+ * 当前选中的 skill name 集合
+ *
+ * 语义:
+ * - 默认(无场景推荐 / general):全部勾选(等同于不限制,提交时不传 allowed_skills)
+ * - 选场景后:勾选该场景 recommended_skills 中实际存在的 skill
+ * - 用户可手动勾选/取消
+ * - 提交时:若全部勾选 → 传 undefined(全部可用);否则传选中的数组
+ */
+const selectedSkillNames = ref<Set<string>>(new Set())
+
+/** 是否全部 skill 都已选中 */
+const allSkillsSelected = computed(
+  () => allSkills.value.length > 0 && selectedSkillNames.value.size === allSkills.value.length,
+)
+
+/** 选中的 skill 数量(展示用) */
+const selectedSkillCount = computed(() => selectedSkillNames.value.size)
+
+/** 切换单个 skill 的选中状态 */
+function toggleSkill(name: string): void {
+  const next = new Set(selectedSkillNames.value)
+  if (next.has(name)) next.delete(name)
+  else next.add(name)
+  selectedSkillNames.value = next
+}
+
+/** 全选 / 全不选切换 */
+function toggleAllSkills(): void {
+  if (allSkillsSelected.value) {
+    selectedSkillNames.value = new Set()
+  } else {
+    selectedSkillNames.value = new Set(allSkills.value.map((s) => s.name))
+  }
+}
+
+/**
+ * 根据场景的 recommended_skills 重置 skill 选中状态
+ *
+ * - recommended_skills 为空或 general 场景:全选(默认全部可用)
+ * - recommended_skills 非空:只勾选推荐且实际存在的 skill
+ */
+function applyRecommendedSkills(): void {
+  const recommended = selectedScenarioDecl.value?.recommended_skills ?? []
+  if (recommended.length === 0) {
+    // 无推荐 → 全选(等同于不限制)
+    selectedSkillNames.value = new Set(allSkills.value.map((s) => s.name))
+    return
+  }
+  // 只勾选推荐且实际存在的 skill
+  const existingNames = new Set(allSkills.value.map((s) => s.name))
+  const validRecommended = recommended.filter((name) => existingNames.has(name))
+  selectedSkillNames.value = new Set(validRecommended)
+}
 
 // ---- 表单数据(扁平化,对应场景声明字段) ----
 
@@ -132,7 +196,7 @@ watch(selectedRepoFullName, (fullName) => {
 })
 
 // 切换场景时:把场景的 preset_prompt 预填到 userInput(用户可自由编辑),
-// 并重置其他字段(避免上一场景的选择残留)
+// 并重置其他字段(避免上一场景的选择残留),同时根据推荐重置 skill 选中状态
 watch(selectedScenario, () => {
   userInput.value = selectedScenarioDecl.value?.preset_prompt ?? ''
   taskTitle.value = ''
@@ -140,6 +204,8 @@ watch(selectedScenario, () => {
   branch.value = ''
   repoInputMode.value = 'url'
   selectedRepoFullName.value = ''
+  // 根据场景推荐重置 skill 选中状态(skill 列表已加载时才生效)
+  applyRecommendedSkills()
   nextTick(autoResize)
 })
 
@@ -211,11 +277,17 @@ async function handleSubmit(): Promise<void> {
     }
 
     // 后端立即返回 task_id(后台线程异步执行)
+    // allowed_skills:全部勾选时不传(等同于全部可用);部分勾选时传选中数组
+    const allowedSkillsPayload: string[] | undefined = allSkillsSelected.value
+      ? undefined
+      : Array.from(selectedSkillNames.value)
+
     const res = await createTask({
       scenario: selectedScenario.value,
       title: taskTitle.value.trim() || undefined,
       user_input: finalUserInput,
       llm_config_id: selectedLlmConfigId.value || undefined,
+      allowed_skills: allowedSkillsPayload,
       params,
     })
 
@@ -236,10 +308,11 @@ function modelLabel(cfg: LLMConfigItemOut): string {
 
 onMounted(async () => {
   try {
-    const [scenarioList, models, ghStatus] = await Promise.all([
+    const [scenarioList, models, ghStatus, skills] = await Promise.all([
       getScenarios(),
       getMyModels().catch(() => null),
       getGitHubStatus().catch(() => null), // 静默失败,未绑定不影响提交
+      getSkills().catch(() => null as SkillSummary[] | null), // 静默失败,无 skill 不阻塞提交
     ])
     scenarios.value = scenarioList
     if (scenarioList.length > 0) {
@@ -252,6 +325,12 @@ onMounted(async () => {
       selectedLlmConfigId.value = (firstWithKey ?? models.llm_configs[0]).id
     }
     if (ghStatus) githubStatus.value = ghStatus
+    // skill 列表加载成功后,默认全选;若已选场景则按推荐重置
+    if (skills && skills.length > 0) {
+      allSkills.value = skills
+      selectedSkillNames.value = new Set(skills.map((s) => s.name))
+      applyRecommendedSkills()
+    }
   } catch {
     // 场景拉取失败兜底(不应发生,保留旧默认以便能提交)
     selectedScenario.value = 'general'
@@ -288,7 +367,7 @@ onMounted(async () => {
       <WorkspaceSidebar v-if="!workspaceCollapsed" />
 
       <main class="main">
-        <!-- 顶部:场景模式选择 + 模型选择 -->
+        <!-- 顶部:场景模式选择 + 模型选择 + 高级选项(技能多选) -->
         <div class="topbar">
           <div class="scenario-segmented" role="tablist" aria-label="场景选择">
             <button
@@ -303,26 +382,96 @@ onMounted(async () => {
             <span v-if="scenarios.length === 0" class="seg-loading">场景加载中...</span>
           </div>
 
-          <div class="model-select">
-            <select
-              v-model="selectedLlmConfigId"
-              :disabled="loadingModels"
-              aria-label="使用模型"
-            >
-              <option value="">默认模型</option>
-              <option
-                v-for="cfg in llmConfigs"
-                :key="cfg.id"
-                :value="cfg.id"
+          <div class="topbar-right">
+            <!-- 模型选择 -->
+            <div class="model-select">
+              <select
+                v-model="selectedLlmConfigId"
+                :disabled="loadingModels"
+                aria-label="使用模型"
               >
-                {{ modelLabel(cfg) }}
-              </option>
-            </select>
-            <RouterLink
-              v-if="llmConfigs.length === 0 && !loadingModels"
-              to="/models"
-              class="model-empty-link"
-            >配置 →</RouterLink>
+                <option value="">默认模型</option>
+                <option
+                  v-for="cfg in llmConfigs"
+                  :key="cfg.id"
+                  :value="cfg.id"
+                >
+                  {{ modelLabel(cfg) }}
+                </option>
+              </select>
+              <RouterLink
+                v-if="llmConfigs.length === 0 && !loadingModels"
+                to="/models"
+                class="model-empty-link"
+              >配置 →</RouterLink>
+            </div>
+
+            <!-- 高级选项:Skill 多选(下拉浮层,默认折叠) -->
+            <div v-if="allSkills.length > 0" class="advanced-panel">
+              <button
+                type="button"
+                class="advanced-toggle"
+                :aria-expanded="advancedOpen"
+                @click="advancedOpen = !advancedOpen"
+              >
+                <svg
+                  class="advanced-chevron"
+                  :class="{ expanded: advancedOpen }"
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
+                <span>技能</span>
+                <span class="advanced-summary">
+                  {{ selectedSkillCount }}/{{ allSkills.length }}
+                </span>
+              </button>
+
+              <Transition name="collapse">
+                <div v-show="advancedOpen" class="advanced-dropdown">
+                  <div class="skill-header">
+                    <label class="skill-select-all">
+                      <input
+                        type="checkbox"
+                        :checked="allSkillsSelected"
+                        @change="toggleAllSkills"
+                      />
+                      <span>全选 / 全不选</span>
+                    </label>
+                    <p class="skill-hint">
+                      勾选的技能将作为 react_agent 可调用的专家知识。
+                      全选=不限制(默认);部分勾选=仅允许选中的;全不选=不启用任何技能。
+                    </p>
+                  </div>
+
+                  <div class="skill-list">
+                    <label
+                      v-for="skill in allSkills"
+                      :key="skill.name"
+                      class="skill-item"
+                      :class="{ checked: selectedSkillNames.has(skill.name) }"
+                    >
+                      <input
+                        type="checkbox"
+                        :checked="selectedSkillNames.has(skill.name)"
+                        @change="toggleSkill(skill.name)"
+                      />
+                      <div class="skill-info">
+                        <span class="skill-name">{{ skill.name }}</span>
+                        <span class="skill-desc">{{ skill.description }}</span>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+              </Transition>
+            </div>
           </div>
         </div>
 
@@ -496,6 +645,11 @@ onMounted(async () => {
           <kbd>Enter</kbd> 发送 ·
           <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行
         </p>
+
+        <!-- skill 加载错误提示(静默,不阻塞) -->
+        <p v-if="skillsError" class="skill-load-error">
+          技能列表加载失败:{{ skillsError }}(不影响任务提交)
+        </p>
       </main>
     </div>
   </div>
@@ -611,6 +765,14 @@ onMounted(async () => {
 
 .model-empty-link:hover {
   text-decoration: underline;
+}
+
+/* ---- topbar 右侧:模型 + 高级选项 ---- */
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
 }
 
 /* ---- 错误提示 ---- */
@@ -895,8 +1057,12 @@ onMounted(async () => {
     align-items: stretch;
   }
 
+  .topbar-right {
+    justify-content: space-between;
+  }
+
   .model-select {
-    justify-content: flex-end;
+    flex: 1;
   }
 
   .model-select select {
@@ -906,5 +1072,187 @@ onMounted(async () => {
   .branch-input {
     flex: 0 0 96px;
   }
+
+  /* 窄屏下拉浮层撑满宽度 */
+  .advanced-dropdown {
+    min-width: 0;
+    max-width: calc(100vw - var(--space-6) * 2);
+    right: 0;
+    left: 0;
+  }
+}
+
+/* ---- 高级选项:Skill 多选(下拉浮层,挂在模型选择右边) ---- */
+.advanced-panel {
+  position: relative;
+}
+
+.advanced-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 36px;
+  padding: 0 var(--space-3);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.advanced-toggle:hover {
+  color: var(--color-text);
+  border-color: var(--color-primary-border);
+}
+
+.advanced-toggle[aria-expanded="true"] {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+
+.advanced-chevron {
+  flex-shrink: 0;
+  transition: transform var(--transition-fast);
+  color: var(--color-text-muted);
+}
+
+.advanced-chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.advanced-summary {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-normal);
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 下拉浮层:绝对定位,不撑高 topbar */
+.advanced-dropdown {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  z-index: var(--z-dropdown, 100);
+  min-width: 420px;
+  max-width: min(80vw, 640px);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg, 0 10px 25px rgba(0, 0, 0, 0.12));
+}
+
+.skill-header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  margin-bottom: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.skill-select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--color-text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.skill-select-all input {
+  cursor: pointer;
+}
+
+.skill-hint {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  line-height: var(--lh-relaxed);
+  flex: 1;
+  min-width: 200px;
+}
+
+.skill-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--space-2);
+}
+
+.skill-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.skill-item:hover {
+  border-color: var(--color-primary-border);
+  background: var(--color-surface-alt);
+}
+
+.skill-item.checked {
+  border-color: var(--color-primary-border);
+  background: var(--color-primary-light);
+}
+
+.skill-item input {
+  margin-top: 2px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.skill-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.skill-name {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--color-text);
+  font-family: var(--font-mono, monospace);
+  word-break: break-all;
+}
+
+.skill-desc {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  line-height: var(--lh-snug);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.skill-load-error {
+  margin-top: var(--space-2);
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+/* ---- 折叠过渡 ---- */
+.collapse-enter-active,
+.collapse-leave-active {
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+}
+
+.collapse-enter-from,
+.collapse-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
 }
 </style>

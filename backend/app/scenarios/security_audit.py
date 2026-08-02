@@ -25,12 +25,11 @@ class SecurityAuditTemplate:
 
     @property
     def recommended_skills(self) -> list[str]:
-        # 对应 skills/ 目录下的子目录名(全局可见,这里仅作默认勾选建议)
+        # 对应 skills/ 目录下实际存在的 skill name(来自 SKILL.md frontmatter)
+        # 前端创建任务时默认勾选这些,用户可自行调整
         return [
             "check_sql_injection",
-            "check_command_injection",
             "check_hardcoded_secrets",
-            "check_deserialization",
             "check_ssrf",
         ]
 

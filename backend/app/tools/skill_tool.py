@@ -41,27 +41,18 @@ def set_current_allowed_skills(allowed_skills: list[str] | None) -> None:
 
 
 def _get_all_skills():
-    """获取所有已注册的 skill(跨所有场景目录)
+    """获取所有已注册的 skill(跨所有场景目录,全局可见)
 
-    skill_loader.REGISTRY 内部按 scenario 组织,场景降级后我们遍历所有 scenario
-    汇总 skill 列表。若 skill_loader 支持全局列举则直接用,否则遍历已知 scenario。
+    场景降级后:skill 不再按场景过滤,遍历 SkillRegistry 所有 scenario 汇总。
+    同名 skill 跨场景去重(保留首个)。
     """
-    # 尝试调用 REGISTRY 的全局列举方法(若存在)
-    if hasattr(skill_loader.REGISTRY, "list_all"):
-        return skill_loader.REGISTRY.list_all()
-
-    # 兜底:遍历已注册的 scenario 目录(从 REGISTRY 内部结构推断)
-    # skill_loader 通常按 _SCENARIOS 或类似结构组织,这里兼容性处理
     all_skills = []
-    seen_names = set()
-    # 遍历 REGISTRY 内部的 scenario → skills 映射
-    scenarios_map = getattr(skill_loader.REGISTRY, "_scenarios", None) or \
-                    getattr(skill_loader.REGISTRY, "scenarios", None) or {}
-    for scenario_id, skills in scenarios_map.items():
-        for s in skills:
-            if s.name not in seen_names:
-                all_skills.append(s)
-                seen_names.add(s.name)
+    seen_names: set[str] = set()
+    for scenario_id in skill_loader.REGISTRY.list_scenarios():
+        for skill in skill_loader.REGISTRY.list_for_scenario(scenario_id):
+            if skill.name not in seen_names:
+                all_skills.append(skill)
+                seen_names.add(skill.name)
     return all_skills
 
 
