@@ -1218,22 +1218,24 @@ defineExpose({ openTaskFile })
 }
 
 .task-input {
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
   color: var(--color-text);
   margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   line-height: 1.4;
+  font-weight: var(--fw-medium);
 }
 
 /* 任务标题就地编辑输入框(替换 .task-input 文本) */
 .task-title-edit {
   width: 100%;
-  height: 22px;
+  height: 24px;
   padding: 0 4px;
   margin: -1px -4px; /* 抵消 padding,与文本基线对齐 */
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
   font-family: var(--font-sans);
   color: var(--color-text);
   background: var(--color-surface);
