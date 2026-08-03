@@ -59,6 +59,7 @@ TOOL_FUNCTIONS: dict[str, Any] = {
     "read_file": sandbox_tools.read_file,
     "search_code": sandbox_tools.search_code,
     "run_semgrep": sandbox_tools.run_semgrep,
+    "find_files": sandbox_tools.find_files,
     "query_cve": query_cve,
     "list_skills": list_available_skills,
     "skill": run_skill,
@@ -180,6 +181,46 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "offset": {
                         "type": "integer",
                         "description": "分页偏移,跳过前 N 个匹配,默认 0",
+                    },
+                },
+                "required": ["repo_path", "pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_files",
+            "description": (
+                "按文件名 glob 模式递归查找仓库内文件,返回匹配的文件路径列表(不看内容)。"
+                "适用于知道文件名或扩展名但不知道具体位置的场景,"
+                "如找所有测试文件、配置文件、特定命名的模块。"
+                "pattern 示例:**/*.py(所有 Python 文件)、**/test_*.py(测试文件)、"
+                "src/**/*.ts(src 下的 TS)、**/*.{js,ts}(JS 和 TS)。"
+                "与 list_files 区别:list_files 列单层目录看结构;find_files 按 pattern 递归定位文件。"
+                "与 search_code 区别:search_code 按内容正则搜索;find_files 按文件名 pattern 搜索。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {
+                        "type": "string",
+                        "description": "clone_repo 返回的 path",
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": (
+                            "glob 模式,支持 *、**、?、{a,b}。"
+                            "如 **/*.py、src/**/*.ts、**/test_*.py、**/*.{js,ts}"
+                        ),
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "最多返回文件数,默认 100",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "分页偏移,跳过前 N 个结果,默认 0",
                     },
                 },
                 "required": ["repo_path", "pattern"],

@@ -825,6 +825,186 @@ def _parse_search_output_with_context(output: str, repo_path: str) -> list[dict]
 
 
 # ============================================================
+# 工具:find_files(按文件名 glob 查找,参考 TRAE Glob 工具)
+# ============================================================
+
+
+def find_files(
+    repo_path: str,
+    pattern: str,
+    max_results: int = 100,
+    offset: int = 0,
+    task_id: str = "",
+) -> dict:
+    """按 glob 模式递归查找仓库内文件路径(不看内容)
+
+    参考 TRAE Glob 工具设计:
+    - 按文件名 pattern 匹配,不读取文件内容
+    - 递归查找(支持 ** 通配)
+    - 跳过噪声目录(.git / node_modules / __pycache__ / venv 等)
+    - 返回相对仓库根的路径列表,按路径排序
+    - 支持分页(offset + max_results)
+
+    与 list_files 的区别:
+    - list_files:列单层目录,看结构
+    - find_files:按 pattern 递归定位文件,知道文件名/扩展名时用
+
+    与 search_code 的区别:
+    - search_code:按文件内容搜索(正则)
+    - find_files:按文件名 pattern 搜索
+
+    pattern 示例:
+    - "**/*.py":所有层级的 .py 文件(递归)
+    - "src/**/*.ts":src 下所有 .ts 文件
+    - "**/test_*.py":所有 test_ 开头的 .py 文件
+    - "**/*.{js,ts}":所有 .js 和 .ts 文件(brace expansion)
+
+    参数:
+        repo_path: clone_repo 返回的 path
+        pattern: glob 模式(支持 *、**、?、{a,b})
+        max_results: 最多返回文件数,默认 100
+        offset: 分页偏移,跳过前 N 个结果,默认 0
+
+    返回:{
+        "pattern": str,
+        "files": ["src/main.py", "src/utils.py", ...],  # 相对路径
+        "total": int,
+        "truncated": bool,
+        "offset": int,
+    }
+    """
+    ctx = _get_or_create_session(task_id)
+    mode = ctx["mode"]
+
+    if mode == "mock":
+        return _find_files_mock(repo_path, pattern, max_results, offset)
+    else:
+        return _find_files_sandbox(ctx, repo_path, pattern, max_results, offset)
+
+
+def _expand_braces(pattern: str) -> list[str]:
+    """展开 {a,b} brace expansion 成多个 glob pattern
+
+    Python pathlib.glob 不支持 {a,b} 语法(rg --glob 原生支持),
+    mock 模式手动展开以保持与 sandbox 模式行为一致。
+    支持嵌套(递归处理)。无 brace 时返回 [pattern]。
+    """
+    m = re.search(r"\{([^{}]+)\}", pattern)
+    if not m:
+        return [pattern]
+    options = m.group(1).split(",")
+    expanded: list[str] = []
+    for opt in options:
+        sub = pattern[:m.start()] + opt.strip() + pattern[m.end():]
+        expanded.extend(_expand_braces(sub))
+    return expanded
+
+
+def _find_files_mock(
+    repo_path: str, pattern: str, max_results: int, offset: int,
+) -> dict:
+    """mock 模式:用 pathlib.Path.glob 递归匹配
+
+    Python pathlib.glob 语义:
+    - "*.py" 只匹配根目录(不递归)
+    - "**/*.py" 递归所有层级
+    - "src/**/*.py" 递归 src 下所有层级
+    与 rg --glob 的"*.py 递归"语义有差异,文档里提示 LLM 用 ** 明确递归。
+    """
+    root = Path(repo_path).resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"仓库目录不存在: {repo_path}")
+
+    # Python pathlib 不支持 {a,b},手动展开成多个 pattern
+    patterns = _expand_braces(pattern)
+    seen: set[str] = set()
+    matched: list[str] = []
+    for pat in patterns:
+        for p in root.glob(pat):
+            if not p.is_file():
+                continue
+            rel_parts = p.relative_to(root).parts
+            # 跳过噪声目录下的文件(检查除文件名外的父目录)
+            if any(part in _SKIP_DIRS_LIST for part in rel_parts[:-1]):
+                continue
+            rel = str(p.relative_to(root))
+            if rel not in seen:
+                seen.add(rel)
+                matched.append(rel)
+
+    matched.sort()
+    total = len(matched)
+    page = matched[offset:offset + max_results]
+    return {
+        "pattern": pattern,
+        "files": page,
+        "total": total,
+        "truncated": offset + len(page) < total,
+        "offset": offset,
+    }
+
+
+def _find_files_sandbox(
+    ctx: dict, repo_path: str, pattern: str, max_results: int, offset: int,
+) -> dict:
+    """sandbox 模式:用 rg --files --glob 递归匹配
+
+    rg --files 列出所有文件路径(每行一个),--glob 按 gitignore 风格 glob 过滤。
+    rg 的 --glob 语义:
+    - "*.py" 递归匹配任意层级(与 Python pathlib 不同)
+    - "**/*.py" 同上
+    - "src/**/*.py" 匹配 src 下任意层级
+    - 支持 {a,b} brace expansion
+
+    --no-ignore:不遵守 .gitignore(列出所有文件,含被 ignore 的配置文件)
+    --hidden:包含隐藏文件(如 .env.example)
+    然后手动排除噪声目录,保证与 mock 模式行为一致。
+    """
+    session: SandboxSession = ctx["session"]
+
+    # 检查仓库目录存在
+    check = session.run_command(
+        f"test -d {shlex.quote(repo_path)} && echo OK || echo MISSING"
+    )
+    if "MISSING" in check:
+        raise FileNotFoundError(f"仓库目录不存在: {repo_path}")
+
+    # rg --files 列出所有文件路径,--glob 过滤
+    cmd_parts = ["rg", "--files", "--color=never", "--no-ignore", "--hidden"]
+    # 排除噪声目录(rg --glob 用 ! 前缀表示排除,匹配任意层级)
+    for skip in _SKIP_DIRS_LIST:
+        cmd_parts.extend(["--glob", f"!**/{skip}/**"])
+    # 用户的 pattern
+    cmd_parts.extend(["--glob", shlex.quote(pattern)])
+    cmd_parts.append(shlex.quote(repo_path))
+
+    cmd = " ".join(cmd_parts)
+    logger.info(f"[sandbox] find_files: {cmd}")
+    output = session.run_command(f"{cmd} || true")
+
+    files: list[str] = []
+    for line in output.splitlines():
+        f = line.strip()
+        if not f:
+            continue
+        # 去掉 repo_path 前缀,转成相对路径
+        if f.startswith(repo_path):
+            f = f[len(repo_path):].lstrip("/")
+        files.append(f)
+    files.sort()
+    total = len(files)
+    page = files[offset:offset + max_results]
+
+    return {
+        "pattern": pattern,
+        "files": page,
+        "total": total,
+        "truncated": offset + len(page) < total,
+        "offset": offset,
+    }
+
+
+# ============================================================
 # 辅助:URL 转换
 # ============================================================
 

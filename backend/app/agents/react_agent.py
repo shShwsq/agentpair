@@ -64,6 +64,7 @@ REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行�
 ## 可用工具
 - clone_repo:克隆 GitHub 仓库到沙箱(若 orchestrator 已预克隆,无需调用)
 - list_files:列出目录结构(单层,跳过 .git/node_modules 等噪声目录)
+- find_files:按文件名 glob 模式递归查找文件(如 **/*.py、**/test_*.py),返回路径列表
 - read_file:读取文件内容(带行号,支持 offset 翻页)
 - search_code:正则搜索代码,支持 content/files_with_matches/count 三种输出模式
 - run_semgrep:运行 Semgrep 静态分析(仅 sandbox 模式可用,mock 模式不可用)
@@ -630,6 +631,8 @@ def _build_tool_intent(fn_name: str, fn_args: dict) -> str:
     if fn_name == "list_files":
         subdir = fn_args.get("subdir", "")
         return f"查看目录结构: {subdir or '根目录'}"
+    if fn_name == "find_files":
+        return f"查找文件: {fn_args.get('pattern', '?')}"
     if fn_name == "read_file":
         return f"读取文件 {fn_args.get('file_path', '?')}"
     if fn_name == "search_code":
@@ -765,6 +768,7 @@ def _extract_plan(content: str) -> list[dict] | None:
 _TOOL_STEP_KEYWORDS: dict[str, list[str]] = {
     "clone_repo":      ["克隆", "clone", "仓库"],
     "list_files":      ["结构", "目录", "查看", "list"],
+    "find_files":      ["查找", "定位", "文件", "find"],
     "read_file":       ["读取", "依赖", "清单", "read"],
     "query_cve":       ["依赖", "cve", "漏洞"],
     "search_code":     ["注入", "密钥", "反序列化", "ssrf", "路径", "认证", "授权",
