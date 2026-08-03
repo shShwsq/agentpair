@@ -26,6 +26,7 @@ from app.llm.client import LLMClient
 from app.models.task import Conversation, Task
 from app.pause_controller import wait_if_paused
 from app.tools.schema import execute_tool, get_all_tools, set_current_task
+from app.user_messages import drain_user_messages
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +238,21 @@ def run_react_agent(
 
         # 暂停检查点 1:迭代边界(若用户已暂停,在此阻塞直到恢复)
         wait_if_paused(task.id)
+
+        # 用户补充消息检查点:drain 队列,若有则注入到 LLM 上下文
+        # 用户在对话界面输入框发的消息(运行中/暂停中场景),已由 API 端点
+        # 落库为 Conversation(role=user, type=message)并推送 SSE,
+        # 这里只把它注入到当前 LLM 上下文 messages,让模型在下一迭代看到。
+        # 多条消息合并为一条 user 消息(按时间顺序),避免上下文碎片化。
+        pending_user_msgs = drain_user_messages(task.id)
+        if pending_user_msgs:
+            injected = _format_injected_user_messages(pending_user_msgs)
+            if injected:
+                messages.append({"role": "user", "content": injected})
+                logger.info(
+                    f"[task={task.id}] react_agent 第 {round_idx} 轮 / 迭代 {iteration} "
+                    f"注入 {len(pending_user_msgs)} 条用户补充消息"
+                )
 
         # 流式调用 LLM,累积 reasoning / content / tool_calls
         # 同时通过 event_bus 实时推送 thinking_delta 给前端
@@ -488,6 +504,42 @@ def run_react_agent(
 
     # 修复 4:返回本轮结束时的 plan 状态,供 orchestrator 传给下一轮
     return [], summary, current_plan
+
+
+# ============================================================
+# 用户补充消息注入(运行中/暂停中场景)
+# ============================================================
+
+
+def _format_injected_user_messages(messages: list[dict[str, Any]]) -> str:
+    """把 drain 出的用户补充消息格式化为一条 LLM user 消息文本
+
+    多条消息按时间顺序合并为一条,加前缀说明这是用户在审计过程中追加的指令,
+    引导模型理解为新的检查方向/补充要求,而非替换原始任务。
+
+    返回空字符串表示无可注入内容(消息 content 全为空)。
+    """
+    parts: list[str] = []
+    for msg in messages:
+        content = (msg.get("content") or "").strip()
+        if not content:
+            continue
+        parts.append(content)
+
+    if not parts:
+        return ""
+
+    if len(parts) == 1:
+        body = parts[0]
+    else:
+        body = "\n\n".join(f"[{i + 1}] {p}" for i, p in enumerate(parts))
+
+    return (
+        "[用户在审计过程中追加的消息]\n"
+        "请把以下内容作为新的检查方向或补充要求纳入当前任务,"
+        "结合已掌握的仓库信息继续执行(无需重新 clone):\n\n"
+        f"{body}"
+    )
 
 
 # ============================================================

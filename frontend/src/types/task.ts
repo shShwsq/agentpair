@@ -153,7 +153,18 @@ export interface Conversation {
   round_idx: number
   /** 角色:user / user_agent / react_agent */
   role: string
-  /** 消息类型:evaluation/followup/thinking/tool_call/tool_result/submit/summary/error */
+  /**
+   * 消息类型:
+   * - evaluation: user_agent 评估
+   * - question: user_agent 向用户提问 / react_agent 接收的 user 指令(原始意图)
+   * - answer: 用户对澄清提问的回答
+   * - message: 用户在对话界面下方输入框主动发送的补充消息
+   * - thinking: react_agent 思考过程
+   * - tool_call / tool_result: 工具调用 / 结果
+   * - submit: react_agent 提交结果
+   * - summary: user_agent 最终总结
+   * - error: 错误信息
+   */
   type: string
   content: string
   /**
@@ -341,4 +352,22 @@ export interface ChecklistReviewEventData {
   checklist: ChecklistDimension[]
   /** user_agent 生成清单的依据(展示给用户参考,可选) */
   reasoning?: string
+}
+
+// ============================================================
+// 用户补充消息(对话界面下方输入框)
+// ============================================================
+
+/** 发送用户补充消息请求(POST /tasks/{id}/messages) */
+export interface SendMessageRequest {
+  /** 消息内容(1-8000 字符) */
+  content: string
+}
+
+/** 发送用户补充消息响应 */
+export interface SendMessageResponse {
+  /** 是否被接受(false 表示任务状态不允许或内容无效) */
+  accepted: boolean
+  /** 提示信息(展示给用户) */
+  message?: string
 }

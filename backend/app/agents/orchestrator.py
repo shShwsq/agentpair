@@ -50,8 +50,12 @@ from app.user_interaction import (
     wait_for_answers,
     wait_for_checklist_confirmation,
 )
+from app.user_messages import clear_user_messages
 
 logger = logging.getLogger(__name__)
+
+# 完成后重启允许的最大轮次(避免用户反复追加导致无限审计)
+MAX_RESUME_ROUNDS = 3
 
 
 def run_dual_agent_audit(task: Task, db: Session) -> None:
@@ -338,6 +342,11 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             clear_pause_state(task.id)
         except Exception as cleanup_err:
             logger.warning(f"[task={task.id}] 清理暂停状态失败: {cleanup_err}")
+        # 清理用户补充消息队列(防止任务结束时仍有 in-memory 残留)
+        try:
+            clear_user_messages(task.id)
+        except Exception as cleanup_err:
+            logger.warning(f"[task={task.id}] 清理用户消息队列失败: {cleanup_err}")
         # 延迟关闭沙箱:标记任务完成,保留 session 供前端浏览工作区文件
         # 实际清理由 workspace 路由的 cleanup_expired_sessions() 惰性触发(TTL 1 小时)
         try:
@@ -725,3 +734,253 @@ def _format_repo_context(
             lines.append(f"  [文件] {name}{size_str}")
 
     return "\n".join(lines)
+
+
+# ============================================================
+# 完成后重启:用户在 task 完成后追加消息,触发新一轮协作
+# ============================================================
+
+
+def resume_audit_with_message(task: Task, db: Session, user_message: str) -> None:
+    """用户在任务完成后追加消息,重启协作循环
+
+    流程:
+    1. task.status: COMPLETED → RUNNING
+    2. 加载历史上下文(react_summaries / task_checklist / LLM 配置)
+    3. 起始 round_idx = max(Conversation.round_idx) + 1
+    4. 先调 user_agent 分析用户消息(对照已有 checklist,输出 followup_query)
+    5. 启动协作循环(react_agent + user_agent 评估),最多 MAX_RESUME_ROUNDS 轮
+    6. done 或达到上限时结束,task.status → COMPLETED
+
+    用户消息本身已由 API 端点落库为 Conversation(role=user, type=message),
+    本函数不重复落库。
+
+    注意:本函数由 API 端点在独立后台线程中调用(类似 _run_task_in_background),
+    与原 run_dual_agent_audit 互斥(任务从 completed 改回 running 时,
+    原后台线程已结束)。
+    """
+    task_id_str = str(task.id)
+
+    task.status = TaskStatus.RUNNING
+    task.current_stage = "用户追加消息,重启审计"
+    task.error_message = None  # 清除之前的错误信息(若有)
+    db.commit()
+    _publish_status(task)
+
+    # 加载上下文(与 run_dual_agent_audit 一致)
+    llm_client = _build_llm_client(db, task.user_id, task.llm_config_id)
+    github_token = _load_github_token(db, task.user_id)
+    set_current_github_token(github_token)
+    allowed_skills = task.allowed_skills
+    set_current_task(task_id_str, task.scenario, allowed_skills)
+
+    task_checklist = task.checklist
+    react_summaries = _load_react_summaries(db, task.id)
+    # 重启时不复用旧 plan(让 LLM 根据新消息重新规划)
+    current_plan: list[dict] = []
+
+    # 起始 round = max(Conversation.round_idx) + 1,最多再跑 MAX_RESUME_ROUNDS 轮
+    start_round_idx = _get_next_round_idx(db, task.id)
+    max_rounds = start_round_idx + MAX_RESUME_ROUNDS - 1
+
+    # 把用户消息拼到 user_intent 后面,让 user_agent 把它视为新的检查方向
+    effective_intent = task.user_input + f"\n\n[用户追加消息]\n{user_message}"
+
+    try:
+        # 先调 user_agent 分析用户消息(round_idx = start_round_idx)
+        task.current_stage = f"第 {start_round_idx} 轮:user_agent 分析用户消息"
+        db.commit()
+        _publish_status(task)
+
+        ua_result = run_user_agent(
+            effective_intent, react_summaries,
+            task_id=task.id, db=db, round_idx=start_round_idx,
+            scenario_id=task.scenario, client=llm_client,
+            ask_round=MAX_ASKS,  # 重启不允许提问
+            task_checklist=task_checklist,
+        )
+        _record_user_agent(db, task, start_round_idx, ua_result)
+
+        # user_agent 认为用户消息无需新检查,直接结束
+        if ua_result.get("done"):
+            _persist_structured_results(db, task, start_round_idx, ua_result)
+            _finish_resume(task, db, react_summaries, ua_result)
+            return
+
+        # 启动协作循环:react_agent 执行 + user_agent 评估
+        followup = ua_result.get("followup_query", user_message)
+        for round_idx in range(start_round_idx + 1, max_rounds + 1):
+            # 暂停检查点:每轮开始前
+            wait_if_paused(task.id)
+
+            task.current_stage = f"第 {round_idx} 轮:react_agent 执行"
+            db.commit()
+            _publish_status(task)
+
+            _results, summary, current_plan = run_react_agent(
+                task, db,
+                round_idx=round_idx,
+                followup_query=followup,
+                client=llm_client,
+                repo_context=None,  # 重启不传 repo_context(仓库已 clone,react_agent 自行从 sandbox 取)
+                previous_plan=current_plan if round_idx > start_round_idx + 1 else None,
+            )
+            react_summaries.append({"round": round_idx, "summary": summary})
+
+            # 暂停检查点:react_agent 跑完后、user_agent 评估前
+            wait_if_paused(task.id)
+
+            task.current_stage = f"第 {round_idx} 轮:user_agent 评估"
+            db.commit()
+            _publish_status(task)
+
+            ua_result = run_user_agent(
+                effective_intent, react_summaries,
+                task_id=task.id, db=db, round_idx=round_idx,
+                scenario_id=task.scenario, client=llm_client,
+                ask_round=MAX_ASKS,
+                task_checklist=task_checklist,
+            )
+            _record_user_agent(db, task, round_idx, ua_result)
+
+            if ua_result.get("done"):
+                _persist_structured_results(db, task, round_idx, ua_result)
+                break
+
+            followup = ua_result.get("followup_query", "")
+        else:
+            logger.warning(
+                f"[task={task.id}] 重启审计达到最大轮次 {max_rounds}"
+            )
+
+        _finish_resume(task, db, react_summaries, ua_result)
+
+    except Exception as e:
+        logger.exception(f"[task={task.id}] 重启审计失败")
+        task.status = TaskStatus.FAILED
+        task.error_message = str(e)[:1000]
+        task.current_stage = "重启执行失败"
+        db.commit()
+        _publish_status(task)
+        _add_conversation(
+            db, task, round_idx=0,
+            role="user_agent", type="error",
+            content=f"重启执行失败: {e}",
+        )
+    finally:
+        # 清理资源(与 run_dual_agent_audit 对齐)
+        for cleanup_fn, name in [
+            (clear_pending_question, "待回答问题"),
+            (clear_pending_checklist, "待确认清单"),
+            (clear_pause_state, "暂停状态"),
+            (clear_user_messages, "用户消息队列"),
+        ]:
+            try:
+                cleanup_fn(task.id)
+            except Exception as cleanup_err:
+                logger.warning(f"[task={task.id}] 清理{name}失败: {cleanup_err}")
+        try:
+            sandbox_tools.mark_task_completed(task_id_str)
+        except Exception as cleanup_err:
+            logger.warning(f"[task={task.id}] 标记任务完成失败: {cleanup_err}")
+        # 推送终止事件
+        if task.status == TaskStatus.COMPLETED:
+            publish(task.id, "done", {"status": "completed"})
+        else:
+            publish(task.id, "error", {
+                "status": "failed",
+                "error_message": task.error_message or "未知错误",
+            })
+        finish_task(task.id)
+
+
+def _finish_resume(
+    task: Task, db: Session, react_summaries: list[dict], ua_result: dict,
+) -> None:
+    """重启审计完成:标记 task 状态 + 写最终总结对话"""
+    task.status = TaskStatus.COMPLETED
+    task.current_stage = f"重启审计完成,共 {len(react_summaries)} 轮"
+    task.completed_at = datetime.now(timezone.utc)
+    db.commit()
+    _publish_status(task)
+    _add_conversation(
+        db, task, round_idx=len(react_summaries),
+        role="user_agent", type="summary",
+        content=(
+            f"重启审计完成。\n"
+            f"协作轮次: {len(react_summaries)}\n"
+            f"user_agent 最终评估: {ua_result.get('reasoning', '')}"
+        ),
+    )
+
+
+def _load_react_summaries(db: Session, task_id) -> list[dict]:
+    """从 Conversation 表加载历史 react_agent 总结(供 user_agent 评估)
+
+    按 round_idx 升序,取每个 round 的最后一条 thinking content 作为该轮 summary。
+    (react_agent 内部把每轮最终思考落库为 type=thinking,content 即为 summary)
+    """
+    convs = (
+        db.query(Conversation)
+        .filter(
+            Conversation.task_id == task_id,
+            Conversation.role == "react_agent",
+            Conversation.type == "thinking",
+        )
+        .order_by(Conversation.round_idx.asc(), Conversation.created_at.asc())
+        .all()
+    )
+    summaries_by_round: dict[int, str] = {}
+    for c in convs:
+        if c.content:
+            summaries_by_round[c.round_idx] = c.content
+    return [
+        {"round": r, "summary": s}
+        for r, s in sorted(summaries_by_round.items())
+    ]
+
+
+def _get_next_round_idx(db: Session, task_id) -> int:
+    """获取下一个 round_idx = max(Conversation.round_idx) + 1
+
+    无对话记录时返回 1(理论上不会发生,因为已完成的任务一定有对话)。
+    """
+    latest = (
+        db.query(Conversation)
+        .filter(Conversation.task_id == task_id)
+        .order_by(Conversation.round_idx.desc())
+        .first()
+    )
+    return (latest.round_idx + 1) if latest else 1
+
+
+def _persist_structured_results(
+    db: Session, task: Task, round_idx: int, ua_result: dict,
+) -> None:
+    """落库结构化结果(从 ua_result 提取 results + grouping)
+
+    与 run_dual_agent_audit 协作循环里 done=true 的落库逻辑一致,
+    抽出复用避免代码重复。
+    """
+    structured_results = ua_result.get("results") or []
+    grouping = ua_result.get("grouping")
+    for r in structured_results:
+        result = Result(
+            task_id=task.id,
+            round_idx=round_idx,
+            title=r.get("title", "(无标题)"),
+            content=r.get("content", ""),
+            metadata_=r.get("metadata"),
+        )
+        db.add(result)
+    db.commit()
+    # 把 grouping 存到 task.params 供前端读取(结果分组声明)
+    if grouping:
+        if task.params is not None:
+            task.params = {**(task.params or {}), "_grouping": grouping}
+        else:
+            task.params = {"_grouping": grouping}
+        db.commit()
+    logger.info(
+        f"[task={task.id}] user_agent 整理 {len(structured_results)} 个结构化结果"
+    )

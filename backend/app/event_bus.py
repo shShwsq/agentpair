@@ -165,6 +165,25 @@ def finish_task(task_id: str | UUID) -> None:
     _get_bus(str(task_id)).finish()
 
 
+def reset_task_bus(task_id: str | UUID) -> None:
+    """重置 task 的事件总线(恢复审计时调用)
+
+    任务完成后 _finished=True,后续 publish 全部被丢弃。
+    用户追加消息触发 resume_audit_with_message 时,需先调用此函数
+    清除 _finished 标记和 _history 缓存(含旧 done 事件),
+    让新的 conversation/status/thinking_delta 等事件能正常推送,
+    且前端重连 SSE 时不会因历史 done 事件立即关闭。
+
+    注意:必须在 publish 之前调用,且在后台 resume 线程启动之前
+    (API 端点同步调用,时序有保证)。
+    """
+    bus = _get_bus(str(task_id))
+    with bus._lock:
+        bus._finished = False
+        bus._history.clear()
+    logger.info(f"[task={task_id}] 事件总线已重置(清除 finished 标记 + 历史缓存)")
+
+
 def cleanup_task(task_id: str | UUID) -> None:
     """清理 task 的事件总线(任务完成后释放内存)"""
     with _buses_lock:

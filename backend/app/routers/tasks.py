@@ -24,10 +24,10 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.agents.orchestrator import run_dual_agent_audit
+from app.agents.orchestrator import resume_audit_with_message, run_dual_agent_audit
 from app.database import SessionLocal, get_db
 from app.deps import get_optional_user, get_optional_user_sse
-from app.event_bus import publish, subscribe, unsubscribe
+from app.event_bus import publish, reset_task_bus, subscribe, unsubscribe
 from app.models.task import Conversation, Result, Task, TaskStatus
 from app.models.user import User
 from app.pause_controller import (
@@ -43,6 +43,8 @@ from app.schemas.task import (
     ChecklistReviewRequest,
     PendingQuestion,
     ScenarioInfo,
+    SendMessageRequest,
+    SendMessageResponse,
     TaskCreateRequest,
     TaskCreateResponse,
     TaskListItem,
@@ -58,6 +60,7 @@ from app.user_interaction import (
     submit_answers,
     submit_checklist,
 )
+from app.user_messages import push_user_message
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["tasks"])
@@ -472,6 +475,151 @@ def _record_answer(
         "reasoning": conv.reasoning,
         "created_at": conv.created_at.isoformat() if conv.created_at else None,
     })
+
+
+# ============================================================
+# 用户补充消息(对话界面下方输入框)
+# ============================================================
+
+
+@router.post("/tasks/{task_id}/messages", response_model=SendMessageResponse)
+def submit_task_message(
+    task_id: uuid.UUID,
+    req: SendMessageRequest,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> SendMessageResponse:
+    """用户在对话界面下方输入框发送的补充消息
+
+    按 task.status 分发:
+    - running / paused:消息入队(user_messages.push_user_message),
+      react_agent 在下一迭代边界 drain 出来注入 LLM 上下文
+    - completed:启动新的协作 round(后台线程调 resume_audit_with_message),
+      先让 user_agent 分析这条消息,再决定是否触发新一轮 react_agent 执行
+    - pending / failed:拒绝(任务未启动或已失败)
+
+    消息统一落库为 Conversation(role=user, type=message, round_idx=max+0),
+    并推送 SSE conversation 事件,前端会把它追加到当前 round 的对话流末尾。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    content = (req.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="消息内容不能为空")
+
+    # 拒绝 pending / failed 状态
+    if task.status in (TaskStatus.PENDING, TaskStatus.FAILED):
+        return SendMessageResponse(
+            accepted=False,
+            message=f"任务状态为 {task.status.value},无法接收消息",
+        )
+
+    # 用户消息归到当前最大 round(运行中=当前 round,完成后=最后 round)
+    # 重启后的新 round 从 max+1 开始(由 resume_audit_with_message 处理)
+    latest_conv = (
+        db.query(Conversation)
+        .filter(Conversation.task_id == task_id)
+        .order_by(Conversation.round_idx.desc())
+        .first()
+    )
+    msg_round_idx = latest_conv.round_idx if latest_conv else 0
+
+    # 同步落库(确保刷新时数据库已有记录)
+    conv = Conversation(
+        task_id=task.id,
+        round_idx=msg_round_idx,
+        role="user",
+        type="message",
+        content=content,
+    )
+    db.add(conv)
+    db.commit()
+    db.refresh(conv)
+
+    # 完成态任务:事件总线已被 finish_task 标记为 _finished=True,
+    # 后续 publish 会被静默丢弃。重启审计前先重置总线(清除 _finished +
+    # _history 含旧 done 事件),让新事件能推送、前端重连 SSE 不会立即关闭。
+    if task.status == TaskStatus.COMPLETED:
+        reset_task_bus(task.id)
+
+    publish(task.id, "conversation", {
+        "id": str(conv.id),
+        "round_idx": conv.round_idx,
+        "role": conv.role,
+        "type": conv.type,
+        "content": conv.content,
+        "reasoning": conv.reasoning,
+        "created_at": conv.created_at.isoformat() if conv.created_at else None,
+    })
+
+    # 状态分发
+    if task.status in (TaskStatus.RUNNING, TaskStatus.PAUSED):
+        # 入队,react_agent 下一迭代 drain
+        push_user_message(
+            task.id, content,
+            message_id=str(conv.id),
+            created_at=conv.created_at.isoformat() if conv.created_at else "",
+        )
+        return SendMessageResponse(
+            accepted=True,
+            message="消息已加入队列,智能体将在下一迭代处理",
+        )
+
+    if task.status == TaskStatus.COMPLETED:
+        # 启动新的协作 round(后台线程)
+        # resume_audit_with_message 会把 task.status 改回 RUNNING
+        thread = threading.Thread(
+            target=_run_resume_in_background,
+            args=(str(task_id), content),
+            daemon=True,
+            name=f"task-{task_id}-resume",
+        )
+        thread.start()
+        return SendMessageResponse(
+            accepted=True,
+            message="已启动新一轮审计",
+        )
+
+    # 兜底(理论上不会到这,前面已覆盖所有可接收状态)
+    return SendMessageResponse(
+        accepted=False,
+        message=f"任务状态 {task.status.value} 不支持发送消息",
+    )
+
+
+def _run_resume_in_background(task_id: str, user_message: str) -> None:
+    """后台线程执行重启审计(与 _run_task_in_background 对齐)
+
+    用独立的 DB session(线程安全),执行完毕后关闭。
+    """
+    db = SessionLocal()
+    try:
+        task = db.get(Task, uuid.UUID(task_id))
+        if not task:
+            logger.error(f"重启任务:task {task_id} 不存在")
+            return
+        resume_audit_with_message(task, db, user_message)
+    except Exception as e:
+        logger.exception(f"[task={task_id}] 重启后台执行失败")
+        # 兜底:确保 task 状态被标记为失败
+        try:
+            task = db.get(Task, uuid.UUID(task_id))
+            if task and task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+                task.status = TaskStatus.FAILED
+                task.error_message = str(e)[:1000]
+                task.current_stage = "重启执行失败"
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
+        # 清理 in-memory 暂停状态(防止任务结束但状态卡住)
+        clear_pause_state(task_id)
 
 
 # ============================================================

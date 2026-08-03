@@ -41,7 +41,7 @@ const emit = defineEmits<{
   'toggle-reasoning': [convId: string]
 }>()
 
-type MessageVariant = 'user-agent' | 'react-agent' | 'tool' | 'error' | 'summary' | 'streaming'
+type MessageVariant = 'user-agent' | 'react-agent' | 'tool' | 'error' | 'summary' | 'streaming' | 'user-message'
 
 /** 仅按 role/type 决定 content 卡片配色,不再生成文案标签 */
 function getVariant(item: DisplayItem): MessageVariant {
@@ -55,7 +55,12 @@ function getVariant(item: DisplayItem): MessageVariant {
     if (item.type === 'error') return 'error'
     return 'react-agent'
   }
-  if (item.role === 'user') return 'tool'
+  if (item.role === 'user') {
+    // type=message:用户在对话输入框主动发送的补充消息,用专门配色(与顶部 userDirective 一致)
+    // type=answer:用户对澄清提问的回答,用 tool 配色(等宽小字,内容通常较短)
+    if (item.type === 'message') return 'user-message'
+    return 'tool'
+  }
   return 'react-agent'
 }
 
@@ -341,6 +346,15 @@ const displayContent = computed(() => {
   color: var(--color-text-secondary);
   max-height: 200px;
   overflow-y: auto;
+}
+
+/* 用户补充消息(type=message):蓝色右对齐气泡样式,与顶部 userDirective 视觉一致 */
+/* 注意:外层右对齐由父容器(.user-directive 或 TaskDetailView 中的样式)控制,
+   这里只负责配色 */
+.msg-user-message {
+  background: var(--color-primary-light);
+  border-left-color: var(--color-primary);
+  color: var(--color-text);
 }
 
 .msg-error {

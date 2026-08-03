@@ -11,6 +11,8 @@ import type {
   ChecklistDimension,
   PendingQuestion,
   Scenario,
+  SendMessageRequest,
+  SendMessageResponse,
   TaskCoverage,
   TaskCreateRequest,
   TaskCreateResponse,
@@ -197,4 +199,26 @@ export function updateTaskTitle(taskId: string, title: string): Promise<TaskDeta
  */
 export function deleteTask(taskId: string): Promise<void> {
   return client.delete(`/tasks/${taskId}`).then(() => undefined)
+}
+
+// ============================================================
+// 用户补充消息(对话界面下方输入框)
+// ============================================================
+
+/**
+ * 发送用户补充消息
+ *
+ * 按 task.status 分发:
+ * - running / paused:消息入队,react_agent 下一迭代注入 LLM 上下文
+ * - completed:启动新的协作 round(resume_audit_with_message)
+ * - pending / failed:返回 accepted=false
+ *
+ * 消息会落库为 Conversation(role=user, type=message)并推送 SSE,
+ * 前端通过 onConversation 事件自动追加到对话流当前 round 末尾。
+ */
+export function sendTaskMessage(
+  taskId: string,
+  req: SendMessageRequest,
+): Promise<SendMessageResponse> {
+  return client.post(`/tasks/${taskId}/messages`, req).then((r) => r.data)
 }

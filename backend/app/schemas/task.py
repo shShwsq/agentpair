@@ -215,3 +215,27 @@ class ChecklistReviewRequest(BaseModel):
     """
 
     checklist: list[ChecklistDimension] | None = None
+
+
+# ============================================================
+# 用户补充消息(对话界面下方输入框)
+# ============================================================
+
+
+class SendMessageRequest(BaseModel):
+    """用户在对话界面下方输入框发送的补充消息(POST /tasks/{id}/messages)
+
+    用途:用户在任务运行中/暂停中/完成后追加指令或补充要求。
+    后端按 task.status 分发:
+    - running/paused:消息入队,react_agent 下一迭代注入 LLM 上下文
+    - completed:启动新的协作 round(resume_audit_with_message)
+    """
+
+    content: str = Field(min_length=1, max_length=8000)
+
+
+class SendMessageResponse(BaseModel):
+    """发送用户补充消息的响应"""
+
+    accepted: bool
+    message: str = ""

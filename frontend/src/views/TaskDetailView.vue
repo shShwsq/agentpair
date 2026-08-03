@@ -27,6 +27,7 @@ import AppHeader from '@/components/AppHeader.vue'
 import ChecklistReviewDialog from '@/components/ChecklistReviewDialog.vue'
 import ConversationMessage from '@/components/ConversationMessage.vue'
 import QuestionDialog from '@/components/QuestionDialog.vue'
+import UserMessageInput from '@/components/UserMessageInput.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import {
@@ -51,6 +52,7 @@ import type {
   PlanStep,
   QuestionEventData,
   ChecklistReviewEventData,
+  SendMessageResponse,
   TaskCoverage,
   TaskDetail,
   TaskResult,
@@ -1376,6 +1378,37 @@ function formatTime(iso: string): string {
     second: '2-digit',
   })
 }
+
+// ---- 用户补充消息输入框事件处理 ----
+
+/**
+ * 用户消息发送成功后的处理
+ *
+ * - completed 态:后端已启动 resume 线程(状态 → RUNNING),需重连 SSE
+ *   接收新一轮的事件。用户消息的 conversation 事件已由后端在 reset_task_bus
+ *   后 publish,会通过 SSE 历史补播送达。
+ * - running / paused 态:SSE 已连接,conversation 事件由 onConversation 自动接收,
+ *   无需额外处理。
+ */
+function handleMessageSent(_resp: SendMessageResponse): void {
+  if (task.value?.status === 'completed') {
+    // 后端 resume 线程已把状态改回 RUNNING,本地同步 + 重连 SSE
+    task.value.status = 'running'
+    task.value.current_stage = '用户追加消息,重启审计'
+    connectSSE(String(task.value.id))
+  }
+  nextTick(scrollToBottom)
+}
+
+/** 用户消息发送失败:展示错误提示 */
+function handleMessageError(message: string): void {
+  error.value = message
+}
+
+/** 判断 DisplayItem 是否为用户补充消息(type=message,需右对齐展示) */
+function isUserMessageItem(item: DisplayItem): boolean {
+  return !item.is_streaming && item.role === 'user' && item.type === 'message'
+}
 </script>
 
 <template>
@@ -1407,6 +1440,7 @@ function formatTime(iso: string): string {
     />
 
     <main class="main">
+      <div ref="conversationRef" class="main-scroll">
       <!-- 加载中 -->
       <div v-if="loading" class="loading-state">
         <div class="spinner-lg" />
@@ -1456,7 +1490,7 @@ function formatTime(iso: string): string {
         </section>
 
         <!-- 协作对话流(无外框,顶部仅在运行时显示实时徽标) -->
-        <section v-if="roundGroups.length > 0 || isRunning" ref="conversationRef" class="conversation-section">
+        <section v-if="roundGroups.length > 0 || isRunning" class="conversation-section">
           <div v-if="isRunning" class="conv-header">
             <!-- 暂停态:橙色徽标 + 恢复按钮;运行态:红色实时徽标 + 暂停按钮 -->
             <span v-if="isPaused" class="paused-indicator">
@@ -1509,11 +1543,16 @@ function formatTime(iso: string): string {
                 :key="seg.kind === 'step' ? `step-${seg.id}` : `plain-${seg.item.id}`"
               >
                 <!-- 平铺段:user_agent 评估/追问/总结、user 指令等关键消息 -->
-                <ConversationMessage
+                <!-- 用户补充消息(type=message)右对齐,与顶部 userDirective 视觉一致 -->
+                <div
                   v-if="seg.kind === 'plain'"
-                  :item="seg.item"
-                  @toggle-reasoning="toggleReasoning"
-                />
+                  :class="{ 'user-msg-row': isUserMessageItem(seg.item) }"
+                >
+                  <ConversationMessage
+                    :item="seg.item"
+                    @toggle-reasoning="toggleReasoning"
+                  />
+                </div>
 
                 <!-- step 分组:plan step 下含多个迭代(无 plan 时为单个"审计过程"组) -->
                 <div
@@ -1610,6 +1649,16 @@ function formatTime(iso: string): string {
           </div>
         </section>
       </template>
+      </div>
+
+      <!-- 用户补充消息输入框(running/paused/completed 可见,pending/failed 隐藏) -->
+      <UserMessageInput
+        v-if="task && (task.status === 'running' || task.status === 'paused' || task.status === 'completed')"
+        :task-id="String(task.id)"
+        :task-status="task.status"
+        @sent="handleMessageSent"
+        @error="handleMessageError"
+      />
     </main>
 
     <!-- 右侧:任务详情 + 覆盖度看板(抽屉把手式;展开时顶部条带标题+折叠按钮,折叠时悬浮把手在 page-body 右上角) -->
@@ -1770,8 +1819,28 @@ function formatTime(iso: string): string {
   min-width: 0;
   max-width: var(--content-width);
   margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 可滚动内容区(结果清单 + 协作对话流) */
+.main-scroll {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: var(--space-6) var(--space-6) var(--space-12);
+}
+
+/* 用户补充消息(type=message):右对齐,与顶部 userDirective 一致 */
+.user-msg-row {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.user-msg-row :deep(.msg-group) {
+  max-width: 80%;
 }
 
 /* ---- 右侧任务详情栏(抽屉把手式;展开时顶部条+滚动内容区,折叠时不渲染) ---- */
