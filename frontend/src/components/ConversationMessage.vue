@@ -1,16 +1,14 @@
 <script setup lang="ts">
 /**
- * 协作对话流中的单条消息卡片
+ * 协作对话流中的单条消息
  *
  * 从 TaskDetailView 抽出,用于复用:平铺消息(user_agent 评估/追问/总结、user 指令)、
  * 迭代内的 thinking 项、工具调用/结果项、submit 项等。
  *
  * 渲染规则:
- * - 流式项(is_streaming=true):显示 reasoning(可折叠) + content,流式期间有打字机提示
- * - 正式对话项(is_streaming=false):仅显示 content
- *
- * reasoning 折叠状态由父组件管理(实时流式项的状态在父的 streamingItems Map 里),
- * 通过 toggle-reasoning 事件通知父组件切换。
+ * - reasoning 和 content 是两个独立的卡片,不再是嵌套在同一个外层容器里
+ * - reasoning 卡片可折叠(默认折叠),点击 header 展开/收起
+ * - content 卡片用 role/type 对应配色
  */
 import { computed, ref } from 'vue'
 
@@ -43,68 +41,34 @@ const emit = defineEmits<{
   'toggle-reasoning': [convId: string]
 }>()
 
-interface MessageMeta {
-  label: string
-  variant: 'user-agent' | 'react-agent' | 'tool' | 'error' | 'summary' | 'streaming'
-}
+type MessageVariant = 'user-agent' | 'react-agent' | 'tool' | 'error' | 'summary' | 'streaming'
 
-function getMessageMeta(item: DisplayItem): MessageMeta {
-  if (item.is_streaming && item.streaming) {
-    const role = item.streaming.role
-    const roleLabel = role === 'user_agent' ? 'user_agent' : 'react_agent'
-    if (item.streaming.status === 'streaming') {
-      return { label: `${roleLabel} 思考中`, variant: 'streaming' }
-    }
-    return { label: `${roleLabel} 思考`, variant: 'streaming' }
-  }
-
+/** 仅按 role/type 决定 content 卡片配色,不再生成文案标签 */
+function getVariant(item: DisplayItem): MessageVariant {
+  if (item.is_streaming && item.streaming) return 'streaming'
   if (item.role === 'user_agent') {
-    if (item.type === 'evaluation')
-      return { label: 'user_agent 评估', variant: 'user-agent' }
-    if (item.type === 'followup')
-      return { label: 'user_agent 追问', variant: 'user-agent' }
-    if (item.type === 'summary')
-      return { label: '最终总结', variant: 'summary' }
-    return { label: 'user_agent', variant: 'user-agent' }
+    if (item.type === 'summary') return 'summary'
+    return 'user-agent'
   }
   if (item.role === 'react_agent') {
-    if (item.type === 'thinking')
-      return { label: 'react_agent 思考', variant: 'react-agent' }
-    if (item.type === 'tool_call')
-      return { label: '工具调用', variant: 'tool' }
-    if (item.type === 'tool_result')
-      return { label: '工具结果', variant: 'tool' }
-    if (item.type === 'submit')
-      return { label: '提交结果', variant: 'react-agent' }
-    if (item.type === 'error')
-      return { label: '错误', variant: 'error' }
-    return { label: 'react_agent', variant: 'react-agent' }
+    if (item.type === 'tool_call' || item.type === 'tool_result') return 'tool'
+    if (item.type === 'error') return 'error'
+    return 'react-agent'
   }
-  if (item.role === 'user') {
-    return { label: '用户指令', variant: 'tool' }
-  }
-  return { label: item.role || 'unknown', variant: 'react-agent' }
+  if (item.role === 'user') return 'tool'
+  return 'react-agent'
 }
 
-function formatTime(iso: string): string {
-  const d = new Date(iso)
-  return d.toLocaleString('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  })
-}
-
-const meta = computed(() => getMessageMeta(props.item))
+const variant = computed(() => getVariant(props.item))
 const isActive = computed(
   () => !!(props.item.is_streaming && props.item.streaming?.status === 'streaming'),
 )
-const time = computed(() => formatTime(props.item.created_at))
 
-/** 正式对话项的 reasoning(完整评估)折叠状态:默认折叠,点击展开 */
+/** 正式对话项 reasoning 的折叠状态:默认折叠,点击展开 */
 const evalExpanded = ref(false)
+
+/** 流式项 reasoning 的展开状态(由父组件通过 streamingItems 管理) */
+const streamingExpanded = computed(() => props.item.streaming?.reasoning_expanded ?? false)
 
 /**
  * tool_call content 拆分:后端把意图放在首行,原始调用详情放后续行。
@@ -137,31 +101,15 @@ const streamingDisplayContent = computed(() => {
   return stripPlanBlock(c)
 })
 
-/**
- * 流式项的 reasoning 实际内容(trim 后)。
- * 纯空白时视为无思考链,不渲染"思考链"块;字符数与正文也基于此值,
- * 避免"1 字符"但展开为空等怪异显示。
- */
+/** 流式项的 reasoning 实际内容(trim 后) */
 const streamingReasoning = computed(() => {
   const r = props.item.streaming?.reasoning ?? ''
   return r.trim()
 })
 
 /**
- * 流式思考项是否显示 header(含 "react_agent 思考" 标签/时间戳/流式动画)。
- * 无 reasoning 时整个卡片只是承载 content 输出,标"思考"无意义,隐藏 header。
- * 有 reasoning 时正常显示,与思考链块语义对应。
- */
-const showStreamingHeader = computed(() => {
-  if (!(props.item.is_streaming && props.item.streaming)) return true
-  return streamingReasoning.value.length > 0
-})
-
-/**
- * 整张卡片是否渲染。
+ * 是否渲染该消息组。
  * 非流式项始终渲染;流式项仅在"有 reasoning / 有 content / 正在流式"时任一成立时渲染。
- * 避免流式思考已完成(status=done)但 reasoning 与 content 均空时,
- * 外层 .message(msg-streaming 黄色背景)仍显示一个空黄框。
  */
 const showCard = computed(() => {
   if (!(props.item.is_streaming && props.item.streaming)) return true
@@ -176,56 +124,59 @@ const showCard = computed(() => {
 const displayContent = computed(() => {
   if (toolCallParts.value) return toolCallParts.value.detail
   const c = props.item.content || ''
-  // thinking 类的 content 可能含 plan 块,过滤掉
   if (props.item.type === 'thinking') return stripPlanBlock(c)
   return c
 })
 </script>
 
 <template>
-  <div v-if="showCard" :class="['message', `msg-${meta.variant}`, { 'msg-streaming-active': isActive }]">
-    <div v-if="showStreamingHeader" class="msg-header">
-      <span class="msg-label">{{ meta.label }}</span>
-      <span v-if="isActive" class="msg-streaming-tag">
-        <span class="typing-dots">
-          <span></span><span></span><span></span>
-        </span>
-      </span>
-      <span class="msg-time">{{ time }}</span>
-    </div>
-
-    <!-- 流式思考项:显示 reasoning(可折叠) + content -->
+  <div v-if="showCard" class="msg-group">
+    <!-- 流式思考项:reasoning 卡片 + content 卡片,两者独立 -->
     <template v-if="item.is_streaming && item.streaming">
-      <div v-if="streamingReasoning" class="msg-reasoning">
+      <!-- reasoning 独立卡片(可折叠) -->
+      <div
+        v-if="streamingReasoning"
+        class="msg-reasoning-card"
+        :class="{ 'msg-reasoning-streaming': isActive }"
+      >
         <div
           class="msg-reasoning-header"
           @click="emit('toggle-reasoning', item.streaming.conv_id)"
         >
           <span class="msg-reasoning-toggle">
-            {{ item.streaming.reasoning_expanded ? '▼' : '▶' }}
+            {{ streamingExpanded ? '▼' : '▶' }}
           </span>
-          <span class="msg-reasoning-label">思考链</span>
-          <span class="msg-reasoning-meta">
+          <span class="msg-reasoning-label">思考</span>
+          <span v-if="streamingReasoning" class="msg-reasoning-meta">
             {{ streamingReasoning.length }} 字符
           </span>
+          <span v-if="isActive" class="msg-streaming-tag">
+            <span class="typing-dots">
+              <span></span><span></span><span></span>
+            </span>
+          </span>
         </div>
-        <div
-          v-if="item.streaming.reasoning_expanded"
-          class="msg-reasoning-content"
-        >{{ streamingReasoning }}</div>
+        <div v-if="streamingExpanded" class="msg-reasoning-content">{{ streamingReasoning }}</div>
       </div>
-      <div v-if="streamingDisplayContent" class="msg-content">{{ streamingDisplayContent }}</div>
+
+      <!-- content 独立卡片 -->
+      <div
+        v-if="streamingDisplayContent"
+        :class="['msg-content-card', `msg-${variant}`]"
+      >{{ streamingDisplayContent }}</div>
+
       <div
         v-if="isActive && !item.streaming.reasoning && !streamingDisplayContent"
-        class="msg-content msg-content-muted"
+        class="msg-content-card msg-content-muted"
       >
         等待模型响应...
       </div>
     </template>
 
-    <!-- 正式对话项:若有 reasoning(完整评估)则可折叠展示,默认只显示精简 content -->
+    <!-- 正式对话项:reasoning 卡片(可折叠) + content 卡片,两者独立 -->
     <template v-else>
-      <div v-if="item.reasoning" class="msg-reasoning">
+      <!-- reasoning 独立卡片(可折叠) -->
+      <div v-if="item.reasoning" class="msg-reasoning-card">
         <div
           class="msg-reasoning-header"
           @click="evalExpanded = !evalExpanded"
@@ -233,84 +184,39 @@ const displayContent = computed(() => {
           <span class="msg-reasoning-toggle">
             {{ evalExpanded ? '▼' : '▶' }}
           </span>
-          <span class="msg-reasoning-label">完整评估</span>
+          <span class="msg-reasoning-label">思考</span>
           <span class="msg-reasoning-meta">
             {{ item.reasoning.length }} 字符
           </span>
         </div>
         <div v-if="evalExpanded" class="msg-reasoning-content">{{ item.reasoning }}</div>
       </div>
+
+      <!-- content 独立卡片 -->
       <!-- tool_call:首行作为意图标题高亮,其余作为等宽调用详情 -->
       <div v-if="toolCallParts" class="msg-tool-intent">{{ toolCallParts.intent }}</div>
-      <div v-if="displayContent" class="msg-content">{{ displayContent }}</div>
+      <div
+        v-if="displayContent"
+        :class="['msg-content-card', `msg-${variant}`]"
+      >{{ displayContent }}</div>
     </template>
   </div>
 </template>
 
 <style scoped>
-.message {
-  padding: var(--space-3) var(--space-4);
-  border-radius: var(--radius-lg);
-  border-left: 3px solid transparent;
+/* 消息组:纯布局容器,不再是卡片;reasoning 与 content 各自独立成卡片 */
+.msg-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
 }
 
-.msg-user-agent {
-  background: var(--color-info-light);
-  border-left-color: var(--color-info);
-}
-
-.msg-react-agent {
-  background: #faf5ff;
-  border-left-color: #a855f7;
-}
-
-.msg-tool {
-  background: var(--color-surface-alt);
-  border-left-color: var(--color-text-muted);
-}
-
-.msg-error {
-  background: var(--color-danger-light);
-  border-left-color: var(--color-danger);
-}
-
-.msg-summary {
-  background: linear-gradient(135deg, #faf5ff 0%, #f0f4ff 100%);
-  border-left-color: var(--color-primary);
-}
-
-.msg-streaming {
-  background: linear-gradient(135deg, #fefce8 0%, #fef3c7 100%);
-  border-left-color: #f59e0b;
-  position: relative;
-}
-
-.msg-streaming-active {
-  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2);
-  animation: streaming-pulse 2s ease-in-out infinite;
-}
-
-@keyframes streaming-pulse {
-  0%, 100% { box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2); }
-  50% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.35); }
-}
-
-.msg-streaming-tag {
-  display: inline-flex;
-  align-items: center;
-  margin-left: var(--space-2);
-}
-
-.msg-streaming-tag .typing-dots span {
-  background: #f59e0b;
-}
-
-.msg-reasoning {
-  margin-bottom: var(--space-2);
+/* reasoning 独立卡片:淡灰背景 + 左边框,与 content 卡片视觉区分 */
+.msg-reasoning-card {
   padding: var(--space-2) var(--space-3);
-  background: rgba(255, 255, 255, 0.5);
+  background: var(--color-surface-alt);
   border-radius: var(--radius-md);
-  border-left: 2px solid #d97706;
+  border-left: 2px solid var(--color-text-muted);
 }
 
 .msg-reasoning-header {
@@ -321,25 +227,25 @@ const displayContent = computed(() => {
   user-select: none;
   padding: var(--space-1) 0;
   transition: background 0.15s ease;
+  border-radius: var(--radius-sm);
 }
 
 .msg-reasoning-header:hover {
-  background: rgba(245, 158, 11, 0.08);
-  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.04);
 }
 
 .msg-reasoning-toggle {
   display: inline-block;
   width: 14px;
   font-size: var(--fs-xs);
-  color: #92400e;
+  color: var(--color-text-muted);
   text-align: center;
 }
 
 .msg-reasoning-label {
   font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
-  color: #92400e;
+  color: var(--color-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -361,62 +267,28 @@ const displayContent = computed(() => {
   overflow-y: auto;
   margin-top: var(--space-1);
   padding-top: var(--space-2);
-  border-top: 1px dashed rgba(146, 64, 14, 0.2);
+  border-top: 1px dashed var(--color-border);
 }
 
-.msg-content-muted {
-  color: var(--color-text-muted);
-  font-style: italic;
+/* 流式思考时给 reasoning 卡片加脉冲动画 */
+.msg-reasoning-streaming {
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2);
+  animation: streaming-pulse 2s ease-in-out infinite;
 }
 
-.msg-header {
-  display: flex;
+@keyframes streaming-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2); }
+  50% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.35); }
+}
+
+.msg-streaming-tag {
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: var(--space-2);
+  margin-left: var(--space-2);
 }
 
-.msg-label {
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-semibold);
-  color: var(--color-text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
-.msg-summary .msg-label {
-  color: var(--color-primary);
-}
-
-.msg-time {
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-}
-
-.msg-content {
-  font-size: var(--fs-sm);
-  white-space: pre-wrap;
-  word-break: break-word;
-  line-height: var(--lh-relaxed);
-}
-
-.msg-tool .msg-content {
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  color: var(--color-text-secondary);
-  max-height: 200px;
-  overflow-y: auto;
-}
-
-/* tool_call 意图标题:人类可读的一句话,高亮显示在调用详情上方 */
-.msg-tool-intent {
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-semibold);
-  color: var(--color-primary);
-  margin-bottom: var(--space-1);
-  padding: var(--space-1) var(--space-2);
-  background: var(--color-primary-light);
-  border-radius: var(--radius-sm);
+.msg-streaming-tag .typing-dots span {
+  background: #f59e0b;
 }
 
 .typing-dots {
@@ -438,5 +310,66 @@ const displayContent = computed(() => {
 @keyframes typing {
   0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
   30% { opacity: 1; transform: translateY(-4px); }
+}
+
+/* content 独立卡片:用 role/type 配色 */
+.msg-content-card {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-lg);
+  border-left: 3px solid transparent;
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: var(--lh-relaxed);
+}
+
+.msg-user-agent {
+  background: var(--color-info-light);
+  border-left-color: var(--color-info);
+}
+
+.msg-react-agent {
+  background: #faf5ff;
+  border-left-color: #a855f7;
+}
+
+.msg-tool {
+  background: var(--color-surface-alt);
+  border-left-color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.msg-error {
+  background: var(--color-danger-light);
+  border-left-color: var(--color-danger);
+}
+
+.msg-summary {
+  background: linear-gradient(135deg, #faf5ff 0%, #f0f4ff 100%);
+  border-left-color: var(--color-primary);
+}
+
+.msg-streaming {
+  background: linear-gradient(135deg, #fefce8 0%, #fef3c7 100%);
+  border-left-color: #f59e0b;
+}
+
+.msg-content-muted {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+/* tool_call 意图标题:人类可读的一句话,高亮显示在调用详情上方 */
+.msg-tool-intent {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--color-primary);
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-primary-light);
+  border-radius: var(--radius-sm);
 }
 </style>
