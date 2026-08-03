@@ -1005,6 +1005,258 @@ def _find_files_sandbox(
 
 
 # ============================================================
+# 工具:write_file / run_python_code(独立工作区,原仓库只读)
+# ============================================================
+
+# 工作区根路径(sandbox 模式);mock 模式用 ctx["mock_dir"]/workspace
+_WORKSPACE_DIR_SANDBOX = "/home/user/workspace"
+# 单次 run_python_code 执行超时(秒)
+_RUN_CODE_TIMEOUT = 60
+# 输出截断阈值(stdout/stderr 合计)
+_RUN_CODE_OUTPUT_LIMIT = 5000
+# 单次写入文件大小上限(防 LLM 写入超大文件撑爆沙箱)
+_WRITE_FILE_SIZE_LIMIT = 200_000
+
+
+def _get_workspace_dir(ctx: dict) -> str:
+    """获取(并按需创建)任务的工作区目录
+
+    工作区独立于仓库 clone 路径,react_agent 在这里写 PoC、补丁、报告等产物,
+    不污染原仓库(保持审计可追溯)。
+
+    mock 模式:本地临时目录下的 workspace 子目录
+    sandbox 模式:/home/user/workspace(沙箱内)
+    """
+    mode = ctx["mode"]
+    if mode == "mock":
+        ws_dir: Path = ctx["mock_dir"] / "workspace"
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        return str(ws_dir)
+    else:
+        session: SandboxSession = ctx["session"]
+        session.run_command(f"mkdir -p {shlex.quote(_WORKSPACE_DIR_SANDBOX)}")
+        return _WORKSPACE_DIR_SANDBOX
+
+
+def _resolve_workspace_path(ws_dir: str, file_path: str) -> str:
+    """把相对 file_path 解析到工作区内的绝对路径,防路径穿越
+
+    禁止 file_path 含 .. 或绝对路径(防止逃逸工作区改原仓库或系统文件)。
+    """
+    if not file_path:
+        raise ValueError("file_path 不能为空")
+    # 统一用 / 分隔(沙箱是 Linux,LLM 传 \ 也能容错)
+    normalized = file_path.replace("\\", "/").lstrip("/")
+    if ".." in normalized.split("/"):
+        raise ValueError("file_path 不能含 .. (防止路径穿越)")
+    if Path(normalized).is_absolute():
+        raise ValueError("file_path 必须是相对路径(相对工作区根)")
+    return f"{ws_dir.rstrip('/')}/{normalized}"
+
+
+def write_file(
+    file_path: str,
+    content: str,
+    mode: str = "write",
+    task_id: str = "",
+) -> dict:
+    """在工作区写入文件(不影响原仓库)
+
+    工作区是独立目录,与 clone 的仓库隔离。react_agent 在这里写 PoC 脚本、
+    修复补丁、分析报告等产物。原仓库保持只读,保证审计可追溯。
+
+    参数:
+        file_path: 工作区内相对路径(如 "poc/sqli_test.py"、"patches/fix.diff")
+            不能含 .. 或绝对路径(防路径穿越)
+        content: 文件内容(文本)
+        mode: 写入模式
+            - "write"(默认):覆盖写入(文件不存在则创建,存在则覆盖)
+            - "append":追加写入(在文件末尾追加)
+
+    返回:{
+        "path": str,       # 工作区内相对路径
+        "abs_path": str,   # 绝对路径(供 run_python_code 等引用)
+        "bytes": int,      # 写入字节数
+        "mode": str,       # 实际使用的写入模式
+    }
+    """
+    if not isinstance(content, str):
+        raise TypeError("content 必须是字符串")
+    if len(content) > _WRITE_FILE_SIZE_LIMIT:
+        raise ValueError(
+            f"文件内容过大({len(content)} 字符),上限 "
+            f"{_WRITE_FILE_SIZE_LIMIT}。建议拆分多次写入或精简内容。"
+        )
+    if mode not in ("write", "append"):
+        raise ValueError(f"mode 必须是 'write' 或 'append',收到: {mode}")
+
+    ctx = _get_or_create_session(task_id)
+    ws_dir = _get_workspace_dir(ctx)
+    abs_path = _resolve_workspace_path(ws_dir, file_path)
+
+    sandbox_mode = ctx["mode"]
+    if sandbox_mode == "mock":
+        # mock 模式:直接用 Python 写
+        p = Path(abs_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if mode == "append" and p.exists():
+            existing = p.read_text(encoding="utf-8")
+            content = existing + content
+        p.write_text(content, encoding="utf-8")
+    else:
+        # sandbox 模式:复用 SandboxSession.write_file
+        #   write 模式:直接写(底层会覆盖)
+        #   append 模式:先读后写(沙箱没原生 append 接口,模拟)
+        session: SandboxSession = ctx["session"]
+        parent = str(Path(abs_path).parent)
+        session.run_command(f"mkdir -p {shlex.quote(parent)}")
+        if mode == "append":
+            try:
+                existing = session.read_file(abs_path)
+            except Exception:
+                existing = ""
+            content = existing + content
+        session.write_file(abs_path, content)
+
+    return {
+        "path": file_path,
+        "abs_path": abs_path,
+        "bytes": len(content.encode("utf-8")),
+        "mode": mode,
+    }
+
+
+def run_python_code(
+    code: str,
+    task_id: str = "",
+    timeout: int = _RUN_CODE_TIMEOUT,
+) -> dict:
+    """在沙箱里执行 Python 代码,返回 stdout/stderr/exit_code
+
+    用于:
+    - 验证漏洞 PoC(如触发 SQL 注入、跑反序列化 payload)
+    - 跑分析脚本(如解析依赖树、调用图分析)
+    - 执行仓库测试用例验证假设
+
+    执行环境:
+    - 工作目录:工作区根(/home/user/workspace 或 mock 等价目录)
+    - Python:沙箱内置的 python3
+    - 网络:依赖沙箱配置(默认沙箱禁外网,防数据外泄/C2 回连)
+    - 超时:默认 60s,超时强制终止
+
+    参数:
+        code: Python 代码(字符串)。多行直接写,无需转义
+        timeout: 执行超时秒数,默认 60,上限 120
+
+    返回:{
+        "stdout": str,      # 标准输出(截断到 _RUN_CODE_OUTPUT_LIMIT)
+        "stderr": str,      # 标准错误(截断)
+        "exit_code": int,   # 退出码(0 表示成功)
+        "duration_ms": int, # 执行耗时(毫秒)
+        "truncated": bool,  # 输出是否被截断
+        "timed_out": bool,  # 是否超时被强制终止
+    }
+    """
+    if not isinstance(code, str) or not code.strip():
+        raise ValueError("code 不能为空")
+    timeout = max(1, min(timeout, 120))
+
+    ctx = _get_or_create_session(task_id)
+    ws_dir = _get_workspace_dir(ctx)
+    sandbox_mode = ctx["mode"]
+
+    # 代码写到临时文件再执行(避免 shlex 转义复杂代码出错)
+    # 文件名加 uuid 避免并发冲突
+    script_name = f"_run_{uuid.uuid4().hex[:8]}.py"
+    write_file(script_name, code, mode="write", task_id=task_id)
+    script_abs = _resolve_workspace_path(ws_dir, script_name)
+
+    start = time.time()
+    timed_out = False
+    if sandbox_mode == "mock":
+        # mock 模式:本地 subprocess 执行
+        try:
+            result = subprocess.run(
+                ["python", script_abs],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=ws_dir,
+            )
+            stdout = result.stdout
+            stderr = result.stderr
+            exit_code = result.returncode
+        except subprocess.TimeoutExpired as e:
+            stdout = (e.stdout or "") if isinstance(e.stdout, str) else ""
+            stderr = (e.stderr or "") if isinstance(e.stderr, str) else ""
+            stderr = (stderr + f"\n[执行超时({timeout}s),被强制终止]")
+            exit_code = -1
+            timed_out = True
+    else:
+        # sandbox 模式:沙箱里执行
+        # 命令拼接:cd 工作区 → timeout 限时 → python3 执行 → 末尾 echo exit code
+        # 2>&1 合并 stdout/stderr(沙箱 run_command 只返回 stdout 一个通道)
+        # exit code 用 echo "EXIT_CODE:$?" 附加到输出末尾,本地解析
+        session: SandboxSession = ctx["session"]
+        cmd = (
+            f"cd {shlex.quote(ws_dir)} && "
+            f"timeout {timeout} python3 {shlex.quote(script_abs)} 2>&1; "
+            f'echo "EXIT_CODE:$?"'
+        )
+        try:
+            combined = session.run_command(cmd, timeout=timeout + 5)
+            # 从输出末尾解析 "EXIT_CODE:N" 行
+            stdout = combined
+            stderr = ""
+            exit_code = 0
+            # 找最后一个 EXIT_CODE: 行(防代码本身输出过这个串)
+            m = None
+            for line in reversed(combined.splitlines()):
+                if line.startswith("EXIT_CODE:"):
+                    m = line
+                    break
+            if m:
+                code_str = m[len("EXIT_CODE:"):].strip()
+                # timeout 命令超时返回 124
+                exit_code = int(code_str) if code_str.lstrip("-").isdigit() else -1
+                # 去掉这行,剩余作为真实输出
+                stdout = combined.rsplit(m, 1)[0].rstrip("\n")
+                if exit_code == 124:
+                    timed_out = True
+                    stderr = f"[执行超时({timeout}s),被 timeout 命令终止]"
+        except Exception as e:
+            stdout = ""
+            stderr = f"[沙箱执行失败: {e}]"
+            exit_code = -1
+
+    duration_ms = int((time.time() - start) * 1000)
+
+    # 输出截断
+    truncated = False
+    if len(stdout) + len(stderr) > _RUN_CODE_OUTPUT_LIMIT:
+        total = len(stdout) + len(stderr)
+        # 按比例裁剪,保留尾部(通常错误信息在尾部)
+        if stdout:
+            keep_stdout = max(200, int(_RUN_CODE_OUTPUT_LIMIT * len(stdout) / total))
+            if len(stdout) > keep_stdout:
+                stdout = "[...输出过长,已截断头部...]\n" + stdout[-keep_stdout:]
+        if stderr:
+            keep_stderr = max(200, int(_RUN_CODE_OUTPUT_LIMIT * len(stderr) / total))
+            if len(stderr) > keep_stderr:
+                stderr = "[...输出过长,已截断头部...]\n" + stderr[-keep_stderr:]
+        truncated = True
+
+    return {
+        "stdout": stdout,
+        "stderr": stderr,
+        "exit_code": exit_code,
+        "duration_ms": duration_ms,
+        "truncated": truncated,
+        "timed_out": timed_out,
+    }
+
+
+# ============================================================
 # 辅助:URL 转换
 # ============================================================
 

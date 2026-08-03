@@ -60,6 +60,8 @@ TOOL_FUNCTIONS: dict[str, Any] = {
     "search_code": sandbox_tools.search_code,
     "run_semgrep": sandbox_tools.run_semgrep,
     "find_files": sandbox_tools.find_files,
+    "write_file": sandbox_tools.write_file,
+    "run_python_code": sandbox_tools.run_python_code,
     "query_cve": query_cve,
     "list_skills": list_available_skills,
     "skill": run_skill,
@@ -224,6 +226,68 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["repo_path", "pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": (
+                "在工作区写入文件(不影响原仓库)。工作区独立于 clone 的仓库,"
+                "用于写 PoC 脚本、修复补丁、分析报告等产物。"
+                "原仓库保持只读,保证审计可追溯。"
+                "写入后可用 run_python_code 执行脚本,或再次 write_file 追加内容。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": (
+                            "工作区内相对路径,如 'poc/sqli_test.py'、'patches/fix.diff'。"
+                            "不能含 .. 或绝对路径(防路径穿越)。"
+                            "父目录会自动创建。"
+                        ),
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "文件内容(文本)。上限 200000 字符",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["write", "append"],
+                        "description": "写入模式:write 覆盖(默认),append 追加",
+                    },
+                },
+                "required": ["file_path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_python_code",
+            "description": (
+                "在沙箱里执行 Python 代码,返回 stdout/stderr/exit_code。"
+                "用于验证漏洞 PoC(触发 SQL 注入、跑反序列化 payload)、"
+                "跑分析脚本(解析依赖树、调用图)、执行测试验证假设。"
+                "工作目录是工作区根,write_file 写的脚本可直接执行。"
+                "网络访问依赖沙箱配置(默认禁外网)。单次执行超时 60s。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "Python 代码(字符串)。多行直接写,无需转义",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "执行超时秒数,默认 60,上限 120",
+                    },
+                },
+                "required": ["code"],
             },
         },
     },

@@ -56,8 +56,9 @@ REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行�
 ## 工作方式(ReAct 循环)
 你通过"思考-行动-观察"循环工作:
 1. **思考**:分析当前状态,决定下一步该做什么
-2. **行动**:调用工具(clone_repo / list_files / read_file / search_code /
-   run_semgrep / query_cve / list_skills / skill 等)
+2. **行动**:调用工具(clone_repo / list_files / find_files / read_file /
+   search_code / run_semgrep / query_cve / write_file / run_python_code /
+   list_skills / skill 等)
 3. **观察**:查看工具返回的结果
 4. 重复以上步骤,直到完成分析
 
@@ -69,6 +70,8 @@ REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行�
 - search_code:正则搜索代码,支持 content/files_with_matches/count 三种输出模式
 - run_semgrep:运行 Semgrep 静态分析(仅 sandbox 模式可用,mock 模式不可用)
 - query_cve:查询指定包+版本的已知 CVE 漏洞(OSV API,按依赖逐个查)
+- write_file:在工作区写文件(PoC 脚本、补丁、报告等),不影响原仓库
+- run_python_code:在沙箱执行 Python 代码,验证 PoC / 跑分析脚本 / 执行测试
 - list_skills / skill:查看并加载专家技能(获取 SKILL.md 指令后按其指引执行)
 
 ## 工作原则
@@ -642,6 +645,11 @@ def _build_tool_intent(fn_name: str, fn_args: dict) -> str:
             f"查询 {fn_args.get('package_name', '?')}@"
             f"{fn_args.get('version', '?')} 的已知漏洞"
         )
+    if fn_name == "write_file":
+        mode = fn_args.get("mode", "write")
+        return f"{mode == 'append' and '追加' or '写入'}文件 {fn_args.get('file_path', '?')}"
+    if fn_name == "run_python_code":
+        return "执行 Python 代码"
     if fn_name == "run_semgrep":
         return "运行 Semgrep 静态分析"
     if fn_name == "list_skills":
@@ -771,6 +779,8 @@ _TOOL_STEP_KEYWORDS: dict[str, list[str]] = {
     "find_files":      ["查找", "定位", "文件", "find"],
     "read_file":       ["读取", "依赖", "清单", "read"],
     "query_cve":       ["依赖", "cve", "漏洞"],
+    "write_file":      ["写入", "补丁", "poc", "报告", "生成", "write"],
+    "run_python_code": ["执行", "运行", "验证", "测试", "poc", "run"],
     "search_code":     ["注入", "密钥", "反序列化", "ssrf", "路径", "认证", "授权",
                          "审计", "代码审计", "search"],
     "run_semgrep":     ["semgrep", "sast", "静态分析"],
