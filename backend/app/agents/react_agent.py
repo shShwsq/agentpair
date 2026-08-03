@@ -230,7 +230,7 @@ def run_react_agent(
 
         # 流式调用 LLM,累积 reasoning / content / tool_calls
         # 同时通过 event_bus 实时推送 thinking_delta 给前端
-        reasoning_full, content_full, tool_calls_full, _conv_id = _stream_llm_response(
+        reasoning_full, content_full, tool_calls_full, finish_reason, _conv_id = _stream_llm_response(
             client, task, db, round_idx, iteration, messages, tools
         )
 
@@ -274,9 +274,49 @@ def run_react_agent(
                     "steps": current_plan,
                 })
 
-        # 没有工具调用 → agent 认为做完了
+        # 兜底:结构化 tool_calls 为空但 content 里有 <tool_call> 文本块
+        # (GLM/Qwen 等 Hermes 风格,在思考模式下可能把工具调用写在正文,
+        # 而非走 OpenAI function calling 结构化通道)
+        if not tool_calls_full and content_full:
+            text_tool_calls = _extract_text_tool_calls(content_full)
+            if text_tool_calls:
+                logger.info(
+                    f"[task={task.id}] 从 content 文本解析出 {len(text_tool_calls)} 个 tool_call"
+                )
+                tool_calls_full = text_tool_calls
+                # 补回 assistant_msg 的 tool_calls(供下一轮 LLM 上下文)
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": tc["arguments_str"],
+                        },
+                    }
+                    for tc in tool_calls_full
+                ]
+                # 从 messages 上下文里的 content 剥离 tool_call 文本块
+                # (避免下一轮 LLM 重复看到工具调用文本;落库的 thinking 保留原文便于排查)
+                cleaned = _strip_tool_call_blocks(content_full)
+                if cleaned != content_full:
+                    assistant_msg["content"] = cleaned
+
+        # 结束判断:模型主动 stop 且无工具调用 → 真正结束
+        # finish_reason=length 是被 max_tokens 截断,模型没说完,不算主动结束
+        # (降级处理:用现有 content 作 summary,记录 warning)
         if not tool_calls_full:
-            logger.info(f"[task={task.id}] react_agent 结束(无更多工具调用)")
+            if finish_reason == "length":
+                logger.warning(
+                    f"[task={task.id}] react_agent 第 {round_idx} 轮/迭代 {iteration} "
+                    f"输出被 max_tokens 截断(finish=length),降级结束。"
+                    f"reasoning={len(reasoning_full)}字符, content={len(content_full)}字符"
+                )
+            else:
+                logger.info(
+                    f"[task={task.id}] react_agent 结束"
+                    f"(finish={finish_reason},无工具调用)"
+                )
             if content_full:
                 summary = content_full
             break
@@ -422,7 +462,7 @@ def run_react_agent(
             ),
         })
         try:
-            reasoning_full, content_full, tool_calls_full, _conv_id = _stream_llm_response(
+            reasoning_full, content_full, tool_calls_full, finish_reason, _conv_id = _stream_llm_response(
                 client, task, db, round_idx, MAX_ITERATIONS, messages, tools
             )
             # content 作为 summary(自然语言总结)
@@ -453,15 +493,17 @@ def _stream_llm_response(
     iteration: int,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
-) -> tuple[str, str, list[dict[str, Any]], str]:
+) -> tuple[str, str, list[dict[str, Any]], str, str]:
     """流式调用 LLM,实时推送 thinking_delta 事件
 
-    返回 (reasoning_full, content_full, tool_calls_full, conv_id)
+    返回 (reasoning_full, content_full, tool_calls_full, conv_id, finish_reason)
         - reasoning_full: 完整思考链(供日志/调试,不入 Conversation 表)
         - content_full: 完整回答内容(落库但不再推 conversation 事件,避免和流式卡片重复)
         - tool_calls_full: 完整工具调用列表
             [{"id": str, "name": str, "arguments_str": str, "index": int}]
         - conv_id: 这次 LLM 调用的标识(供调试/日志,前端不再用于去重)
+        - finish_reason: 流结束原因('stop' / 'tool_calls' / 'length' 等),
+            供调用方判断"模型是否主动结束"。None 表示异常中断。
     """
     # 这次 LLM 调用的临时 conv_id(前端按此 key 累积 thinking_delta)
     conv_id = str(uuid.uuid4())
@@ -471,6 +513,7 @@ def _stream_llm_response(
     content_full = ""
     # 工具调用累积:index → {id, name, arguments_str}
     tool_calls_acc: dict[int, dict[str, Any]] = {}
+    finish_reason: str | None = None
 
     # 推送流开始事件(前端可以创建占位项,显示"正在生成...")
     publish(task_id, "thinking_delta", {
@@ -531,8 +574,9 @@ def _stream_llm_response(
 
             # finish_reason 出现,流结束
             if chunk.finish_reason:
-                logger.debug(
-                    f"[task={task.id}] react_agent 流式结束,finish={chunk.finish_reason}, "
+                finish_reason = chunk.finish_reason
+                logger.info(
+                    f"[task={task.id}] react_agent 流式结束,finish={finish_reason}, "
                     f"reasoning={len(reasoning_full)}字符, content={len(content_full)}字符, "
                     f"tool_calls={len(tool_calls_acc)}"
                 )
@@ -561,7 +605,7 @@ def _stream_llm_response(
 
     # 按 index 排序输出
     tool_calls_full = [tool_calls_acc[i] for i in sorted(tool_calls_acc.keys())]
-    return reasoning_full, content_full, tool_calls_full, conv_id
+    return reasoning_full, content_full, tool_calls_full, conv_id, finish_reason
 
 
 # ============================================================
@@ -596,6 +640,67 @@ def _build_tool_intent(fn_name: str, fn_args: dict) -> str:
     if fn_name == "skill":
         return f"获取技能指令: {fn_args.get('skill_name', '?')}"
     return f"调用 {fn_name}"
+
+
+# ============================================================
+# 文本 tool_call 兜底解析(GLM/Qwen 等 Hermes 风格)
+# ============================================================
+
+# Hermes 风格文本工具调用:<tool_call>\n{...}\n</tool_call>
+# GLM/Qwen 等在思考模式下可能把工具调用写在正文(而非走结构化 tool_calls 通道)
+# 正则靠 </tool_call> 锚定结束,非贪婪 .*? 可正确处理嵌套 JSON 对象
+_TEXT_TOOL_CALL_RE = re.compile(
+    r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
+    re.DOTALL,
+)
+_TEXT_TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*.*?\s*</tool_call>", re.DOTALL)
+
+
+def _extract_text_tool_calls(content: str) -> list[dict[str, Any]]:
+    """从 content 文本解析 Hermes 风格 <tool_call> 块,作为结构化 tool_calls 的兜底
+
+    适配 GLM/Qwen 等模型在思考模式下把工具调用写在正文(而非走 OpenAI
+    function calling 通道)的情况。每个 <tool_call>{...}</tool_call> 块解析为
+    一个工具调用,JSON 不合法的块跳过。
+
+    返回 [{"id": str, "name": str, "arguments_str": str, "index": int}]
+    无匹配返回空列表。
+    """
+    matches = _TEXT_TOOL_CALL_RE.findall(content)
+    if not matches:
+        return []
+
+    result: list[dict[str, Any]] = []
+    for i, json_str in enumerate(matches):
+        try:
+            parsed = json.loads(json_str)
+        except json.JSONDecodeError:
+            continue
+        name = parsed.get("name")
+        if not name:
+            continue
+        # arguments 字段(部分模型用 parameters)可能是 dict 或 str,统一成 str
+        args = parsed.get("arguments", parsed.get("parameters", {}))
+        if isinstance(args, dict):
+            args_str = json.dumps(args, ensure_ascii=False)
+        else:
+            args_str = str(args)
+        result.append({
+            "id": f"text_tc_{i}_{uuid.uuid4().hex[:8]}",
+            "name": name,
+            "arguments_str": args_str,
+            "index": i,
+        })
+    return result
+
+
+def _strip_tool_call_blocks(content: str) -> str:
+    """从 content 剥离 <tool_call>...</tool_call> 文本块
+
+    兜底解析后用于清理 messages 上下文里的 content,避免下一轮 LLM 重复看到
+    工具调用文本。落库的 thinking 保留原文(便于排查)。
+    """
+    return _TEXT_TOOL_CALL_BLOCK_RE.sub("", content).strip()
 
 
 # 计划清单提取:<plan>...</plan> 块,逐行解析序号 + 可选状态标记 + 文本
