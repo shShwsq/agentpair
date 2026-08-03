@@ -60,7 +60,7 @@ search_code(pattern="mysqli_query\\s*\\(|->query\\s*\\(", file_glob="*.php")
 
 ### 3. 验证(可选,沙箱可用时)
 
-若你判断有 SQL 注入,且 `run_in_sandbox` 可用,可构造最小验证脚本:
+若你判断有 SQL 注入,可构造最小验证脚本(若沙箱支持运行自定义脚本):
 
 ```python
 # 仅当目标仓库有可启动的 web 服务时,才能跑验证。

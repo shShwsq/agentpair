@@ -6,7 +6,7 @@
 
 设计要点:
 - skill 工具不直接执行任何审计操作,只返回 SKILL.md 文本
-- LLM 看完 SKILL.md 后,自己决定调用 search_code / read_file / run_in_sandbox 等底层工具
+- LLM 看完 SKILL.md 后,自己决定调用 search_code / read_file / run_semgrep 等底层工具
 - 这符合 Trae / Claude Code 的 skill 规范:Markdown 指令驱动,而非程序化 steps
 
 场景降级后的变更:

@@ -722,9 +722,14 @@ def _search_code_sandbox(
         return {"counts": counts, "total_matches": total}
 
     # ---- content 模式(默认):匹配行 + 可选上下文 ----
-    # 1. rg 拿匹配行(不带 context),多取 offset+max_matches 个用于分页
+    # 用 rg -A/-B 一次性带上下文,避免对每个匹配单独跑 awk(N+1 沙箱往返)
     cmd_parts = ["rg", "--line-number", "--no-heading", "--color=never"]
     cmd_parts.extend(["--max-count", str(offset + max_matches)])
+    if context_lines > 0:
+        cmd_parts.extend([
+            f"--before-context={context_lines}",
+            f"--after-context={context_lines}",
+        ])
     if not case_sensitive:
         cmd_parts.append("-i")
     if file_glob:
@@ -734,43 +739,9 @@ def _search_code_sandbox(
     logger.info(f"[sandbox] search: {cmd}")
     output = session.run_command(f"{cmd} || true")
 
-    all_matches = _parse_search_output(output, repo_path)
+    all_matches = _parse_search_output_with_context(output, repo_path)
     total = len(all_matches)
     page = all_matches[offset:offset + max_matches]
-
-    # 2. 对当前页匹配,用 awk 读 context(逐匹配一次命令)
-    if context_lines > 0:
-        for m in page:
-            full_path = f"{repo_path.rstrip('/')}/{m['file'].lstrip('/')}"
-            start = max(1, m["line"] - context_lines)
-            end = m["line"] + context_lines
-            awk_script = (
-                f"NR>={start} && NR<={end} "
-                f"{{printf \"%d\\t%s\\n\", NR, $0}}"
-            )
-            ctx_output = session.run_command(
-                f"awk '{awk_script}' {shlex.quote(full_path)}"
-            )
-            ctx_before = []
-            ctx_after = []
-            for cl in ctx_output.splitlines():
-                # 格式: 行号\t内容
-                idx = cl.find("\t")
-                if idx < 0:
-                    continue
-                ln_str = cl[:idx]
-                text = cl[idx + 1:]
-                ln = int(ln_str) if ln_str.isdigit() else 0
-                if ln < m["line"]:
-                    ctx_before.append(text.rstrip())
-                elif ln > m["line"]:
-                    ctx_after.append(text.rstrip())
-            m["context_before"] = ctx_before
-            m["context_after"] = ctx_after
-    else:
-        for m in page:
-            m["context_before"] = []
-            m["context_after"] = []
 
     return {
         "matches": page,
@@ -780,23 +751,76 @@ def _search_code_sandbox(
     }
 
 
-def _parse_search_output(output: str, repo_path: str) -> list[dict]:
-    """解析 rg/grep 的输出(file:line:content)"""
-    matches = []
+# rg 输出解析正则:
+# - 匹配行格式: path:line:content(分隔符为 :)
+# - 上下文行格式: path-line-content(分隔符为 -)
+# 贪婪 .* 从右往左定位 ":数字:" / "-数字-",可正确处理路径含 : 或 - 的情况
+_MATCH_LINE_RE = re.compile(r"^(.*):(\d+):(.*)$")
+_CONTEXT_LINE_RE = re.compile(r"^(.*)-(\d+)-(.*)$")
+
+
+def _parse_search_output_with_context(output: str, repo_path: str) -> list[dict]:
+    """解析 rg 输出(支持 -A/-B 上下文模式)
+
+    rg --no-heading 输出格式:
+    - 匹配行: path:line:content
+    - 上下文行: path-line-content(用 - 区分匹配行的 :)
+    - 多个匹配之间用 -- 分隔(仅当带 -A/-B 时)
+
+    无上下文时全是匹配行(无 -- 分隔),本函数同样适用:
+    每个 match 的 context_before/after 为空列表。
+
+    优先按匹配行格式解析(:line:),失败再按上下文行格式(-line-),
+    避免上下文行的 content 含 ":N:" 时被误判。
+    """
+    matches: list[dict] = []
+    current: dict | None = None
+    before: list[str] = []
+    after: list[str] = []
+
+    def _finalize() -> None:
+        nonlocal current, before, after
+        if current is not None:
+            current["context_before"] = before
+            current["context_after"] = after
+            matches.append(current)
+            current = None
+            before = []
+            after = []
+
     for line in output.splitlines():
-        if not line.strip():
+        if not line:
             continue
-        parts = line.split(":", 2)
-        if len(parts) < 3:
+        if line == "--":
+            _finalize()
             continue
-        file, line_no, content = parts
-        if file.startswith(repo_path):
-            file = file[len(repo_path):].lstrip("/")
-        matches.append({
-            "file": file,
-            "line": int(line_no) if line_no.isdigit() else 0,
-            "content": content,
-        })
+        # 先尝试匹配行格式 path:N:content
+        m = _MATCH_LINE_RE.match(line)
+        if m:
+            # 遇到新匹配,先收尾上一个(无 -- 分隔时也兼容)
+            _finalize()
+            path, line_no, content = m.groups()
+            if path.startswith(repo_path):
+                path = path[len(repo_path):].lstrip("/")
+            current = {
+                "file": path,
+                "line": int(line_no),
+                "content": content,
+            }
+            continue
+        # 再尝试上下文行格式 path-N-content
+        m = _CONTEXT_LINE_RE.match(line)
+        if m and current is not None:
+            _path, line_no, content = m.groups()
+            ln = int(line_no)
+            if ln < current["line"]:
+                before.append(content)
+            else:
+                after.append(content)
+            continue
+        # 无法解析的行,跳过
+
+    _finalize()
     return matches
 
 
@@ -966,8 +990,8 @@ def run_semgrep(
             "total": 0,
             "truncated": False,
             "note": (
-                "mock 模式不支持 semgrep(需要 Linux 沙箱环境)。",
-                "请通过其他工具(search_code + read_file)进行手动 SAST 检查,",
+                "mock 模式不支持 semgrep(需要 Linux 沙箱环境)。"
+                "请通过其他工具(search_code + read_file)进行手动 SAST 检查,"
                 "或切换 SANDBOX_MODE=sandbox 启用此工具。"
             ),
         }

@@ -240,7 +240,7 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "name": "skill",
             "description": (
                 "获取指定 skill 的详细指令(SKILL.md 内容)。"
-                "拿到指令后,按其指引自行调用 search_code/read_file/run_in_sandbox 等底层工具执行。"
+                "拿到指令后,按其指引自行调用 search_code/read_file/run_semgrep 等底层工具执行。"
                 "先调 list_skills 查可用 skill 名称。"
             ),
             "parameters": {
