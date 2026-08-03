@@ -203,7 +203,12 @@ def get_task(
         if current_user is None or current_user.id != task.user_id:
             raise HTTPException(status_code=403, detail="无权访问此任务")
 
-    return task
+    # 过滤内部缓存记录(type=history_compress 是 LLM 压缩摘要,不展示给用户)
+    task_resp = TaskResponse.model_validate(task)
+    task_resp.conversations = [
+        c for c in task_resp.conversations if c.type != "history_compress"
+    ]
+    return task_resp
 
 
 # ============================================================

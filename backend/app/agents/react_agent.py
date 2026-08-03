@@ -177,7 +177,10 @@ def run_react_agent(
             )
 
         # 之前轮次的对话记忆(react_agent 自己的总结 + user_agent 的评估反馈)
-        history_prefix = _build_history_context(db, task.id, round_idx)
+        # 三级压缩:Level 0(完整) → Level 1(丢工具摘要) → Level 2(LLM 压缩早期轮次)
+        # client 提前构造,供 LLM 压缩使用(若传入的 client 为 None,临时构造一个)
+        history_client = client or LLMClient()
+        history_prefix = _build_history_context(db, task.id, round_idx, client=history_client)
 
         user_msg = (
             f"基于之前的审计结果,现在请针对以下问题继续检查(不需要重新 clone 仓库):"
@@ -863,37 +866,53 @@ def _format_plan_reminder(plan_steps: list[dict]) -> str:
 
 
 # ============================================================
-# 跨轮记忆传递:从 Conversation 表加载之前轮次的对话
+# 跨轮记忆传递:三级压缩策略
 # ============================================================
 
+# 工具调用摘要单轮最大字符数(避免单轮工具调用过多撑爆 history)
+MAX_TOOL_HISTORY_CHARS = 2000
+# Level 2 时保留最近几轮的完整 Level 1(不压缩)
+HISTORY_KEEP_RECENT = 1
 
-def _build_history_context(db: Session, task_id, current_round_idx: int) -> str:
-    """构造之前轮次的对话记忆,作为前缀注入当前轮 user_msg
+
+def _build_history_context(
+    db: Session, task_id, current_round_idx: int,
+    client: LLMClient | None = None,
+) -> str:
+    """构造之前轮次的对话记忆,三级压缩策略控制 token 成本
 
     同一任务内,每轮 react_agent 启动时 messages 是重新构造的,
     若不做记忆传递,LLM 看不到自己之前几轮做了什么、user_agent 给过什么反馈。
 
-    本函数从 Conversation 表加载 round_idx < current_round_idx 的对话,
-    每轮提取三类信息:
-      - react_agent 的工具调用摘要(intent + 结果片段):让 LLM 记住第 1 轮在
-        tool_result 里发现的关键证据,即使没写进最终总结(修复 3)
-      - react_agent 最后一条 thinking 的 content(自己当轮的总结)
-      - user_agent evaluation 的 reasoning(审核反馈:covered/missing/追问判断)
-    拼接成一段文本,单条截断到 MAX_HISTORY_MSG_CHARS,整体超 MAX_HISTORY_TOTAL_CHARS
-    时按重要性保留(missing 非空的轮次优先,其次 done=false,同优先级 FIFO),
-    控制 token 成本。
+    三级压缩:
+    - Level 0(完整):工具调用摘要 + react_agent 总结 + user_agent 评估
+    - Level 1(压缩):只保留 react_agent 总结 + user_agent 评估(丢工具摘要)
+    - Level 2(LLM 压缩):保留最近 HISTORY_KEEP_RECENT 轮的完整 Level 1,
+      早期轮次调 LLM 压缩成一段摘要(带缓存,增量压缩)
+
+    超限处理顺序:
+    1. 先尝试全部 Level 0
+    2. 超限 → 按优先级降级到 Level 1(优先级低的先降,同优先级 FIFO)
+    3. 全部 Level 1 还超 → Level 2:保留最近 N 轮 Level 1,其余 LLM 压缩
+    4. 无 client 或压缩失败 → 兜底强制截断
+
+    优先级判定(决定哪些轮次保留完整信息最久):
+    - 2:user_agent 评估 missing 非空(还有未覆盖项,信息量大)
+    - 1:done=false
+    - 0:其他(done=true 等)
 
     返回字符串(可能为空)。第 1 轮(current_round_idx=1)无历史,返回空串。
     """
     if current_round_idx <= 1:
         return ""
 
-    # 查询当前轮之前的所有对话(按 round_idx, created_at 升序)
+    # 查询当前轮之前的所有对话(排除 history_compress 缓存记录)
     convs = (
         db.query(Conversation)
         .filter(
             Conversation.task_id == task_id,
             Conversation.round_idx < current_round_idx,
+            Conversation.type != "history_compress",
         )
         .order_by(Conversation.round_idx, Conversation.created_at)
         .all()
@@ -911,101 +930,340 @@ def _build_history_context(db: Session, task_id, current_round_idx: int) -> str:
     if not by_round:
         return ""
 
-    # 工具调用摘要单轮最大字符数(避免单轮工具调用过多撑爆 history)
-    MAX_TOOL_HISTORY_CHARS = 2000
-
-    # 逐轮构造记忆段,先收集后裁剪(可能按优先级丢弃)
-    segments: list[str] = []
-    priorities: list[int] = []  # 裁剪用:user_agent 标 missing 的轮次优先级更高
+    # 逐轮构造 full(Level 0) + compact(Level 1) 两个版本
+    rounds_data: list[dict[str, Any]] = []
     for ridx in sorted(by_round.keys()):
-        round_convs = by_round[ridx]
-
-        # react_agent 当轮工具调用摘要(intent + 结果片段)
-        # tool_call content 格式:"{intent}\n{call_detail}",第一行是意图
-        # tool_result content 是结果片段(已截断 500 字符)
-        tool_calls = [
-            c for c in round_convs
-            if c.role == "react_agent" and c.type == "tool_call" and c.content
-        ]
-        tool_results = [
-            c for c in round_convs
-            if c.role == "react_agent" and c.type == "tool_result" and c.content
-        ]
-        tool_lines: list[str] = []
-        for i, tc in enumerate(tool_calls):
-            # intent 是 tool_call content 的第一行(如"读取文件 src/main.py")
-            intent_line = tc.content.split("\n", 1)[0] if tc.content else ""
-            # 配对同序号的 tool_result,取前 200 字符作结果片段
-            result_snippet = ""
-            if i < len(tool_results):
-                result_snippet = tool_results[i].content[:200]
-            if result_snippet:
-                tool_lines.append(f"  - {intent_line} → {result_snippet}")
-            else:
-                tool_lines.append(f"  - {intent_line}")
-        tool_summary = "\n".join(tool_lines)
-        if tool_summary:
-            tool_summary = tool_summary[:MAX_TOOL_HISTORY_CHARS]
-
-        # react_agent 当轮最后一条 thinking(即最终总结)
-        react_thinkings = [
-            c for c in round_convs
-            if c.role == "react_agent" and c.type == "thinking" and c.content
-        ]
-        react_summary = react_thinkings[-1].content if react_thinkings else ""
-
-        # user_agent 当轮评估(优先 reasoning,含 covered/missing/判断)
-        ua_eval = next(
-            (c for c in round_convs
-             if c.role == "user_agent" and c.type == "evaluation"),
-            None,
-        )
-        ua_text = ""
-        if ua_eval:
-            ua_text = ua_eval.reasoning or ua_eval.content or ""
-
-        # 至少有一条非空才输出该轮
-        if not react_summary and not ua_text and not tool_summary:
+        full, compact, priority = _build_round_segments(by_round[ridx], ridx)
+        if not full:
             continue
+        rounds_data.append({
+            "ridx": ridx,
+            "full": full,
+            "compact": compact,
+            "priority": priority,
+        })
 
-        # 单条截断
-        react_summary = react_summary[:MAX_HISTORY_MSG_CHARS] if react_summary else ""
-        ua_text = ua_text[:MAX_HISTORY_MSG_CHARS] if ua_text else ""
-
-        parts = [f"=== 第 {ridx} 轮 ==="]
-        if tool_summary:
-            parts.append(f"[react_agent 工具调用]\n{tool_summary}")
-        if react_summary:
-            parts.append(f"[react_agent 总结]\n{react_summary}")
-        if ua_text:
-            parts.append(f"[user_agent 评估]\n{ua_text}")
-        segments.append("\n".join(parts))
-
-        # 优先级判定:user_agent 评估里 missing 非空 → 高优先级(还有未覆盖项)
-        # done=false → 中优先级;其他(如 done=true 或无 ua 评估)→ 低优先级
-        priority = 0
-        if ua_text:
-            if "未覆盖:" in ua_text:
-                missing_part = ua_text.split("未覆盖:")[1].split("\n")[0]
-                if missing_part.strip() and missing_part.strip() != "[]":
-                    priority = 2
-            if priority == 0 and "→ 宣布完成" not in ua_text:
-                priority = 1
-        priorities.append(priority)
-
-    if not segments:
+    if not rounds_data:
         return ""
 
-    # 整体超限时按优先级裁剪:优先级低的先丢;同优先级 FIFO 丢最早
-    total = sum(len(s) for s in segments)
-    while total > MAX_HISTORY_TOTAL_CHARS and len(segments) > 1:
-        min_priority = min(priorities)
-        drop_idx = priorities.index(min_priority)
-        dropped = segments.pop(drop_idx)
-        priorities.pop(drop_idx)
-        total -= len(dropped)
+    # ---- Level 0:全部 full ----
+    total = sum(len(r["full"]) for r in rounds_data)
+    if total <= MAX_HISTORY_TOTAL_CHARS:
+        return "[之前轮次的对话记忆]\n" + "\n\n".join(r["full"] for r in rounds_data)
 
-    return "[之前轮次的对话记忆]\n" + "\n\n".join(segments)
+    # ---- Level 1:按优先级降级 ----
+    use_compact = [False] * len(rounds_data)
+    while total > MAX_HISTORY_TOTAL_CHARS:
+        # 找最低优先级中最早且还是 full 的轮次降级
+        target_idx = None
+        min_pri = 999
+        for i, r in enumerate(rounds_data):
+            if use_compact[i]:
+                continue
+            if r["priority"] < min_pri:
+                min_pri = r["priority"]
+                target_idx = i
+        if target_idx is None:
+            break  # 全部已降级
+        total -= len(rounds_data[target_idx]["full"]) - len(rounds_data[target_idx]["compact"])
+        use_compact[target_idx] = True
+
+    if total <= MAX_HISTORY_TOTAL_CHARS:
+        segments = [
+            rounds_data[i]["compact"] if use_compact[i] else rounds_data[i]["full"]
+            for i in range(len(rounds_data))
+        ]
+        return "[之前轮次的对话记忆]\n" + "\n\n".join(segments)
+
+    # ---- Level 2:LLM 压缩早期轮次 ----
+    # 保留最近 HISTORY_KEEP_RECENT 轮的完整 Level 1,早期轮次调 LLM 压缩
+    if len(rounds_data) <= HISTORY_KEEP_RECENT or client is None:
+        # 无法压缩(轮次太少或无 client),兜底强制截断
+        segments = [rounds_data[i]["compact"] for i in range(len(rounds_data))]
+        return "[之前轮次的对话记忆]\n" + _truncate_segments(segments, MAX_HISTORY_TOTAL_CHARS)
+
+    recent_rounds = rounds_data[-HISTORY_KEEP_RECENT:]
+    old_rounds = rounds_data[:-HISTORY_KEEP_RECENT]
+
+    # 查缓存或创建压缩摘要
+    compressed_text, compressed_rounds = _get_or_create_compressed(
+        db, task_id, client, old_rounds, current_round_idx
+    )
+
+    # 拼接:压缩摘要 + 最近 N 轮 Level 1
+    parts = []
+    if compressed_text:
+        parts.append(
+            f"[早期轮次压缩摘要(覆盖 round {compressed_rounds})]\n{compressed_text}"
+        )
+    for r in recent_rounds:
+        parts.append(r["compact"])
+
+    result = "[之前轮次的对话记忆]\n" + "\n\n".join(parts)
+    # 如果拼接后还超(压缩摘要本身太长),强制截断
+    if len(result) > MAX_HISTORY_TOTAL_CHARS:
+        return _truncate_segments([result], MAX_HISTORY_TOTAL_CHARS)
+    return result
+
+
+def _build_round_segments(
+    round_convs: list[Conversation], ridx: int,
+) -> tuple[str, str, int]:
+    """为单轮构造 full(Level 0) + compact(Level 1) + priority
+
+    full:工具调用摘要 + react_agent 总结 + user_agent 评估
+    compact:react_agent 总结 + user_agent 评估(丢工具摘要)
+    priority:2=missing 非空,1=done=false,0=其他
+
+    返回 (full, compact, priority)。无有效内容时 full 为空字符串。
+    """
+    # react_agent 当轮工具调用摘要(intent + 结果片段)
+    tool_calls = [
+        c for c in round_convs
+        if c.role == "react_agent" and c.type == "tool_call" and c.content
+    ]
+    tool_results = [
+        c for c in round_convs
+        if c.role == "react_agent" and c.type == "tool_result" and c.content
+    ]
+    tool_lines: list[str] = []
+    for i, tc in enumerate(tool_calls):
+        intent_line = tc.content.split("\n", 1)[0] if tc.content else ""
+        result_snippet = ""
+        if i < len(tool_results):
+            result_snippet = tool_results[i].content[:200]
+        if result_snippet:
+            tool_lines.append(f"  - {intent_line} → {result_snippet}")
+        else:
+            tool_lines.append(f"  - {intent_line}")
+    tool_summary = "\n".join(tool_lines)
+    if tool_summary:
+        tool_summary = tool_summary[:MAX_TOOL_HISTORY_CHARS]
+
+    # react_agent 当轮最后一条 thinking(即最终总结)
+    react_thinkings = [
+        c for c in round_convs
+        if c.role == "react_agent" and c.type == "thinking" and c.content
+    ]
+    react_summary = react_thinkings[-1].content if react_thinkings else ""
+
+    # user_agent 当轮评估(优先 reasoning,含 covered/missing/判断)
+    ua_eval = next(
+        (c for c in round_convs
+         if c.role == "user_agent" and c.type == "evaluation"),
+        None,
+    )
+    ua_text = ""
+    if ua_eval:
+        ua_text = ua_eval.reasoning or ua_eval.content or ""
+
+    # 至少有一条非空才输出该轮
+    if not react_summary and not ua_text and not tool_summary:
+        return "", "", 0
+
+    # 单条截断
+    react_summary = react_summary[:MAX_HISTORY_MSG_CHARS] if react_summary else ""
+    ua_text = ua_text[:MAX_HISTORY_MSG_CHARS] if ua_text else ""
+
+    # compact(Level 1):丢工具摘要
+    compact_parts = [f"=== 第 {ridx} 轮 ==="]
+    if react_summary:
+        compact_parts.append(f"[react_agent 总结]\n{react_summary}")
+    if ua_text:
+        compact_parts.append(f"[user_agent 评估]\n{ua_text}")
+    compact = "\n".join(compact_parts)
+
+    # full(Level 0):含工具摘要
+    full_parts = [f"=== 第 {ridx} 轮 ==="]
+    if tool_summary:
+        full_parts.append(f"[react_agent 工具调用]\n{tool_summary}")
+    if react_summary:
+        full_parts.append(f"[react_agent 总结]\n{react_summary}")
+    if ua_text:
+        full_parts.append(f"[user_agent 评估]\n{ua_text}")
+    full = "\n".join(full_parts)
+
+    # 优先级判定
+    priority = 0
+    if ua_text:
+        if "未覆盖:" in ua_text:
+            missing_part = ua_text.split("未覆盖:")[1].split("\n")[0]
+            if missing_part.strip() and missing_part.strip() != "[]":
+                priority = 2
+        if priority == 0 and "→ 宣布完成" not in ua_text:
+            priority = 1
+
+    return full, compact, priority
+
+
+def _truncate_segments(segments: list[str], max_chars: int) -> str:
+    """兜底截断:超限时从最早段开始裁剪,保留最近内容"""
+    result = "\n\n".join(segments)
+    if len(result) <= max_chars:
+        return result
+    # 从尾部保留 max_chars,头部加截断标记
+    return "[...早期记忆已截断...]\n" + result[-(max_chars - 30):]
+
+
+# ============================================================
+# Level 2:LLM 压缩(带缓存 + 增量压缩)
+# ============================================================
+
+# LLM 压缩 prompt
+_HISTORY_COMPRESS_PROMPT = """你是审计历史压缩助手。以下是之前几轮双智能体协作的对话记忆,
+请压缩成一段简洁的摘要,必须保留:
+- 每轮 react_agent 的关键发现(漏洞/问题/已确认的结论)
+- user_agent 标记的已覆盖维度(covered)和未覆盖维度(missing)
+- user_agent 的追问方向(followup_query 指向的检查项)
+
+丢弃冗余的工具调用细节、重复信息和无关叙述。输出纯文本摘要(不要 JSON,不要 markdown 标题),
+按轮次顺序组织,每轮用"第 N 轮:"开头。
+
+{old_hint}
+
+[待压缩的历史记忆]
+{history_text}
+"""
+
+
+def _llm_compress_history(
+    client: LLMClient,
+    old_summary: str | None,
+    new_segments: list[str],
+) -> str:
+    """调 LLM 压缩历史记忆段
+
+    参数:
+        old_summary: 之前的压缩摘要(增量压缩时传入,首次为 None)
+        new_segments: 新增的需要压缩的记忆段列表
+
+    返回压缩后的摘要文本。失败时返回拼接的原文(降级,不丢信息)。
+    """
+    # 拼接待压缩文本
+    if old_summary:
+        history_text = f"[已有摘要]\n{old_summary}\n\n[新增轮次]\n" + "\n\n".join(new_segments)
+        old_hint = "已有摘要是之前压缩的结果,请把它和新增轮次合并成一段新的摘要。"
+    else:
+        history_text = "\n\n".join(new_segments)
+        old_hint = ""
+
+    prompt = _HISTORY_COMPRESS_PROMPT.format(
+        old_hint=old_hint,
+        history_text=history_text[:20000],  # 保护性截断,避免超长
+    )
+
+    try:
+        # 关闭思考模式压缩更快(压缩是简单任务,不需要深度思考)
+        original_thinking = client.enable_thinking
+        client.enable_thinking = False
+        try:
+            collected: list[str] = []
+            for chunk in client.chat_stream(
+                [{"role": "user", "content": prompt}],
+                max_tokens=2048,
+            ):
+                if chunk.content_delta:
+                    collected.append(chunk.content_delta)
+                if chunk.finish_reason in ("stop", "length"):
+                    break
+            compressed = "".join(collected).strip()
+            if compressed:
+                return compressed
+        finally:
+            client.enable_thinking = original_thinking
+    except Exception as e:
+        logger.warning(f"LLM 压缩历史失败,降级用原文: {e}")
+
+    # 降级:拼接原文(不丢信息,但可能超长,由调用方截断)
+    if old_summary:
+        return old_summary + "\n\n" + "\n\n".join(new_segments)
+    return "\n\n".join(new_segments)
+
+
+def _get_or_create_compressed(
+    db: Session,
+    task_id,
+    client: LLMClient,
+    old_rounds: list[dict[str, Any]],
+    current_round_idx: int,
+) -> tuple[str, list[int]]:
+    """获取或创建早期轮次的 LLM 压缩摘要(带缓存 + 增量压缩)
+
+    缓存策略:
+    - 查 Conversation 表 type=history_compress 的最新记录
+    - 若缓存覆盖的轮次 ⊇ 需要压缩的轮次,直接用缓存
+    - 若部分覆盖(如缓存有 round 1-2,需要 round 1-3),增量压缩:旧摘要 + 新轮次
+    - 若无缓存,压缩所有需要压缩的轮次
+    - 压缩结果落库为新缓存记录(不删旧记录,便于回查)
+
+    返回 (compressed_text, compressed_rounds)
+    """
+    need_ridxs = sorted(r["ridx"] for r in old_rounds)
+    old_by_ridx = {r["ridx"]: r for r in old_rounds}
+
+    # 查最新缓存
+    cache = (
+        db.query(Conversation)
+        .filter(
+            Conversation.task_id == task_id,
+            Conversation.type == "history_compress",
+        )
+        .order_by(Conversation.created_at.desc())
+        .first()
+    )
+
+    cached_rounds: list[int] = []
+    cached_text = ""
+    if cache:
+        try:
+            cache_data = json.loads(cache.reasoning or "{}")
+            cached_rounds = cache_data.get("rounds", [])
+            cached_text = cache.content or ""
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # 找出需要新增压缩的轮次(在 need_ridxs 但不在 cached_rounds)
+    new_ridxs = [r for r in need_ridxs if r not in cached_rounds]
+
+    if not new_ridxs and set(cached_rounds) >= set(need_ridxs):
+        # 缓存完全覆盖,直接用
+        return cached_text, need_ridxs
+
+    if cached_text and new_ridxs:
+        # 增量压缩:旧摘要 + 新轮次
+        new_segments = [old_by_ridx[r]["compact"] for r in new_ridxs if r in old_by_ridx]
+        if new_segments:
+            compressed = _llm_compress_history(client, cached_text, new_segments)
+            all_rounds = sorted(set(cached_rounds) | set(new_ridxs))
+        else:
+            return cached_text, need_ridxs
+    elif new_ridxs:
+        # 无缓存,压缩所有需要压缩的轮次
+        new_segments = [old_by_ridx[r]["compact"] for r in need_ridxs if r in old_by_ridx]
+        if not new_segments:
+            return "", []
+        compressed = _llm_compress_history(client, None, new_segments)
+        all_rounds = need_ridxs
+    else:
+        # cached_rounds 超出 need(不该发生),用缓存
+        return cached_text, need_ridxs
+
+    # 落库新缓存
+    try:
+        conv = Conversation(
+            task_id=task_id,
+            round_idx=current_round_idx,
+            role="system",
+            type="history_compress",
+            content=compressed,
+            reasoning=json.dumps({"rounds": all_rounds}, ensure_ascii=False),
+        )
+        db.add(conv)
+        db.commit()
+    except Exception as e:
+        logger.warning(f"[task={task_id}] 压缩缓存落库失败(不影响流程): {e}")
+
+    return compressed, all_rounds
 
 
 def _add_conversation(
