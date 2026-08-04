@@ -427,6 +427,7 @@ def _wait_for_bridge_ready(
         f"timeout={BRIDGE_STARTUP_TIMEOUT}s, headers_keys={list(endpoint_headers.keys())}"
     )
 
+    last_logs_len = 0
     try:
         while time.time() < deadline:
             # 先检查后台进程是否还活着(避免 bridge 崩溃后空等)
@@ -435,6 +436,11 @@ def _wait_for_bridge_ready(
                 raise RuntimeError(
                     f"ACP bridge 启动失败:CLI 进程退出。日志:\n{logs[-1000:]}"
                 )
+            # 新增日志内容立即打印,便于实时观察 bridge 状态
+            if logs and len(logs) > last_logs_len:
+                new_part = logs[last_logs_len:]
+                logger.warning(f"[qoder_cli] bridge 日志增量: {new_part.rstrip()}")
+                last_logs_len = len(logs)
 
             # 健康检查
             try:
@@ -449,8 +455,10 @@ def _wait_for_bridge_ready(
                             f"[qoder_cli] health 200 但状态非 ok: {data}"
                         )
                 else:
+                    # 非 200:打印响应体辅助排查(可能是 server proxy 错误)
+                    body = resp.text[:300]
                     logger.warning(
-                        f"[qoder_cli] health 返回 HTTP {resp.status_code}"
+                        f"[qoder_cli] health 返回 HTTP {resp.status_code}: {body}"
                     )
             except Exception as e:
                 logger.warning(f"[qoder_cli] health 请求失败: {type(e).__name__}: {e}")

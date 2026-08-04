@@ -139,8 +139,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
     """HTTP 请求处理器"""
 
     def log_message(self, format, *args):
-        # 覆盖默认日志(输出到 stderr,带前缀)
-        print(f"[bridge] {args[0]} - {format % args[1:]}", file=sys.stderr, flush=True)
+        # 覆盖默认日志,安全格式化(避免参数数量不匹配导致异常)
+        try:
+            msg = format % args if args else format
+        except Exception:
+            msg = f"{format} {args}"
+        print(f"[bridge] {msg}", file=sys.stderr, flush=True)
 
     def do_GET(self):
         """GET /health:健康检查"""
@@ -251,8 +255,8 @@ def main():
         help="ACP CLI 可执行文件名/路径(默认 qodercli,从 PATH 查找或绝对路径)",
     )
     parser.add_argument(
-        "--args", type=str, default='["--acp", "--yolo"]',
-        help='CLI 启动参数(JSON 数组,默认 \'["--acp", "--yolo"]\')',
+        "--args", type=str, default='["--acp", "--permission-mode", "bypass_permissions"]',
+        help='CLI 启动参数(JSON 数组,默认 \'["--acp", "--permission-mode", "bypass_permissions"]\')',
     )
     parser.add_argument(
         "--host", type=str, default="0.0.0.0",

@@ -55,6 +55,9 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
             "install_cmd_config_key": "QODER_CLI_INSTALL_CMD",
             "install_cmd_default": "npm install -g @qoder-ai/qodercli",
             # ACP 启动参数(qodercli --acp --yolo)
+            #   --acp:启动 ACP 协议服务
+            #   --yolo:等价 --permission-mode bypass_permissions,跳过权限确认
+            #     见 https://docs.qoder.com/cli/permissions
             "acp_args": ["--acp", "--yolo"],
             # PAT 注入用的环境变量名
             "credential_env": {"pat": "QODER_PERSONAL_ACCESS_TOKEN"},
