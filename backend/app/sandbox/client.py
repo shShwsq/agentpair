@@ -116,8 +116,14 @@ class SandboxSession:
     # ---------- sandbox 模式实现(SandboxSync 同步) ----------
 
     def _sandbox_run_command(self, cmd: str, timeout: int) -> str:
-        """在真实沙箱里执行命令(SandboxSync.commands.run 同步调用)"""
-        execution = self.sandbox.commands.run(cmd, timeout=timeout)
+        """在真实沙箱里执行命令(SandboxSync.commands.run 同步调用)
+
+        SDK 的 run() 不接受 timeout kwarg,超时通过 RunCommandOpts(timeout=timedelta) 传入。
+        """
+        from opensandbox.models.execd import RunCommandOpts
+
+        opts = RunCommandOpts(timeout=timedelta(seconds=timeout))
+        execution = self.sandbox.commands.run(cmd, opts=opts)
         # logs.stdout 是一个 list,每项有 .text
         stdout_parts = []
         for item in (execution.logs.stdout or []):
