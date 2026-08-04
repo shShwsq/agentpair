@@ -15,9 +15,10 @@ import AppHeader from '@/components/AppHeader.vue'
 import DeleteAccountDialog from '@/components/DeleteAccountDialog.vue'
 import GitHubDialog from '@/components/GitHubDialog.vue'
 import PasswordDialog from '@/components/PasswordDialog.vue'
+import TraeCLIPatDialog from '@/components/TraeCLIPatDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
-import { changePassword, deleteAccount } from '@/api/auth'
+import { changePassword, clearTraeCliPat, deleteAccount, getTraeCliPatStatus, setTraeCliPat } from '@/api/auth'
 import { getGitHubBindURL, getGitHubStatus, syncEmail, unbindGitHub } from '@/api/github'
 import type { GitHubStatus } from '@/types/github'
 import { useAuthStore } from '@/stores/auth'
@@ -141,10 +142,69 @@ async function handleUnbind(): Promise<void> {
 }
 
 // ============================================================
+// TRAE CLI PAT 弹窗
+// ============================================================
+const traePatDialogOpen = ref(false)
+const traePatHasPat = ref<boolean | null>(null)  // null = 加载中
+const traePatSaving = ref(false)
+const traePatError = ref('')
+
+async function refreshTraeCliPatStatus(): Promise<void> {
+  traePatHasPat.value = null
+  traePatError.value = ''
+  try {
+    const res = await getTraeCliPatStatus()
+    traePatHasPat.value = res.has_pat
+  } catch (err) {
+    console.warn('加载 TRAE CLI PAT 状态失败:', err)
+    traePatHasPat.value = false
+  }
+}
+
+function openTraePatDialog(): void {
+  traePatError.value = ''
+  if (traePatHasPat.value === null) refreshTraeCliPatStatus()
+  traePatDialogOpen.value = true
+}
+
+async function handleTraePatSave(pat: string): Promise<void> {
+  traePatError.value = ''
+  traePatSaving.value = true
+  try {
+    const res = await setTraeCliPat(pat)
+    traePatHasPat.value = res.has_pat
+    traePatDialogOpen.value = false
+    showToast('TRAE CLI PAT 已保存', 'success')
+    // 同步本地用户信息(表格行状态依赖 has_trae_cli_pat)
+    await authStore.fetchMe()
+  } catch (err) {
+    traePatError.value = extractErrorMessage(err)
+  } finally {
+    traePatSaving.value = false
+  }
+}
+
+async function handleTraePatClear(): Promise<void> {
+  traePatError.value = ''
+  traePatSaving.value = true
+  try {
+    const res = await clearTraeCliPat()
+    traePatHasPat.value = res.has_pat
+    traePatDialogOpen.value = false
+    showToast('TRAE CLI PAT 已清除', 'success')
+    await authStore.fetchMe()
+  } catch (err) {
+    traePatError.value = extractErrorMessage(err)
+  } finally {
+    traePatSaving.value = false
+  }
+}
+
+// ============================================================
 // 表格行
 // ============================================================
 interface SettingRow {
-  key: 'password' | 'github' | 'delete'
+  key: 'password' | 'github' | 'trae_cli' | 'delete'
   item: string
   desc: string
   status: string
@@ -181,6 +241,23 @@ const rows = computed<SettingRow[]>(() => [
     loading: githubStatus.value === null,
   },
   {
+    key: 'trae_cli',
+    item: 'TRAE CLI PAT',
+    desc: '选择 TRAE CLI 执行器时用于沙箱内认证',
+    status: traePatHasPat.value === null
+      ? ''  // 加载中,由 template 渲染 spinner
+      : traePatHasPat.value
+        ? '已设置'
+        : '未设置',
+    statusType: traePatHasPat.value === null
+      ? 'neutral'
+      : traePatHasPat.value
+        ? 'ok'
+        : 'warn',
+    actionText: traePatHasPat.value ? '修改' : '设置',
+    loading: traePatHasPat.value === null,
+  },
+  {
     key: 'delete',
     item: '删除账号',
     desc: '永久删除账号及所有数据',
@@ -193,6 +270,7 @@ const rows = computed<SettingRow[]>(() => [
 function openRow(row: SettingRow): void {
   if (row.key === 'password') openPasswordDialog()
   else if (row.key === 'github') openGitHubDialog()
+  else if (row.key === 'trae_cli') openTraePatDialog()
   else if (row.key === 'delete') openDeleteDialog()
 }
 
@@ -256,6 +334,8 @@ async function handleSyncConfirm(): Promise<void> {
 onMounted(() => {
   // 预加载 GitHub 状态(用于表格状态列展示)
   refreshGitHubStatus()
+  // 预加载 TRAE CLI PAT 状态
+  refreshTraeCliPatStatus()
 
   // 检测 OAuthCallbackView 带来的邮箱不一致 query → 弹窗询问
   if (route.query.email_mismatch === '1') {
@@ -361,6 +441,16 @@ onMounted(() => {
           @bind="handleBind"
           @unbind="handleUnbind"
           @cancel="ghDialogOpen = false"
+        />
+
+        <TraeCLIPatDialog
+          :open="traePatDialogOpen"
+          :has-pat="traePatHasPat === true"
+          :saving="traePatSaving"
+          :error="traePatError"
+          @save="handleTraePatSave"
+          @clear="handleTraePatClear"
+          @cancel="traePatDialogOpen = false"
         />
 
         <DeleteAccountDialog

@@ -10,6 +10,7 @@ import type {
   MessageResponse,
   RefreshResponse,
   TokenResponse,
+  TraeCLIPatStatus,
   User,
 } from '@/types/auth'
 
@@ -85,4 +86,21 @@ export function getGitHubAuthorizeURL(): string {
     scope: 'user:email',
   })
   return `https://github.com/login/oauth/authorize?${params.toString()}`
+}
+
+// ---- TRAE CLI PAT 管理(账户设置页) ----
+
+/** 查询 TRAE CLI PAT 是否已设置(不暴露实际值) */
+export function getTraeCliPatStatus(): Promise<TraeCLIPatStatus> {
+  return client.get('/auth/me/trae-cli-pat').then((r) => r.data)
+}
+
+/** 设置/更新 TRAE CLI PAT(空串等价于清除) */
+export function setTraeCliPat(pat: string): Promise<TraeCLIPatStatus> {
+  return client.put('/auth/me/trae-cli-pat', { pat }).then((r) => r.data)
+}
+
+/** 清除 TRAE CLI PAT */
+export function clearTraeCliPat(): Promise<TraeCLIPatStatus> {
+  return client.delete('/auth/me/trae-cli-pat').then((r) => r.data)
 }
