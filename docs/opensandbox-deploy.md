@@ -143,7 +143,26 @@ sudo systemctl status opensandbox
 
 AgentPair 在沙箱里执行 `git` / `rg`(ripgrep)/ `python3` / `awk` / `find` 等命令。官方 `ubuntu` 镜像不含 `git` 和 `rg`,需构建自定义镜像。
 
-在服务器上创建 `Dockerfile.sandbox`:
+### 2.1 一键构建(推荐)
+
+仓库提供了 `scripts/build-sandbox-image.sh`,自动生成 Dockerfile、构建镜像、验证必要工具都在:
+
+```bash
+# 在服务器上,进入 AgentPair 仓库根目录
+bash scripts/build-sandbox-image.sh
+```
+
+脚本会:
+1. 检查 docker 可用(含 daemon 是否运行、当前用户是否在 docker 组)
+2. 生成 `Dockerfile.sandbox`(已存在则跳过,便于你手动改后重跑)
+3. `docker build -t agentpair-sandbox:latest`
+4. 逐个验证镜像内 `git` / `rg` / `python3` / `awk` / `find` 都能找到
+
+完成后在 AgentPair 的 `.env` 里设 `SANDBOX_IMAGE=agentpair-sandbox:latest`。
+
+### 2.2 手动构建(了解脚本做了什么)
+
+脚本生成的 `Dockerfile.sandbox` 内容:
 
 ```dockerfile
 FROM ubuntu:22.04
@@ -170,7 +189,7 @@ USER user
 WORKDIR /home/user
 ```
 
-构建并加载(Server 直接用本地 Docker daemon,无需推到 registry):
+手动构建命令:
 
 ```bash
 docker build -f Dockerfile.sandbox -t agentpair-sandbox:latest .
@@ -179,7 +198,7 @@ docker run --rm agentpair-sandbox:latest rg --version
 docker run --rm agentpair-sandbox:latest git --version
 ```
 
-后续在 AgentPair 的 `.env` 里设 `SANDBOX_IMAGE=agentpair-sandbox:latest`。
+Server 直接用本地 Docker daemon,无需推到 registry。
 
 ## 三、配置 SSH Key(给沙箱用,可选)
 
