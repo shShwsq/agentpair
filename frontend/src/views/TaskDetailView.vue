@@ -1446,8 +1446,8 @@ function isUserMessageItem(item: DisplayItem): boolean {
     />
 
     <main class="main">
-      <!-- 暂停/实时按钮行(固定在滚动容器外,不随对话滚动) -->
-      <div v-if="isRunning" class="conv-header">
+      <!-- 标题/状态行(固定在滚动容器外,不随对话滚动;有任务即显示) -->
+      <div v-if="task" class="conv-header">
         <!-- 左侧:对话标题 + 创建时间 -->
         <div class="conv-header-info">
           <span class="conv-header-title" :title="task?.title || task?.user_input">
@@ -1456,20 +1456,22 @@ function isUserMessageItem(item: DisplayItem): boolean {
           <span v-if="task?.created_at" class="conv-header-time">{{ formatTime(task.created_at) }}</span>
         </div>
         <!-- 右侧:暂停态橙色徽标 + 恢复按钮;运行态红色实时徽标 + 暂停按钮 -->
-        <span v-if="isPaused" class="paused-indicator">
-          <span class="paused-bars" /><span>已暂停</span>
-        </span>
-        <span v-else class="live-indicator">
-          <span class="live-dot" />实时
-        </span>
-        <button
-          class="btn-pause"
-          :disabled="pausing"
-          :title="isPaused ? '恢复执行' : '暂停执行'"
-          @click="handleTogglePause"
-        >
-          {{ pausing ? '处理中...' : isPaused ? '恢复' : '暂停' }}
-        </button>
+        <template v-if="isRunning">
+          <span v-if="isPaused" class="paused-indicator">
+            <span class="paused-bars" /><span>已暂停</span>
+          </span>
+          <span v-else class="live-indicator">
+            <span class="live-dot" />实时
+          </span>
+          <button
+            class="btn-pause"
+            :disabled="pausing"
+            :title="isPaused ? '恢复执行' : '暂停执行'"
+            @click="handleTogglePause"
+          >
+            {{ pausing ? '处理中...' : isPaused ? '恢复' : '暂停' }}
+          </button>
+        </template>
       </div>
       <div ref="conversationRef" class="main-scroll">
       <!-- 加载中 -->
