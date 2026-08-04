@@ -260,7 +260,10 @@ def _create_real_sandbox() -> SandboxSession:
     config = ConnectionConfigSync(
         domain=domain,
         api_key=settings.SANDBOX_API_KEY or None,
-        request_timeout=timedelta(seconds=30),
+        # 跨机部署:走 Server 代理,后端只连 8080,无需放行容器端口范围
+        use_server_proxy=settings.SANDBOX_USE_SERVER_PROXY,
+        # 创建沙箱涉及拉镜像/启容器/等 healthy,首次尤慢,HTTP 请求超时给足 5 分钟
+        request_timeout=timedelta(minutes=5),
     )
     volumes = _build_volumes()
     resource = _build_resource()

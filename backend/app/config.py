@@ -60,8 +60,13 @@ class Settings(BaseSettings):
     SANDBOX_IMAGE: str = "ubuntu"
     # 沙箱超时(分钟)
     SANDBOX_TIMEOUT_MINUTES: int = 30
-    # 宿主机 SSH key 目录(可选,挂载到沙箱 /home/user/.ssh 供 git clone SSH 协议用)
-    # 留空不挂载;设为 ~/.ssh 则只读挂载到沙箱。需在 server [storage].allowed_host_paths 放行
+    # 是否走 Server 代理访问沙箱(跨机部署必须开;本机部署开了也能用)
+    # True=所有沙箱请求经 Server 8080 端口转发,后端只需连 Server 一个端口
+    # False=SDK 直连沙箱容器端口(需后端能访问 Server 的容器端口范围)
+    SANDBOX_USE_SERVER_PROXY: bool = True
+    # Server 宿主机上的 SSH key 目录(可选,只读挂载到沙箱 /home/user/.ssh 供 git clone SSH 协议用)
+    # 这是 Server 机器上的路径,不是后端本地路径!必须用绝对路径(如 /home/admin/.ssh),不要用 ~
+    # 留空不挂载;需在 server [storage].allowed_host_paths 放行该路径前缀
     SANDBOX_SSH_KEY_HOST_PATH: str = ""
     # 沙箱资源限制(可选,传给 SDK resource 参数,如 cpu="2" memory="4Gi")
     SANDBOX_CPU: str = ""
