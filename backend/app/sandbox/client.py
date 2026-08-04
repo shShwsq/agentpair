@@ -1,10 +1,10 @@
 """沙箱客户端封装
 
-OpenSandbox 的 Python SDK 是 async/await 风格,但我们的 react_agent 是同步循环
-(基于 OpenAI SDK 同步调用)。本模块对外提供同步接口,内部用 asyncio 跑异步调用。
+使用 OpenSandbox 官方同步 API(SandboxSync / ConnectionConfigSync),
+对齐 react_agent 的同步循环(基于 OpenAI SDK 同步调用),无需 asyncio 包装。
 
 两种模式:
-- sandbox:连真实 OpenSandbox Server(部署在 Linux 服务器上)
+- sandbox:连真实 OpenSandbox Server(部署在 Linux 服务器上),走 SandboxSync
 - mock:本地未部署 Server,用本地文件系统模拟,供开发期使用
 
 对外接口(同步):
@@ -16,7 +16,6 @@ OpenSandbox 的 Python SDK 是 async/await 风格,但我们的 react_agent 是�
 
 参考:https://github.com/alibaba/OpenSandbox
 """
-import asyncio
 import logging
 import os
 import shutil
@@ -40,12 +39,12 @@ logger = logging.getLogger(__name__)
 class SandboxSession:
     """沙箱会话,封装对单个沙箱实例的操作
 
-    所有方法都是同步的,内部异步部分由 _run_async 调度
+    所有方法都是同步的:sandbox 模式走 SandboxSync 同步 API,mock 模式走本地文件系统
     """
 
     def __init__(self, mode: str, sandbox: Any = None, work_dir: str = "/home/user"):
         self.mode = mode
-        self.sandbox = sandbox  # OpenSandbox Sandbox 对象(sandbox 模式)
+        self.sandbox = sandbox  # SandboxSync 对象(sandbox 模式)
         self.work_dir = work_dir
         # mock 模式下的本地临时目录
         self._mock_dir: Path | None = None
@@ -60,14 +59,14 @@ class SandboxSession:
     def run_command(self, cmd: str, timeout: int = 60) -> str:
         """执行 shell 命令,返回 stdout
 
-        sandbox 模式:在沙箱里执行
+        sandbox 模式:在沙箱里执行(SandboxSync.commands.run)
         mock 模式:在本地临时目录里执行(用 subprocess)
         """
         if self._closed:
             raise RuntimeError("沙箱已关闭")
 
         if self.mode == "sandbox":
-            return self._run_async(self._sandbox_run_command(cmd, timeout))
+            return self._sandbox_run_command(cmd, timeout)
         else:
             return self._mock_run_command(cmd, timeout)
 
@@ -77,7 +76,7 @@ class SandboxSession:
             raise RuntimeError("沙箱已关闭")
 
         if self.mode == "sandbox":
-            self._run_async(self._sandbox_write_file(path, content))
+            self._sandbox_write_file(path, content)
         else:
             self._mock_write_file(path, content)
 
@@ -87,7 +86,7 @@ class SandboxSession:
             raise RuntimeError("沙箱已关闭")
 
         if self.mode == "sandbox":
-            return self._run_async(self._sandbox_read_file(path))
+            return self._sandbox_read_file(path)
         else:
             return self._mock_read_file(path)
 
@@ -105,20 +104,20 @@ class SandboxSession:
             try:
                 destroy = getattr(self.sandbox, "destroy", None)
                 if destroy is not None:
-                    self._run_async(destroy())
+                    destroy()
                 else:
-                    self._run_async(self.sandbox.kill())
+                    self.sandbox.kill()
             except Exception as e:
                 logger.warning(f"关闭沙箱失败: {e}")
         elif self._mock_dir:
             # mock 模式:清理临时目录
             shutil.rmtree(self._mock_dir, ignore_errors=True)
 
-    # ---------- sandbox 模式实现(异步) ----------
+    # ---------- sandbox 模式实现(SandboxSync 同步) ----------
 
-    async def _sandbox_run_command(self, cmd: str, timeout: int) -> str:
-        """在真实沙箱里执行命令"""
-        execution = await self.sandbox.commands.run(cmd, timeout=timeout)
+    def _sandbox_run_command(self, cmd: str, timeout: int) -> str:
+        """在真实沙箱里执行命令(SandboxSync.commands.run 同步调用)"""
+        execution = self.sandbox.commands.run(cmd, timeout=timeout)
         # logs.stdout 是一个 list,每项有 .text
         stdout_parts = []
         for item in (execution.logs.stdout or []):
@@ -126,17 +125,17 @@ class SandboxSession:
             stdout_parts.append(text)
         return "".join(stdout_parts)
 
-    async def _sandbox_write_file(self, path: str, content: str) -> None:
+    def _sandbox_write_file(self, path: str, content: str) -> None:
         """在真实沙箱里写文件"""
-        from opensandbox.models import WriteEntry
+        from opensandbox.models.filesystem import WriteEntry
 
-        await self.sandbox.files.write_files([
+        self.sandbox.files.write_files([
             WriteEntry(path=path, data=content, mode=644)
         ])
 
-    async def _sandbox_read_file(self, path: str) -> str:
+    def _sandbox_read_file(self, path: str) -> str:
         """在真实沙箱里读文件"""
-        content = await self.sandbox.files.read_file(path)
+        content = self.sandbox.files.read_file(path)
         return content
 
     # ---------- mock 模式实现(本地文件系统) ----------
@@ -178,28 +177,6 @@ class SandboxSession:
             rel = rel[len("home/user/"):]
         target = self._mock_dir / rel
         return target.read_text(encoding="utf-8")
-
-    # ---------- 异步调度 ----------
-
-    def _run_async(self, coro):
-        """在同步上下文里跑异步协程
-
-        FastAPI 路由虽然是 async,但 react_agent 内部循环是同步的(OpenAI SDK 同步调用),
-        所以这里用一个独立的事件循环跑沙箱调用
-
-        注意:如果当前已有运行中的事件循环(比如在 async 函数里调用),
-        asyncio.run 会报错。这种情况用 asyncio.run_coroutine_threadsafe 兜底
-        """
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # 没有运行中的循环,直接用 asyncio.run
-            return asyncio.run(coro)
-        # 有运行中的循环(在 async 上下文里),用新线程跑
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
 
 
 # ============================================================
@@ -271,18 +248,18 @@ def _build_resource() -> dict[str, str] | None:
 
 
 def _create_real_sandbox() -> SandboxSession:
-    """创建真实沙箱
+    """创建真实沙箱(同步)
 
-    OpenSandbox SDK 是 async/await 风格,这里用 asyncio.run 启动。
-    必须显式传 ConnectionConfig(domain + api_key),否则 SDK 只会连 localhost:8080。
+    使用官方 SandboxSync 同步 API,无需 asyncio 包装。
+    必须显式传 ConnectionConfigSync(domain + api_key),否则 SDK 只会连 localhost:8080。
     """
     from datetime import timedelta
 
-    from opensandbox import Sandbox
-    from opensandbox.config import ConnectionConfig
+    from opensandbox import SandboxSync
+    from opensandbox.config import ConnectionConfigSync
 
     domain = _parse_domain(settings.SANDBOX_SERVER_URL)
-    config = ConnectionConfig(
+    config = ConnectionConfigSync(
         domain=domain,
         api_key=settings.SANDBOX_API_KEY or None,
         request_timeout=timedelta(seconds=30),
@@ -290,19 +267,14 @@ def _create_real_sandbox() -> SandboxSession:
     volumes = _build_volumes()
     resource = _build_resource()
 
-    async def _create():
-        kwargs: dict[str, Any] = {
-            "image": settings.SANDBOX_IMAGE,
-            "connection_config": config,
-            "timeout": timedelta(minutes=settings.SANDBOX_TIMEOUT_MINUTES),
-        }
-        if volumes:
-            kwargs["volumes"] = volumes
-        if resource:
-            kwargs["resource"] = resource
-        sandbox = await Sandbox.create(**kwargs)
-        return sandbox
-
-    sandbox = SandboxSession(mode="sandbox")._run_async(_create())
-    session = SandboxSession(mode="sandbox", sandbox=sandbox)
-    return session
+    kwargs: dict[str, Any] = {
+        "image": settings.SANDBOX_IMAGE,
+        "connection_config": config,
+        "timeout": timedelta(minutes=settings.SANDBOX_TIMEOUT_MINUTES),
+    }
+    if volumes:
+        kwargs["volumes"] = volumes
+    if resource:
+        kwargs["resource"] = resource
+    sandbox = SandboxSync.create(**kwargs)
+    return SandboxSession(mode="sandbox", sandbox=sandbox)
