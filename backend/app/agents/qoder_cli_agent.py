@@ -86,7 +86,7 @@ class ACPClient:
         client = ACPClient(endpoint_url, endpoint_headers)
         client.initialize()
         session_id = client.new_session(cwd="/home/user/repo")
-        result = client.prompt(session_id, messages, on_event=callback)
+        result = client.prompt(session_id, [{"type":"text","text":"hi"}], on_event=callback)
         client.close()
     """
 
@@ -108,6 +108,7 @@ class ACPClient:
         self,
         request: dict,
         on_event=None,
+        timeout: httpx.Timeout | float | None = None,
     ) -> dict:
         """发送 JSON-RPC 请求,可选流式处理通知,返回最终响应 result
 
@@ -117,6 +118,8 @@ class ACPClient:
 
         on_event: 接收通知 dict 的回调函数。None 表示不处理中间事件
         (用于 initialize / session/new 等快速调用)。
+        timeout: 本次请求的超时(秒或 httpx.Timeout)。None 用 client 默认
+        (read=None 无限等待)。测试场景应传有限值,避免模型无响应时卡死。
         """
         request_id = request.get("id")
 
@@ -124,6 +127,7 @@ class ACPClient:
             "POST",
             f"{self.base_url}/rpc",
             json=request,
+            timeout=timeout,
         ) as response:
             if response.status_code != 200:
                 response.read()
@@ -169,7 +173,12 @@ class ACPClient:
         return final_result
 
     def initialize(self) -> dict:
-        """ACP 握手:交换协议版本和能力"""
+        """ACP 握手:交换协议版本和能力
+
+        返回的 result 可能含 authMethods(若 Agent 要求认证),
+        此时客户端须先调 authenticate(methodId) 才能创建 session。
+        见 https://agentclientprotocol.com/protocol/authentication
+        """
         return self._rpc({
             "jsonrpc": "2.0",
             "method": "initialize",
@@ -181,9 +190,34 @@ class ACPClient:
             "id": self._next_id(),
         })
 
+    def authenticate(
+        self,
+        method_id: str,
+        timeout: httpx.Timeout | float | None = None,
+    ) -> dict:
+        """ACP 认证:用 initialize 返回的某个 authMethod id 完成认证
+
+        Agent 在 initialize 响应中通过 authMethods 声明支持的认证方式,
+        客户端选一个调本方法。PAT 等凭证经环境变量注入到 bridge 进程,
+        qodercli 子进程继承后在此步骤完成服务端认证。
+
+        认证成功后才能创建 session,否则会收到 -32000 Authentication required。
+        timeout: 超时(秒),认证可能涉及网络往返 qoder.com 验证 PAT,建议传有限值。
+        """
+        return self._rpc({
+            "jsonrpc": "2.0",
+            "method": "authenticate",
+            "params": {"methodId": method_id},
+            "id": self._next_id(),
+        }, timeout=timeout)
+
     def new_session(self, cwd: str | None = None) -> str:
-        """创建 ACP 会话,返回 session_id"""
-        params: dict[str, Any] = {}
+        """创建 ACP 会话,返回 session_id
+
+        params 按 ACP 规范必须含 mcpServers(可为空数组),cwd 为可选工作目录。
+        见 https://agentclientprotocol.com/protocol/session-setup
+        """
+        params: dict[str, Any] = {"mcpServers": []}
         if cwd:
             params["cwd"] = cwd
         result = self._rpc({
@@ -200,22 +234,27 @@ class ACPClient:
     def prompt(
         self,
         session_id: str,
-        messages: list[dict],
+        prompt: list[dict],
         on_event=None,
+        timeout: httpx.Timeout | float | None = None,
     ) -> dict:
         """发送 prompt,流式处理通知,返回最终结果
 
+        prompt: ACP/MCP content 数组,如 [{"type":"text","text":"你好"}]
+        (注意:不是 OpenAI 的 {"role","content"} 格式,ACP 用 MCP content 格式)
         on_event: 接收 session/update 通知的回调
+        timeout: 本次请求超时(秒或 httpx.Timeout)。None 用 client 默认
+        (read=None 无限等待)。测试场景应传有限值。
         """
         return self._rpc({
             "jsonrpc": "2.0",
             "method": "session/prompt",
             "params": {
                 "sessionId": session_id,
-                "messages": messages,
+                "prompt": prompt,
             },
             "id": self._next_id(),
-        }, on_event=on_event)
+        }, on_event=on_event, timeout=timeout)
 
     def cancel(self, session_id: str) -> None:
         """取消正在进行的 prompt"""
@@ -512,15 +551,16 @@ def _stop_acp_bridge(session, execution_id: str) -> None:
 def test_credential(db: Session, user_id) -> tuple[bool, str]:
     """测试 Qoder CLI 凭证是否可用
 
-    在临时沙箱内启动 ACP bridge 并发起 initialize 请求,验证:
+    在临时沙箱内启动 ACP bridge,依次验证:
     1. 沙箱镜像含 qodercli + node + npm
-    2. PAT 有效(Qoder 服务端认证通过)
+    2. PAT 有效(Qoder 服务端认证通过,ACP initialize 握手)
     3. 网络可达 qoder.com
+    4. 模型可响应(发送「你好」prompt,确认 LLM 正常工作,消耗少量 credits)
 
     临时沙箱在测试结束后立即销毁,不污染任务执行环境。
 
     返回 (ok, message):
-        ok=True: 测试通过,message 为成功提示
+        ok=True: 测试通过,message 含 ACP 协议版本 + 模型响应预览
         ok=False: 测试失败,message 为人类可读的错误原因(可显示给用户)
     """
     # ---- 加载凭证 ----
@@ -554,6 +594,47 @@ def test_credential(db: Session, user_id) -> tuple[bool, str]:
             return False, f"Qoder CLI 环境准备失败: {e}"
 
         # ---- 启动 ACP bridge(凭证经 envs 注入) ----
+        # 诊断:直接用 PAT 运行 qodercli(非 ACP 模式),验证 PAT 有效性
+        # 如果 PAT 无效,会快速报认证错误;如果有效,会返回模型响应
+        try:
+            # 先清理可能残留的旧登录态(避免干扰 PAT 认证)
+            session.run_command(
+                "rm -rf ~/.qoder 2>/dev/null; echo 'cleaned'",
+                timeout=5,
+            )
+
+            # 诊断:确认 PAT 确实传到了沙箱(只打印长度和首尾 4 位,避免泄露)
+            pat_val = credential_envs.get("QODER_PERSONAL_ACCESS_TOKEN", "")
+            if pat_val:
+                masked = f"{pat_val[:4]}...{pat_val[-4:]}" if len(pat_val) > 8 else "(too short)"
+                logger.warning(
+                    f"[qoder_cli_test] PAT 诊断: len={len(pat_val)}, "
+                    f"preview={masked}, has_whitespace={any(c.isspace() for c in pat_val)}"
+                )
+            else:
+                logger.warning("[qoder_cli_test] PAT 诊断: QODER_PERSONAL_ACCESS_TOKEN 为空!")
+                return False, "PAT 未配置或为空,请在智能体配置中填写 Qoder Personal Access Token"
+
+            pat_test_id = session.run_command_background(
+                'qodercli -p "hello" 2>&1',
+                envs=credential_envs,
+                work_dir="/tmp",
+            )
+            import time as _time
+            _time.sleep(25)  # 给 qodercli 足够时间响应或报错
+            pat_logs, _ = session.get_background_logs(pat_test_id)
+            logger.warning(
+                f"[qoder_cli_test] PAT 直接测试(qodercli -p hello),完整输出:\n"
+                f"{(pat_logs or '')[-1500:]}"
+            )
+            # 中断测试命令(可能还在运行)
+            try:
+                session.interrupt_command(pat_test_id)
+            except Exception:
+                pass  # 命令可能已结束,中断失败可忽略
+        except Exception as e:
+            logger.warning(f"[qoder_cli_test] PAT 直接测试异常: {e}")
+
         try:
             bridge_exec_id = _start_acp_bridge(session, credential_envs)
             endpoint_url, endpoint_headers = session.get_endpoint(ACP_BRIDGE_PORT)
@@ -569,17 +650,128 @@ def test_credential(db: Session, user_id) -> tuple[bool, str]:
                 return False, f"PAT 认证失败: {err_msg}"
             return False, f"ACP bridge 启动失败: {err_msg}"
 
-        # ---- ACP 握手(真正验证 PAT) ----
-        # qodercli 在 PAT 无效时通常会在 initialize 前后报认证错误
+        # ---- ACP 握手(验证 PAT) + 测试 prompt(验证模型可响应) ----
+        # qodercli 在 PAT 无效时通常会在 initialize 前后报认证错误;
+        # 握手通过后再发个「你好」prompt,确认模型能正常响应(消耗少量 credits)。
         client = ACPClient(endpoint_url, endpoint_headers)
         try:
             result = client.initialize()
             protocol_version = result.get("protocolVersion", "?")
-            logger.info(
+            auth_methods = result.get("authMethods", []) or []
+            logger.warning(
                 f"[qoder_cli_test] ACP 握手成功: protocolVersion={protocol_version}, "
-                f"result={json.dumps(result, ensure_ascii=False)[:200]}"
+                f"authMethods={[m.get('id') for m in auth_methods]}"
             )
-            return True, f"连接成功(ACP 协议版本 {protocol_version})"
+
+            # ---- ACP 认证(若 Agent 要求) ----
+            # qodercli 通过 authMethods 声明需要认证,客户端必须调 authenticate
+            # 才能创建 session。PAT 经环境变量注入,在此步骤完成服务端认证。
+            if auth_methods:
+                logger.warning(
+                    f"[qoder_cli_test] 完整 authMethods: "
+                    f"{json.dumps(auth_methods, ensure_ascii=False)}"
+                )
+                # 选 qodercli-login 方法(qodercli 的标准认证方式)
+                method_id = ""
+                for m in auth_methods:
+                    if m.get("id") == "qodercli-login":
+                        method_id = "qodercli-login"
+                        break
+                if not method_id:
+                    method_id = auth_methods[0].get("id", "")
+                if not method_id:
+                    return False, "ACP 握手成功但未找到可用的认证方法"
+
+                logger.warning(f"[qoder_cli_test] 开始 ACP 认证: methodId={method_id}")
+                # 认证前打印 bridge 日志,看 qodercli 当前状态
+                if bridge_exec_id:
+                    logs, _ = session.get_background_logs(bridge_exec_id)
+                    logger.warning(f"[qoder_cli_test] 认证前 bridge 日志: {(logs or '')[-500:]}")
+                try:
+                    # authenticate 可能涉及网络往返 qoder.com 验证 PAT,给 90s 超时
+                    # (之前 30s 超时时,bridge 日志显示 qodercli 恰好在 ~30s 才返回)
+                    auth_result = client.authenticate(method_id, timeout=90)
+                    logger.warning(
+                        f"[qoder_cli_test] ACP 认证成功: "
+                        f"{json.dumps(auth_result, ensure_ascii=False)[:200]}"
+                    )
+                except httpx.TimeoutException:
+                    # 超时时读取 bridge 日志辅助诊断
+                    if bridge_exec_id:
+                        logs, _ = session.get_background_logs(bridge_exec_id)
+                        logger.warning(
+                            f"[qoder_cli_test] 认证超时 bridge 日志: {(logs or '')[-800:]}"
+                        )
+                    return False, "ACP 认证超时(90s),请检查网络或 PAT 有效性"
+                except RuntimeError as e:
+                    err_msg = str(e)
+                    low = err_msg.lower()
+                    if any(kw in low for kw in ("auth", "unauthorized", "token", "401",
+                                                "credential", "authentication required")):
+                        return False, f"PAT 认证失败: {err_msg}"
+                    return False, f"ACP 认证失败: {err_msg}"
+                except Exception as e:
+                    logger.exception("[qoder_cli_test] ACP 认证异常")
+                    return False, f"ACP 认证异常: {e}"
+
+            # ---- 发送测试 prompt 验证模型可响应 ----
+            try:
+                # cwd 用 /tmp(沙箱内必定存在),避免 /home/user 不存在导致 -32602
+                acp_session_id = client.new_session(cwd="/tmp")
+                logger.warning(
+                    f"[qoder_cli_test] session/new 返回: sessionId={acp_session_id}"
+                )
+
+                test_prompt = [{"type": "text", "text": "你好"}]
+                logger.warning(
+                    f"[qoder_cli_test] 发送 session/prompt: "
+                    f"sessionId={acp_session_id}, prompt={json.dumps(test_prompt, ensure_ascii=False)}"
+                )
+
+                # 收集模型文本回复
+                # ACP session/update 结构: params.update.sessionUpdate / params.update.content
+                reply_chunks: list[str] = []
+
+                def _on_test_event(msg: dict) -> None:
+                    if msg.get("method") != "session/update":
+                        return
+                    params = msg.get("params") or {}
+                    update = params.get("update") or {}
+                    update_type = update.get("sessionUpdate", "")
+                    content = update.get("content", "")
+                    # agent_message_chunk 是模型文本回复
+                    if update_type == "agent_message_chunk":
+                        text = _extract_text(content)
+                        if text:
+                            reply_chunks.append(text)
+
+                client.prompt(
+                    acp_session_id,
+                    test_prompt,
+                    on_event=_on_test_event,
+                    timeout=30,  # 测试场景 30s 超时,避免模型无响应时卡死
+                )
+
+                reply = "".join(reply_chunks).strip()
+                if not reply:
+                    return False, "ACP 握手成功,但模型未响应(请检查 PAT 配额或网络)"
+
+                preview = reply[:80] + ("..." if len(reply) > 80 else "")
+                logger.warning(f"[qoder_cli_test] 模型响应: {preview}")
+                return True, (
+                    f"连接成功(ACP 协议版本 {protocol_version}),"
+                    f"模型响应: {preview}"
+                )
+            except httpx.TimeoutException:
+                return False, "ACP 握手成功,但模型响应超时(30s,请检查网络或配额)"
+            except RuntimeError as e:
+                err_msg = str(e)
+                low = err_msg.lower()
+                if any(kw in low for kw in ("auth", "unauthorized", "token", "401",
+                                            "quota", "credit", "limit", "余额", "配额")):
+                    return False, f"PAT 认证或配额失败: {err_msg}"
+                return False, f"模型响应测试失败: {err_msg}"
+
         except RuntimeError as e:
             err_msg = str(e)
             if any(kw in err_msg.lower() for kw in ("auth", "unauthorized", "token", "401")):
@@ -609,12 +801,29 @@ def test_credential(db: Session, user_id) -> tuple[bool, str]:
 class _ACPCollector:
     """收集 ACP 通知事件,翻译为 event_bus 事件并落库
 
-    在 prompt 流式过程中作为 on_event 回调,逐条处理 session/update 通知:
-    - thinking/reasoning → thinking_delta(phase=reasoning)
-    - text/content → thinking_delta(phase=content)
-    - tool_call/tool_use → conversation(type=tool_call)
-    - tool_result/tool_response → conversation(type=tool_result)
-    - error → thinking_delta(phase=error)
+    ACP session/update 通知结构(见 https://agentclientprotocol.com/protocol/prompt-turn):
+        {
+          "method": "session/update",
+          "params": {
+            "sessionId": "...",
+            "update": {
+              "sessionUpdate": "agent_message_chunk" | "plan" | "tool_call" | "tool_call_update" | ...,
+              "content": { "type": "text", "text": "..." },  # agent_message_chunk
+              "entries": [...],  # plan
+              "toolCallId": "...",  # tool_call / tool_call_update
+              "status": "...",  # tool_call_update
+              ...
+            }
+          }
+        }
+
+    字段映射(sessionUpdate → event_bus 事件):
+    - agent_message_chunk → thinking_delta(phase=content)
+    - thought_chunk       → thinking_delta(phase=reasoning)
+    - tool_call           → conversation(type=tool_call)
+    - tool_call_update    → conversation(type=tool_result) (status=completed 时)
+    - plan                → event_bus plan 事件
+    - error               → thinking_delta(phase=error)
 
     同时累积 reasoning / content 文本,供调用方生成 summary 和落库 thinking。
     """
@@ -630,36 +839,39 @@ class _ACPCollector:
 
     def __call__(self, msg: dict) -> None:
         """处理一条 ACP 通知"""
-        # 首次集成时记录原始 msg 结构,便于核对 qodercli --acp 实际输出格式后
-        # 调整下方 update_type / content 字段映射。确认无误后可删除此日志。
+        # 记录原始 msg 结构(qodercli 实际输出可能与标准有差异,便于核对)
         logger.debug(
             f"[acp] raw msg: {json.dumps(msg, ensure_ascii=False)[:500]}"
         )
 
         method = msg.get("method", "")
         if method != "session/update":
-            # 其他通知(如 initialized)忽略
             return
 
         params = msg.get("params") or {}
-        update_type = params.get("type", "")
-        content = params.get("content", "")
+        update = params.get("update") or {}
+        update_type = update.get("sessionUpdate", "")
+        content = update.get("content", "")
 
         # 提取文本(content 可能是 str / dict / list)
         text = _extract_text(content)
 
-        if update_type in ("thinking", "reasoning"):
+        if update_type in ("thought_chunk", "thinking", "reasoning"):
             self._handle_thinking(text)
-        elif update_type in ("text", "content", "assistant"):
+        elif update_type == "agent_message_chunk":
             self._handle_text(text)
-        elif update_type in ("tool_call", "tool_use"):
-            self._handle_tool_call(content)
-        elif update_type in ("tool_result", "tool_response"):
-            self._handle_tool_result(content)
+        elif update_type == "tool_call":
+            self._handle_tool_call(update)
+        elif update_type == "tool_call_update":
+            # status=completed 时携带工具结果
+            if update.get("status") == "completed":
+                self._handle_tool_result(content)
+        elif update_type == "plan":
+            self._handle_plan(update.get("entries", []))
         elif update_type == "error":
             self._handle_error(text)
         else:
-            logger.debug(f"[acp] 未知 update 类型: {update_type}, content={str(content)[:100]}")
+            logger.debug(f"[acp] 未知 update 类型: {update_type}, update={str(update)[:100]}")
 
     def _handle_thinking(self, delta: str) -> None:
         if not delta:
@@ -685,22 +897,15 @@ class _ACPCollector:
             "delta": delta,
         })
 
-    def _handle_tool_call(self, content: Any) -> None:
-        """记录工具调用(落库 conversation,推送 SSE)"""
-        self.tool_call_count += 1
-        tool_name = ""
-        tool_args = ""
-        if isinstance(content, dict):
-            tool_name = content.get("name", "")
-            args = content.get("arguments", content.get("input", ""))
-            if isinstance(args, dict):
-                tool_args = json.dumps(args, ensure_ascii=False)
-            else:
-                tool_args = str(args)
-        elif isinstance(content, str):
-            tool_name = content
+    def _handle_tool_call(self, update: dict) -> None:
+        """记录工具调用(落库 conversation,推送 SSE)
 
-        intent = f"调用 {tool_name}({tool_args[:200]})" if tool_name else "工具调用"
+        ACP tool_call update 结构:
+            {"sessionUpdate":"tool_call","toolCallId":"...","title":"...","kind":"...","status":"pending"}
+        """
+        self.tool_call_count += 1
+        tool_name = update.get("title", "") or update.get("toolCallId", "")
+        intent = f"调用 {tool_name}" if tool_name else "工具调用"
         _add_conversation(
             self.db, self.task,
             round_idx=self.round_idx,
@@ -717,6 +922,25 @@ class _ACPCollector:
             role="react_agent", type="tool_result",
             content=(text or str(content))[:500],
         )
+
+    def _handle_plan(self, entries: list) -> None:
+        """处理 plan 通知,推送 plan 事件"""
+        if not entries:
+            return
+        steps = []
+        for i, e in enumerate(entries, 1):
+            if not isinstance(e, dict):
+                continue
+            steps.append({
+                "id": i,
+                "text": e.get("content", ""),
+                "status": e.get("status", "pending"),
+            })
+        if steps:
+            publish(self.task.id, "plan", {
+                "round_idx": self.round_idx,
+                "steps": steps,
+            })
 
     def _handle_error(self, text: str) -> None:
         if not text:
@@ -912,7 +1136,21 @@ def run_qoder_cli_agent(
         client = ACPClient(endpoint_url, endpoint_headers)
         try:
             # 握手
-            client.initialize()
+            init_result = client.initialize()
+
+            # 认证(若 Agent 要求)
+            auth_methods = init_result.get("authMethods", []) or []
+            if auth_methods:
+                method_id = ""
+                for m in auth_methods:
+                    if m.get("id") == "qodercli-login":
+                        method_id = "qodercli-login"
+                        break
+                if not method_id:
+                    method_id = auth_methods[0].get("id", "")
+                if method_id:
+                    logger.info(f"[qoder_cli] ACP 认证: methodId={method_id}")
+                    client.authenticate(method_id)
 
             # 创建会话(cwd 设为仓库路径,让 CLI 在仓库目录下工作)
             cwd = repo_path or BRIDGE_WORK_DIR
@@ -946,7 +1184,7 @@ def run_qoder_cli_agent(
             try:
                 result = client.prompt(
                     acp_session_id,
-                    [{"role": "user", "content": user_msg}],
+                    [{"type": "text", "text": user_msg}],
                     on_event=collector,
                 )
             except Exception as e:

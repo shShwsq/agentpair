@@ -49,11 +49,15 @@ export function deleteAgentConfig(agent_type: string): Promise<AgentConfigListRe
 }
 
 /**
- * 测试指定 agent 类型的凭证连通性(启动临时沙箱 + ACP 握手)
+ * 测试指定 agent 类型的凭证连通性(启动临时沙箱 + ACP 握手 + prompt 验证)
  *
- * 耗时较长(约 10-30s),调用方应显示 loading 状态。
+ * 耗时较长(沙箱启动 + bridge 就绪 + 认证 + 模型响应,约 30-90s),
+ * 单独设置 120s 超时,避免前端 axios 默认 30s 超时导致误报网络错误。
+ * 调用方应显示 loading 状态。
  * 必须先保存配置才能测试(测试用的是已加密存储的凭证)。
  */
 export function testAgentConfig(agent_type: string): Promise<AgentTestResult> {
-  return client.post(`/agents/configs/${agent_type}/test`).then((r) => r.data)
+  return client
+    .post(`/agents/configs/${agent_type}/test`, null, { timeout: 120_000 })
+    .then((r) => r.data)
 }
