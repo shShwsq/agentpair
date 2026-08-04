@@ -31,6 +31,10 @@ class TaskCreateRequest(BaseModel):
     # 为空表示用 env 默认配置或匿名任务
     llm_config_id: str | None = None
 
+    # 执行器选择:"builtin"(默认,内置 react_agent)或 "trae_cli"(TRAE CLI)
+    # TRAE CLI 模式下,模型配置由沙箱内 trae_cli.yaml 管理,llm_config_id 被忽略
+    executor: str = Field(default="builtin", pattern="^(builtin|trae_cli)$")
+
     # 兼容字段:旧 API 直接传 repo_url
     repo_url: HttpUrl | None = None
     branch: str | None = None
@@ -82,6 +86,7 @@ class TaskResponse(BaseModel):
     user_input: str
     params: dict[str, Any] | None = None
     llm_config_id: str | None = None
+    executor: str = "builtin"
     status: str
     current_stage: str | None
     error_message: str | None

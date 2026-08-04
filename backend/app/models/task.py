@@ -65,6 +65,15 @@ class Task(Base):
     # 为空表示用 env 默认配置或匿名任务
     llm_config_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # 执行器选择:"builtin"(默认,内置 react_agent)或 "trae_cli"(TRAE CLI via ACP)
+    # 决定 orchestrator 调用哪个 ExecutorAgent provider 执行 react 角色的任务
+    # server_default 保证旧表新增列时已有行回填 "builtin"(create_all 不改已存在表,
+    # 升级时需手动执行:ALTER TABLE tasks ADD COLUMN executor VARCHAR(32)
+    #   NOT NULL DEFAULT 'builtin';)
+    executor: Mapped[str] = mapped_column(
+        String(32), default="builtin", server_default="builtin", nullable=False
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

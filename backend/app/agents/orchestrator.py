@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.agents.react_agent import run_react_agent
+from app.agents.executor_agent import get_executor
 from app.agents.user_agent import (
     MAX_ASKS,
     MAX_ROUNDS,
@@ -81,6 +81,10 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
     # allowed_skills 为 None/空 表示全部 skill 可用(默认)
     allowed_skills = task.allowed_skills
     set_current_task(task_id_str, scenario_id, allowed_skills)
+
+    # 执行器选择:按 task.executor 拿到对应的 ExecutorAgent provider
+    # (builtin → 内置 react_agent;trae_cli → TRAE CLI via ACP)
+    executor = get_executor(task)
 
     # 用户原始意图
     user_intent = task.user_input
@@ -226,8 +230,9 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             # 后续轮 followup_query=追问(不 clone,不传 repo_context)
             # 修复 4:传入上轮 plan(previous_plan),让本轮从已有进度续接;
             #   返回本轮结束时的 plan 供下一轮使用
+            # 执行器抽象:按 task.executor 选择 builtin / trae_cli provider
             is_first = round_idx == 1
-            _results, summary, current_plan = run_react_agent(
+            _results, summary, current_plan = executor.run(
                 task, db,
                 round_idx=round_idx,
                 followup_query=None if is_first else followup,
@@ -774,6 +779,9 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
     allowed_skills = task.allowed_skills
     set_current_task(task_id_str, task.scenario, allowed_skills)
 
+    # 执行器选择:按 task.executor 拿到对应的 ExecutorAgent provider
+    executor = get_executor(task)
+
     task_checklist = task.checklist
     react_summaries = _load_react_summaries(db, task.id)
     # 重启时不复用旧 plan(让 LLM 根据新消息重新规划)
@@ -817,7 +825,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
             db.commit()
             _publish_status(task)
 
-            _results, summary, current_plan = run_react_agent(
+            _results, summary, current_plan = executor.run(
                 task, db,
                 round_idx=round_idx,
                 followup_query=followup,

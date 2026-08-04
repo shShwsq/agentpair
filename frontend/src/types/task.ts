@@ -118,6 +118,12 @@ export interface TaskCreateRequest {
   params?: Record<string, unknown>
   /** 用户选择的 LLM 配置 id(对应 user_llm_configs.llm_configs[].id) */
   llm_config_id?: string
+  /**
+   * 执行器选择:"builtin"(默认,内置 react_agent)或 "trae_cli"(TRAE CLI)
+   *
+   * TRAE CLI 模式下,模型配置由沙箱内 trae_cli.yaml 管理,llm_config_id 被忽略。
+   */
+  executor?: 'builtin' | 'trae_cli'
   /** 兼容字段:传 repo_url 时自动生成 user_input */
   repo_url?: string
   branch?: string
@@ -186,6 +192,8 @@ export interface TaskDetail {
   user_input: string
   params?: Record<string, unknown> | null
   llm_config_id?: string | null
+  /** 执行器:"builtin"(内置 react_agent)或 "trae_cli"(TRAE CLI) */
+  executor?: string
   status: TaskStatus
   current_stage: string | null
   error_message: string | null

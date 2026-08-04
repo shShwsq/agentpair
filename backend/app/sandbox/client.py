@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -54,6 +55,8 @@ class SandboxSession:
             # mock 模式下 work_dir 映射到本地目录
             self.work_dir = str(self._mock_dir)
         self._closed = False
+        # mock 模式:后台进程跟踪 {execution_id: (Popen, [stdout_lines])}
+        self._mock_bg_procs: dict[str, tuple[subprocess.Popen, list[str]]] = {}
 
     # ---------- 通用 ----------
 
@@ -93,15 +96,96 @@ class SandboxSession:
         else:
             return self._mock_read_file(path)
 
+    def get_endpoint(self, port: int) -> tuple[str, dict[str, str]]:
+        """获取沙箱内端口的外部访问端点(端口转发)
+
+        sandbox 模式:通过 SDK 的 get_endpoint(port) 获取转发 URL + 必需 headers
+        mock 模式:返回 localhost:port(本地调试用)
+
+        返回 (endpoint_url, headers):
+            - endpoint_url:可直接 HTTP 请求的完整 URL(含 scheme)
+            - headers:请求时必须携带的 headers(server proxy 路由/鉴权用)
+        """
+        if self._closed:
+            raise RuntimeError("沙箱已关闭")
+
+        if self.mode == "sandbox":
+            ep = self.sandbox.get_endpoint(port)
+            return ep.endpoint, dict(ep.headers or {})
+        else:
+            # mock 模式:直接用 localhost
+            return f"http://127.0.0.1:{port}", {}
+
+    def run_command_background(
+        self,
+        cmd: str,
+        envs: dict[str, str] | None = None,
+        work_dir: str | None = None,
+    ) -> str:
+        """后台启动命令(非阻塞),返回 execution_id 供后续查询日志/中断
+
+        用于启动 ACP bridge 等长驻服务。命令在沙箱内 detached 运行,
+        本方法立即返回,不等待命令结束。
+
+        envs: 注入命令进程的环境变量(如 TRAE_CLI_PAT)
+        work_dir: 工作目录(沙箱内绝对路径)
+        """
+        if self._closed:
+            raise RuntimeError("沙箱已关闭")
+
+        if self.mode == "sandbox":
+            return self._sandbox_run_background(cmd, envs, work_dir)
+        else:
+            return self._mock_run_background(cmd, envs, work_dir)
+
+    def get_background_logs(self, execution_id: str, cursor: int | None = None) -> tuple[str, int | None]:
+        """获取后台命令的累积日志
+
+        返回 (logs_text, next_cursor)。next_cursor 为 None 表示无更多日志。
+        mock 模式返回 (stdout_so_far, None)。
+        """
+        if self._closed:
+            raise RuntimeError("沙箱已关闭")
+
+        if self.mode == "sandbox":
+            logs = self.sandbox.commands.get_background_command_logs(
+                execution_id, cursor=cursor
+            )
+            return logs.content, logs.cursor
+        else:
+            return self._mock_get_background_logs(execution_id)
+
+    def interrupt_command(self, execution_id: str) -> None:
+        """中断后台命令"""
+        if self._closed:
+            return
+
+        if self.mode == "sandbox":
+            self.sandbox.commands.interrupt(execution_id)
+        else:
+            proc = self._mock_bg_procs.pop(execution_id, None)
+            if proc:
+                proc.terminate()
+
     def close(self) -> None:
         """关闭沙箱,释放资源
 
         sandbox 模式用 destroy()(kill + close 本地资源,避免 httpx 连接泄漏);
-        destroy 不可用时回退到 kill()
+        destroy 不可用时回退到 kill()。
+        mock 模式清理临时目录 + 终止后台进程。
         """
         if self._closed:
             return
         self._closed = True
+
+        # mock 模式:终止所有后台进程
+        if self._mock_bg_procs:
+            for proc in self._mock_bg_procs.values():
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            self._mock_bg_procs.clear()
 
         if self.mode == "sandbox" and self.sandbox:
             try:
@@ -155,6 +239,29 @@ class SandboxSession:
         content = self.sandbox.files.read_file(path)
         return content
 
+    def _sandbox_run_background(
+        self,
+        cmd: str,
+        envs: dict[str, str] | None,
+        work_dir: str | None,
+    ) -> str:
+        """sandbox 模式:后台启动命令(SandboxSync.commands.run + background=True)
+
+        返回 execution_id(str),供 get_background_logs / interrupt_command 使用。
+        """
+        from opensandbox.models.execd import RunCommandOpts
+
+        opts = RunCommandOpts(
+            background=True,
+            working_directory=work_dir,
+            envs=envs,
+        )
+        execution = self.sandbox.commands.run(cmd, opts=opts)
+        if not execution.id:
+            raise RuntimeError(f"后台命令启动失败,无 execution_id: {cmd}")
+        logger.info(f"[sandbox] 后台命令已启动: execution_id={execution.id}, cmd={cmd[:100]}")
+        return execution.id
+
     # ---------- mock 模式实现(本地文件系统) ----------
 
     def _mock_run_command(self, cmd: str, timeout: int, *, check: bool = False) -> str:
@@ -194,6 +301,48 @@ class SandboxSession:
             rel = rel[len("home/user/"):]
         target = self._mock_dir / rel
         return target.read_text(encoding="utf-8")
+
+    def _mock_run_background(
+        self,
+        cmd: str,
+        envs: dict[str, str] | None,
+        work_dir: str | None,
+    ) -> str:
+        """mock 模式:用 subprocess.Popen 后台启动,跟踪进程"""
+        assert self._mock_dir is not None
+        exec_id = f"mock_bg_{uuid.uuid4().hex[:8]}"
+        merged_env = {**os.environ, **(envs or {})}
+        cwd = work_dir or str(self._mock_dir)
+        # mock 模式下 work_dir 可能是 /home/user/xxx,映射到本地
+        if cwd.startswith("/home/user"):
+            cwd = str(self._mock_dir / cwd[len("/home/user/"):])
+        proc = subprocess.Popen(
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=cwd if Path(cwd).exists() else str(self._mock_dir),
+            env=merged_env,
+        )
+        self._mock_bg_procs[exec_id] = (proc, [])
+        # 启动后台线程持续读取 stdout(避免 pipe 满死锁)
+        def _drain():
+            try:
+                for line in proc.stdout:
+                    self._mock_bg_procs[exec_id][1].append(line)
+            except Exception:
+                pass
+        threading.Thread(target=_drain, daemon=True).start()
+        return exec_id
+
+    def _mock_get_background_logs(self, execution_id: str) -> tuple[str, int | None]:
+        """mock 模式:返回已累积的 stdout 行"""
+        entry = self._mock_bg_procs.get(execution_id)
+        if entry is None:
+            return "", None
+        _proc, lines = entry
+        return "".join(lines), None
 
 
 # ============================================================

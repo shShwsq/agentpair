@@ -85,6 +85,7 @@ class UserResponse(BaseModel):
     email_verified: bool
     github_id: str | None
     has_password: bool
+    has_trae_cli_pat: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -98,6 +99,7 @@ class UserResponse(BaseModel):
             email_verified=user.is_email_verified,
             github_id=user.github_id,
             has_password=bool(user.password_hash),
+            has_trae_cli_pat=bool(user.trae_cli_pat),
             created_at=user.created_at,
         )
 
@@ -131,3 +133,24 @@ class DeleteAccountRequest(BaseModel):
     """
 
     email: str
+
+
+# ============================================================
+# TRAE CLI PAT 管理
+# ============================================================
+
+
+class TraeCLIPatRequest(BaseModel):
+    """设置/更新 TRAE CLI PAT
+
+    PAT 用于沙箱内 trae_cli.yaml 的认证,让 TRAE CLI 能访问用户的模型配额。
+    传空字符串等价于清除 PAT。
+    """
+
+    pat: str = Field(min_length=0, max_length=4096)
+
+
+class TraeCLIPatStatus(BaseModel):
+    """TRAE CLI PAT 状态(是否已设置,不暴露实际值)"""
+
+    has_pat: bool

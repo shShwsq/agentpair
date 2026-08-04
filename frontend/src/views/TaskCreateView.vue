@@ -59,6 +59,15 @@ const llmConfigs = ref<LLMConfigItemOut[]>([])
 const selectedLlmConfigId = ref('')
 const loadingModels = ref(true)
 
+// ---- 执行器选择(builtin / trae_cli) ----
+
+/**
+ * 执行器:决定 react 角色由哪个 agent 执行
+ * - builtin:系统内置 react_agent(使用上方选择的 LLM 配置)
+ * - trae_cli:TRAE CLI(沙箱内运行,模型由 trae_cli.yaml 管理,忽略 LLM 配置)
+ */
+const selectedExecutor = ref<'builtin' | 'trae_cli'>('builtin')
+
 // ---- Skill 多选(高级选项) ----
 
 /** 所有可用 skill(从后端 GET /skills 加载) */
@@ -287,6 +296,7 @@ async function handleSubmit(): Promise<void> {
       title: taskTitle.value.trim() || undefined,
       user_input: finalUserInput,
       llm_config_id: selectedLlmConfigId.value || undefined,
+      executor: selectedExecutor.value,
       allowed_skills: allowedSkillsPayload,
       params,
     })
@@ -383,12 +393,36 @@ onMounted(async () => {
           </div>
 
           <div class="topbar-right">
-            <!-- 模型选择 -->
-            <div class="model-select">
+            <!-- 执行器选择:内置 react_agent / TRAE CLI -->
+            <div
+              class="executor-segmented"
+              role="tablist"
+              aria-label="执行器选择"
+            >
+              <button
+                type="button"
+                :class="['exec-btn', { active: selectedExecutor === 'builtin' }]"
+                role="tab"
+                :aria-selected="selectedExecutor === 'builtin'"
+                title="系统内置 ReAct 智能体(使用下方选择的 LLM 配置)"
+                @click="selectedExecutor = 'builtin'"
+              >内置</button>
+              <button
+                type="button"
+                :class="['exec-btn', { active: selectedExecutor === 'trae_cli' }]"
+                role="tab"
+                :aria-selected="selectedExecutor === 'trae_cli'"
+                title="TRAE CLI(沙箱内运行,模型由 trae_cli.yaml 管理)"
+                @click="selectedExecutor = 'trae_cli'"
+              >TRAE CLI</button>
+            </div>
+
+            <!-- 模型选择(TRAE CLI 模式下禁用:模型由沙箱内 trae_cli.yaml 管理) -->
+            <div class="model-select" :class="{ disabled: selectedExecutor === 'trae_cli' }">
               <select
                 v-model="selectedLlmConfigId"
-                :disabled="loadingModels"
-                aria-label="使用模型"
+                :disabled="loadingModels || selectedExecutor === 'trae_cli'"
+                :aria-label="selectedExecutor === 'trae_cli' ? 'TRAE CLI 模式下模型由 trae_cli.yaml 管理' : '使用模型'"
               >
                 <option value="">默认模型</option>
                 <option
@@ -738,6 +772,12 @@ onMounted(async () => {
   gap: var(--space-2);
 }
 
+/* TRAE CLI 模式下模型选择禁用样式 */
+.model-select.disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
 .model-select select {
   height: 36px;
   padding: 0 var(--space-3);
@@ -755,6 +795,40 @@ onMounted(async () => {
   outline: none;
   border-color: var(--color-primary);
   box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+
+/* ---- 执行器选择(builtin / trae_cli 分段控件) ---- */
+.executor-segmented {
+  display: inline-flex;
+  align-items: center;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 2px;
+  gap: 2px;
+}
+
+.exec-btn {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.exec-btn:hover {
+  color: var(--color-text);
+}
+
+.exec-btn.active {
+  color: var(--color-primary);
+  background: var(--color-surface-alt);
+  box-shadow: var(--shadow-sm);
 }
 
 .model-empty-link {

@@ -37,6 +37,12 @@ class User(Base):
     github_access_token: Mapped[str] = mapped_column(
         String(2048), nullable=False, server_default=""
     )
+    # TRAE CLI PAT(Personal Access Token)加密密文(Fernet base64,空串表示未配置)
+    # 用于沙箱内 trae_cli.yaml 的认证,让 TRAE CLI 能访问用户的模型配额
+    # 通过"账户设置"页面写入,复用 security.encrypt_secret 加密
+    trae_cli_pat: Mapped[str] = mapped_column(
+        String(2048), nullable=False, server_default=""
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
