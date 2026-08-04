@@ -16,18 +16,28 @@
 
 ### 1.1 安装 Server
 
-```bash
-# 用 pip
-pip install opensandbox-server
+`opensandbox-server` 是 CLI 应用(不是库),Debian/Ubuntu 12+ 的 Python 是 PEP 668 externally-managed,直接 `pip install` 会被拦。正确做法是用 `uv tool install` 或 `pipx`:它自动建独立 venv,把命令放到 `~/.local/bin/opensandbox-server`。
 
-# 或用 uv
-uv pip install opensandbox-server
+```bash
+# 方式 A(推荐):uv tool install —— 需先装 uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+uv tool install opensandbox-server
+
+# 方式 B:pipx —— 需先装 pipx
+sudo apt install -y pipx
+pipx ensurepath
+pipx install opensandbox-server
+
+# 让当前 shell 能找到 ~/.local/bin(两种方式装完都要执行一次,或重登)
+export PATH="$HOME/.local/bin:$PATH"
 
 # 验证:能输出版本号即可
 opensandbox-server --version
 ```
 
 > 不要用 `uvx opensandbox-server` 长期运行:`uvx` 是临时执行,每次启动都可能重新拉包,systemd 托管时路径也不好定位。装成正式命令更稳。
+> 也不要用 `pip install --break-system-packages`:会污染系统 Python,可能破坏 apt 管理的包。
 
 ### 1.2 生成配置文件
 
@@ -94,7 +104,13 @@ export OPENSANDBOX_INSECURE_SERVER=YES
 
 ### 1.5 配置 systemd(可选,生产推荐)
 
+`opensandbox-server` 装在 `~/.local/bin/`,systemd 的非登录 shell 默认不加载它,所以 ExecStart 必须用**绝对路径**,不能用 `$(which ...)`(在 `sudo tee` 的 heredoc 里 PATH 往往不含 `~/.local/bin`,会展开成空串)。
+
 ```bash
+# 先确认绝对路径(应该是 ~/.local/bin/opensandbox-server)
+which opensandbox-server
+# 例如输出:/home/admin/.local/bin/opensandbox-server
+
 sudo tee /etc/systemd/system/opensandbox.service > /dev/null <<EOF
 [Unit]
 Description=OpenSandbox Server
@@ -104,10 +120,11 @@ Requires=docker.service
 [Service]
 Type=simple
 User=$(whoami)
-ExecStart=$(which opensandbox-server)
+# 用绝对路径!不要用 $(which ...),sudo 上下文里 PATH 可能不含 ~/.local/bin
+ExecStart=/home/$(whoami)/.local/bin/opensandbox-server
 Restart=on-failure
 RestartSec=5
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/home/$(whoami)/.local/bin
 # 若 [server].api_key 留空,必须加这一行,否则非交互启动会卡住
 Environment=OPENSANDBOX_INSECURE_SERVER=YES
 
@@ -119,6 +136,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now opensandbox
 sudo systemctl status opensandbox
 ```
+
+如果 `which opensandbox-server` 输出的不是 `/home/<user>/.local/bin/opensandbox-server`(比如用了 pipx 装在别的位置),把 ExecStart 和 PATH 里的路径换成实际输出。
 
 ## 二、准备沙箱镜像
 
