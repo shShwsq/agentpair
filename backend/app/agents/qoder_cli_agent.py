@@ -623,7 +623,7 @@ def test_credential(db: Session, user_id, agent_type: str = AGENT_TYPE) -> tuple
             result = client.initialize()
             protocol_version = result.get("protocolVersion", "?")
             auth_methods = result.get("authMethods", []) or []
-            logger.warning(
+            logger.info(
                 f"[qoder_cli_test] ACP 握手成功: protocolVersion={protocol_version}, "
                 f"authMethods={[m.get('id') for m in auth_methods]}"
             )
@@ -675,7 +675,7 @@ def test_credential(db: Session, user_id, agent_type: str = AGENT_TYPE) -> tuple
             try:
                 # cwd 用 /tmp(沙箱内必定存在),避免 /home/user 不存在导致 -32602
                 acp_session_id = client.new_session(cwd="/tmp")
-                logger.warning(
+                logger.info(
                     f"[qoder_cli_test] session/new 返回: sessionId={acp_session_id}"
                 )
 

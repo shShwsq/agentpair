@@ -336,8 +336,8 @@ async function handleSubmit(): Promise<void> {
     if (repoUrlVal) params.repo_url = repoUrlVal
     if (branchVal) params.branch = branchVal
 
-    // Qoder CLI 模型配置(仅 qoder_cli 执行器时写入)
-    if (selectedExecutor.value === 'qoder_cli') {
+    // Qoder CLI 模型配置(qoder_cli / qoder_cli_cn 执行器时写入)
+    if (selectedExecutor.value.startsWith('qoder_cli')) {
       if (qoderModel.value) params.model = qoderModel.value
       if (qoderReasoningEffort.value) params.reasoning_effort = qoderReasoningEffort.value
       if (qoderContextWindow.value) params.context_window = qoderContextWindow.value
@@ -515,8 +515,8 @@ onMounted(async () => {
               >配置 →</RouterLink>
             </div>
 
-            <!-- Qoder CLI 模型配置(仅 qoder_cli 执行器显示) -->
-            <div v-if="selectedExecutor === 'qoder_cli'" class="qoder-config-panel">
+            <!-- Qoder CLI 模型配置(qoder_cli / qoder_cli_cn 执行器显示) -->
+            <div v-if="selectedExecutor.startsWith('qoder_cli')" class="qoder-config-panel">
               <button
                 type="button"
                 class="qoder-config-toggle"
