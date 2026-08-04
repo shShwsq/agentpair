@@ -1379,6 +1379,12 @@ function formatTime(iso: string): string {
   })
 }
 
+/** 无标题时回退到 user_input,并截断到 max 字符(与历史任务侧栏一致) */
+function truncateInput(s: string, max = 40): string {
+  if (s.length <= max) return s
+  return s.slice(0, max) + '...'
+}
+
 // ---- 用户补充消息输入框事件处理 ----
 
 /**
@@ -1442,7 +1448,14 @@ function isUserMessageItem(item: DisplayItem): boolean {
     <main class="main">
       <!-- 暂停/实时按钮行(固定在滚动容器外,不随对话滚动) -->
       <div v-if="isRunning" class="conv-header">
-        <!-- 暂停态:橙色徽标 + 恢复按钮;运行态:红色实时徽标 + 暂停按钮 -->
+        <!-- 左侧:对话标题 + 创建时间 -->
+        <div class="conv-header-info">
+          <span class="conv-header-title" :title="task?.title || task?.user_input">
+            {{ truncateInput(task?.title || task?.user_input || '') }}
+          </span>
+          <span v-if="task?.created_at" class="conv-header-time">{{ formatTime(task.created_at) }}</span>
+        </div>
+        <!-- 右侧:暂停态橙色徽标 + 恢复按钮;运行态红色实时徽标 + 暂停按钮 -->
         <span v-if="isPaused" class="paused-indicator">
           <span class="paused-bars" /><span>已暂停</span>
         </span>
@@ -2608,9 +2621,32 @@ function isUserMessageItem(item: DisplayItem): boolean {
 .conv-header {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: var(--space-2);
+  gap: var(--space-3);
   padding: var(--space-3) var(--space-6);
+}
+
+.conv-header-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.conv-header-title {
+  font-size: var(--fs-base);
+  font-weight: 600;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conv-header-time {
+  flex-shrink: 0;
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  white-space: nowrap;
 }
 
 .live-indicator {
