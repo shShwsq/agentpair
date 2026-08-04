@@ -54,17 +54,30 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 # ---------- 生成 Dockerfile(若不存在) ----------
-# 若已存在但不含 Qoder CLI 段,本次又要求装 Qoder CLI,则追加(兼容旧脚本生成的文件)
+# 检测:旧 Dockerfile 不含 qodercli 时,备份原文件并覆盖重生成
+# 不用 sed 追加(反引号/转义/curl 缺失等问题太多),直接覆盖最可靠
 NEED_REGEN=0
+REGEN_REASON=""
 if [ ! -f "$DOCKERFILE" ]; then
     NEED_REGEN=1
+    REGEN_REASON="文件不存在,全新生成"
 elif [ "$WITH_QODER_CLI" -eq 1 ] && ! grep -q "qodercli" "$DOCKERFILE"; then
-    echo "[INFO] $DOCKERFILE 已存在但不含 Qoder CLI,将追加 Qoder CLI 安装段"
-    NEED_REGEN=2  # 已存在但需追加
+    NEED_REGEN=1
+    REGEN_REASON="旧 Dockerfile 不含 Qoder CLI,需重新生成"
+elif [ "$WITH_QODER_CLI" -eq 0 ] && grep -q "qodercli" "$DOCKERFILE"; then
+    NEED_REGEN=1
+    REGEN_REASON="旧 Dockerfile 含 Qoder CLI,但本次指定 --no-qoder-cli,需重新生成"
+fi
+
+# 已存在且需要重新生成 → 备份原文件(不丢用户自定义内容)
+if [ "$NEED_REGEN" -eq 1 ] && [ -f "$DOCKERFILE" ]; then
+    BACKUP="${DOCKERFILE}.bak"
+    cp "$DOCKERFILE" "$BACKUP"
+    echo "[INFO] $DOCKERFILE 已存在,$REGEN_REASON"
+    echo "       原文件备份到 $BACKUP(含用户自定义内容,可手动合并回新 Dockerfile)"
 fi
 
 if [ "$NEED_REGEN" -eq 1 ]; then
-    # 全新生成
     if [ "$WITH_QODER_CLI" -eq 1 ]; then
         cat > "$DOCKERFILE" <<'EOF'
 FROM ubuntu:22.04
@@ -72,7 +85,7 @@ FROM ubuntu:22.04
 # 避免 tzdata 等交互式安装卡住
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 基础工具:git / ripgrep / python3 / awk / find
+# 基础工具:git / ripgrep / python3 / awk / find / curl(NodeSource 安装脚本需要)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         ripgrep \
@@ -127,23 +140,7 @@ USER user
 WORKDIR /home/user
 EOF
     fi
-    echo "[OK] 已生成 $DOCKERFILE"
-elif [ "$NEED_REGEN" -eq 2 ]; then
-    # 已存在但不含 Qoder CLI,追加 Node.js + qodercli 安装段
-    # 找到 "USER user" 之前的位置插入,否则 npm 装到非 root 用户会失败
-    # 用 sed 在 "# 沙箱默认非 root 用户 user" 之前插入新内容
-    sed -i '/^# 沙箱默认非 root 用户 user/i\
-# Node.js 20.x(Qoder CLI 要求 >= 20.0.0,见 https://docs.qoder.com/cli/install)\
-USER root\
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \\\
-    \&\& apt-get install -y --no-install-recommends nodejs \\\
-    \&\& rm -rf /var/lib/apt/lists/*\
-\
-# 全局安装 Qoder CLI(官方 npm 包,见 https://docs.qoder.com/cli/install)\
-RUN npm install -g @qoder-ai/qodercli\
-\
-' "$DOCKERFILE"
-    echo "[OK] 已在 $DOCKERFILE 追加 Qoder CLI 安装段"
+    echo "[OK] 已生成 $DOCKERFILE($REGEN_REASON)"
 else
     echo "[INFO] $DOCKERFILE 已存在且符合要求,直接使用(如需重新生成请先删除)"
 fi
