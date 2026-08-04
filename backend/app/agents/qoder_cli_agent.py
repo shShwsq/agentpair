@@ -664,8 +664,9 @@ def test_credential(db: Session, user_id, agent_type: str = AGENT_TYPE) -> tuple
                 f"[qoder_cli_test] 注入环境变量 keys: {list(credential_envs.keys())}"
             )
             # 测试时强制用最便宜的模型配置,最小化 credits 消耗
-            # lite:最低分级模型,low:最少思考强度
-            test_acp_args = ["--model", "lite", "--reasoning-effort", "low"]
+            # Qwen3.6-Flash:Flash 系列轻量模型,credits 最低
+            # low:最少思考强度,几乎不思考
+            test_acp_args = ["--model", "Qwen3.6-Flash", "--reasoning-effort", "low"]
             bridge_exec_id = _start_acp_bridge(
                 session, credential_envs,
                 agent_type=agent_type,
