@@ -111,7 +111,12 @@ class SandboxSession:
 
         if self.mode == "sandbox":
             ep = self.sandbox.get_endpoint(port)
-            return ep.endpoint, dict(ep.headers or {})
+            url = ep.endpoint
+            # SDK 返回的 endpoint 可能不含 scheme(如 "host:port/path"),
+            # httpx 要求完整 URL,补上 http://
+            if not url.startswith(("http://", "https://")):
+                url = f"http://{url}"
+            return url, dict(ep.headers or {})
         else:
             # mock 模式:直接用 localhost
             return f"http://127.0.0.1:{port}", {}

@@ -421,6 +421,12 @@ def _wait_for_bridge_ready(
     deadline = time.time() + BRIDGE_STARTUP_TIMEOUT
     client = httpx.Client(headers=endpoint_headers, timeout=5)
 
+    # 诊断:记录 endpoint 信息,便于排查跨机端口转发问题
+    logger.warning(
+        f"[qoder_cli] 等待 bridge 就绪: endpoint={endpoint_url}, "
+        f"timeout={BRIDGE_STARTUP_TIMEOUT}s, headers_keys={list(endpoint_headers.keys())}"
+    )
+
     try:
         while time.time() < deadline:
             # 先检查后台进程是否还活着(避免 bridge 崩溃后空等)
@@ -436,10 +442,18 @@ def _wait_for_bridge_ready(
                 if resp.status_code == 200:
                     data = resp.json()
                     if data.get("status") == "ok":
-                        logger.info("[qoder_cli] ACP bridge 就绪")
+                        logger.warning("[qoder_cli] ACP bridge 就绪")
                         return
-            except Exception:
-                pass
+                    else:
+                        logger.warning(
+                            f"[qoder_cli] health 200 但状态非 ok: {data}"
+                        )
+                else:
+                    logger.warning(
+                        f"[qoder_cli] health 返回 HTTP {resp.status_code}"
+                    )
+            except Exception as e:
+                logger.warning(f"[qoder_cli] health 请求失败: {type(e).__name__}: {e}")
 
             time.sleep(BRIDGE_HEALTH_INTERVAL)
 
@@ -499,7 +513,7 @@ def test_credential(db: Session, user_id) -> tuple[bool, str]:
     # 注意:不复用任务的沙箱会话,避免污染任务上下文
     from app.sandbox.client import create_sandbox
 
-    logger.info("[qoder_cli_test] 创建临时沙箱测试凭证")
+    logger.warning("[qoder_cli_test] 开始测试:创建临时沙箱")
     session = create_sandbox()
     bridge_exec_id: str | None = None
 
@@ -507,6 +521,7 @@ def test_credential(db: Session, user_id) -> tuple[bool, str]:
         # ---- 准备 CLI 环境(写 bridge 脚本 + 检查/安装 CLI) ----
         try:
             _ensure_cli_env(session)
+            logger.warning("[qoder_cli_test] CLI 环境就绪")
         except RuntimeError as e:
             return False, f"Qoder CLI 环境准备失败: {e}"
 
@@ -514,7 +529,11 @@ def test_credential(db: Session, user_id) -> tuple[bool, str]:
         try:
             bridge_exec_id = _start_acp_bridge(session, credential_envs)
             endpoint_url, endpoint_headers = session.get_endpoint(ACP_BRIDGE_PORT)
+            logger.warning(
+                f"[qoder_cli_test] bridge 已启动,等待就绪: endpoint={endpoint_url}"
+            )
             _wait_for_bridge_ready(session, bridge_exec_id, endpoint_url, endpoint_headers)
+            logger.warning("[qoder_cli_test] bridge 就绪,开始 ACP 握手")
         except RuntimeError as e:
             err_msg = str(e)
             # bridge 日志可能含认证失败关键词
