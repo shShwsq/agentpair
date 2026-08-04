@@ -201,6 +201,7 @@ class ExternalCLIAgent(ExecutorAgent):
             followup_query=followup_query,
             repo_context=repo_context,
             previous_plan=previous_plan,
+            agent_type=self._agent_type,
             # client 参数被忽略:外部 CLI 自带模型配置
         )
 

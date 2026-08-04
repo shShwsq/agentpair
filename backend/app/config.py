@@ -72,11 +72,17 @@ class Settings(BaseSettings):
     SANDBOX_CPU: str = ""
     SANDBOX_MEMORY: str = ""
 
-    # Qoder CLI 配置(qoder_cli executor 用)
+    # Qoder CLI 配置(qoder_cli executor 用,国际版)
     # qodercli 可执行文件名/路径(沙箱内 PATH 查找或绝对路径)
     QODER_CLI_BIN: str = "qodercli"
     # qodercli 安装命令(沙箱内未检测到 qodercli 时执行,留空则不自动安装)
     QODER_CLI_INSTALL_CMD: str = "npm install -g @qoder-ai/qodercli"
+
+    # Qoder CN CLI 配置(qoder_cli_cn executor 用,国内版/原通义灵码)
+    # qoderclicn 可执行文件名/路径
+    QODER_CLI_CN_BIN: str = "qoderclicn"
+    # qoderclicn 安装命令(官方安装脚本)
+    QODER_CLI_CN_INSTALL_CMD: str = "curl -fsSL https://qoder.cn/install | bash"
 
 
 settings = Settings()

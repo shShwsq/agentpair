@@ -65,6 +65,34 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
         "executor_module": "app.agents.qoder_cli_agent",
         "executor_func": "run_qoder_cli_agent",
     },
+    "qoder_cli_cn": {
+        "display_name": "Qoder CN CLI",
+        "description": "沙箱内运行 Qoder CN CLI(国内版,原通义灵码),通过 ACP 协议通信,模型由 Qoder CN 账号配额管理",
+        "credential_fields": [
+            {
+                "key": "pat",
+                "label": "Personal Access Token",
+                "type": CREDENTIAL_FIELD_SECRET,
+                "required": True,
+                "placeholder": "粘贴你的 Qoder CN PAT",
+                "help_url": "https://qoder.cn/account/integrations",
+                "help_text": "在 qoder.cn/account/integrations 生成,用于沙箱内 Qoder CN CLI 认证",
+            },
+        ],
+        "sandbox": {
+            # qoderclicn 是国内版 CLI,与国际版 qodercli 账号体系不互通
+            "bin_config_key": "QODER_CLI_CN_BIN",
+            "bin_default": "qoderclicn",
+            "install_cmd_config_key": "QODER_CLI_CN_INSTALL_CMD",
+            "install_cmd_default": "curl -fsSL https://qoder.cn/install | bash",
+            # ACP 启动参数(与国际版一致,见 docs.qoder.cn/cli)
+            "acp_args": ["--acp", "--yolo"],
+            # PAT 环境变量名与国际版不同(多了 CN 后缀)
+            "credential_env": {"pat": "QODERCN_PERSONAL_ACCESS_TOKEN"},
+        },
+        "executor_module": "app.agents.qoder_cli_agent",
+        "executor_func": "run_qoder_cli_agent",
+    },
 }
 
 

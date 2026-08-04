@@ -288,10 +288,11 @@ class ACPClient:
 # ============================================================
 
 
-def _load_credentials(db: Session, user_id) -> dict[str, str]:
+def _load_credentials(db: Session, user_id, agent_type: str = AGENT_TYPE) -> dict[str, str]:
     """从 user_agent_configs 加载解密后的凭证 dict
 
     返回如 {"pat": "xxx"}。未配置或解密失败时抛错(CLI executor 需要凭证才能认证)。
+    agent_type: agent 类型标识(如 "qoder_cli" / "qoder_cli_cn"),用于查对应的配置记录。
     """
     if user_id is None:
         raise RuntimeError("Qoder CLI 执行器需要登录用户(匿名任务不支持)")
@@ -300,13 +301,13 @@ def _load_credentials(db: Session, user_id) -> dict[str, str]:
         db.query(UserAgentConfig)
         .filter(
             UserAgentConfig.user_id == user_id,
-            UserAgentConfig.agent_type == AGENT_TYPE,
+            UserAgentConfig.agent_type == agent_type,
         )
         .first()
     )
     if row is None or not row.credentials_encrypted:
         raise RuntimeError(
-            "未配置 Qoder CLI 凭证。请在「智能体配置」中配置 Qoder Personal Access Token。"
+            f"未配置 {agent_type} 凭证。请在「智能体配置」中配置 Qoder Personal Access Token。"
         )
 
     try:
@@ -319,13 +320,13 @@ def _load_credentials(db: Session, user_id) -> dict[str, str]:
         raise RuntimeError(f"Qoder CLI 凭证解密失败: {e}") from e
 
 
-def _build_credential_envs(credentials: dict[str, str]) -> dict[str, str]:
+def _build_credential_envs(credentials: dict[str, str], agent_type: str = AGENT_TYPE) -> dict[str, str]:
     """将凭证 dict 映射为环境变量 dict(按 registry 的 credential_env)
 
     registry 中 credential_env 形如 {"pat": "QODER_PERSONAL_ACCESS_TOKEN"},
     即凭证 key → 环境变量名。只注入有值的凭证。
     """
-    sandbox_cfg = get_sandbox_config(AGENT_TYPE) or {}
+    sandbox_cfg = get_sandbox_config(agent_type) or {}
     cred_env_map: dict[str, str] = sandbox_cfg.get("credential_env", {})
     envs: dict[str, str] = {}
     for cred_key, env_name in cred_env_map.items():
@@ -340,9 +341,9 @@ def _build_credential_envs(credentials: dict[str, str]) -> dict[str, str]:
 # ============================================================
 
 
-def _get_bin() -> str:
+def _get_bin(agent_type: str = AGENT_TYPE) -> str:
     """从 settings 读取 CLI 可执行文件名(经 registry 的 config key)"""
-    sandbox_cfg = get_sandbox_config(AGENT_TYPE) or {}
+    sandbox_cfg = get_sandbox_config(agent_type) or {}
     config_key = sandbox_cfg.get("bin_config_key", "")
     if config_key:
         val = getattr(settings, config_key, None)
@@ -351,9 +352,9 @@ def _get_bin() -> str:
     return sandbox_cfg.get("bin_default", "qodercli")
 
 
-def _get_install_cmd() -> str:
+def _get_install_cmd(agent_type: str = AGENT_TYPE) -> str:
     """从 settings 读取 CLI 安装命令(经 registry 的 config key)"""
-    sandbox_cfg = get_sandbox_config(AGENT_TYPE) or {}
+    sandbox_cfg = get_sandbox_config(agent_type) or {}
     config_key = sandbox_cfg.get("install_cmd_config_key", "")
     if config_key:
         val = getattr(settings, config_key, None)
@@ -362,7 +363,7 @@ def _get_install_cmd() -> str:
     return sandbox_cfg.get("install_cmd_default", "")
 
 
-def _get_acp_args(task: Task | None = None) -> list[str]:
+def _get_acp_args(task: Task | None = None, agent_type: str = AGENT_TYPE) -> list[str]:
     """从 registry 读取 ACP 启动参数,并注入 task.params 中的模型配置
 
     支持的 task.params 字段(均为可选,见 https://docs.qoder.cn/cli/model):
@@ -370,7 +371,7 @@ def _get_acp_args(task: Task | None = None) -> list[str]:
         reasoning_effort: 思考强度(low/medium/high/xhigh/max)
         context_window:   上下文窗口(200000/400000/1000000)
     """
-    sandbox_cfg = get_sandbox_config(AGENT_TYPE) or {}
+    sandbox_cfg = get_sandbox_config(agent_type) or {}
     args = list(sandbox_cfg.get("acp_args", ["--acp", "--yolo"]))
 
     if task and task.params:
@@ -394,7 +395,7 @@ def _write_bridge_script(session) -> None:
     session.write_file(BRIDGE_SCRIPT_PATH, content)
 
 
-def _ensure_cli_env(session) -> None:
+def _ensure_cli_env(session, agent_type: str = AGENT_TYPE) -> None:
     """准备沙箱内 CLI 运行环境
 
     1. 创建 bridge 脚本目录
@@ -410,12 +411,12 @@ def _ensure_cli_env(session) -> None:
     _write_bridge_script(session)
 
     # 检查 CLI 是否可用
-    cli_bin = _get_bin()
+    cli_bin = _get_bin(agent_type)
     check_cmd = f"command -v {cli_bin} || which {cli_bin} 2>/dev/null"
     result = session.run_command(check_cmd, timeout=10)
     if not result.strip():
         # CLI 未安装,尝试安装
-        install_cmd = _get_install_cmd()
+        install_cmd = _get_install_cmd(agent_type)
         if not install_cmd:
             raise RuntimeError(
                 f"沙箱内未找到 {cli_bin},且安装命令为空。"
@@ -439,7 +440,12 @@ def _ensure_cli_env(session) -> None:
 # ============================================================
 
 
-def _start_acp_bridge(session, credential_envs: dict[str, str], task: Task | None = None) -> str:
+def _start_acp_bridge(
+    session,
+    credential_envs: dict[str, str],
+    task: Task | None = None,
+    agent_type: str = AGENT_TYPE,
+) -> str:
     """后台启动 ACP bridge,返回 execution_id
 
     bridge 启动命令:
@@ -450,8 +456,8 @@ def _start_acp_bridge(session, credential_envs: dict[str, str], task: Task | Non
     task 参数用于从 task.params 读取模型/思考强度/上下文窗口配置(见 _get_acp_args)。
     通过 run_command_background 非阻塞启动。
     """
-    cli_bin = _get_bin()
-    acp_args = _get_acp_args(task)
+    cli_bin = _get_bin(agent_type)
+    acp_args = _get_acp_args(task, agent_type)
     args_json = json.dumps(acp_args, ensure_ascii=False)
 
     # shell 中 JSON 数组含双引号,需单引号包裹
@@ -480,10 +486,9 @@ def _wait_for_bridge_ready(
     deadline = time.time() + BRIDGE_STARTUP_TIMEOUT
     client = httpx.Client(headers=endpoint_headers, timeout=5)
 
-    # 诊断:记录 endpoint 信息,便于排查跨机端口转发问题
-    logger.warning(
+    logger.info(
         f"[qoder_cli] 等待 bridge 就绪: endpoint={endpoint_url}, "
-        f"timeout={BRIDGE_STARTUP_TIMEOUT}s, headers_keys={list(endpoint_headers.keys())}"
+        f"timeout={BRIDGE_STARTUP_TIMEOUT}s"
     )
 
     last_logs_len = 0
@@ -495,10 +500,10 @@ def _wait_for_bridge_ready(
                 raise RuntimeError(
                     f"ACP bridge 启动失败:CLI 进程退出。日志:\n{logs[-1000:]}"
                 )
-            # 新增日志内容立即打印,便于实时观察 bridge 状态
+            # 新增日志内容打印为 debug,便于实时观察 bridge 状态(生产环境不刷屏)
             if logs and len(logs) > last_logs_len:
                 new_part = logs[last_logs_len:]
-                logger.warning(f"[qoder_cli] bridge 日志增量: {new_part.rstrip()}")
+                logger.debug(f"[qoder_cli] bridge 日志增量: {new_part.rstrip()}")
                 last_logs_len = len(logs)
 
             # 健康检查
@@ -507,20 +512,16 @@ def _wait_for_bridge_ready(
                 if resp.status_code == 200:
                     data = resp.json()
                     if data.get("status") == "ok":
-                        logger.warning("[qoder_cli] ACP bridge 就绪")
+                        logger.info("[qoder_cli] ACP bridge 就绪")
                         return
                     else:
-                        logger.warning(
-                            f"[qoder_cli] health 200 但状态非 ok: {data}"
-                        )
+                        logger.debug(f"[qoder_cli] health 200 但状态非 ok: {data}")
                 else:
                     # 非 200:打印响应体辅助排查(可能是 server proxy 错误)
                     body = resp.text[:300]
-                    logger.warning(
-                        f"[qoder_cli] health 返回 HTTP {resp.status_code}: {body}"
-                    )
+                    logger.debug(f"[qoder_cli] health 返回 HTTP {resp.status_code}: {body}")
             except Exception as e:
-                logger.warning(f"[qoder_cli] health 请求失败: {type(e).__name__}: {e}")
+                logger.debug(f"[qoder_cli] health 请求失败: {type(e).__name__}: {e}")
 
             time.sleep(BRIDGE_HEALTH_INTERVAL)
 
@@ -548,16 +549,17 @@ def _stop_acp_bridge(session, execution_id: str) -> None:
 # ============================================================
 
 
-def test_credential(db: Session, user_id) -> tuple[bool, str]:
+def test_credential(db: Session, user_id, agent_type: str = AGENT_TYPE) -> tuple[bool, str]:
     """测试 Qoder CLI 凭证是否可用
 
     在临时沙箱内启动 ACP bridge,依次验证:
-    1. 沙箱镜像含 qodercli + node + npm
-    2. PAT 有效(Qoder 服务端认证通过,ACP initialize 握手)
-    3. 网络可达 qoder.com
-    4. 模型可响应(发送「你好」prompt,确认 LLM 正常工作,消耗少量 credits)
+    1. 沙箱镜像含 CLI(qodercli / qoderclicn)
+    2. PAT 有效(Qoder 服务端认证通过,ACP initialize + authenticate)
+    3. 模型可响应(发送「你好」prompt,确认 LLM 正常工作,消耗少量 credits)
 
     临时沙箱在测试结束后立即销毁,不污染任务执行环境。
+
+    agent_type: "qoder_cli"(国际版)或 "qoder_cli_cn"(国内版),决定用哪个 CLI 和 PAT 环境变量。
 
     返回 (ok, message):
         ok=True: 测试通过,message 含 ACP 协议版本 + 模型响应预览
@@ -565,84 +567,47 @@ def test_credential(db: Session, user_id) -> tuple[bool, str]:
     """
     # ---- 加载凭证 ----
     try:
-        credentials = _load_credentials(db, user_id)
+        credentials = _load_credentials(db, user_id, agent_type)
     except RuntimeError as e:
         return False, f"凭证加载失败: {e}"
 
-    credential_envs = _build_credential_envs(credentials)
+    credential_envs = _build_credential_envs(credentials, agent_type)
     if not credential_envs:
         return False, "凭证映射为空(请检查 registry 配置)"
 
     # ---- 检查沙箱模式 ----
     if settings.SANDBOX_MODE == "mock":
-        return False, "测试连接需要 SANDBOX_MODE=sandbox(mock 模式无 qodercli)"
+        return False, "测试连接需要 SANDBOX_MODE=sandbox(mock 模式无 CLI)"
 
     # ---- 创建临时沙箱 ----
     # 注意:不复用任务的沙箱会话,避免污染任务上下文
     from app.sandbox.client import create_sandbox
 
-    logger.warning("[qoder_cli_test] 开始测试:创建临时沙箱")
+    logger.info(f"[qoder_cli_test] 开始测试({agent_type}):创建临时沙箱")
     session = create_sandbox()
     bridge_exec_id: str | None = None
 
     try:
         # ---- 准备 CLI 环境(写 bridge 脚本 + 检查/安装 CLI) ----
         try:
-            _ensure_cli_env(session)
-            logger.warning("[qoder_cli_test] CLI 环境就绪")
+            _ensure_cli_env(session, agent_type)
+            logger.info("[qoder_cli_test] CLI 环境就绪")
         except RuntimeError as e:
-            return False, f"Qoder CLI 环境准备失败: {e}"
+            return False, f"CLI 环境准备失败: {e}"
 
-        # ---- 启动 ACP bridge(凭证经 envs 注入) ----
-        # 诊断:直接用 PAT 运行 qodercli(非 ACP 模式),验证 PAT 有效性
-        # 如果 PAT 无效,会快速报认证错误;如果有效,会返回模型响应
-        try:
-            # 先清理可能残留的旧登录态(避免干扰 PAT 认证)
-            session.run_command(
-                "rm -rf ~/.qoder 2>/dev/null; echo 'cleaned'",
-                timeout=5,
-            )
-
-            # 诊断:确认 PAT 确实传到了沙箱(只打印长度和首尾 4 位,避免泄露)
-            pat_val = credential_envs.get("QODER_PERSONAL_ACCESS_TOKEN", "")
-            if pat_val:
-                masked = f"{pat_val[:4]}...{pat_val[-4:]}" if len(pat_val) > 8 else "(too short)"
-                logger.warning(
-                    f"[qoder_cli_test] PAT 诊断: len={len(pat_val)}, "
-                    f"preview={masked}, has_whitespace={any(c.isspace() for c in pat_val)}"
-                )
-            else:
-                logger.warning("[qoder_cli_test] PAT 诊断: QODER_PERSONAL_ACCESS_TOKEN 为空!")
-                return False, "PAT 未配置或为空,请在智能体配置中填写 Qoder Personal Access Token"
-
-            pat_test_id = session.run_command_background(
-                'qodercli -p "hello" 2>&1',
-                envs=credential_envs,
-                work_dir="/tmp",
-            )
-            import time as _time
-            _time.sleep(25)  # 给 qodercli 足够时间响应或报错
-            pat_logs, _ = session.get_background_logs(pat_test_id)
-            logger.warning(
-                f"[qoder_cli_test] PAT 直接测试(qodercli -p hello),完整输出:\n"
-                f"{(pat_logs or '')[-1500:]}"
-            )
-            # 中断测试命令(可能还在运行)
-            try:
-                session.interrupt_command(pat_test_id)
-            except Exception:
-                pass  # 命令可能已结束,中断失败可忽略
-        except Exception as e:
-            logger.warning(f"[qoder_cli_test] PAT 直接测试异常: {e}")
+        # 清理可能残留的旧登录态(国际版 ~/.qoder,国内版 ~/.qoder-cn)
+        cli_bin = _get_bin(agent_type)
+        config_dirs = "~/.qoder ~/.qoder-cn"
+        session.run_command(f"rm -rf {config_dirs} 2>/dev/null", timeout=5)
 
         try:
-            bridge_exec_id = _start_acp_bridge(session, credential_envs)
+            bridge_exec_id = _start_acp_bridge(session, credential_envs, agent_type=agent_type)
             endpoint_url, endpoint_headers = session.get_endpoint(ACP_BRIDGE_PORT)
-            logger.warning(
+            logger.info(
                 f"[qoder_cli_test] bridge 已启动,等待就绪: endpoint={endpoint_url}"
             )
             _wait_for_bridge_ready(session, bridge_exec_id, endpoint_url, endpoint_headers)
-            logger.warning("[qoder_cli_test] bridge 就绪,开始 ACP 握手")
+            logger.info("[qoder_cli_test] bridge 就绪,开始 ACP 握手")
         except RuntimeError as e:
             err_msg = str(e)
             # bridge 日志可能含认证失败关键词
@@ -650,9 +615,9 @@ def test_credential(db: Session, user_id) -> tuple[bool, str]:
                 return False, f"PAT 认证失败: {err_msg}"
             return False, f"ACP bridge 启动失败: {err_msg}"
 
-        # ---- ACP 握手(验证 PAT) + 测试 prompt(验证模型可响应) ----
-        # qodercli 在 PAT 无效时通常会在 initialize 前后报认证错误;
-        # 握手通过后再发个「你好」prompt,确认模型能正常响应(消耗少量 credits)。
+        # ---- ACP 握手 + 认证 + 测试 prompt ----
+        # qodercli 在 PAT 无效时通常会在 initialize/authenticate 阶段报认证错误;
+        # 认证通过后再发个「你好」prompt,确认模型能正常响应(消耗少量 credits)。
         client = ACPClient(endpoint_url, endpoint_headers)
         try:
             result = client.initialize()
@@ -664,39 +629,31 @@ def test_credential(db: Session, user_id) -> tuple[bool, str]:
             )
 
             # ---- ACP 认证(若 Agent 要求) ----
-            # qodercli 通过 authMethods 声明需要认证,客户端必须调 authenticate
+            # CLI 通过 authMethods 声明需要认证,客户端必须调 authenticate
             # 才能创建 session。PAT 经环境变量注入,在此步骤完成服务端认证。
             if auth_methods:
-                logger.warning(
-                    f"[qoder_cli_test] 完整 authMethods: "
-                    f"{json.dumps(auth_methods, ensure_ascii=False)}"
-                )
-                # 选 qodercli-login 方法(qodercli 的标准认证方式)
+                # 动态选择认证方法:优先含 "login" 的,否则取第一个
+                # (不同 CLI 版本可能用不同的 method_id,如 qodercli-login / qoderclicn-login)
                 method_id = ""
                 for m in auth_methods:
-                    if m.get("id") == "qodercli-login":
-                        method_id = "qodercli-login"
+                    mid = m.get("id", "")
+                    if "login" in mid:
+                        method_id = mid
                         break
                 if not method_id:
                     method_id = auth_methods[0].get("id", "")
                 if not method_id:
                     return False, "ACP 握手成功但未找到可用的认证方法"
 
-                logger.warning(f"[qoder_cli_test] 开始 ACP 认证: methodId={method_id}")
-                # 认证前打印 bridge 日志,看 qodercli 当前状态
-                if bridge_exec_id:
-                    logs, _ = session.get_background_logs(bridge_exec_id)
-                    logger.warning(f"[qoder_cli_test] 认证前 bridge 日志: {(logs or '')[-500:]}")
+                logger.info(f"[qoder_cli_test] 开始 ACP 认证: methodId={method_id}")
                 try:
-                    # authenticate 可能涉及网络往返 qoder.com 验证 PAT,给 90s 超时
-                    # (之前 30s 超时时,bridge 日志显示 qodercli 恰好在 ~30s 才返回)
+                    # authenticate 涉及网络往返验证 PAT,给 90s 超时
                     auth_result = client.authenticate(method_id, timeout=90)
-                    logger.warning(
+                    logger.info(
                         f"[qoder_cli_test] ACP 认证成功: "
                         f"{json.dumps(auth_result, ensure_ascii=False)[:200]}"
                     )
                 except httpx.TimeoutException:
-                    # 超时时读取 bridge 日志辅助诊断
                     if bridge_exec_id:
                         logs, _ = session.get_background_logs(bridge_exec_id)
                         logger.warning(
@@ -723,7 +680,7 @@ def test_credential(db: Session, user_id) -> tuple[bool, str]:
                 )
 
                 test_prompt = [{"type": "text", "text": "你好"}]
-                logger.warning(
+                logger.info(
                     f"[qoder_cli_test] 发送 session/prompt: "
                     f"sessionId={acp_session_id}, prompt={json.dumps(test_prompt, ensure_ascii=False)}"
                 )
@@ -754,16 +711,16 @@ def test_credential(db: Session, user_id) -> tuple[bool, str]:
 
                 reply = "".join(reply_chunks).strip()
                 if not reply:
-                    return False, "ACP 握手成功,但模型未响应(请检查 PAT 配额或网络)"
+                    return False, "ACP 认证成功,但模型未响应(请检查 PAT 配额或网络)"
 
                 preview = reply[:80] + ("..." if len(reply) > 80 else "")
-                logger.warning(f"[qoder_cli_test] 模型响应: {preview}")
+                logger.info(f"[qoder_cli_test] 模型响应: {preview}")
                 return True, (
                     f"连接成功(ACP 协议版本 {protocol_version}),"
                     f"模型响应: {preview}"
                 )
             except httpx.TimeoutException:
-                return False, "ACP 握手成功,但模型响应超时(30s,请检查网络或配额)"
+                return False, "ACP 认证成功,但模型响应超时(30s,请检查网络或配额)"
             except RuntimeError as e:
                 err_msg = str(e)
                 low = err_msg.lower()
@@ -790,7 +747,7 @@ def test_credential(db: Session, user_id) -> tuple[bool, str]:
         try:
             session.close()
         except Exception as e:
-            logger.warning(f"[qoder_cli_test] 关闭沙箱失败(忽略): {e}")
+            logger.info(f"[qoder_cli_test] 关闭沙箱失败(忽略): {e}")
 
 
 # ============================================================
@@ -1082,10 +1039,13 @@ def run_qoder_cli_agent(
     followup_query: str | None = None,
     repo_context: str | None = None,
     previous_plan: list[dict[str, Any]] | None = None,
+    agent_type: str = AGENT_TYPE,
 ) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
     """跑一轮 Qoder CLI 执行器
 
     与 run_react_agent 签名对齐(不含 client 参数,Qoder CLI 自带模型配置)。
+    agent_type 决定使用哪个 CLI(国际版 qoder_cli / 国内版 qoder_cli_cn),
+    默认 AGENT_TYPE("qoder_cli"),由 executor_agent.ExternalCLIAgent 注入。
 
     返回:(results, summary, final_plan)
         results: 始终为空 list(结构化结果由 user_agent 在 done 时提取)
@@ -1096,8 +1056,8 @@ def run_qoder_cli_agent(
     set_current_task(task_id_str, task.scenario)
 
     # ---- 校验 agent 类型已注册 ----
-    if get_agent_meta(AGENT_TYPE) is None:
-        raise RuntimeError(f"agent 类型未注册: {AGENT_TYPE}")
+    if get_agent_meta(agent_type) is None:
+        raise RuntimeError(f"agent 类型未注册: {agent_type}")
 
     # ---- 检查沙箱模式 ----
     if settings.SANDBOX_MODE == "mock":
@@ -1107,8 +1067,8 @@ def run_qoder_cli_agent(
         )
 
     # ---- 加载凭证 + 映射为环境变量 ----
-    credentials = _load_credentials(db, task.user_id)
-    credential_envs = _build_credential_envs(credentials)
+    credentials = _load_credentials(db, task.user_id, agent_type)
+    credential_envs = _build_credential_envs(credentials, agent_type)
     if not credential_envs:
         raise RuntimeError("Qoder CLI 凭证映射为空,无法注入环境变量(请检查 registry 配置)")
 
@@ -1120,10 +1080,10 @@ def run_qoder_cli_agent(
     repo_path = ctx.get("repo_path", "")
 
     # ---- 准备 CLI 环境 ----
-    _ensure_cli_env(session)
+    _ensure_cli_env(session, agent_type)
 
     # ---- 启动 ACP bridge ----
-    bridge_exec_id = _start_acp_bridge(session, credential_envs, task)
+    bridge_exec_id = _start_acp_bridge(session, credential_envs, task, agent_type=agent_type)
 
     # 获取端口转发地址
     endpoint_url, endpoint_headers = session.get_endpoint(ACP_BRIDGE_PORT)
@@ -1139,17 +1099,20 @@ def run_qoder_cli_agent(
             init_result = client.initialize()
 
             # 认证(若 Agent 要求)
+            # 动态选择认证方法:优先含 "login" 的 method_id
+            # (qodercli-login 国际版 / qoderclicn-login 国内版,见 test_credential 同款逻辑)
             auth_methods = init_result.get("authMethods", []) or []
             if auth_methods:
                 method_id = ""
                 for m in auth_methods:
-                    if m.get("id") == "qodercli-login":
-                        method_id = "qodercli-login"
+                    mid = m.get("id", "")
+                    if "login" in mid:
+                        method_id = mid
                         break
                 if not method_id:
                     method_id = auth_methods[0].get("id", "")
                 if method_id:
-                    logger.info(f"[qoder_cli] ACP 认证: methodId={method_id}")
+                    logger.info(f"[qoder_cli:{agent_type}] ACP 认证: methodId={method_id}")
                     client.authenticate(method_id)
 
             # 创建会话(cwd 设为仓库路径,让 CLI 在仓库目录下工作)

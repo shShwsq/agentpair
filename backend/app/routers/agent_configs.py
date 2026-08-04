@@ -178,19 +178,35 @@ def test_config(
             detail=f"未配置 {agent_type} 凭证,请先保存配置再测试",
         )
 
-    # 按 agent_type 分派到对应的测试函数
-    # 当前只有 qoder_cli,后续扩展时在此添加分支
-    if agent_type == "qoder_cli":
-        from app.agents.qoder_cli_agent import test_credential
+    # 按 agent_type 动态分派到对应的测试函数
+    # 约定:测试函数名为 test_credential,与 registry.executor_module 同模块
+    # (qoder_cli / qoder_cli_cn 共用 app.agents.qoder_cli_agent.test_credential)
+    meta = AGENT_REGISTRY.get(agent_type) or {}
+    module_path = meta.get("executor_module", "")
+    if not module_path:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=f"agent 类型 {agent_type} 未配置 executor_module,暂不支持测试连接",
+        )
 
-        ok, message = test_credential(db, current_user.id)
-        return AgentTestResponse(ok=ok, message=message)
+    try:
+        import importlib
+        module = importlib.import_module(module_path)
+        test_func = getattr(module, "test_credential", None)
+    except ImportError as e:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=f"agent 类型 {agent_type} 的执行模块加载失败: {e}",
+        )
 
-    # 未实现的 agent 类型
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail=f"agent 类型 {agent_type} 暂不支持测试连接",
-    )
+    if test_func is None:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=f"agent 类型 {agent_type} 未实现 test_credential,暂不支持测试连接",
+        )
+
+    ok, message = test_func(db, current_user.id, agent_type)
+    return AgentTestResponse(ok=ok, message=message)
 
 
 @router.delete("/configs/{agent_type}", response_model=AgentConfigListResponse)
