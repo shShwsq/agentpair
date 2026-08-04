@@ -32,8 +32,8 @@ pipx install opensandbox-server
 # 让当前 shell 能找到 ~/.local/bin(两种方式装完都要执行一次,或重登)
 export PATH="$HOME/.local/bin:$PATH"
 
-# 验证:能输出版本号即可
-opensandbox-server --version
+# 验证:能列出子命令即装好(此 CLI 没有 --version)
+opensandbox-server --help
 ```
 
 > 不要用 `uvx opensandbox-server` 长期运行:`uvx` 是临时执行,每次启动都可能重新拉包,systemd 托管时路径也不好定位。装成正式命令更稳。
