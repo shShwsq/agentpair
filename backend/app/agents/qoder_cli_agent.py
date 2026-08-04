@@ -323,10 +323,28 @@ def _get_install_cmd() -> str:
     return sandbox_cfg.get("install_cmd_default", "")
 
 
-def _get_acp_args() -> list[str]:
-    """从 registry 读取 ACP 启动参数(如 ["--acp", "--yolo"])"""
+def _get_acp_args(task: Task | None = None) -> list[str]:
+    """从 registry 读取 ACP 启动参数,并注入 task.params 中的模型配置
+
+    支持的 task.params 字段(均为可选,见 https://docs.qoder.cn/cli/model):
+        model:            模型分级(auto/ultimate/performance/efficient/lite)或前沿模型名
+        reasoning_effort: 思考强度(low/medium/high/xhigh/max)
+        context_window:   上下文窗口(200000/400000/1000000)
+    """
     sandbox_cfg = get_sandbox_config(AGENT_TYPE) or {}
-    return list(sandbox_cfg.get("acp_args", ["--acp", "--yolo"]))
+    args = list(sandbox_cfg.get("acp_args", ["--acp", "--yolo"]))
+
+    if task and task.params:
+        model = task.params.get("model")
+        if model:
+            args.extend(["--model", str(model)])
+        effort = task.params.get("reasoning_effort")
+        if effort:
+            args.extend(["--reasoning-effort", str(effort)])
+        ctx = task.params.get("context_window")
+        if ctx:
+            args.extend(["--context-window", str(ctx)])
+    return args
 
 
 def _write_bridge_script(session) -> None:
@@ -382,7 +400,7 @@ def _ensure_cli_env(session) -> None:
 # ============================================================
 
 
-def _start_acp_bridge(session, credential_envs: dict[str, str]) -> str:
+def _start_acp_bridge(session, credential_envs: dict[str, str], task: Task | None = None) -> str:
     """后台启动 ACP bridge,返回 execution_id
 
     bridge 启动命令:
@@ -390,10 +408,11 @@ def _start_acp_bridge(session, credential_envs: dict[str, str]) -> str:
     凭证经 envs 注入到 bridge 进程,bridge 子进程(qodercli)继承这些环境变量,
     实现 PAT 不在命令行明文出现。
 
+    task 参数用于从 task.params 读取模型/思考强度/上下文窗口配置(见 _get_acp_args)。
     通过 run_command_background 非阻塞启动。
     """
     cli_bin = _get_bin()
-    acp_args = _get_acp_args()
+    acp_args = _get_acp_args(task)
     args_json = json.dumps(acp_args, ensure_ascii=False)
 
     # shell 中 JSON 数组含双引号,需单引号包裹
@@ -880,7 +899,7 @@ def run_qoder_cli_agent(
     _ensure_cli_env(session)
 
     # ---- 启动 ACP bridge ----
-    bridge_exec_id = _start_acp_bridge(session, credential_envs)
+    bridge_exec_id = _start_acp_bridge(session, credential_envs, task)
 
     # 获取端口转发地址
     endpoint_url, endpoint_headers = session.get_endpoint(ACP_BRIDGE_PORT)

@@ -82,6 +82,53 @@ const selectedAgentExecutor = computed<AgentConfigOut | null>(() =>
   agentExecutors.value.find((a) => a.agent_type === selectedExecutor.value) ?? null,
 )
 
+// ---- Qoder CLI 模型配置(仅 qoder_cli 执行器显示) ----
+// 见 https://docs.qoder.cn/cli/model
+
+/** Qoder CLI 模型分级选项 */
+const qoderModelOptions = [
+  { value: '', label: '默认(智能路由 Auto)' },
+  { value: 'auto', label: '智能路由 (Auto)' },
+  { value: 'ultimate', label: '极致 (Ultimate)' },
+  { value: 'performance', label: '性能 (Performance)' },
+  { value: 'efficient', label: '经济 (Efficient)' },
+  { value: 'lite', label: '轻量 (Lite)' },
+  { value: 'qwen3.7-max', label: 'Qwen3.7-Max' },
+  { value: 'qwen3.7-plus', label: 'Qwen3.7-Plus' },
+  { value: 'deepseek-v4-pro', label: 'DeepSeek-V4-Pro' },
+  { value: 'deepseek-v4-flash', label: 'DeepSeek-V4-Flash' },
+  { value: 'glm-5.2', label: 'GLM-5.2' },
+  { value: 'kimi-k2.7-code', label: 'Kimi-K2.7-Code' },
+  { value: 'minimax-m3', label: 'MiniMax-M3' },
+] as const
+
+/** 思考强度选项 */
+const qoderEffortOptions = [
+  { value: '', label: '默认' },
+  { value: 'low', label: 'Low(最快)' },
+  { value: 'medium', label: 'Medium(适中)' },
+  { value: 'high', label: 'High(深入)' },
+  { value: 'xhigh', label: 'XHigh(深度分析)' },
+  { value: 'max', label: 'Max(最大推理)' },
+] as const
+
+/** 上下文窗口选项 */
+const qoderContextOptions = [
+  { value: 0, label: '默认' },
+  { value: 200000, label: '200K' },
+  { value: 400000, label: '400K' },
+  { value: 1000000, label: '1M' },
+] as const
+
+/** Qoder CLI 配置面板是否展开 */
+const qoderConfigOpen = ref(false)
+/** 选中的模型(空字符串=默认) */
+const qoderModel = ref('')
+/** 选中的思考强度(空字符串=默认) */
+const qoderReasoningEffort = ref('')
+/** 选中的上下文窗口(0=默认) */
+const qoderContextWindow = ref(0)
+
 // ---- Skill 多选(高级选项) ----
 
 /** 所有可用 skill(从后端 GET /skills 加载) */
@@ -289,6 +336,13 @@ async function handleSubmit(): Promise<void> {
     if (repoUrlVal) params.repo_url = repoUrlVal
     if (branchVal) params.branch = branchVal
 
+    // Qoder CLI 模型配置(仅 qoder_cli 执行器时写入)
+    if (selectedExecutor.value === 'qoder_cli') {
+      if (qoderModel.value) params.model = qoderModel.value
+      if (qoderReasoningEffort.value) params.reasoning_effort = qoderReasoningEffort.value
+      if (qoderContextWindow.value) params.context_window = qoderContextWindow.value
+    }
+
     // user_input 优先用用户主输入;若为空但仓库地址已填,自动兜底生成
     let finalUserInput = userInput.value.trim()
     if (!finalUserInput && repoUrlVal) {
@@ -459,6 +513,64 @@ onMounted(async () => {
                 to="/models"
                 class="model-empty-link"
               >配置 →</RouterLink>
+            </div>
+
+            <!-- Qoder CLI 模型配置(仅 qoder_cli 执行器显示) -->
+            <div v-if="selectedExecutor === 'qoder_cli'" class="qoder-config-panel">
+              <button
+                type="button"
+                class="qoder-config-toggle"
+                :aria-expanded="qoderConfigOpen"
+                @click="qoderConfigOpen = !qoderConfigOpen"
+              >
+                <svg
+                  class="qoder-chevron"
+                  :class="{ expanded: qoderConfigOpen }"
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
+                <span>Qoder 模型</span>
+                <span class="qoder-config-summary">
+                  {{ qoderModel || 'Auto' }} · {{ qoderReasoningEffort || '默认' }} · {{ qoderContextWindow ? (qoderContextWindow >= 1000000 ? '1M' : (qoderContextWindow / 1000) + 'K') : '默认' }}
+                </span>
+              </button>
+
+              <Transition name="collapse">
+                <div v-show="qoderConfigOpen" class="qoder-config-dropdown">
+                  <div class="qoder-config-row">
+                    <label class="qoder-config-label">模型</label>
+                    <select v-model="qoderModel" class="qoder-config-select">
+                      <option v-for="opt in qoderModelOptions" :key="opt.value" :value="opt.value">
+                        {{ opt.label }}
+                      </option>
+                    </select>
+                  </div>
+                  <div class="qoder-config-row">
+                    <label class="qoder-config-label">思考强度</label>
+                    <select v-model="qoderReasoningEffort" class="qoder-config-select">
+                      <option v-for="opt in qoderEffortOptions" :key="opt.value" :value="opt.value">
+                        {{ opt.label }}
+                      </option>
+                    </select>
+                  </div>
+                  <div class="qoder-config-row">
+                    <label class="qoder-config-label">上下文窗口</label>
+                    <select v-model.number="qoderContextWindow" class="qoder-config-select">
+                      <option v-for="opt in qoderContextOptions" :key="opt.value" :value="opt.value">
+                        {{ opt.label }}
+                      </option>
+                    </select>
+                  </div>
+                </div>
+              </Transition>
             </div>
 
             <!-- 高级选项:Skill 多选(下拉浮层,默认折叠) -->
@@ -1175,6 +1287,105 @@ onMounted(async () => {
     right: 0;
     left: 0;
   }
+}
+
+/* ---- Qoder CLI 模型配置(下拉浮层,与高级选项同模式) ---- */
+.qoder-config-panel {
+  position: relative;
+}
+
+.qoder-config-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 36px;
+  padding: 0 var(--space-3);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.qoder-config-toggle:hover {
+  color: var(--color-text);
+  border-color: var(--color-primary-border);
+}
+
+.qoder-config-toggle[aria-expanded="true"] {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+
+.qoder-chevron {
+  flex-shrink: 0;
+  transition: transform var(--transition-fast);
+  color: var(--color-text-muted);
+}
+
+.qoder-chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.qoder-config-summary {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-normal);
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.qoder-config-dropdown {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  z-index: var(--z-dropdown, 100);
+  min-width: 320px;
+  max-width: min(80vw, 480px);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg, 0 10px 25px rgba(0, 0, 0, 0.12));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.qoder-config-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.qoder-config-label {
+  flex-shrink: 0;
+  width: 80px;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--color-text-secondary);
+}
+
+.qoder-config-select {
+  flex: 1;
+  height: 34px;
+  padding: 0 var(--space-2);
+  font-size: var(--fs-sm);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.qoder-config-select:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-light);
 }
 
 /* ---- 高级选项:Skill 多选(下拉浮层,挂在模型选择右边) ---- */
