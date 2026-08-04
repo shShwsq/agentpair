@@ -363,13 +363,20 @@ def _get_install_cmd(agent_type: str = AGENT_TYPE) -> str:
     return sandbox_cfg.get("install_cmd_default", "")
 
 
-def _get_acp_args(task: Task | None = None, agent_type: str = AGENT_TYPE) -> list[str]:
+def _get_acp_args(
+    task: Task | None = None,
+    agent_type: str = AGENT_TYPE,
+    extra_args: list[str] | None = None,
+) -> list[str]:
     """从 registry 读取 ACP 启动参数,并注入 task.params 中的模型配置
 
     支持的 task.params 字段(均为可选,见 https://docs.qoder.cn/cli/model):
         model:            模型分级(auto/ultimate/performance/efficient/lite)或前沿模型名
         reasoning_effort: 思考强度(low/medium/high/xhigh/max)
         context_window:   上下文窗口(200000/400000/1000000)
+
+    extra_args: 额外追加的 CLI 参数(如测试时强制用 lite 模型 + low 思考强度),
+    追加在 task.params 配置之后,会覆盖同名参数(qodercli 以最后的为准)。
     """
     sandbox_cfg = get_sandbox_config(agent_type) or {}
     args = list(sandbox_cfg.get("acp_args", ["--acp", "--yolo"]))
@@ -384,6 +391,9 @@ def _get_acp_args(task: Task | None = None, agent_type: str = AGENT_TYPE) -> lis
         ctx = task.params.get("context_window")
         if ctx:
             args.extend(["--context-window", str(ctx)])
+
+    if extra_args:
+        args.extend(extra_args)
     return args
 
 
@@ -492,6 +502,7 @@ def _start_acp_bridge(
     credential_envs: dict[str, str],
     task: Task | None = None,
     agent_type: str = AGENT_TYPE,
+    extra_acp_args: list[str] | None = None,
 ) -> str:
     """后台启动 ACP bridge,返回 execution_id
 
@@ -501,10 +512,11 @@ def _start_acp_bridge(
     实现 PAT 不在命令行明文出现。
 
     task 参数用于从 task.params 读取模型/思考强度/上下文窗口配置(见 _get_acp_args)。
+    extra_acp_args: 额外 CLI 参数(如测试时强制 lite 模型),透传给 _get_acp_args。
     通过 run_command_background 非阻塞启动。
     """
     cli_bin = _get_bin(agent_type)
-    acp_args = _get_acp_args(task, agent_type)
+    acp_args = _get_acp_args(task, agent_type, extra_acp_args)
     args_json = json.dumps(acp_args, ensure_ascii=False)
 
     # shell 中 JSON 数组含双引号,需单引号包裹
@@ -651,7 +663,14 @@ def test_credential(db: Session, user_id, agent_type: str = AGENT_TYPE) -> tuple
             logger.info(
                 f"[qoder_cli_test] 注入环境变量 keys: {list(credential_envs.keys())}"
             )
-            bridge_exec_id = _start_acp_bridge(session, credential_envs, agent_type=agent_type)
+            # 测试时强制用最便宜的模型配置,最小化 credits 消耗
+            # lite:最低分级模型,low:最少思考强度
+            test_acp_args = ["--model", "lite", "--reasoning-effort", "low"]
+            bridge_exec_id = _start_acp_bridge(
+                session, credential_envs,
+                agent_type=agent_type,
+                extra_acp_args=test_acp_args,
+            )
             endpoint_url, endpoint_headers = session.get_endpoint(ACP_BRIDGE_PORT)
             logger.info(
                 f"[qoder_cli_test] bridge 已启动,等待就绪: endpoint={endpoint_url}"
