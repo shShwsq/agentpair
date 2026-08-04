@@ -12,15 +12,28 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
+import AgentConfigDialog from '@/components/AgentConfigDialog.vue'
 import DeleteAccountDialog from '@/components/DeleteAccountDialog.vue'
 import GitHubDialog from '@/components/GitHubDialog.vue'
 import PasswordDialog from '@/components/PasswordDialog.vue'
-import TraeCLIPatDialog from '@/components/TraeCLIPatDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
-import { changePassword, clearTraeCliPat, deleteAccount, getTraeCliPatStatus, setTraeCliPat } from '@/api/auth'
+import { changePassword, deleteAccount } from '@/api/auth'
+import {
+  deleteAgentConfig,
+  getAgentConfig,
+  getAgentConfigs,
+  getAgentTypes,
+  saveAgentConfig,
+} from '@/api/agent_configs'
 import { getGitHubBindURL, getGitHubStatus, syncEmail, unbindGitHub } from '@/api/github'
 import type { GitHubStatus } from '@/types/github'
+import type {
+  AgentConfigDetailOut,
+  AgentConfigOut,
+  AgentTypeMeta,
+  CredentialValue,
+} from '@/types/agent_configs'
 import { useAuthStore } from '@/stores/auth'
 import { extractErrorMessage } from '@/utils/error'
 
@@ -142,61 +155,88 @@ async function handleUnbind(): Promise<void> {
 }
 
 // ============================================================
-// TRAE CLI PAT 弹窗
+// 智能体 CLI 配置弹窗(动态多 agent)
 // ============================================================
-const traePatDialogOpen = ref(false)
-const traePatHasPat = ref<boolean | null>(null)  // null = 加载中
-const traePatSaving = ref(false)
-const traePatError = ref('')
+/** 所有已注册 agent 类型(后端动态返回,含凭据字段定义) */
+const agentTypes = ref<AgentTypeMeta[]>([])
+/** 当前用户已配置的 agent 列表(用于表格状态列) */
+const agentConfigs = ref<AgentConfigOut[]>([])
+/** agentTypes 是否仍在加载 */
+const agentTypesLoading = ref(true)
 
-async function refreshTraeCliPatStatus(): Promise<void> {
-  traePatHasPat.value = null
-  traePatError.value = ''
+const agentDialogOpen = ref(false)
+/** 当前弹窗对应的 agent 类型元数据 */
+const agentDialogMeta = ref<AgentTypeMeta | null>(null)
+/** 当前弹窗对应的 agent 配置详情(null=未配置或加载中) */
+const agentDialogDetail = ref<AgentConfigDetailOut | null>(null)
+/** 弹窗加载详情中(用于禁用表单) */
+const agentDialogLoading = ref(false)
+const agentSaving = ref(false)
+const agentError = ref('')
+
+/** 按类型查找已配置项(用于表格状态展示) */
+function findConfig(agent_type: string): AgentConfigOut | null {
+  return agentConfigs.value.find((c) => c.agent_type === agent_type) ?? null
+}
+
+/** 刷新用户已配置的 agent 列表 */
+async function refreshAgentConfigs(): Promise<void> {
   try {
-    const res = await getTraeCliPatStatus()
-    traePatHasPat.value = res.has_pat
+    const res = await getAgentConfigs()
+    agentConfigs.value = res.configs
   } catch (err) {
-    console.warn('加载 TRAE CLI PAT 状态失败:', err)
-    traePatHasPat.value = false
+    console.warn('加载 agent 配置列表失败:', err)
   }
 }
 
-function openTraePatDialog(): void {
-  traePatError.value = ''
-  if (traePatHasPat.value === null) refreshTraeCliPatStatus()
-  traePatDialogOpen.value = true
-}
-
-async function handleTraePatSave(pat: string): Promise<void> {
-  traePatError.value = ''
-  traePatSaving.value = true
+async function openAgentDialog(meta: AgentTypeMeta): Promise<void> {
+  agentDialogMeta.value = meta
+  agentDialogDetail.value = null
+  agentDialogLoading.value = true
+  agentError.value = ''
+  agentDialogOpen.value = true
   try {
-    const res = await setTraeCliPat(pat)
-    traePatHasPat.value = res.has_pat
-    traePatDialogOpen.value = false
-    showToast('TRAE CLI PAT 已保存', 'success')
-    // 同步本地用户信息(表格行状态依赖 has_trae_cli_pat)
-    await authStore.fetchMe()
+    agentDialogDetail.value = await getAgentConfig(meta.agent_type)
   } catch (err) {
-    traePatError.value = extractErrorMessage(err)
+    // 未配置时后端可能 404,静默处理:detail 保持 null(按未配置渲染)
+    console.warn('加载 agent 配置详情失败:', err)
   } finally {
-    traePatSaving.value = false
+    agentDialogLoading.value = false
   }
 }
 
-async function handleTraePatClear(): Promise<void> {
-  traePatError.value = ''
-  traePatSaving.value = true
+async function handleAgentSave(credentials: CredentialValue[], is_active: boolean): Promise<void> {
+  const meta = agentDialogMeta.value
+  if (!meta) return
+  agentError.value = ''
+  agentSaving.value = true
   try {
-    const res = await clearTraeCliPat()
-    traePatHasPat.value = res.has_pat
-    traePatDialogOpen.value = false
-    showToast('TRAE CLI PAT 已清除', 'success')
-    await authStore.fetchMe()
+    agentDialogDetail.value = await saveAgentConfig(meta.agent_type, { credentials, is_active })
+    await refreshAgentConfigs()
+    agentDialogOpen.value = false
+    showToast(`${meta.display_name} 配置已保存`, 'success')
   } catch (err) {
-    traePatError.value = extractErrorMessage(err)
+    agentError.value = extractErrorMessage(err)
   } finally {
-    traePatSaving.value = false
+    agentSaving.value = false
+  }
+}
+
+async function handleAgentClear(): Promise<void> {
+  const meta = agentDialogMeta.value
+  if (!meta) return
+  agentError.value = ''
+  agentSaving.value = true
+  try {
+    await deleteAgentConfig(meta.agent_type)
+    await refreshAgentConfigs()
+    agentDialogDetail.value = null
+    agentDialogOpen.value = false
+    showToast(`${meta.display_name} 配置已清除`, 'success')
+  } catch (err) {
+    agentError.value = extractErrorMessage(err)
+  } finally {
+    agentSaving.value = false
   }
 }
 
@@ -204,74 +244,93 @@ async function handleTraePatClear(): Promise<void> {
 // 表格行
 // ============================================================
 interface SettingRow {
-  key: 'password' | 'github' | 'trae_cli' | 'delete'
+  /** 行唯一 key:password/github/delete 固定;agent 行用 'agent:'+agent_type */
+  key: string
   item: string
   desc: string
   status: string
   statusType: 'ok' | 'warn' | 'neutral' | 'danger'
   actionText: string
   loading?: boolean
+  /** 关联的 agent 类型元数据(仅 agent 行有),用于打开弹窗 */
+  agentMeta?: AgentTypeMeta
 }
 
-const rows = computed<SettingRow[]>(() => [
-  {
-    key: 'password',
-    item: '登录密码',
-    desc: hasPassword.value ? '修改账号登录密码' : 'OAuth 账号设置密码',
-    status: hasPassword.value ? '已设置' : '未设置',
-    statusType: hasPassword.value ? 'ok' : 'warn',
-    actionText: hasPassword.value ? '修改' : '设置',
-    loading: false,
-  },
-  {
-    key: 'github',
-    item: 'GitHub 账号',
-    desc: '绑定后可访问私有仓库',
-    status: githubStatus.value?.bound
-      ? `@${githubStatus.value.github_login || 'unknown'}`
-      : githubStatus.value === null
-        ? ''  // 加载中,由 template 渲染 spinner
-        : '未绑定',
-    statusType: githubStatus.value?.bound
-      ? 'ok'
-      : githubStatus.value === null
-        ? 'neutral'
-        : 'warn',
-    actionText: githubStatus.value?.bound ? '管理' : '绑定',
-    loading: githubStatus.value === null,
-  },
-  {
-    key: 'trae_cli',
-    item: 'TRAE CLI PAT',
-    desc: '选择 TRAE CLI 执行器时用于沙箱内认证',
-    status: traePatHasPat.value === null
-      ? ''  // 加载中,由 template 渲染 spinner
-      : traePatHasPat.value
-        ? '已设置'
-        : '未设置',
-    statusType: traePatHasPat.value === null
-      ? 'neutral'
-      : traePatHasPat.value
+const rows = computed<SettingRow[]>(() => {
+  const fixed: SettingRow[] = [
+    {
+      key: 'password',
+      item: '登录密码',
+      desc: hasPassword.value ? '修改账号登录密码' : 'OAuth 账号设置密码',
+      status: hasPassword.value ? '已设置' : '未设置',
+      statusType: hasPassword.value ? 'ok' : 'warn',
+      actionText: hasPassword.value ? '修改' : '设置',
+      loading: false,
+    },
+    {
+      key: 'github',
+      item: 'GitHub 账号',
+      desc: '绑定后可访问私有仓库',
+      status: githubStatus.value?.bound
+        ? `@${githubStatus.value.github_login || 'unknown'}`
+        : githubStatus.value === null
+          ? ''  // 加载中,由 template 渲染 spinner
+          : '未绑定',
+      statusType: githubStatus.value?.bound
         ? 'ok'
-        : 'warn',
-    actionText: traePatHasPat.value ? '修改' : '设置',
-    loading: traePatHasPat.value === null,
-  },
-  {
-    key: 'delete',
-    item: '删除账号',
-    desc: '永久删除账号及所有数据',
-    status: '不可恢复',
-    statusType: 'danger',
-    actionText: '删除',
-  },
-])
+        : githubStatus.value === null
+          ? 'neutral'
+          : 'warn',
+      actionText: githubStatus.value?.bound ? '管理' : '绑定',
+      loading: githubStatus.value === null,
+    },
+  ]
+
+  // 动态 agent 行:遍历后端注册的 agent 类型,每种一行
+  const agentRows: SettingRow[] = agentTypes.value.map((meta) => {
+    const cfg = findConfig(meta.agent_type)
+    const configured = !!cfg && cfg.has_credentials
+    // agentTypes 未加载完时显示加载态
+    const loading = agentTypesLoading.value
+    return {
+      key: `agent:${meta.agent_type}`,
+      item: meta.display_name,
+      desc: meta.description,
+      status: loading
+        ? ''
+        : configured
+          ? '已设置'
+          : '未设置',
+      statusType: loading
+        ? 'neutral'
+        : configured
+          ? 'ok'
+          : 'warn',
+      actionText: configured ? '修改' : '设置',
+      loading,
+      agentMeta: meta,
+    }
+  })
+
+  const tail: SettingRow[] = [
+    {
+      key: 'delete',
+      item: '删除账号',
+      desc: '永久删除账号及所有数据',
+      status: '不可恢复',
+      statusType: 'danger',
+      actionText: '删除',
+    },
+  ]
+
+  return [...fixed, ...agentRows, ...tail]
+})
 
 function openRow(row: SettingRow): void {
   if (row.key === 'password') openPasswordDialog()
   else if (row.key === 'github') openGitHubDialog()
-  else if (row.key === 'trae_cli') openTraePatDialog()
   else if (row.key === 'delete') openDeleteDialog()
+  else if (row.agentMeta) openAgentDialog(row.agentMeta)
 }
 
 // ============================================================
@@ -334,8 +393,8 @@ async function handleSyncConfirm(): Promise<void> {
 onMounted(() => {
   // 预加载 GitHub 状态(用于表格状态列展示)
   refreshGitHubStatus()
-  // 预加载 TRAE CLI PAT 状态
-  refreshTraeCliPatStatus()
+  // 并行加载 agent 类型列表 + 用户已配置列表
+  loadAgentTypesAndConfigs()
 
   // 检测 OAuthCallbackView 带来的邮箱不一致 query → 弹窗询问
   if (route.query.email_mismatch === '1') {
@@ -347,6 +406,23 @@ onMounted(() => {
     router.replace({ path: '/settings' })
   }
 })
+
+/** 并行加载 agent 类型与已配置列表(表格行状态依赖) */
+async function loadAgentTypesAndConfigs(): Promise<void> {
+  agentTypesLoading.value = true
+  try {
+    const [types, configs] = await Promise.all([
+      getAgentTypes(),
+      getAgentConfigs().catch(() => null), // 未登录或失败时静默,列表为空
+    ])
+    agentTypes.value = types
+    if (configs) agentConfigs.value = configs.configs
+  } catch (err) {
+    console.warn('加载 agent 类型失败:', err)
+  } finally {
+    agentTypesLoading.value = false
+  }
+}
 </script>
 
 <template>
@@ -443,14 +519,15 @@ onMounted(() => {
           @cancel="ghDialogOpen = false"
         />
 
-        <TraeCLIPatDialog
-          :open="traePatDialogOpen"
-          :has-pat="traePatHasPat === true"
-          :saving="traePatSaving"
-          :error="traePatError"
-          @save="handleTraePatSave"
-          @clear="handleTraePatClear"
-          @cancel="traePatDialogOpen = false"
+        <AgentConfigDialog
+          :open="agentDialogOpen"
+          :meta="agentDialogMeta"
+          :detail="agentDialogDetail"
+          :saving="agentSaving || agentDialogLoading"
+          :error="agentError"
+          @save="handleAgentSave"
+          @clear="handleAgentClear"
+          @cancel="agentDialogOpen = false"
         />
 
         <DeleteAccountDialog

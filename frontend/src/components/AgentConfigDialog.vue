@@ -1,21 +1,32 @@
 <script setup lang="ts">
 /**
- * TRAE CLI PAT 管理 弹窗
+ * 智能体 CLI 配置 弹窗(动态表单)
  *
- * 复用 PasswordDialog / GitHubDialog 的视觉语言(mask + card + header/body/footer)。
- * - hasPat=true:展示"已设置"状态,输入新值覆盖,footer 提供「清除」+「更新」
- * - hasPat=false:首次设置,footer 提供「取消」+「保存」
+ * 复用 PasswordDialog / GitHubDialog 的视觉语言
+ * (mask + card + header/body/footer,dialog-fade transition,Teleport to body)。
  *
+ * 根据 meta.credential_fields 动态渲染输入框:
+ * - secret 类型:password 输入框 + 眼睛切换显隐,font-mono 便于核对 token
+ * - text 类型:普通明文输入框
+ *
+ * secret 字段已配置时占位提示「已设置,留空保留」;未配置时用字段定义的 placeholder。
  * 草稿在 open=true 时重置;保存/清除由父组件调 API 持久化。
- * PAT 仅在沙箱内 trae_cli.yaml 中使用,加密存储于用户记录。
  */
 import { computed, reactive, watch } from 'vue'
+import type {
+  AgentConfigDetailOut,
+  AgentTypeMeta,
+  CredentialField,
+  CredentialValue,
+} from '@/types/agent_configs'
 
 const props = defineProps<{
   /** 是否显示 */
   open: boolean
-  /** 是否已设置 PAT(决定文案与是否显示「清除」按钮) */
-  hasPat: boolean
+  /** 类型元数据(含 credential_fields 定义),null 时弹窗不渲染表单 */
+  meta: AgentTypeMeta | null
+  /** 当前配置状态(用于判断各字段是否已设置),null 表示加载中 */
+  detail: AgentConfigDetailOut | null
   /** 提交中状态(禁用按钮 + spinner) */
   saving: boolean
   /** 错误信息(父组件 API 失败时传入) */
@@ -23,40 +34,85 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  (e: 'save', pat: string): void
+  (e: 'save', credentials: CredentialValue[], is_active: boolean): void
   (e: 'clear'): void
   (e: 'cancel'): void
 }>()
 
-const draft = reactive({
-  pat: '',
-  showPat: false,
+/** 字段值草稿:key 为字段 key,value 为输入框当前值 */
+const draft = reactive<{
+  values: Record<string, string>
+  /** 各字段的显隐状态(secret 类型用),key 为字段 key */
+  show: Record<string, boolean>
+  is_active: boolean
+}>({
+  values: {},
+  show: {},
+  is_active: true,
 })
 
-/** open 变 true 时重置草稿 */
+/** open 变 true 时重置草稿(根据当前 meta + detail 初始化) */
 watch(
   () => props.open,
   (isOpen) => {
     if (!isOpen) return
-    draft.pat = ''
-    draft.showPat = false
+    const fields = props.meta?.credential_fields ?? []
+    const values: Record<string, string> = {}
+    const show: Record<string, boolean> = {}
+    for (const f of fields) {
+      values[f.key] = ''
+      show[f.key] = false
+    }
+    draft.values = values
+    draft.show = show
+    // 启用状态:已配置时沿用当前值,未配置时默认启用
+    draft.is_active = props.detail?.is_active ?? true
   },
   { immediate: true },
 )
 
-const patError = computed(() => {
-  if (!draft.pat) return ''
-  if (draft.pat.length < 8) return 'PAT 长度过短'
-  return ''
-})
-
-const canSubmit = computed(
-  () => !!draft.pat && !patError.value && !props.saving,
+/** 是否已配置(决定 footer 按钮文案与是否显示「清除配置」) */
+const hasCredentials = computed(
+  () => !!props.detail && props.detail.has_credentials,
 )
 
+/** 指定字段是否已设置(用于 secret 字段的占位提示) */
+function isFieldSet(field: CredentialField): boolean {
+  return props.detail?.credential_status?.[field.key] === true
+}
+
+/** 指定字段的占位提示 */
+function fieldPlaceholder(field: CredentialField): string {
+  if (field.type === 'secret' && isFieldSet(field)) {
+    return '已设置,留空保留'
+  }
+  return field.placeholder
+}
+
+/** 字段校验错误信息(空串=无错误) */
+function fieldError(field: CredentialField): string {
+  if (!field.required) return ''
+  const val = (draft.values[field.key] ?? '').trim()
+  // secret 字段已配置时允许留空(保留原值)
+  if (field.type === 'secret' && isFieldSet(field)) return ''
+  if (!val) return `请输入${field.label}`
+  return ''
+}
+
+/** 是否所有必填字段都满足提交条件 */
+const canSubmit = computed(() => {
+  if (props.saving) return false
+  const fields = props.meta?.credential_fields ?? []
+  return fields.every((f) => !fieldError(f))
+})
+
 function handleSubmit(): void {
-  if (!canSubmit.value) return
-  emit('save', draft.pat.trim())
+  if (!canSubmit.value || !props.meta) return
+  const credentials: CredentialValue[] = props.meta.credential_fields.map((f) => ({
+    key: f.key,
+    value: draft.values[f.key] ?? '',
+  }))
+  emit('save', credentials, draft.is_active)
 }
 
 function handleClear(): void {
@@ -73,10 +129,10 @@ function handleCancel(): void {
 <template>
   <Teleport to="body">
     <Transition name="dialog-fade">
-      <div v-if="open" class="dialog-mask" @click.self="handleCancel">
+      <div v-if="open && meta" class="dialog-mask" @click.self="handleCancel">
         <div class="dialog-card" role="dialog" aria-modal="true">
           <header class="dialog-header">
-            <h3>TRAE CLI PAT</h3>
+            <h3>{{ meta.display_name }}</h3>
             <button
               class="dialog-close"
               :disabled="saving"
@@ -87,35 +143,53 @@ function handleCancel(): void {
 
           <div class="dialog-body">
             <p class="dialog-tip">
-              PAT 用于沙箱内 trae_cli.yaml 的认证,让 TRAE CLI 能访问你的模型配额。
-              保存后加密存储,仅在任务执行时注入沙箱。
+              {{ meta.description }}
+              <a
+                v-if="meta.help_url"
+                :href="meta.help_url"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="tip-link"
+              >获取帮助 →</a>
             </p>
 
             <!-- 当前状态 -->
-            <div :class="['status-row', hasPat ? 'status-ok' : 'status-warn']">
+            <div :class="['status-row', hasCredentials ? 'status-ok' : 'status-warn']">
               <span class="status-dot" />
-              <span class="status-text">{{ hasPat ? '当前已设置 PAT' : '尚未设置 PAT' }}</span>
+              <span class="status-text">
+                {{ hasCredentials ? '当前已配置凭据' : '尚未配置凭据' }}
+              </span>
             </div>
 
-            <div class="field">
-              <label for="trae-pat">{{ hasPat ? '新 PAT(覆盖原值)' : 'PAT' }}</label>
-              <div class="input-wrapper">
+            <!-- 动态凭据字段 -->
+            <div
+              v-for="field in meta.credential_fields"
+              :key="field.key"
+              class="field"
+            >
+              <label :for="`agent-field-${field.key}`">
+                {{ field.label }}
+                <span v-if="field.required" class="required-mark">*</span>
+              </label>
+
+              <!-- secret 类型:password 输入 + 眼睛切换显隐 -->
+              <div v-if="field.type === 'secret'" class="input-wrapper">
                 <input
-                  id="trae-pat"
-                  v-model="draft.pat"
-                  :type="draft.showPat ? 'text' : 'password'"
+                  :id="`agent-field-${field.key}`"
+                  v-model="draft.values[field.key]"
+                  :type="draft.show[field.key] ? 'text' : 'password'"
                   autocomplete="off"
-                  :placeholder="hasPat ? '输入新 PAT 以覆盖' : '粘贴你的 TRAE CLI PAT'"
-                  :class="{ invalid: patError }"
+                  :placeholder="fieldPlaceholder(field)"
+                  :class="{ invalid: fieldError(field) }"
                   :disabled="saving"
                 />
                 <button
                   type="button"
                   class="toggle-pwd"
-                  :aria-label="draft.showPat ? '隐藏' : '显示'"
-                  @click="draft.showPat = !draft.showPat"
+                  :aria-label="draft.show[field.key] ? '隐藏' : '显示'"
+                  @click="draft.show[field.key] = !draft.show[field.key]"
                 >
-                  <svg v-if="!draft.showPat" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <svg v-if="!draft.show[field.key]" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
                     <circle cx="12" cy="12" r="3" />
                   </svg>
@@ -125,22 +199,54 @@ function handleCancel(): void {
                   </svg>
                 </button>
               </div>
-              <span v-if="patError" class="field-error">{{ patError }}</span>
+
+              <!-- text 类型:普通明文输入 -->
+              <input
+                v-else
+                :id="`agent-field-${field.key}`"
+                v-model="draft.values[field.key]"
+                type="text"
+                autocomplete="off"
+                :placeholder="fieldPlaceholder(field)"
+                :class="{ invalid: fieldError(field) }"
+                :disabled="saving"
+              />
+
+              <span v-if="field.help_text" class="field-help">{{ field.help_text }}</span>
+              <a
+                v-if="field.help_url"
+                :href="field.help_url"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="field-help-link"
+              >如何获取? →</a>
+              <span v-if="fieldError(field)" class="field-error">{{ fieldError(field) }}</span>
             </div>
+
+            <!-- 启用开关 -->
+            <label class="active-toggle">
+              <input
+                v-model="draft.is_active"
+                type="checkbox"
+                :disabled="saving"
+              />
+              <span>启用此执行器(任务提交页可选)</span>
+            </label>
           </div>
 
           <footer class="dialog-footer">
             <span v-if="error" class="validation-error">{{ error }}</span>
             <span v-else></span>
             <div class="footer-actions">
+              <!-- 已配置时显示「清除配置」按钮 -->
               <button
-                v-if="hasPat"
+                v-if="hasCredentials"
                 class="btn btn-danger"
                 :disabled="saving"
                 @click="handleClear"
               >
                 <span v-if="saving" class="btn-spinner danger" />
-                清除
+                清除配置
               </button>
               <button
                 class="btn btn-secondary"
@@ -153,7 +259,7 @@ function handleCancel(): void {
                 @click="handleSubmit"
               >
                 <span v-if="saving" class="btn-spinner" />
-                {{ saving ? '处理中...' : (hasPat ? '更新' : '保存') }}
+                {{ saving ? '处理中...' : (hasCredentials ? '更新' : '保存') }}
               </button>
             </div>
           </footer>
@@ -241,6 +347,16 @@ function handleCancel(): void {
   line-height: var(--lh-relaxed);
 }
 
+.tip-link {
+  color: var(--color-primary);
+  text-decoration: none;
+  margin-left: var(--space-1);
+}
+
+.tip-link:hover {
+  text-decoration: underline;
+}
+
 /* ---- 状态行 ---- */
 .status-row {
   display: flex;
@@ -279,8 +395,8 @@ function handleCancel(): void {
   margin-bottom: var(--space-4);
 }
 
-.field:last-child {
-  margin-bottom: 0;
+.field:last-of-type {
+  margin-bottom: var(--space-4);
 }
 
 .field label {
@@ -291,6 +407,12 @@ function handleCancel(): void {
   color: var(--color-text);
 }
 
+.required-mark {
+  color: var(--color-danger);
+  margin-left: 2px;
+}
+
+/* secret 字段用 monospace 便于核对 token */
 .field input {
   width: 100%;
   height: 42px;
@@ -353,11 +475,47 @@ function handleCancel(): void {
   color: var(--color-text);
 }
 
+.field-help {
+  display: block;
+  margin-top: var(--space-1);
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+}
+
+.field-help-link {
+  display: inline-block;
+  margin-top: var(--space-1);
+  font-size: var(--fs-xs);
+  color: var(--color-primary);
+  text-decoration: none;
+}
+
+.field-help-link:hover {
+  text-decoration: underline;
+}
+
 .field-error {
   display: block;
   margin-top: var(--space-1);
   font-size: var(--fs-xs);
   color: var(--color-danger);
+}
+
+/* ---- 启用开关 ---- */
+.active-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--fs-sm);
+  color: var(--color-text);
+  cursor: pointer;
+  padding: var(--space-2) 0;
+}
+
+.active-toggle input {
+  cursor: pointer;
+  width: auto;
+  height: auto;
 }
 
 /* ---- footer ---- */

@@ -127,7 +127,7 @@ class SandboxSession:
         用于启动 ACP bridge 等长驻服务。命令在沙箱内 detached 运行,
         本方法立即返回,不等待命令结束。
 
-        envs: 注入命令进程的环境变量(如 TRAE_CLI_PAT)
+        envs: 注入命令进程的环境变量(如 QODER_PERSONAL_ACCESS_TOKEN)
         work_dir: 工作目录(沙箱内绝对路径)
         """
         if self._closed:

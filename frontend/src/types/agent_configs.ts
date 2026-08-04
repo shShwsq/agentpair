@@ -1,0 +1,94 @@
+/**
+ * 智能体 CLI 配置相关类型定义
+ *
+ * 对应后端 /agents 系列 API。后端采用动态多 agent 架构:
+ * - /agents/types 返回所有已注册 agent 类型及其凭据字段定义(动态表单)
+ * - /agents/configs 管理当前用户已配置的 agent(每个 agent_type 一条记录)
+ *
+ * 当前注册 qoder_cli,未来可扩展 aider / goose 等。
+ */
+
+/**
+ * 凭据字段定义(后端动态返回,前端据此渲染表单)
+ *
+ * - secret 类型:password 输入框 + 眼睛切换显隐,加密存储且不回传明文
+ * - text 类型:普通输入框,明文存储
+ */
+export interface CredentialField {
+  /** 字段 key,如 'pat' */
+  key: string
+  /** 展示标签,如 'Personal Access Token' */
+  label: string
+  /** 输入类型:secret=密码输入+加密存储;text=明文 */
+  type: 'secret' | 'text'
+  /** 是否必填 */
+  required: boolean
+  /** 占位提示 */
+  placeholder: string
+  /** 帮助链接(可选) */
+  help_url: string | null
+  /** 帮助文本(可选) */
+  help_text: string | null
+}
+
+/** agent 类型元数据(GET /agents/types) */
+export interface AgentTypeMeta {
+  /** agent 类型标识,如 'qoder_cli' */
+  agent_type: string
+  /** 展示名称,如 'Qoder CLI' */
+  display_name: string
+  /** 描述说明 */
+  description: string
+  /** 凭据字段定义(动态表单) */
+  credential_fields: CredentialField[]
+  /** 帮助链接(可选) */
+  help_url: string | null
+}
+
+/** agent 配置列表项(GET /agents/configs) */
+export interface AgentConfigOut {
+  /** agent 类型标识 */
+  agent_type: string
+  /** 展示名称 */
+  display_name: string
+  /** 是否启用 */
+  is_active: boolean
+  /** 是否已填写凭据 */
+  has_credentials: boolean
+}
+
+/** agent 配置详情(GET /agents/configs/{agent_type}、PUT 响应) */
+export interface AgentConfigDetailOut extends AgentConfigOut {
+  /**
+   * 各凭据字段的填写状态
+   *
+   * key 为字段名,value 为是否已设置。如 { "pat": true }
+   */
+  credential_status: Record<string, boolean>
+}
+
+/** 单个凭据值(保存时提交) */
+export interface CredentialValue {
+  /** 字段 key */
+  key: string
+  /**
+   * 字段值
+   *
+   * secret 字段:传空串=保留已存值,传非空=更新;
+   * text 字段:直接存。
+   */
+  value: string
+}
+
+/** 保存 agent 配置请求(PUT /agents/configs/{agent_type} body) */
+export interface SaveAgentConfigRequest {
+  /** 凭据列表 */
+  credentials: CredentialValue[]
+  /** 是否启用 */
+  is_active: boolean
+}
+
+/** agent 配置列表响应(GET /agents/configs、DELETE 后响应) */
+export interface AgentConfigListResponse {
+  configs: AgentConfigOut[]
+}

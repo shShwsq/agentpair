@@ -1,0 +1,311 @@
+"""智能体配置路由
+
+用户可配置多种外部智能体 CLI(Qoder CLI 等),任务创建时选择一种作为执行器。
+
+端点:
+- GET    /agents/types                 已注册的 agent 类型清单(前端渲染配置表单用)
+- GET    /agents/configs               当前用户已配置的 agent 列表(鉴权,不含凭据原文)
+- GET    /agents/configs/{agent_type}  单个 agent 配置详情(含各字段填写状态)
+- PUT    /agents/configs/{agent_type}  保存/更新某 agent 配置(凭证加密存储)
+- DELETE /agents/configs/{agent_type}  删除某 agent 配置
+
+安全约定(与 model_configs.py 一致):
+- 响应绝不回传凭据原文,只返回 has_credentials / credential_status 布尔
+- 请求中 secret 字段传空串表示保留已存值,非空表示更新
+"""
+import json
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.agents.registry import (
+    AGENT_REGISTRY,
+    get_credential_fields,
+    is_registered,
+)
+from app.database import get_db
+from app.deps import get_current_user
+from app.models.user import User
+from app.models.user_agent_config import UserAgentConfig
+from app.schemas.agent_configs import (
+    AgentConfigDetailOut,
+    AgentConfigListResponse,
+    AgentConfigOut,
+    AgentTypeMeta,
+    CredentialField,
+    SaveAgentConfigRequest,
+)
+from app.security import decrypt_secret, encrypt_secret
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/agents", tags=["agents"])
+
+
+# ============================================================
+# Agent 类型清单
+# ============================================================
+
+
+@router.get("/types", response_model=list[AgentTypeMeta])
+def get_agent_types() -> list[AgentTypeMeta]:
+    """返回所有已注册的 agent 类型元数据(前端据此渲染配置表单)
+
+    无需登录即可访问(类型清单不含敏感信息),便于任务创建页展示可选执行器。
+    """
+    result: list[AgentTypeMeta] = []
+    for agent_type, meta in AGENT_REGISTRY.items():
+        # 提取 help_url(取第一个 secret 字段的 help_url,或 None)
+        help_url = None
+        for f in meta.get("credential_fields", []):
+            if f.get("help_url"):
+                help_url = f["help_url"]
+                break
+
+        result.append(AgentTypeMeta(
+            agent_type=agent_type,
+            display_name=meta.get("display_name", agent_type),
+            description=meta.get("description", ""),
+            credential_fields=[
+                CredentialField(**f) for f in meta.get("credential_fields", [])
+            ],
+            help_url=help_url,
+        ))
+    return result
+
+
+# ============================================================
+# 用户配置 CRUD
+# ============================================================
+
+
+@router.get("/configs", response_model=AgentConfigListResponse)
+def list_my_configs(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> AgentConfigListResponse:
+    """获取当前用户已配置的 agent 列表(不含凭据原文)"""
+    rows = (
+        db.query(UserAgentConfig)
+        .filter(UserAgentConfig.user_id == current_user.id)
+        .all()
+    )
+    configs = [_to_out(r) for r in rows]
+    return AgentConfigListResponse(configs=configs)
+
+
+@router.get("/configs/{agent_type}", response_model=AgentConfigDetailOut)
+def get_my_config(
+    agent_type: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> AgentConfigDetailOut:
+    """获取单个 agent 配置详情(含各凭证字段填写状态,不含原文)"""
+    _require_registered(agent_type)
+
+    row = _find_config(db, current_user.id, agent_type)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"未配置 agent: {agent_type}")
+
+    return _to_detail_out(row)
+
+
+@router.put("/configs/{agent_type}", response_model=AgentConfigDetailOut)
+def save_config(
+    agent_type: str,
+    req: SaveAgentConfigRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> AgentConfigDetailOut:
+    """保存/更新某 agent 配置
+
+    凭证处理:
+    - secret 字段:空串表示保留已存值,非空表示更新
+    - text 字段:直接用新值(可为空)
+    - 首次保存时,required 的 secret 字段必须非空
+
+    凭证加密后整体存入 credentials_encrypted(JSON 密文)。
+    """
+    _require_registered(agent_type)
+
+    row = _find_config(db, current_user.id, agent_type)
+    if row is None:
+        row = UserAgentConfig(
+            user_id=current_user.id,
+            agent_type=agent_type,
+            credentials_encrypted="",
+            is_active=True,
+        )
+        db.add(row)
+
+    # 合并凭证
+    old_creds = _decrypt_credentials(row.credentials_encrypted)
+    new_creds = _merge_credentials(agent_type, old_creds, req.credentials)
+
+    # 加密存储
+    row.credentials_encrypted = _encrypt_credentials(new_creds)
+    row.is_active = req.is_active
+
+    db.commit()
+    db.refresh(row)
+    logger.info(
+        "用户 %s 更新了 agent 配置 %s(active=%s)",
+        current_user.id, agent_type, row.is_active,
+    )
+    return _to_detail_out(row)
+
+
+@router.delete("/configs/{agent_type}", response_model=AgentConfigListResponse)
+def delete_config(
+    agent_type: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> AgentConfigListResponse:
+    """删除某 agent 配置(整行删除,含凭据)"""
+    _require_registered(agent_type)
+
+    row = _find_config(db, current_user.id, agent_type)
+    if row is not None:
+        db.delete(row)
+        db.commit()
+        logger.info("用户 %s 删除了 agent 配置 %s", current_user.id, agent_type)
+
+    # 返回剩余列表
+    rows = (
+        db.query(UserAgentConfig)
+        .filter(UserAgentConfig.user_id == current_user.id)
+        .all()
+    )
+    return AgentConfigListResponse(configs=[_to_out(r) for r in rows])
+
+
+# ============================================================
+# 辅助函数
+# ============================================================
+
+
+def _require_registered(agent_type: str) -> None:
+    """校验 agent 类型已注册,否则 404"""
+    if not is_registered(agent_type):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"未知的 agent 类型: {agent_type}",
+        )
+
+
+def _find_config(db: Session, user_id, agent_type: str) -> UserAgentConfig | None:
+    """按 user_id + agent_type 查配置"""
+    return (
+        db.query(UserAgentConfig)
+        .filter(
+            UserAgentConfig.user_id == user_id,
+            UserAgentConfig.agent_type == agent_type,
+        )
+        .first()
+    )
+
+
+def _decrypt_credentials(encrypted: str) -> dict:
+    """解密 credentials_encrypted,返回 dict
+
+    空串/损坏返回空 dict(不抛错,让上层按"未配置"处理)
+    """
+    if not encrypted:
+        return {}
+    try:
+        plaintext = decrypt_secret(encrypted)
+        data = json.loads(plaintext)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.warning(f"agent 凭证解密失败(按空处理): {e}")
+        return {}
+
+
+def _encrypt_credentials(creds: dict) -> str:
+    """加密 dict,返回 base64 密文"""
+    if not creds:
+        return ""
+    plaintext = json.dumps(creds, ensure_ascii=False)
+    return encrypt_secret(plaintext)
+
+
+def _merge_credentials(
+    agent_type: str,
+    old_creds: dict,
+    new_values: list,
+) -> dict:
+    """合并凭证(策略同 model_configs._merge_llm_configs)
+
+    - secret 字段:空串 → 保留旧值;非空 → 更新;首次 required 空串 → 报错
+    - text 字段:直接用新值(可为空)
+    """
+    field_defs = get_credential_fields(agent_type)
+    field_map = {f["key"]: f for f in field_defs}
+
+    # 构建 new_values 的 lookup
+    new_map = {v.key: v.value for v in new_values}
+
+    result: dict = {}
+    for fdef in field_defs:
+        key = fdef["key"]
+        ftype = fdef.get("type", "secret")
+        new_val = new_map.get(key, "")
+
+        if ftype == "secret":
+            if new_val:
+                # 非空:更新为新值
+                result[key] = new_val
+            else:
+                # 空串:保留旧值
+                old_val = old_creds.get(key, "")
+                if old_val:
+                    result[key] = old_val
+                elif fdef.get("required"):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"字段 '{fdef.get('label', key)}' 首次保存必须填写",
+                    )
+                # 非必填且空:不存
+        else:
+            # text 类型:直接用新值
+            result[key] = new_val
+
+    return result
+
+
+def _to_out(row: UserAgentConfig) -> AgentConfigOut:
+    """row → AgentConfigOut(不含凭据原文)"""
+    creds = _decrypt_credentials(row.credentials_encrypted)
+    has_creds = any(bool(v) for v in creds.values())
+    meta = AGENT_REGISTRY.get(row.agent_type, {})
+    return AgentConfigOut(
+        agent_type=row.agent_type,
+        display_name=meta.get("display_name", row.agent_type),
+        is_active=row.is_active,
+        has_credentials=has_creds,
+    )
+
+
+def _to_detail_out(row: UserAgentConfig) -> AgentConfigDetailOut:
+    """row → AgentConfigDetailOut(含各字段填写状态,不含原文)"""
+    creds = _decrypt_credentials(row.credentials_encrypted)
+    meta = AGENT_REGISTRY.get(row.agent_type, {})
+    field_defs = get_credential_fields(row.agent_type)
+
+    # 各字段的填写状态
+    credential_status: dict[str, bool] = {}
+    has_any = False
+    for fdef in field_defs:
+        key = fdef["key"]
+        filled = bool(creds.get(key))
+        credential_status[key] = filled
+        if filled:
+            has_any = True
+
+    return AgentConfigDetailOut(
+        agent_type=row.agent_type,
+        display_name=meta.get("display_name", row.agent_type),
+        is_active=row.is_active,
+        has_credentials=has_any,
+        credential_status=credential_status,
+    )

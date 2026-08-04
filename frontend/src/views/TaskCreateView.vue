@@ -22,11 +22,13 @@ import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import { createTask, getScenarios } from '@/api/task'
 import { getMyModels } from '@/api/model_configs'
+import { getAgentConfigs } from '@/api/agent_configs'
 import { getGitHubStatus, listGitHubRepos } from '@/api/github'
 import { getSkills, type SkillSummary } from '@/api/skill'
 import { extractErrorMessage } from '@/utils/error'
 import type { Scenario } from '@/types/task'
 import type { LLMConfigItemOut } from '@/types/model_configs'
+import type { AgentConfigOut } from '@/types/agent_configs'
 import type { GitHubRepoItem, GitHubStatus } from '@/types/github'
 
 const router = useRouter()
@@ -59,14 +61,26 @@ const llmConfigs = ref<LLMConfigItemOut[]>([])
 const selectedLlmConfigId = ref('')
 const loadingModels = ref(true)
 
-// ---- 执行器选择(builtin / trae_cli) ----
+// ---- 执行器选择(内置 + 用户已配置且启用的 agent) ----
 
 /**
  * 执行器:决定 react 角色由哪个 agent 执行
- * - builtin:系统内置 react_agent(使用上方选择的 LLM 配置)
- * - trae_cli:TRAE CLI(沙箱内运行,模型由 trae_cli.yaml 管理,忽略 LLM 配置)
+ * - 'builtin':系统内置 react_agent(使用上方选择的 LLM 配置)
+ * - agent_type(如 'qoder_cli'):对应 agent CLI,模型由其配置自管,llm_config_id 被忽略
+ *
+ * 候选列表由后端 GET /agents/configs 动态返回(is_active=true 的)。
  */
-const selectedExecutor = ref<'builtin' | 'trae_cli'>('builtin')
+const agentExecutors = ref<AgentConfigOut[]>([])
+/** 当前选中执行器:'builtin' 或某个 agent_type */
+const selectedExecutor = ref<string>('builtin')
+
+/** 是否选中了非内置执行器(此时禁用模型选择) */
+const useAgentExecutor = computed(() => selectedExecutor.value !== 'builtin')
+
+/** 当前选中的 agent 执行器元信息(用于文案展示) */
+const selectedAgentExecutor = computed<AgentConfigOut | null>(() =>
+  agentExecutors.value.find((a) => a.agent_type === selectedExecutor.value) ?? null,
+)
 
 // ---- Skill 多选(高级选项) ----
 
@@ -318,11 +332,12 @@ function modelLabel(cfg: LLMConfigItemOut): string {
 
 onMounted(async () => {
   try {
-    const [scenarioList, models, ghStatus, skills] = await Promise.all([
+    const [scenarioList, models, ghStatus, skills, agentCfgs] = await Promise.all([
       getScenarios(),
       getMyModels().catch(() => null),
       getGitHubStatus().catch(() => null), // 静默失败,未绑定不影响提交
       getSkills().catch(() => null as SkillSummary[] | null), // 静默失败,无 skill 不阻塞提交
+      getAgentConfigs().catch(() => null), // 静默失败,无 agent 配置不影响提交
     ])
     scenarios.value = scenarioList
     if (scenarioList.length > 0) {
@@ -340,6 +355,10 @@ onMounted(async () => {
       allSkills.value = skills
       selectedSkillNames.value = new Set(skills.map((s) => s.name))
       applyRecommendedSkills()
+    }
+    // 仅展示已启用且已配置凭据的 agent 作为可选执行器
+    if (agentCfgs) {
+      agentExecutors.value = agentCfgs.configs.filter((c) => c.is_active && c.has_credentials)
     }
   } catch {
     // 场景拉取失败兜底(不应发生,保留旧默认以便能提交)
@@ -393,7 +412,7 @@ onMounted(async () => {
           </div>
 
           <div class="topbar-right">
-            <!-- 执行器选择:内置 react_agent / TRAE CLI -->
+            <!-- 执行器选择:内置 + 用户已配置且启用的 agent CLI -->
             <div
               class="executor-segmented"
               role="tablist"
@@ -408,23 +427,25 @@ onMounted(async () => {
                 @click="selectedExecutor = 'builtin'"
               >内置</button>
               <button
+                v-for="agent in agentExecutors"
+                :key="agent.agent_type"
                 type="button"
-                :class="['exec-btn', { active: selectedExecutor === 'trae_cli' }]"
+                :class="['exec-btn', { active: selectedExecutor === agent.agent_type }]"
                 role="tab"
-                :aria-selected="selectedExecutor === 'trae_cli'"
-                title="TRAE CLI(沙箱内运行,模型由 trae_cli.yaml 管理)"
-                @click="selectedExecutor = 'trae_cli'"
-              >TRAE CLI</button>
+                :aria-selected="selectedExecutor === agent.agent_type"
+                :title="`${agent.display_name}(模型由该 agent 自管)`"
+                @click="selectedExecutor = agent.agent_type"
+              >{{ agent.display_name }}</button>
             </div>
 
-            <!-- 模型选择(TRAE CLI 模式下禁用:模型由沙箱内 trae_cli.yaml 管理) -->
-            <div class="model-select" :class="{ disabled: selectedExecutor === 'trae_cli' }">
+            <!-- 模型选择(agent 执行器模式下禁用:模型由 agent 自管) -->
+            <div class="model-select" :class="{ disabled: useAgentExecutor }">
               <select
                 v-model="selectedLlmConfigId"
-                :disabled="loadingModels || selectedExecutor === 'trae_cli'"
-                :aria-label="selectedExecutor === 'trae_cli' ? 'TRAE CLI 模式下模型由 trae_cli.yaml 管理' : '使用模型'"
+                :disabled="loadingModels || useAgentExecutor"
+                :aria-label="useAgentExecutor && selectedAgentExecutor ? `由 ${selectedAgentExecutor.display_name} 管理` : '使用模型'"
               >
-                <option value="">默认模型</option>
+                <option value="">{{ useAgentExecutor && selectedAgentExecutor ? `由 ${selectedAgentExecutor.display_name} 管理` : '默认模型' }}</option>
                 <option
                   v-for="cfg in llmConfigs"
                   :key="cfg.id"
@@ -434,7 +455,7 @@ onMounted(async () => {
                 </option>
               </select>
               <RouterLink
-                v-if="llmConfigs.length === 0 && !loadingModels"
+                v-if="llmConfigs.length === 0 && !loadingModels && !useAgentExecutor"
                 to="/models"
                 class="model-empty-link"
               >配置 →</RouterLink>
@@ -772,7 +793,7 @@ onMounted(async () => {
   gap: var(--space-2);
 }
 
-/* TRAE CLI 模式下模型选择禁用样式 */
+/* agent 执行器模式下模型选择禁用样式 */
 .model-select.disabled {
   opacity: 0.45;
   pointer-events: none;
@@ -797,7 +818,7 @@ onMounted(async () => {
   box-shadow: 0 0 0 3px var(--color-primary-light);
 }
 
-/* ---- 执行器选择(builtin / trae_cli 分段控件) ---- */
+/* ---- 执行器选择(内置 + 动态 agent 分段控件) ---- */
 .executor-segmented {
   display: inline-flex;
   align-items: center;

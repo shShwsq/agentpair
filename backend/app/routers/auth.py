@@ -12,9 +12,6 @@
 - POST   /auth/password/change       修改密码(需登录)
 - POST   /auth/oauth/github          GitHub OAuth 登录
 - DELETE /auth/account               删除账号(硬删除,连带 task+配置+token)
-- GET    /auth/me/trae-cli-pat       查询 TRAE CLI PAT 是否已设置
-- PUT    /auth/me/trae-cli-pat       设置/更新 TRAE CLI PAT(加密存储)
-- DELETE /auth/me/trae-cli-pat       清除 TRAE CLI PAT
 """
 import logging
 import uuid
@@ -49,8 +46,6 @@ from app.schemas.user import (
     ResendVerificationRequest,
     ResetPasswordRequest,
     TokenResponse,
-    TraeCLIPatRequest,
-    TraeCLIPatStatus,
     UserResponse,
     VerifyEmailRequest,
 )
@@ -59,7 +54,6 @@ from app.security import (
     TokenInvalidError,
     create_token_pair,
     create_access_token,
-    encrypt_secret,
     extract_user_id_from_token,
     hash_password,
     verify_password,
@@ -413,49 +407,3 @@ def github_oauth(
         refresh_token=refresh,
         user=UserResponse.from_user(user),
     )
-
-
-# ============================================================
-# TRAE CLI PAT 管理(账户设置页)
-# ============================================================
-
-
-@router.get("/me/trae-cli-pat", response_model=TraeCLIPatStatus)
-def get_trae_cli_pat_status(
-    user: User = Depends(get_current_user),
-) -> TraeCLIPatStatus:
-    """查询 TRAE CLI PAT 是否已设置(不暴露实际值)"""
-    return TraeCLIPatStatus(has_pat=bool(user.trae_cli_pat))
-
-
-@router.put("/me/trae-cli-pat", response_model=TraeCLIPatStatus)
-def set_trae_cli_pat(
-    req: TraeCLIPatRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> TraeCLIPatStatus:
-    """设置/更新 TRAE CLI PAT
-
-    PAT 加密后存入 user.trae_cli_pat(Fernet base64 密文)。
-    传空字符串等价于清除 PAT。
-    """
-    pat = req.pat.strip()
-    if pat:
-        user.trae_cli_pat = encrypt_secret(pat)
-    else:
-        user.trae_cli_pat = ""
-    db.commit()
-    logger.info("用户 %s 更新了 TRAE CLI PAT(已%s)", user.id, "设置" if pat else "清除")
-    return TraeCLIPatStatus(has_pat=bool(pat))
-
-
-@router.delete("/me/trae-cli-pat", response_model=TraeCLIPatStatus)
-def clear_trae_cli_pat(
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> TraeCLIPatStatus:
-    """清除 TRAE CLI PAT"""
-    user.trae_cli_pat = ""
-    db.commit()
-    logger.info("用户 %s 清除了 TRAE CLI PAT", user.id)
-    return TraeCLIPatStatus(has_pat=False)

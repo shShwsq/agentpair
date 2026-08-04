@@ -10,6 +10,13 @@ from typing import Any
 
 from pydantic import BaseModel, Field, HttpUrl
 
+from app.agents.registry import get_registered_types
+
+# 合法执行器:builtin + registry 中已注册的 agent_type
+# 新增 agent 类型只需在 registry 注册,此处自动生效
+_VALID_EXECUTORS = ("builtin", *get_registered_types())
+_EXECUTOR_PATTERN = "^(" + "|".join(_VALID_EXECUTORS) + ")$"
+
 
 class TaskCreateRequest(BaseModel):
     """提交任务的请求
@@ -31,9 +38,9 @@ class TaskCreateRequest(BaseModel):
     # 为空表示用 env 默认配置或匿名任务
     llm_config_id: str | None = None
 
-    # 执行器选择:"builtin"(默认,内置 react_agent)或 "trae_cli"(TRAE CLI)
-    # TRAE CLI 模式下,模型配置由沙箱内 trae_cli.yaml 管理,llm_config_id 被忽略
-    executor: str = Field(default="builtin", pattern="^(builtin|trae_cli)$")
+    # 执行器选择:"builtin"(默认,内置 react_agent)或 registry 中已注册的 agent_type(如 "qoder_cli")
+    # 外部 CLI 模式下,模型由该 CLI 的账号配额管理,llm_config_id 被忽略
+    executor: str = Field(default="builtin", pattern=_EXECUTOR_PATTERN)
 
     # 兼容字段:旧 API 直接传 repo_url
     repo_url: HttpUrl | None = None

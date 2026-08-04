@@ -11,8 +11,6 @@ export interface User {
   email_verified: boolean
   github_id: string | null
   has_password: boolean
-  /** 是否已设置 TRAE CLI PAT(后端 has_trae_cli_pat) */
-  has_trae_cli_pat: boolean
   created_at: string
 }
 
@@ -40,17 +38,6 @@ export interface ChangePasswordRequest {
   /** 当前密码;OAuth 用户(无密码)可不传 */
   current_password?: string
   new_password: string
-}
-
-/** TRAE CLI PAT 状态(后端 TraeCLIPatStatus,不暴露实际值) */
-export interface TraeCLIPatStatus {
-  has_pat: boolean
-}
-
-/** TRAE CLI PAT 设置请求(后端 TraeCLIPatRequest) */
-export interface TraeCLIPatRequest {
-  /** PAT 明文;空串等价于清除 */
-  pat: string
 }
 
 /** 后端错误响应(FastAPI HTTPException 格式) */

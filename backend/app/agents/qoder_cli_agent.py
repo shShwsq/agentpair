@@ -1,14 +1,15 @@
-"""trae_cli_agent:基于 TRAE CLI + ACP 协议的执行智能体
+"""qoder_cli_agent:基于 Qoder CLI + ACP 协议的执行智能体
 
-在沙箱内启动 TRAE CLI 的 ACP(Agent Client Protocol)服务,通过 HTTP 桥接
-(acp_bridge.py)与后端通信。模型配置在沙箱内的 trae_cli.yaml 中指定,
-后端不直接管理 LLM 调用 —— TRAE CLI 内部自主完成 ReAct 循环(思考→工具→观察)。
+在沙箱内启动 Qoder CLI 的 ACP(Agent Client Protocol)服务,通过 HTTP 桥接
+(acp_bridge.py)与后端通信。模型配置由 Qoder 账号配额管理,后端不直接管理
+LLM 调用 —— Qoder CLI 内部自主完成 ReAct 循环(思考→工具→观察)。
 
 工作流程:
 1. 复用 sandbox_tools 的沙箱会话(orchestrator 已预 clone 仓库)
-2. 加载用户 PAT,生成 trae_cli.yaml(认证 + 模型配置),写入沙箱
+2. 从 user_agent_configs 加载用户凭证(加密存储),经 registry 映射为环境变量
 3. 将 acp_bridge.py 写入沙箱
-4. 后台启动 acp_bridge.py(监听端口 ACP_BRIDGE_PORT)
+4. 后台启动 acp_bridge.py(监听端口 ACP_BRIDGE_PORT),凭证经 envs 注入,
+   bridge 进程继承后传给 qodercli 子进程(不在命令行明文出现)
 5. 通过 get_endpoint(ACP_BRIDGE_PORT) 获取转发地址 + headers
 6. ACP 客户端:initialize → session/new → session/prompt
 7. 流式接收 session/update 通知,翻译为 event_bus 事件(thinking_delta /
@@ -16,9 +17,10 @@
 8. 收集最终 summary,提取 plan,返回 (results, summary, plan)
 
 与内置 react_agent 的差异:
-- TRAE CLI 自主管理 ReAct 循环(工具调用/观察),后端只发一个 prompt
-- 模型配置在 trae_cli.yaml 中,不使用 task.llm_config_id
-- PAT 认证:用户在"账户设置"配置 TRAE CLI PAT,加密存储,运行时注入沙箱
+- Qoder CLI 自主管理 ReAct 循环(工具调用/观察),后端只发一个 prompt
+- 模型由 Qoder 账号配额管理,不使用 task.llm_config_id
+- 凭证认证:用户在「智能体配置」配置 Qoder PAT,加密存入 user_agent_configs,
+  运行时解密并经环境变量注入沙箱
 """
 import json
 import logging
@@ -31,10 +33,11 @@ from typing import Any
 import httpx
 from sqlalchemy.orm import Session
 
+from app.agents.registry import get_agent_meta, get_sandbox_config
 from app.config import settings
 from app.event_bus import publish
 from app.models.task import Conversation, Task
-from app.models.user import User
+from app.models.user_agent_config import UserAgentConfig
 from app.security import decrypt_secret
 from app.tools import sandbox_tools
 from app.tools.schema import set_current_task
@@ -46,15 +49,17 @@ logger = logging.getLogger(__name__)
 # 常量
 # ============================================================
 
+# agent 类型标识(与 registry 中的 key 对齐)
+AGENT_TYPE = "qoder_cli"
+
 # ACP bridge 监听端口(沙箱内)
 ACP_BRIDGE_PORT = 8088
 
 # 沙箱内文件路径
-BRIDGE_SCRIPT_PATH = "/home/user/.trae/acp_bridge.py"
-TRAE_CLI_CONFIG_PATH = "/home/user/.trae/trae_cli.yaml"
-TRAE_CLI_WORK_DIR = "/home/user"
+BRIDGE_SCRIPT_PATH = "/home/user/.acp/acp_bridge.py"
+BRIDGE_WORK_DIR = "/home/user"
 
-# bridge 启动超时(秒):等待 traecli 进程就绪 + HTTP 服务监听
+# bridge 启动超时(秒):等待 CLI 进程就绪 + HTTP 服务监听
 BRIDGE_STARTUP_TIMEOUT = 30
 BRIDGE_HEALTH_INTERVAL = 1.0
 
@@ -73,7 +78,7 @@ _BRIDGE_SOURCE = Path(__file__).parent / "acp_bridge.py"
 class ACPClient:
     """ACP HTTP 客户端:通过 HTTP/SSE 与沙箱内的 acp_bridge 通信
 
-    桥接服务将 HTTP 请求转换为 traecli 的 stdio ACP(JSON-RPC over
+    桥接服务将 HTTP 请求转换为 CLI 的 stdio ACP(JSON-RPC over
     newline-delimited JSON),响应以 SSE 流式返回。
 
     使用方式:
@@ -224,7 +229,7 @@ class ACPClient:
             logger.warning(f"[acp] cancel 失败(忽略): {e}")
 
     def health(self) -> bool:
-        """健康检查:bridge + traecli 是否存活"""
+        """健康检查:bridge + CLI 是否存活"""
         try:
             resp = self._client.get(f"{self.base_url}/health", timeout=5)
             if resp.status_code == 200:
@@ -239,43 +244,88 @@ class ACPClient:
 
 
 # ============================================================
-# 沙箱环境准备:trae_cli.yaml + bridge 脚本
+# 凭证加载 + 环境变量映射
 # ============================================================
 
 
-def _load_trae_cli_pat(db: Session, user_id) -> str:
-    """从 User 表加载解密后的 TRAE CLI PAT
+def _load_credentials(db: Session, user_id) -> dict[str, str]:
+    """从 user_agent_configs 加载解密后的凭证 dict
 
-    空串表示未配置。trae_cli executor 需要 PAT 才能认证,未配置时抛错。
+    返回如 {"pat": "xxx"}。未配置或解密失败时抛错(CLI executor 需要凭证才能认证)。
     """
     if user_id is None:
-        raise RuntimeError("TRAE CLI 执行器需要登录用户(匿名任务不支持)")
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise RuntimeError(f"用户不存在: {user_id}")
-    if not user.trae_cli_pat:
-        raise RuntimeError(
-            "未配置 TRAE CLI PAT。请在「账户设置」中配置 TRAE CLI 个人访问令牌。"
+        raise RuntimeError("Qoder CLI 执行器需要登录用户(匿名任务不支持)")
+
+    row = (
+        db.query(UserAgentConfig)
+        .filter(
+            UserAgentConfig.user_id == user_id,
+            UserAgentConfig.agent_type == AGENT_TYPE,
         )
+        .first()
+    )
+    if row is None or not row.credentials_encrypted:
+        raise RuntimeError(
+            "未配置 Qoder CLI 凭证。请在「智能体配置」中配置 Qoder Personal Access Token。"
+        )
+
     try:
-        return decrypt_secret(user.trae_cli_pat)
+        plaintext = decrypt_secret(row.credentials_encrypted)
+        data = json.loads(plaintext)
+        if not isinstance(data, dict):
+            raise ValueError("凭证格式错误(非 JSON 对象)")
+        return data
     except Exception as e:
-        raise RuntimeError(f"TRAE CLI PAT 解密失败: {e}") from e
+        raise RuntimeError(f"Qoder CLI 凭证解密失败: {e}") from e
 
 
-def _generate_trae_cli_config(pat: str) -> str:
-    """生成 trae_cli.yaml 配置内容
+def _build_credential_envs(credentials: dict[str, str]) -> dict[str, str]:
+    """将凭证 dict 映射为环境变量 dict(按 registry 的 credential_env)
 
-    包含 PAT 认证信息。具体配置项可能因 TRAE CLI 版本而异,
-    这里生成一个通用配置,同时通过环境变量 TRAE_CLI_PAT 注入(双保险)。
+    registry 中 credential_env 形如 {"pat": "QODER_PERSONAL_ACCESS_TOKEN"},
+    即凭证 key → 环境变量名。只注入有值的凭证。
     """
-    return f"""# Auto-generated by AgentPair — DO NOT EDIT
-# TRAE CLI configuration (trae_cli.yaml)
-# Generated at: {time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())}
+    sandbox_cfg = get_sandbox_config(AGENT_TYPE) or {}
+    cred_env_map: dict[str, str] = sandbox_cfg.get("credential_env", {})
+    envs: dict[str, str] = {}
+    for cred_key, env_name in cred_env_map.items():
+        val = credentials.get(cred_key)
+        if val:
+            envs[env_name] = val
+    return envs
 
-auth:
-  pat: "{pat}"
-"""
+
+# ============================================================
+# 沙箱环境准备:bridge 脚本 + CLI 可用性检查
+# ============================================================
+
+
+def _get_bin() -> str:
+    """从 settings 读取 CLI 可执行文件名(经 registry 的 config key)"""
+    sandbox_cfg = get_sandbox_config(AGENT_TYPE) or {}
+    config_key = sandbox_cfg.get("bin_config_key", "")
+    if config_key:
+        val = getattr(settings, config_key, None)
+        if val:
+            return val
+    return sandbox_cfg.get("bin_default", "qodercli")
+
+
+def _get_install_cmd() -> str:
+    """从 settings 读取 CLI 安装命令(经 registry 的 config key)"""
+    sandbox_cfg = get_sandbox_config(AGENT_TYPE) or {}
+    config_key = sandbox_cfg.get("install_cmd_config_key", "")
+    if config_key:
+        val = getattr(settings, config_key, None)
+        if val:
+            return val
+    return sandbox_cfg.get("install_cmd_default", "")
+
+
+def _get_acp_args() -> list[str]:
+    """从 registry 读取 ACP 启动参数(如 ["--acp", "--yolo"])"""
+    sandbox_cfg = get_sandbox_config(AGENT_TYPE) or {}
+    return list(sandbox_cfg.get("acp_args", ["--acp", "--yolo"]))
 
 
 def _write_bridge_script(session) -> None:
@@ -286,47 +336,44 @@ def _write_bridge_script(session) -> None:
     session.write_file(BRIDGE_SCRIPT_PATH, content)
 
 
-def _ensure_trae_cli_env(session, pat: str) -> None:
-    """准备沙箱内 TRAE CLI 运行环境
+def _ensure_cli_env(session) -> None:
+    """准备沙箱内 CLI 运行环境
 
-    1. 创建 ~/.trae 目录
-    2. 写入 trae_cli.yaml(PAT 注入)
-    3. 写入 acp_bridge.py
-    4. 检查 traecli 是否可用,不可用则尝试安装
+    1. 创建 bridge 脚本目录
+    2. 写入 acp_bridge.py
+    3. 检查 CLI 是否可用,不可用则尝试安装
+
+    注意:Qoder CLI 通过环境变量认证,无需配置文件。
     """
-    # 创建配置目录
-    session.run_command(f"mkdir -p {Path(TRAE_CLI_CONFIG_PATH).parent.as_posix()}")
-
-    # 写入配置文件
-    config_content = _generate_trae_cli_config(pat)
-    session.write_file(TRAE_CLI_CONFIG_PATH, config_content)
+    # 创建脚本目录
+    session.run_command(f"mkdir -p {Path(BRIDGE_SCRIPT_PATH).parent.as_posix()}")
 
     # 写入 bridge 脚本
     _write_bridge_script(session)
 
-    # 检查 traecli 是否可用
-    traecli_bin = settings.TRAE_CLI_BIN
-    check_cmd = f"command -v {traecli_bin} || which {traecli_bin} 2>/dev/null"
+    # 检查 CLI 是否可用
+    cli_bin = _get_bin()
+    check_cmd = f"command -v {cli_bin} || which {cli_bin} 2>/dev/null"
     result = session.run_command(check_cmd, timeout=10)
     if not result.strip():
-        # traecli 未安装,尝试安装
-        install_cmd = settings.TRAE_CLI_INSTALL_CMD
+        # CLI 未安装,尝试安装
+        install_cmd = _get_install_cmd()
         if not install_cmd:
             raise RuntimeError(
-                f"沙箱内未找到 {traecli_bin},且 TRAE_CLI_INSTALL_CMD 为空。"
-                f"请在沙箱镜像中预装 TRAE CLI,或配置 TRAE_CLI_INSTALL_CMD。"
+                f"沙箱内未找到 {cli_bin},且安装命令为空。"
+                f"请在沙箱镜像中预装 Qoder CLI,或在配置中设置安装命令。"
             )
-        logger.info(f"[trae_cli] traecli 未安装,执行: {install_cmd}")
+        logger.info(f"[qoder_cli] {cli_bin} 未安装,执行: {install_cmd}")
         install_result = session.run_command(install_cmd, timeout=120, check=False)
         # 再次检查
         result = session.run_command(check_cmd, timeout=10)
         if not result.strip():
             raise RuntimeError(
-                f"TRAE CLI 安装失败({install_cmd})。"
+                f"Qoder CLI 安装失败({install_cmd})。"
                 f"安装日志: {install_result[:500]}"
             )
 
-    logger.info(f"[trae_cli] 环境就绪: {traecli_bin} 可用,配置已写入 {TRAE_CLI_CONFIG_PATH}")
+    logger.info(f"[qoder_cli] 环境就绪: {cli_bin} 可用,bridge 脚本已写入 {BRIDGE_SCRIPT_PATH}")
 
 
 # ============================================================
@@ -334,24 +381,33 @@ def _ensure_trae_cli_env(session, pat: str) -> None:
 # ============================================================
 
 
-def _start_acp_bridge(session) -> str:
+def _start_acp_bridge(session, credential_envs: dict[str, str]) -> str:
     """后台启动 ACP bridge,返回 execution_id
 
-    bridge 启动命令:python3 acp_bridge.py --port {port} --config {config} --traecli-bin {bin}
-    通过 run_command_background 非阻塞启动,PAT 通过环境变量注入(双保险)。
+    bridge 启动命令:
+        python3 acp_bridge.py --port {port} --bin {bin} --args '{json}'
+    凭证经 envs 注入到 bridge 进程,bridge 子进程(qodercli)继承这些环境变量,
+    实现 PAT 不在命令行明文出现。
+
+    通过 run_command_background 非阻塞启动。
     """
+    cli_bin = _get_bin()
+    acp_args = _get_acp_args()
+    args_json = json.dumps(acp_args, ensure_ascii=False)
+
+    # shell 中 JSON 数组含双引号,需单引号包裹
     cmd = (
         f"python3 {BRIDGE_SCRIPT_PATH}"
         f" --port {ACP_BRIDGE_PORT}"
-        f" --config {TRAE_CLI_CONFIG_PATH}"
-        f" --traecli-bin {settings.TRAE_CLI_BIN}"
+        f" --bin {cli_bin}"
+        f" --args '{args_json}'"
     )
     execution_id = session.run_command_background(
         cmd,
-        envs={"TRAE_CLI_PAT": ""},  # PAT 已在 yaml 中,env 留空避免覆盖
-        work_dir=TRAE_CLI_WORK_DIR,
+        envs=credential_envs,  # 凭证注入 bridge 进程,继承给 qodercli
+        work_dir=BRIDGE_WORK_DIR,
     )
-    logger.info(f"[trae_cli] ACP bridge 后台启动: execution_id={execution_id}")
+    logger.info(f"[qoder_cli] ACP bridge 后台启动: execution_id={execution_id}")
     return execution_id
 
 
@@ -369,9 +425,9 @@ def _wait_for_bridge_ready(
         while time.time() < deadline:
             # 先检查后台进程是否还活着(避免 bridge 崩溃后空等)
             logs, _ = session.get_background_logs(execution_id)
-            if "traecli 启动失败" in (logs or ""):
+            if "ACP CLI 启动失败" in (logs or ""):
                 raise RuntimeError(
-                    f"ACP bridge 启动失败:traecli 进程退出。日志:\n{logs[-1000:]}"
+                    f"ACP bridge 启动失败:CLI 进程退出。日志:\n{logs[-1000:]}"
                 )
 
             # 健康检查
@@ -380,7 +436,7 @@ def _wait_for_bridge_ready(
                 if resp.status_code == 200:
                     data = resp.json()
                     if data.get("status") == "ok":
-                        logger.info("[trae_cli] ACP bridge 就绪")
+                        logger.info("[qoder_cli] ACP bridge 就绪")
                         return
             except Exception:
                 pass
@@ -401,9 +457,9 @@ def _stop_acp_bridge(session, execution_id: str) -> None:
     """停止 ACP bridge(中断后台命令)"""
     try:
         session.interrupt_command(execution_id)
-        logger.info(f"[trae_cli] ACP bridge 已停止: {execution_id}")
+        logger.info(f"[qoder_cli] ACP bridge 已停止: {execution_id}")
     except Exception as e:
-        logger.warning(f"[trae_cli] 停止 bridge 失败(忽略): {e}")
+        logger.warning(f"[qoder_cli] 停止 bridge 失败(忽略): {e}")
 
 
 # ============================================================
@@ -611,7 +667,7 @@ _PLAN_LINE_RE = re.compile(
 def _extract_plan(content: str) -> list[dict] | None:
     """从 content 提取 <plan>...</plan> 计划清单
 
-    与 react_agent._extract_plan 格式一致,支持 TRAE CLI 在文本中输出 plan。
+    与 react_agent._extract_plan 格式一致,支持 CLI 在文本中输出 plan。
     无 plan 块时返回 None。
     """
     m = _PLAN_BLOCK_RE.search(content)
@@ -635,7 +691,7 @@ def _extract_plan(content: str) -> list[dict] | None:
 
 
 def _format_plan_reminder(plan_steps: list[dict]) -> str:
-    """格式化 plan 状态,注入 prompt 让 TRAE CLI 续接进度"""
+    """格式化 plan 状态,注入 prompt 让 CLI 续接进度"""
     if not plan_steps:
         return ""
     lines = ["[系统提醒] 当前计划清单状态(已完成的请标记 [done]):"]
@@ -646,11 +702,11 @@ def _format_plan_reminder(plan_steps: list[dict]) -> str:
 
 
 # ============================================================
-# 主入口:run_trae_cli_agent
+# 主入口:run_qoder_cli_agent
 # ============================================================
 
 
-def run_trae_cli_agent(
+def run_qoder_cli_agent(
     task: Task,
     db: Session,
     round_idx: int = 1,
@@ -658,27 +714,34 @@ def run_trae_cli_agent(
     repo_context: str | None = None,
     previous_plan: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
-    """跑一轮 TRAE CLI 执行器
+    """跑一轮 Qoder CLI 执行器
 
-    与 run_react_agent 签名对齐(不含 client 参数,TRAE CLI 自带模型配置)。
+    与 run_react_agent 签名对齐(不含 client 参数,Qoder CLI 自带模型配置)。
 
     返回:(results, summary, final_plan)
         results: 始终为空 list(结构化结果由 user_agent 在 done 时提取)
-        summary: 本轮自然语言总结(TRAE CLI 的最终文本输出)
+        summary: 本轮自然语言总结(CLI 的最终文本输出)
         final_plan: 本轮结束时的 plan 状态(从 content 提取 <plan>)
     """
     task_id_str = str(task.id)
     set_current_task(task_id_str, task.scenario)
 
+    # ---- 校验 agent 类型已注册 ----
+    if get_agent_meta(AGENT_TYPE) is None:
+        raise RuntimeError(f"agent 类型未注册: {AGENT_TYPE}")
+
     # ---- 检查沙箱模式 ----
     if settings.SANDBOX_MODE == "mock":
         raise RuntimeError(
-            "TRAE CLI 执行器需要沙箱模式(SANDBOX_MODE=sandbox),"
-            "mock 模式不支持(沙箱内无 traecli)。"
+            "Qoder CLI 执行器需要沙箱模式(SANDBOX_MODE=sandbox),"
+            "mock 模式不支持(沙箱内无 qodercli)。"
         )
 
-    # ---- 加载 PAT ----
-    pat = _load_trae_cli_pat(db, task.user_id)
+    # ---- 加载凭证 + 映射为环境变量 ----
+    credentials = _load_credentials(db, task.user_id)
+    credential_envs = _build_credential_envs(credentials)
+    if not credential_envs:
+        raise RuntimeError("Qoder CLI 凭证映射为空,无法注入环境变量(请检查 registry 配置)")
 
     # ---- 获取/创建沙箱会话 ----
     # orchestrator 已通过 _prepare_repo_context 创建会话并 clone 仓库,
@@ -687,11 +750,11 @@ def run_trae_cli_agent(
     session = ctx["session"]
     repo_path = ctx.get("repo_path", "")
 
-    # ---- 准备 TRAE CLI 环境 ----
-    _ensure_trae_cli_env(session, pat)
+    # ---- 准备 CLI 环境 ----
+    _ensure_cli_env(session)
 
     # ---- 启动 ACP bridge ----
-    bridge_exec_id = _start_acp_bridge(session)
+    bridge_exec_id = _start_acp_bridge(session, credential_envs)
 
     # 获取端口转发地址
     endpoint_url, endpoint_headers = session.get_endpoint(ACP_BRIDGE_PORT)
@@ -706,8 +769,8 @@ def run_trae_cli_agent(
             # 握手
             client.initialize()
 
-            # 创建会话(cwd 设为仓库路径,让 TRAE CLI 在仓库目录下工作)
-            cwd = repo_path or TRAE_CLI_WORK_DIR
+            # 创建会话(cwd 设为仓库路径,让 CLI 在仓库目录下工作)
+            cwd = repo_path or BRIDGE_WORK_DIR
             acp_session_id = client.new_session(cwd=cwd)
 
             # ---- 构造 prompt 消息 ----
@@ -742,13 +805,13 @@ def run_trae_cli_agent(
                     on_event=collector,
                 )
             except Exception as e:
-                logger.exception(f"[task={task.id}] TRAE CLI prompt 失败")
+                logger.exception(f"[task={task.id}] Qoder CLI prompt 失败")
                 publish(task.id, "thinking_delta", {
                     "conv_id": conv_id,
                     "round_idx": round_idx,
                     "role": "react_agent",
                     "phase": "error",
-                    "delta": f"[TRAE CLI 调用失败: {e}]",
+                    "delta": f"[Qoder CLI 调用失败: {e}]",
                 })
                 raise
 
@@ -782,7 +845,7 @@ def run_trae_cli_agent(
     # ---- 提取 summary 和 plan ----
     summary = collector.content_full or ""
     if not summary:
-        summary = f"第 {round_idx} 轮完成(TRAE CLI,{collector.tool_call_count} 次工具调用)"
+        summary = f"第 {round_idx} 轮完成(Qoder CLI,{collector.tool_call_count} 次工具调用)"
 
     # 从 content 提取 plan
     current_plan: list[dict] = [dict(s) for s in (previous_plan or [])]
@@ -795,7 +858,7 @@ def run_trae_cli_agent(
         })
 
     logger.info(
-        f"[task={task.id}] TRAE CLI 第 {round_idx} 轮完成: "
+        f"[task={task.id}] Qoder CLI 第 {round_idx} 轮完成: "
         f"content={len(collector.content_full)}字符, "
         f"reasoning={len(collector.reasoning_full)}字符, "
         f"tool_calls={collector.tool_call_count}"
@@ -818,7 +881,7 @@ def _build_prompt_message(
     repo_path: str,
     previous_plan: list[dict] | None,
 ) -> str:
-    """构造发给 TRAE CLI 的 prompt 消息
+    """构造发给 Qoder CLI 的 prompt 消息
 
     与 react_agent 的 user_msg 构造逻辑对齐:
     - 第 1 轮:task.user_input + 仓库信息 + repo_context(已 clone 提示)

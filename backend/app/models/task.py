@@ -65,7 +65,7 @@ class Task(Base):
     # 为空表示用 env 默认配置或匿名任务
     llm_config_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
-    # 执行器选择:"builtin"(默认,内置 react_agent)或 "trae_cli"(TRAE CLI via ACP)
+    # 执行器选择:"builtin"(默认,内置 react_agent)或 registry 中已注册的 agent_type(如 "qoder_cli")
     # 决定 orchestrator 调用哪个 ExecutorAgent provider 执行 react 角色的任务
     # server_default 保证旧表新增列时已有行回填 "builtin"(create_all 不改已存在表,
     # 升级时需手动执行:ALTER TABLE tasks ADD COLUMN executor VARCHAR(32)

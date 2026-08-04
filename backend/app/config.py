@@ -72,11 +72,11 @@ class Settings(BaseSettings):
     SANDBOX_CPU: str = ""
     SANDBOX_MEMORY: str = ""
 
-    # TRAE CLI 配置(trae_cli executor 用)
-    # traecli 可执行文件名/路径(沙箱内 PATH 查找或绝对路径)
-    TRAE_CLI_BIN: str = "traecli"
-    # traecli 安装命令(沙箱内未检测到 traecli 时执行,留空则不自动安装)
-    TRAE_CLI_INSTALL_CMD: str = "npm install -g @trae/cli"
+    # Qoder CLI 配置(qoder_cli executor 用)
+    # qodercli 可执行文件名/路径(沙箱内 PATH 查找或绝对路径)
+    QODER_CLI_BIN: str = "qodercli"
+    # qodercli 安装命令(沙箱内未检测到 qodercli 时执行,留空则不自动安装)
+    QODER_CLI_INSTALL_CMD: str = "npm install -g @qoder-ai/qodercli"
 
 
 settings = Settings()

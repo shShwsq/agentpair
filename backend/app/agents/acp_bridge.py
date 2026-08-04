@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """ACP Bridge:HTTP <-> stdio 桥接服务(运行在沙箱内)
 
-将后端的 HTTP 请求桥接到 TRAE CLI 的 stdio ACP(JSON-RPC over newline-delimited JSON)接口。
+将后端的 HTTP 请求桥接到任意支持 ACP(Agent Client Protocol)over stdio 的
+智能体 CLI(如 Qoder CLI),CLI 通过命令行参数启动,凭证经环境变量注入。
 
 工作原理:
-1. 启动时 spawn `traecli acp serve` 子进程,持有 stdin/stdout pipe
+1. 启动时 spawn `<bin> <args...>` 子进程(如 `qodercli --acp --yolo`),
+   持有 stdin/stdout pipe。凭证(PAT 等)由父进程(bridge)环境变量继承,
+   无需命令行明文传递。
 2. 监听 HTTP 端口(默认 8088)
-3. POST /rpc:接收 JSON-RPC 请求,写入 traecli stdin,读取 stdout 响应
+3. POST /rpc:接收 JSON-RPC 请求,写入 CLI stdin,读取 stdout 响应
    - 响应通过 SSE(stream)返回:每行 stdout 作为一个 SSE event
    - 通知(notification,无 id)作为中间事件,最终响应(有 id)作为终止事件
-4. GET /health:健康检查(traecli 进程存活返回 200)
+4. GET /health:健康检查(CLI 进程存活返回 200)
 
 ACP 协议(JSON-RPC 2.0 over stdio):
 - 请求:{"jsonrpc":"2.0","method":"initialize","params":{...},"id":1}
@@ -17,7 +20,7 @@ ACP 协议(JSON-RPC 2.0 over stdio):
 - 通知:{"jsonrpc":"2.0","method":"progress","params":{...}}  (无 id)
 
 使用方式(沙箱内):
-    python acp_bridge.py --port 8088 --config /home/user/.trae/trae_cli.yaml
+    python acp_bridge.py --port 8088 --bin qodercli --args '["--acp","--yolo"]'
 
 依赖:仅 Python 标准库(http.server, subprocess, json, threading)
 """
@@ -31,26 +34,27 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 # ============================================================
-# TRAE CLI 进程管理
+# ACP CLI 进程管理(通用,不绑定具体 CLI)
 # ============================================================
 
 
-class TraeCLIProcess:
-    """管理 traecli acp serve 子进程的 stdin/stdout 通信"""
+class ACPCLIProcess:
+    """管理 ACP CLI 子进程的 stdin/stdout 通信
 
-    def __init__(self, config_path: str | None = None, traecli_bin: str = "traecli"):
-        self.config_path = config_path
-        self.traecli_bin = traecli_bin
+    通过 bin + args 启动子进程,子进程继承父进程环境变量
+    (凭证经 envs 注入到 bridge,再继承给 CLI,避免命令行明文)。
+    """
+
+    def __init__(self, bin_name: str, args: list[str] | None = None):
+        self.bin_name = bin_name
+        self.args = args or []
         self.proc: subprocess.Popen | None = None
         self._lock = threading.Lock()  # 保护 stdin 写入(并发请求互斥)
 
     def start(self) -> None:
-        """启动 traecli acp serve 子进程"""
-        cmd = [self.traecli_bin, "acp", "serve"]
-        if self.config_path:
-            cmd.extend(["--config", self.config_path])
-
-        print(f"[bridge] 启动 traecli: {' '.join(cmd)}", flush=True)
+        """启动 ACP CLI 子进程"""
+        cmd = [self.bin_name, *self.args]
+        print(f"[bridge] 启动 ACP CLI: {' '.join(cmd)}", flush=True)
         self.proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -59,15 +63,15 @@ class TraeCLIProcess:
             text=True,
             bufsize=1,  # 行缓冲
         )
-        # 启动 stderr 监控线程(把 traecli 的 stderr 转发到 bridge 的 stderr)
+        # 启动 stderr 监控线程(把 CLI 的 stderr 转发到 bridge 的 stderr)
         threading.Thread(target=self._pump_stderr, daemon=True).start()
 
     def _pump_stderr(self) -> None:
-        """把 traecli 的 stderr 输出到 bridge 的 stderr(调试用)"""
+        """把 CLI 的 stderr 输出到 bridge 的 stderr(调试用)"""
         if not self.proc or not self.proc.stderr:
             return
         for line in self.proc.stderr:
-            print(f"[traecli stderr] {line.rstrip()}", file=sys.stderr, flush=True)
+            print(f"[cli stderr] {line.rstrip()}", file=sys.stderr, flush=True)
 
     @property
     def alive(self) -> bool:
@@ -82,7 +86,7 @@ class TraeCLIProcess:
         线程安全:用锁保护 stdin 写入,避免并发请求交叉。
         """
         if not self.alive:
-            raise RuntimeError("traecli 进程未运行或已退出")
+            raise RuntimeError("ACP CLI 进程未运行或已退出")
 
         request_id = request.get("id")
         request_line = json.dumps(request, ensure_ascii=False)
@@ -113,7 +117,7 @@ class TraeCLIProcess:
         return collected
 
     def stop(self) -> None:
-        """停止 traecli 子进程"""
+        """停止 CLI 子进程"""
         if self.proc:
             try:
                 self.proc.terminate()
@@ -127,8 +131,8 @@ class TraeCLIProcess:
 # HTTP 请求处理
 # ============================================================
 
-# 全局 traecli 进程实例(所有请求共享)
-_trae_cli: TraeCLIProcess | None = None
+# 全局 CLI 进程实例(所有请求共享)
+_cli: ACPCLIProcess | None = None
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
@@ -141,9 +145,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         """GET /health:健康检查"""
         if self.path == "/health":
-            alive = _trae_cli is not None and _trae_cli.alive
+            alive = _cli is not None and _cli.alive
             status_code = 200 if alive else 503
-            body = json.dumps({"status": "ok" if alive else "traecli_not_running"})
+            body = json.dumps({"status": "ok" if alive else "cli_not_running"})
             self._send_json(status_code, body)
         else:
             self._send_json(404, json.dumps({"error": "not found"}))
@@ -151,18 +155,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         """POST /rpc:发送 JSON-RPC 请求,流式返回 SSE(每行 stdout 即时推送)
 
-        与批量收集模式不同,这里逐行读取 traecli stdout 并立即推送 SSE,
+        与批量收集模式不同,这里逐行读取 CLI stdout 并立即推送 SSE,
         让后端能实时收到 thinking/text/tool_call 增量,实现真正流式体验。
 
-        线程安全:整个读取过程持有 _trae_cli._lock,避免并发请求交叉。
+        线程安全:整个读取过程持有 _cli._lock,避免并发请求交叉。
         (ACP 是串行协议,同一时刻只处理一个请求,锁不影响吞吐)
         """
         if self.path != "/rpc":
             self._send_json(404, json.dumps({"error": "not found"}))
             return
 
-        if _trae_cli is None or not _trae_cli.alive:
-            self._send_json(503, json.dumps({"error": "traecli process not running"}))
+        if _cli is None or not _cli.alive:
+            self._send_json(503, json.dumps({"error": "CLI process not running"}))
             return
 
         # 读取请求体
@@ -179,14 +183,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         # 发送请求 + 流式读取响应(持锁,串行)
         try:
-            with _trae_cli._lock:
-                if not _trae_cli.alive:
-                    raise RuntimeError("traecli 进程已退出")
+            with _cli._lock:
+                if not _cli.alive:
+                    raise RuntimeError("ACP CLI 进程已退出")
 
-                assert _trae_cli.proc is not None
-                assert _trae_cli.proc.stdin is not None
-                _trae_cli.proc.stdin.write(request_line + "\n")
-                _trae_cli.proc.stdin.flush()
+                assert _cli.proc is not None
+                assert _cli.proc.stdin is not None
+                _cli.proc.stdin.write(request_line + "\n")
+                _cli.proc.stdin.flush()
 
                 # 先发 SSE 响应头
                 self.send_response(200)
@@ -196,8 +200,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self.end_headers()
 
                 # 逐行读取 stdout,立即推送 SSE
-                assert _trae_cli.proc.stdout is not None
-                for line in _trae_cli.proc.stdout:
+                assert _cli.proc.stdout is not None
+                for line in _cli.proc.stdout:
                     line = line.strip()
                     if not line:
                         continue
@@ -243,12 +247,12 @@ def main():
         help="HTTP 监听端口(默认 8088)",
     )
     parser.add_argument(
-        "--config", type=str, default=None,
-        help="trae_cli.yaml 配置文件路径",
+        "--bin", type=str, default="qodercli",
+        help="ACP CLI 可执行文件名/路径(默认 qodercli,从 PATH 查找或绝对路径)",
     )
     parser.add_argument(
-        "--traecli-bin", type=str, default="traecli",
-        help="traecli 可执行文件路径(默认从 PATH 查找)",
+        "--args", type=str, default='["--acp", "--yolo"]',
+        help='CLI 启动参数(JSON 数组,默认 \'["--acp", "--yolo"]\')',
     )
     parser.add_argument(
         "--host", type=str, default="0.0.0.0",
@@ -256,16 +260,25 @@ def main():
     )
     args = parser.parse_args()
 
-    global _trae_cli
+    # 解析 args JSON
+    try:
+        cli_args = json.loads(args.args)
+        if not isinstance(cli_args, list):
+            raise ValueError("args 必须是 JSON 数组")
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"[bridge] --args 解析失败: {e}", file=sys.stderr, flush=True)
+        sys.exit(1)
 
-    # 启动 traecli 子进程
-    _trae_cli = TraeCLIProcess(config_path=args.config, traecli_bin=args.traecli_bin)
-    _trae_cli.start()
+    global _cli
 
-    # 等待 traecli 就绪(短暂等待进程稳定)
+    # 启动 CLI 子进程(继承当前环境变量,凭证经 envs 注入到 bridge 进程)
+    _cli = ACPCLIProcess(bin_name=args.bin, args=cli_args)
+    _cli.start()
+
+    # 等待 CLI 就绪(短暂等待进程稳定)
     time.sleep(1)
-    if not _trae_cli.alive:
-        print("[bridge] traecli 启动失败,退出", file=sys.stderr, flush=True)
+    if not _cli.alive:
+        print("[bridge] ACP CLI 启动失败,退出", file=sys.stderr, flush=True)
         sys.exit(1)
 
     # 启动 HTTP 服务器
@@ -278,8 +291,8 @@ def main():
         pass
     finally:
         print("[bridge] 正在关闭...", file=sys.stderr, flush=True)
-        if _trae_cli:
-            _trae_cli.stop()
+        if _cli:
+            _cli.stop()
         server.server_close()
 
 

@@ -83,7 +83,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
     set_current_task(task_id_str, scenario_id, allowed_skills)
 
     # 执行器选择:按 task.executor 拿到对应的 ExecutorAgent provider
-    # (builtin → 内置 react_agent;trae_cli → TRAE CLI via ACP)
+    # (builtin → 内置 react_agent;registry 中的 agent_type → 外部 CLI via ACP)
     executor = get_executor(task)
 
     # 用户原始意图
@@ -230,7 +230,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             # 后续轮 followup_query=追问(不 clone,不传 repo_context)
             # 修复 4:传入上轮 plan(previous_plan),让本轮从已有进度续接;
             #   返回本轮结束时的 plan 供下一轮使用
-            # 执行器抽象:按 task.executor 选择 builtin / trae_cli provider
+            # 执行器抽象:按 task.executor 选择 builtin / 外部 CLI provider
             is_first = round_idx == 1
             _results, summary, current_plan = executor.run(
                 task, db,

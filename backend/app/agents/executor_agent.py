@@ -2,7 +2,8 @@
 
 将"执行智能体"抽象为统一接口,支持多种实现:
 - BuiltinReactAgent:系统内置的 ReAct 智能体(基于 react_agent.py)
-- TraeCLIAgent:基于 TRAE CLI + ACP 协议的外部智能体(沙箱内运行)
+- ExternalCLIAgent:基于外部智能体 CLI + ACP 协议的智能体(沙箱内运行),
+  按 registry 动态派发(如 qoder_cli,未来可扩展 aider / goose 等)
 
 orchestrator 通过 get_executor(task) 拿到对应的 provider,调用 .run() 执行一轮,
 无需关心底层是内置 LLM 循环还是外部 CLI 协议。
@@ -16,19 +17,23 @@ orchestrator 通过 get_executor(task) 拿到对应的 provider,调用 .run() �
     - final_plan: 本轮结束时的 plan 状态(供下一轮续接)
 
 设计说明:
-- client(LLMClient)仅对内置 provider 有意义;TRAE CLI provider 自带模型配置,
+- client(LLMClient)仅对内置 provider 有意义;外部 CLI provider 自带模型配置,
   会忽略该参数(签名保持一致以符合抽象契约)。
 - provider 内部负责设置 task 上下文(set_current_task)、推送 SSE 事件、
   落库 Conversation 记录,与原 run_react_agent 行为对齐。
+- 外部 CLI provider 通过 registry 声明 executor_module / executor_func,
+  get_executor 用 importlib 延迟加载,新增 agent 类型无需改本文件。
 """
 from __future__ import annotations
 
+import importlib
 import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.agents.registry import get_executor_location, is_registered
 from app.llm.client import LLMClient
 from app.models.task import Task
 
@@ -36,14 +41,14 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# 执行器类型常量(与 Task.executor 字段值对齐)
+# 执行器类型常量
 # ============================================================
 
 EXECUTOR_BUILTIN = "builtin"
-EXECUTOR_TRAE_CLI = "trae_cli"
 
-# 已注册的执行器(供 get_executor 校验 + 前端枚举)
-REGISTERED_EXECUTORS: tuple[str, ...] = (EXECUTOR_BUILTIN, EXECUTOR_TRAE_CLI)
+# 已注册的执行器标识(供前端枚举 + 校验)
+# builtin 始终可用;其余从 registry 动态读取
+REGISTERED_EXECUTORS: tuple[str, ...] = (EXECUTOR_BUILTIN,)
 
 
 class ExecutorAgent(ABC):
@@ -79,7 +84,7 @@ class ExecutorAgent(ABC):
             db: 数据库会话(用于落库 Conversation)
             round_idx: 当前协作轮次(1 开始)
             followup_query: 追问指令。None 表示第一轮(用 task.user_input)
-            client: LLMClient(仅内置 provider 使用;TRAE CLI 忽略)
+            client: LLMClient(仅内置 provider 使用;外部 CLI 忽略)
             repo_context: 第 1 轮专用,orchestrator 主动 clone 后的仓库上下文
             previous_plan: 上一轮结束时的 plan 状态(跨轮续接)
 
@@ -132,26 +137,48 @@ class BuiltinReactAgent(ExecutorAgent):
 
 
 # ============================================================
-# TRAE CLI 执行器:基于 ACP 协议(沙箱内运行)
+# 外部 CLI 执行器:按 registry 动态派发
 # ============================================================
 
 
-class TraeCLIAgent(ExecutorAgent):
-    """基于 TRAE CLI 的执行智能体
+class ExternalCLIAgent(ExecutorAgent):
+    """基于外部智能体 CLI 的执行智能体(通用包装)
 
-    通过 ACP(Agent Client Protocol)与沙箱内运行的 TRAE CLI 通信:
-    1. 沙箱内启动 acp_bridge.py(HTTP<->stdio 桥接服务)
-    2. 后端通过 ACP HTTP client 与 bridge 通信
-    3. bridge 转发请求到 traecli 的 stdio ACP 接口
+    通过 registry 声明的 executor_module / executor_func 延迟加载具体实现
+    (如 app.agents.qoder_cli_agent.run_qoder_cli_agent)。
 
-    模型配置在沙箱内的 trae_cli.yaml 中指定,后端不直接管理 LLM 调用。
-
-    详见 app/agents/trae_cli_agent.py 的完整实现。
+    新增一种外部 CLI 只需在 registry 注册,无需改本文件。具体实现模块负责:
+    - 从 user_agent_configs 加载凭证
+    - 沙箱内启动 CLI + ACP bridge
+    - ACP 通信 + 事件翻译
+    - 返回 (results, summary, plan)
     """
+
+    def __init__(self, agent_type: str):
+        self._agent_type = agent_type
+        # 延迟解析 executor 位置(仅校验已注册)
+        if not is_registered(agent_type):
+            raise ValueError(f"未注册的 agent 类型: {agent_type}")
 
     @property
     def name(self) -> str:
-        return EXECUTOR_TRAE_CLI
+        return self._agent_type
+
+    def _load_run_func(self):
+        """从 registry 查找 executor_module.executor_func,用 importlib 加载"""
+        location = get_executor_location(self._agent_type)
+        if not location or not location[0] or not location[1]:
+            raise RuntimeError(
+                f"agent '{self._agent_type}' 未配置 executor_module/executor_func"
+            )
+        module_path, func_name = location
+        module = importlib.import_module(module_path)
+        run_func = getattr(module, func_name, None)
+        if run_func is None:
+            raise RuntimeError(
+                f"模块 {module_path} 中未找到函数 {func_name}"
+            )
+        return run_func
 
     def run(
         self,
@@ -163,21 +190,18 @@ class TraeCLIAgent(ExecutorAgent):
         repo_context: str | None = None,
         previous_plan: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
-        # 延迟导入:TRAE CLI 依赖 sandbox_tools + ACP client,
-        # 仅在真正使用时加载,避免内置模式启动时引入额外依赖
-        from app.agents.trae_cli_agent import run_trae_cli_agent
-
+        run_func = self._load_run_func()
         logger.info(
-            f"[task={task.id}] 使用 TRAE CLI 执行器,round={round_idx}"
+            f"[task={task.id}] 使用 {self._agent_type} 执行器,round={round_idx}"
         )
-        return run_trae_cli_agent(
+        return run_func(
             task,
             db,
             round_idx=round_idx,
             followup_query=followup_query,
             repo_context=repo_context,
             previous_plan=previous_plan,
-            # client 参数被忽略:TRAE CLI 自带模型配置
+            # client 参数被忽略:外部 CLI 自带模型配置
         )
 
 
@@ -190,19 +214,21 @@ def get_executor(task: Task) -> ExecutorAgent:
     """根据 task.executor 字段返回对应的执行器实例
 
     - "builtin"(默认):返回 BuiltinReactAgent
-    - "trae_cli":返回 TraeCLIAgent
+    - registry 中已注册的 agent_type(如 "qoder_cli"):返回 ExternalCLIAgent
 
     未知值回退到 builtin 并记录 warning(不阻塞任务执行)。
     每次调用返回新实例(provider 无状态,实例化成本低)。
     """
     executor = (task.executor or EXECUTOR_BUILTIN).strip().lower()
 
-    if executor == EXECUTOR_TRAE_CLI:
-        return TraeCLIAgent()
+    if executor == EXECUTOR_BUILTIN:
+        return BuiltinReactAgent()
 
-    if executor != EXECUTOR_BUILTIN:
-        logger.warning(
-            f"[task={task.id}] 未知 executor='{executor}',回退到 builtin"
-        )
+    if is_registered(executor):
+        return ExternalCLIAgent(executor)
 
+    # 未知 executor:回退到 builtin
+    logger.warning(
+        f"[task={task.id}] 未知 executor='{executor}',回退到 builtin"
+    )
     return BuiltinReactAgent()

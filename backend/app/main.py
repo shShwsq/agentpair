@@ -5,7 +5,7 @@ from fastapi import FastAPI
 
 from app.config import settings
 from app.database import Base, engine
-from app.routers import auth, health, skills, tasks
+from app.routers import agent_configs, auth, health, skills, tasks
 from app.routers import github as github_router
 from app.routers import model_configs as model_configs_router
 from app.routers import workspace as workspace_router
@@ -28,6 +28,7 @@ async def lifespan(app: FastAPI):
     生产环境应切换到 Alembic 迁移管理 schema 变更。
     """
     from app.models import email_token, task, user  # noqa: F401
+    from app.models import user_agent_config  # noqa: F401
     from app.models import user_llm_config  # noqa: F401
 
     if settings.DB_REBUILD_ON_START:
@@ -50,6 +51,7 @@ app.include_router(auth.router)
 app.include_router(model_configs_router.router)
 app.include_router(github_router.router)
 app.include_router(workspace_router.router)
+app.include_router(agent_configs.router)
 
 
 @app.get("/")
