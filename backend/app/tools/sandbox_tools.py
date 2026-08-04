@@ -210,7 +210,7 @@ def _clone_repo_sandbox(ctx: dict, clone_url: str, repo_name: str, branch: str |
     cmd += f" {shlex.quote(clone_url)} {shlex.quote(repo_dir)}"
 
     logger.info(f"[sandbox] git clone: {clone_url}")
-    session.run_command(cmd, timeout=120)
+    session.run_command(cmd, timeout=120, check=True)
 
     count_cmd = f"find {shlex.quote(repo_dir)} -type f -not -path '*/.git/*' | wc -l"
     files_count = int(session.run_command(count_cmd).strip() or "0")

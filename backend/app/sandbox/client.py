@@ -57,19 +57,21 @@ class SandboxSession:
 
     # ---------- 通用 ----------
 
-    def run_command(self, cmd: str, timeout: int = 60) -> str:
+    def run_command(self, cmd: str, timeout: int = 60, check: bool = False) -> str:
         """执行 shell 命令,返回 stdout
 
         sandbox 模式:在沙箱里执行(SandboxSync.commands.run)
         mock 模式:在本地临时目录里执行(用 subprocess)
+
+        check=True 时,退出码非零抛 RuntimeError(含 stderr),用于 git clone 等必须成功的命令。
         """
         if self._closed:
             raise RuntimeError("沙箱已关闭")
 
         if self.mode == "sandbox":
-            return self._sandbox_run_command(cmd, timeout)
+            return self._sandbox_run_command(cmd, timeout, check=check)
         else:
-            return self._mock_run_command(cmd, timeout)
+            return self._mock_run_command(cmd, timeout, check=check)
 
     def write_file(self, path: str, content: str) -> None:
         """写入文件"""
@@ -116,21 +118,32 @@ class SandboxSession:
 
     # ---------- sandbox 模式实现(SandboxSync 同步) ----------
 
-    def _sandbox_run_command(self, cmd: str, timeout: int) -> str:
+    def _sandbox_run_command(self, cmd: str, timeout: int, *, check: bool = False) -> str:
         """在真实沙箱里执行命令(SandboxSync.commands.run 同步调用)
 
         SDK 的 run() 不接受 timeout kwarg,超时通过 RunCommandOpts(timeout=timedelta) 传入。
+        check=True 时,退出码非零抛 RuntimeError(含 stderr)。
         """
         from opensandbox.models.execd import RunCommandOpts
 
         opts = RunCommandOpts(timeout=timedelta(seconds=timeout))
         execution = self.sandbox.commands.run(cmd, opts=opts)
-        # logs.stdout 是一个 list,每项有 .text
-        stdout_parts = []
-        for item in (execution.logs.stdout or []):
-            text = getattr(item, "text", None) or str(item)
-            stdout_parts.append(text)
-        return "".join(stdout_parts)
+
+        def _collect(parts):
+            out = []
+            for item in (parts or []):
+                out.append(getattr(item, "text", None) or str(item))
+            return "".join(out)
+
+        stdout = _collect(execution.logs.stdout)
+        if check:
+            exit_code = getattr(execution, "exit_code", None)
+            if exit_code not in (None, 0):
+                stderr = _collect(execution.logs.stderr)
+                raise RuntimeError(
+                    f"命令退出码 {exit_code}: {cmd}\nstdout: {stdout}\nstderr: {stderr}"
+                )
+        return stdout
 
     def _sandbox_write_file(self, path: str, content: str) -> None:
         """在真实沙箱里写文件"""
@@ -147,7 +160,7 @@ class SandboxSession:
 
     # ---------- mock 模式实现(本地文件系统) ----------
 
-    def _mock_run_command(self, cmd: str, timeout: int) -> str:
+    def _mock_run_command(self, cmd: str, timeout: int, *, check: bool = False) -> str:
         """mock 模式:用本地 subprocess 执行,把 work_dir 当作沙箱根"""
         assert self._mock_dir is not None
         result = subprocess.run(
@@ -158,9 +171,9 @@ class SandboxSession:
             cwd=self._mock_dir,
             timeout=timeout,
         )
-        if result.returncode != 0:
+        if check and result.returncode != 0:
             raise RuntimeError(
-                f"命令执行失败(code={result.returncode}): {result.stderr[:500]}"
+                f"命令退出码 {result.returncode}: {cmd}\nstdout: {result.stdout}\nstderr: {result.stderr[:500]}"
             )
         return result.stdout
 
