@@ -129,17 +129,14 @@ class SandboxSession:
         opts = RunCommandOpts(timeout=timedelta(seconds=timeout))
         execution = self.sandbox.commands.run(cmd, opts=opts)
 
-        def _collect(parts):
-            out = []
-            for item in (parts or []):
-                out.append(getattr(item, "text", None) or str(item))
-            return "".join(out)
-
-        stdout = _collect(execution.logs.stdout)
+        # SDK 的 Execution.text 属性已按 \n 正确拼接 stdout(每条 OutputMessage 是一行)
+        stdout = execution.text or ""
         if check:
             exit_code = getattr(execution, "exit_code", None)
             if exit_code not in (None, 0):
-                stderr = _collect(execution.logs.stderr)
+                stderr = "\n".join(
+                    msg.text.rstrip("\n") for msg in (execution.logs.stderr or [])
+                )
                 raise RuntimeError(
                     f"命令退出码 {exit_code}: {cmd}\nstdout: {stdout}\nstderr: {stderr}"
                 )
