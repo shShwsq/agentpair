@@ -491,6 +491,12 @@ class _ACPCollector:
 
     def __call__(self, msg: dict) -> None:
         """处理一条 ACP 通知"""
+        # 首次集成时记录原始 msg 结构,便于核对 qodercli --acp 实际输出格式后
+        # 调整下方 update_type / content 字段映射。确认无误后可删除此日志。
+        logger.debug(
+            f"[acp] raw msg: {json.dumps(msg, ensure_ascii=False)[:500]}"
+        )
+
         method = msg.get("method", "")
         if method != "session/update":
             # 其他通知(如 initialized)忽略

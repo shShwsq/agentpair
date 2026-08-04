@@ -200,6 +200,54 @@ docker run --rm agentpair-sandbox:latest git --version
 
 Server 直接用本地 Docker daemon,无需推到 registry。
 
+### 2.3 可选:Qoder CLI 执行器依赖
+
+若任务使用 Qoder CLI 执行器(`task.executor=qoder_cli`),沙箱内还需具备 Qoder CLI 运行环境。Qoder CLI 是 npm 包,且 [acp_bridge.py](../backend/app/agents/acp_bridge.py) 用 Python 标准库实现,因此依赖:
+
+- **Node.js >= 20.0.0**(npm 安装方式的前提,见 [官方安装文档](https://docs.qoder.com/cli/install))
+- **Python3**(acp_bridge.py 依赖,2.2 的镜像已含)
+- **qodercli 可执行文件**(全局安装或镜像预装)
+
+有两种方式,二选一:
+
+#### 方式 A:镜像预装(推荐,启动快、无网络依赖)
+
+在 `Dockerfile.sandbox` 里追加(注意需在切到 `user` 之前用 root 安装):
+
+```dockerfile
+# 装 Node.js 20.x(Qoder CLI 要求 >= 20.0.0)
+USER root
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# 全局安装 Qoder CLI(官方 npm 包 @qoder-ai/qodercli)
+RUN npm install -g @qoder-ai/qodercli
+
+# 切回非 root 用户
+USER user
+```
+
+构建后验证:
+
+```bash
+docker run --rm agentpair-sandbox:latest qodercli --version
+docker run --rm agentpair-sandbox:latest node --version
+```
+
+#### 方式 B:运行时自动安装(首次启动慢,需沙箱能访问 npm registry)
+
+不在镜像里预装,让 [qoder_cli_agent.py](../backend/app/agents/qoder_cli_agent.py) 在首次启动时执行 `QODER_CLI_INSTALL_CMD` 安装。前提是镜像里已有 Node.js >= 20.0.0(按方式 A 装 Node.js,但跳过 `npm install -g @qoder-ai/qodercli` 这一行),否则 npm 命令不存在,安装会失败。
+
+对应 `.env` 配置(默认值已可用,无需额外设置):
+
+```bash
+QODER_CLI_BIN=qodercli
+QODER_CLI_INSTALL_CMD=npm install -g @qoder-ai/qodercli
+```
+
+> 注意:[BRIDGE_STARTUP_TIMEOUT 默认 30 秒](../backend/app/agents/qoder_cli_agent.py),首次自动安装可能超时。生产环境建议用方式 A 预装,避免每次任务都拉 npm 包。
+
 ## 三、配置 SSH Key(给沙箱用,可选)
 
 沙箱里执行 `git clone git@github.com:...` 需要 SSH 凭证。如果你只用 HTTPS+token 方式 clone(后端 `clone_repo_with_fallback` 会优先用 token),可以跳过本节。
