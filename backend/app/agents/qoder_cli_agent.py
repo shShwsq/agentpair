@@ -63,8 +63,9 @@ BRIDGE_WORK_DIR = "/home/user"
 BRIDGE_STARTUP_TIMEOUT = 30
 BRIDGE_HEALTH_INTERVAL = 1.0
 
-# ACP 协议版本
-ACP_PROTOCOL_VERSION = "0.1"
+# ACP 协议版本(数字 1,见 https://github.com/agentclientprotocol/agent-client-protocol
+# "The current stable ACP protocol version is 1.")
+ACP_PROTOCOL_VERSION = 1
 
 # 本地 acp_bridge.py 源文件路径(用于写入沙箱)
 _BRIDGE_SOURCE = Path(__file__).parent / "acp_bridge.py"
