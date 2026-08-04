@@ -179,6 +179,12 @@ const agentError = ref('')
 const agentTesting = ref(false)
 /** 测试结果(null=未测试) */
 const agentTestResult = ref<AgentTestResult | null>(null)
+/** 当前测试阶段消息(流式) */
+const agentTestStage = ref('')
+/** 模型思考过程累积(流式) */
+const agentTestThinking = ref('')
+/** 模型回答累积(流式) */
+const agentTestContent = ref('')
 
 /** 按类型查找已配置项(用于表格状态展示) */
 function findConfig(agent_type: string): AgentConfigOut | null {
@@ -201,6 +207,9 @@ async function openAgentDialog(meta: AgentTypeMeta): Promise<void> {
   agentDialogLoading.value = true
   agentError.value = ''
   agentTestResult.value = null
+  agentTestStage.value = ''
+  agentTestThinking.value = ''
+  agentTestContent.value = ''
   agentDialogOpen.value = true
   try {
     agentDialogDetail.value = await getAgentConfig(meta.agent_type)
@@ -221,8 +230,11 @@ async function handleAgentSave(credentials: CredentialValue[], is_active: boolea
     agentDialogDetail.value = await saveAgentConfig(meta.agent_type, { credentials, is_active })
     await refreshAgentConfigs()
     // 保存成功后不自动关闭弹窗,让用户可继续点「测试连接」验证
-    // 清空旧的测试结果(凭证可能已变)
+    // 清空旧的测试结果与流式状态(凭证可能已变)
     agentTestResult.value = null
+    agentTestStage.value = ''
+    agentTestThinking.value = ''
+    agentTestContent.value = ''
     showToast(`${meta.display_name} 配置已保存`, 'success')
   } catch (err) {
     agentError.value = extractErrorMessage(err)
@@ -241,6 +253,9 @@ async function handleAgentClear(): Promise<void> {
     await refreshAgentConfigs()
     agentDialogDetail.value = null
     agentTestResult.value = null
+    agentTestStage.value = ''
+    agentTestThinking.value = ''
+    agentTestContent.value = ''
     agentDialogOpen.value = false
     showToast(`${meta.display_name} 配置已清除`, 'success')
   } catch (err) {
@@ -256,17 +271,28 @@ async function handleAgentTest(): Promise<void> {
   agentError.value = ''
   agentTesting.value = true
   agentTestResult.value = null
-  try {
-    agentTestResult.value = await testAgentConfig(meta.agent_type)
-  } catch (err) {
-    // 网络错误/后端 500 等:构造一个失败结果展示
-    agentTestResult.value = {
-      ok: false,
-      message: extractErrorMessage(err),
-    }
-  } finally {
-    agentTesting.value = false
-  }
+  agentTestStage.value = ''
+  agentTestThinking.value = ''
+  agentTestContent.value = ''
+  await testAgentConfig(meta.agent_type, {
+    onStage: (_stage, message) => {
+      agentTestStage.value = message
+    },
+    onThinking: (delta) => {
+      agentTestThinking.value += delta
+    },
+    onContent: (delta) => {
+      agentTestContent.value += delta
+    },
+    onDone: (ok, message) => {
+      agentTestResult.value = { ok, message }
+      agentTesting.value = false
+    },
+    onError: (message) => {
+      agentTestResult.value = { ok: false, message }
+      agentTesting.value = false
+    },
+  })
 }
 
 // ============================================================
@@ -556,6 +582,9 @@ async function loadAgentTypesAndConfigs(): Promise<void> {
           :error="agentError"
           :testing="agentTesting"
           :test-result="agentTestResult"
+          :test-stage="agentTestStage"
+          :test-thinking="agentTestThinking"
+          :test-content="agentTestContent"
           @save="handleAgentSave"
           @clear="handleAgentClear"
           @test="handleAgentTest"

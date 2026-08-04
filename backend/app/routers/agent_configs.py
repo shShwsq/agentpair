@@ -7,7 +7,7 @@
 - GET    /agents/configs               当前用户已配置的 agent 列表(鉴权,不含凭据原文)
 - GET    /agents/configs/{agent_type}  单个 agent 配置详情(含各字段填写状态)
 - PUT    /agents/configs/{agent_type}  保存/更新某 agent 配置(凭证加密存储)
-- POST   /agents/configs/{agent_type}/test  测试凭证连通性(启动临时沙箱 + ACP 握手)
+- POST   /agents/configs/{agent_type}/test  测试凭证连通性(SSE 流式推送进度+思考+回答)
 - DELETE /agents/configs/{agent_type}  删除某 agent 配置
 
 安全约定(与 model_configs.py 一致):
@@ -18,6 +18,7 @@ import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.agents.registry import (
@@ -33,7 +34,6 @@ from app.schemas.agent_configs import (
     AgentConfigDetailOut,
     AgentConfigListResponse,
     AgentConfigOut,
-    AgentTestResponse,
     AgentTypeMeta,
     CredentialField,
     SaveAgentConfigRequest,
@@ -157,16 +157,27 @@ def save_config(
     return _to_detail_out(row)
 
 
-@router.post("/configs/{agent_type}/test", response_model=AgentTestResponse)
+@router.post("/configs/{agent_type}/test")
 def test_config(
     agent_type: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> AgentTestResponse:
-    """测试 agent 凭证连通性(启动临时沙箱 + ACP 握手)
+) -> StreamingResponse:
+    """测试 agent 凭证连通性(SSE 流式推送进度 + 思考 + 回答)
 
     验证凭证有效性后立即销毁临时沙箱,不污染任务执行环境。
-    耗时较长(约 10-30s,含沙箱启动 + ACP bridge 就绪 + 握手)。
+    耗时较长(约 10-60s,含沙箱启动 + ACP bridge 就绪 + 握手 + 模型响应),
+    改用 SSE 流式推送各阶段进度、模型思考增量、模型回答增量,
+    前端可实时显示测试过程,缓解等待焦虑。
+
+    SSE 事件格式:
+        event: stage     data: {"type":"stage","data":{"stage":"...","message":"..."}}
+        event: thinking  data: {"type":"thinking","data":{"delta":"思考片段"}}
+        event: content   data: {"type":"content","data":{"delta":"回答片段"}}
+        event: done      data: {"type":"done","data":{"ok":bool,"message":"..."}}
+        event: error     data: {"type":"error","data":{"ok":false,"message":"..."}}
+
+    done/error 为终止事件。鉴权/配置检查在流开始前完成(可正常返回 4xx)。
     """
     _require_registered(agent_type)
 
@@ -179,8 +190,7 @@ def test_config(
         )
 
     # 按 agent_type 动态分派到对应的测试函数
-    # 约定:测试函数名为 test_credential,与 registry.executor_module 同模块
-    # (qoder_cli / qoder_cli_cn 共用 app.agents.qoder_cli_agent.test_credential)
+    # 约定:流式测试函数名为 test_credential_streaming,与 registry.executor_module 同模块
     meta = AGENT_REGISTRY.get(agent_type) or {}
     module_path = meta.get("executor_module", "")
     if not module_path:
@@ -192,7 +202,7 @@ def test_config(
     try:
         import importlib
         module = importlib.import_module(module_path)
-        test_func = getattr(module, "test_credential", None)
+        test_func = getattr(module, "test_credential_streaming", None)
     except ImportError as e:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -202,11 +212,48 @@ def test_config(
     if test_func is None:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail=f"agent 类型 {agent_type} 未实现 test_credential,暂不支持测试连接",
+            detail=f"agent 类型 {agent_type} 未实现 test_credential_streaming,暂不支持测试连接",
         )
 
-    ok, message = test_func(db, current_user.id, agent_type)
-    return AgentTestResponse(ok=ok, message=message)
+    # 捕获 user_id 和 agent_type,在生成器闭包中使用(避免请求级 db session 复用问题)
+    # 注意:db session 在请求结束后会关闭,但 test_credential_streaming 内部
+    # 只在开头用 db 加载凭证(同步完成),后续沙箱操作不依赖 db,所以安全。
+    user_id = current_user.id
+    agent_type_capture = agent_type
+
+    def event_generator():
+        """SSE 事件生成器:消费 test_credential_streaming 的 dict 事件"""
+        try:
+            for event in test_func(db, user_id, agent_type_capture):
+                yield _format_test_sse(event)
+        except Exception as e:
+            logger.exception("[agent_test] 流式测试生成器异常")
+            yield _format_test_sse({
+                "type": "error",
+                "data": {"ok": False, "message": f"测试异常: {e}"},
+            })
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Nginx:禁用缓冲,确保实时推送
+        },
+    )
+
+
+def _format_test_sse(event: dict) -> str:
+    """格式化测试事件为 SSE 字符串
+
+    格式:
+        event: <type>
+        data: <json>
+    """
+    event_type = event.get("type", "message")
+    data = json.dumps(event, ensure_ascii=False, default=str)
+    return f"event: {event_type}\ndata: {data}\n\n"
 
 
 @router.delete("/configs/{agent_type}", response_model=AgentConfigListResponse)

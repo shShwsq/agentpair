@@ -27,6 +27,7 @@ import logging
 import re
 import time
 import uuid
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -804,6 +805,252 @@ def test_credential(db: Session, user_id, agent_type: str = AGENT_TYPE) -> tuple
         return False, f"测试异常: {e}"
     finally:
         # ---- 清理:停止 bridge + 销毁沙箱 ----
+        if bridge_exec_id:
+            _stop_acp_bridge(session, bridge_exec_id)
+        try:
+            session.close()
+        except Exception as e:
+            logger.info(f"[qoder_cli_test] 关闭沙箱失败(忽略): {e}")
+
+
+def test_credential_streaming(
+    db: Session, user_id, agent_type: str = AGENT_TYPE
+) -> Generator[dict, None, None]:
+    """流式版测试凭证:yield SSE 事件 dict(供路由层格式化为 SSE)
+
+    与 test_credential 验证流程一致,但把各阶段进度、思考增量、回答增量
+    实时 yield 出去,前端可流式显示「正在做什么 + 模型思考 + 模型回答」,
+    缓解测试等待时间长的体验问题。
+
+    事件类型(yield 的 dict):
+        {"type": "stage",    "data": {"stage": "...", "message": "..."}}
+        {"type": "thinking", "data": {"delta": "思考片段"}}
+        {"type": "content",  "data": {"delta": "回答片段"}}
+        {"type": "done",     "data": {"ok": bool, "message": "..."}}
+        {"type": "error",    "data": {"ok": False, "message": "..."}}
+
+    done/error 为终止事件,生成器在此后结束。
+    """
+    def stage(stage_id: str, message: str) -> dict:
+        return {"type": "stage", "data": {"stage": stage_id, "message": message}}
+
+    def done(ok: bool, message: str) -> dict:
+        return {"type": "done", "data": {"ok": ok, "message": message}}
+
+    # ---- 加载凭证 ----
+    try:
+        credentials = _load_credentials(db, user_id, agent_type)
+    except RuntimeError as e:
+        yield done(False, f"凭证加载失败: {e}")
+        return
+
+    credential_envs = _build_credential_envs(credentials, agent_type)
+    if not credential_envs:
+        yield done(False, "凭证映射为空(请检查 registry 配置)")
+        return
+
+    if settings.SANDBOX_MODE == "mock":
+        yield done(False, "测试连接需要 SANDBOX_MODE=sandbox(mock 模式无 CLI)")
+        return
+
+    # ---- 创建临时沙箱 ----
+    from app.sandbox.client import create_sandbox
+
+    yield stage("creating_sandbox", "创建临时沙箱...")
+    logger.info(f"[qoder_cli_test] 开始流式测试({agent_type}):创建临时沙箱")
+    session = create_sandbox()
+    bridge_exec_id: str | None = None
+
+    try:
+        # ---- 准备 CLI 环境 ----
+        yield stage("cli_env", "准备 CLI 环境(写入 bridge 脚本 + 检查 CLI)...")
+        try:
+            _ensure_cli_env(session, agent_type)
+            logger.info("[qoder_cli_test] CLI 环境就绪")
+        except RuntimeError as e:
+            yield done(False, f"CLI 环境准备失败: {e}")
+            return
+
+        # 清理可能残留的旧登录态
+        session.run_command("rm -rf ~/.qoder ~/.qoder-cn 2>/dev/null", timeout=5)
+
+        # ---- 启动 ACP bridge ----
+        yield stage("bridge_start", "启动 ACP bridge(注入 PAT,等待就绪)...")
+        try:
+            test_acp_args = ["--model", "Qwen3.6-Flash", "--reasoning-effort", "low"]
+            bridge_exec_id = _start_acp_bridge(
+                session, credential_envs,
+                agent_type=agent_type,
+                extra_acp_args=test_acp_args,
+            )
+            endpoint_url, endpoint_headers = session.get_endpoint(ACP_BRIDGE_PORT)
+            _wait_for_bridge_ready(session, bridge_exec_id, endpoint_url, endpoint_headers)
+            yield stage("bridge_ready", "ACP bridge 就绪")
+        except RuntimeError as e:
+            err_msg = str(e)
+            if any(kw in err_msg.lower() for kw in ("auth", "unauthorized", "token", "401", "credential")):
+                yield done(False, f"PAT 认证失败: {err_msg}")
+            else:
+                yield done(False, f"ACP bridge 启动失败: {err_msg}")
+            return
+
+        # ---- ACP 握手 ----
+        yield stage("acp_init", "ACP 握手(initialize)...")
+        client = ACPClient(endpoint_url, endpoint_headers)
+        try:
+            result = client.initialize()
+            protocol_version = result.get("protocolVersion", "?")
+            auth_methods = result.get("authMethods", []) or []
+            logger.info(
+                f"[qoder_cli_test] ACP 握手成功: protocolVersion={protocol_version}, "
+                f"authMethods={[m.get('id') for m in auth_methods]}"
+            )
+            # PAT 经环境变量自动认证,跳过 authenticate
+            if auth_methods:
+                logger.info(
+                    f"[qoder_cli_test] 跳过 authenticate(PAT 经环境变量自动认证),"
+                    f"authMethods={[m.get('id') for m in auth_methods]}"
+                )
+
+            # ---- 创建会话 ----
+            yield stage("session_new", "创建 ACP 会话...")
+            try:
+                acp_session_id = client.new_session(cwd="/tmp")
+                logger.info(
+                    f"[qoder_cli_test] session/new 返回: sessionId={acp_session_id}"
+                )
+            except httpx.TimeoutException:
+                yield done(False, "创建会话超时(请检查网络或 PAT 有效性)")
+                return
+            except RuntimeError as e:
+                err_msg = str(e)
+                low = err_msg.lower()
+                if "auth" in low or "authentication required" in low:
+                    yield done(False, f"session/new 失败:CLI 要求 authenticate 但不支持非交互式认证。错误: {err_msg}")
+                elif any(kw in low for kw in ("unauthorized", "token", "401")):
+                    yield done(False, f"PAT 认证失败: {err_msg}")
+                else:
+                    yield done(False, f"创建会话失败: {err_msg}")
+                return
+
+            # ---- 发送测试 prompt + 流式接收 ----
+            yield stage("prompt", "发送测试 prompt「你好」,等待模型响应(流式)...")
+            test_prompt = [{"type": "text", "text": "你好"}]
+            logger.info(
+                f"[qoder_cli_test] 发送 session/prompt: "
+                f"sessionId={acp_session_id}, prompt={json.dumps(test_prompt, ensure_ascii=False)}"
+            )
+
+            # ACPClient.prompt 是阻塞调用,on_event 是同步回调,期间外层生成器无法 yield。
+            # 方案:prompt 在子线程跑,on_event 把增量 put 到 queue.Queue,
+            # 主生成器线程从 queue get 并 yield,实现真正的流式输出。
+            import queue
+            import threading
+
+            content_full: list[str] = []
+            event_q: queue.Queue = queue.Queue()
+            _SENTINEL = object()
+
+            def _streaming_on_event(msg: dict) -> None:
+                """on_event 回调:把 ACP 通知增量放入 queue 供生成器消费"""
+                if msg.get("method") != "session/update":
+                    return
+                params = msg.get("params") or {}
+                update = params.get("update") or {}
+                update_type = update.get("sessionUpdate", "")
+                content = update.get("content", "")
+                text = _extract_text(content)
+                if not text:
+                    return
+                # thought_chunk / thinking / reasoning → 思考增量
+                if update_type in ("thought_chunk", "thinking", "reasoning"):
+                    event_q.put(("thinking", text))
+                elif update_type == "agent_message_chunk":
+                    event_q.put(("content", text))
+                    content_full.append(text)
+                elif update_type == "error":
+                    event_q.put(("error", text))
+
+            prompt_error: list = []
+
+            def _run_prompt() -> None:
+                try:
+                    client.prompt(
+                        acp_session_id,
+                        test_prompt,
+                        on_event=_streaming_on_event,
+                        timeout=60,
+                    )
+                except Exception as e:
+                    prompt_error.append(e)
+                finally:
+                    event_q.put(_SENTINEL)
+
+            prompt_thread = threading.Thread(
+                target=_run_prompt, name="acp-test-prompt", daemon=True
+            )
+            prompt_thread.start()
+
+            # 外层生成器:从 queue 取事件 yield,直到收到 SENTINEL
+            while True:
+                try:
+                    item = event_q.get(timeout=120)
+                except queue.Empty:
+                    yield done(False, "模型响应超时(120s,请检查网络或配额)")
+                    return
+                if item is _SENTINEL:
+                    break
+                evt_type, text = item
+                if evt_type == "thinking":
+                    yield {"type": "thinking", "data": {"delta": text}}
+                elif evt_type == "content":
+                    yield {"type": "content", "data": {"delta": text}}
+                elif evt_type == "error":
+                    yield done(False, f"模型返回错误: {text}")
+                    return
+
+            # 检查 prompt 线程是否异常
+            if prompt_error:
+                e = prompt_error[0]
+                err_msg = str(e)
+                low = err_msg.lower()
+                if any(kw in low for kw in ("quota", "credit", "limit", "余额", "配额",
+                                            "pricing", "pricingurl")):
+                    yield done(False, f"账户配额不足,请前往充值后重试。错误详情: {err_msg}")
+                elif any(kw in low for kw in ("auth", "unauthorized", "token", "401")):
+                    yield done(False, f"PAT 认证失败: {err_msg}")
+                elif "timeout" in low:
+                    yield done(False, "模型响应超时(60s,请检查网络或配额)")
+                else:
+                    yield done(False, f"模型响应测试失败: {err_msg}")
+                return
+
+            reply = "".join(content_full).strip()
+            if not reply:
+                yield done(False, "session/new 成功,但模型未响应(请检查 PAT 配额或网络)")
+                return
+
+            preview = reply[:80] + ("..." if len(reply) > 80 else "")
+            logger.info(f"[qoder_cli_test] 模型响应: {preview}")
+            yield done(
+                True,
+                f"连接成功(ACP 协议版本 {protocol_version}),模型响应: {preview}",
+            )
+
+        except RuntimeError as e:
+            err_msg = str(e)
+            if any(kw in err_msg.lower() for kw in ("auth", "unauthorized", "token", "401")):
+                yield done(False, f"PAT 认证失败: {err_msg}")
+            else:
+                yield done(False, f"ACP 握手失败: {err_msg}")
+            return
+        finally:
+            client.close()
+
+    except Exception as e:
+        logger.exception("[qoder_cli_test] 流式测试过程异常")
+        yield {"type": "error", "data": {"ok": False, "message": f"测试异常: {e}"}}
+    finally:
         if bridge_exec_id:
             _stop_acp_bridge(session, bridge_exec_id)
         try:

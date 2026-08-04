@@ -13,10 +13,10 @@
  * 草稿在 open=true 时重置;保存/清除/测试由父组件调 API 持久化。
  *
  * 测试连接:已配置凭据时显示「测试连接」按钮,父组件调
- * POST /agents/configs/{type}/test 启动临时沙箱验证 PAT 有效性,
- * 结果通过 testResult prop 回传展示。
+ * POST /agents/configs/{type}/test(SSE 流式)启动临时沙箱验证 PAT 有效性,
+ * 流式推送阶段进度/模型思考/模型回答,结果通过 testResult prop 回传展示。
  */
-import { computed, reactive, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import type {
   AgentConfigDetailOut,
   AgentTestResult,
@@ -40,6 +40,12 @@ const props = defineProps<{
   testing?: boolean
   /** 测试结果(父组件调 test API 后传入),null 表示未测试 */
   testResult?: AgentTestResult | null
+  /** 当前测试阶段消息(流式,testing 时实时更新) */
+  testStage?: string
+  /** 模型思考过程增量累积(流式,testing 时实时更新) */
+  testThinking?: string
+  /** 模型回答增量累积(流式,testing 时实时更新) */
+  testContent?: string
 }>()
 
 const emit = defineEmits<{
@@ -142,6 +148,21 @@ function handleCancel(): void {
   if (props.saving || props.testing) return
   emit('cancel')
 }
+
+/** 流式日志容器 ref(测试中自动滚动到底部) */
+const streamLogRef = ref<HTMLElement | null>(null)
+
+/** thinking/content 有增量时自动滚到底部 */
+watch(
+  () => [props.testThinking, props.testContent, props.testStage],
+  () => {
+    if (!props.testing) return
+    nextTick(() => {
+      const el = streamLogRef.value
+      if (el) el.scrollTop = el.scrollHeight
+    })
+  },
+)
 </script>
 
 <template>
@@ -261,6 +282,29 @@ function handleCancel(): void {
                 <span v-if="testing" class="btn-spinner test-spinner" />
                 {{ testing ? '测试中...' : '测试连接' }}
               </button>
+
+              <!-- 流式进度(测试中显示):阶段 + 思考 + 回答 -->
+              <div
+                v-if="testing && (testStage || testThinking || testContent)"
+                ref="streamLogRef"
+                class="test-stream"
+              >
+                <!-- 当前阶段 -->
+                <div v-if="testStage" class="stream-stage">
+                  <span class="stage-dot" />
+                  <span class="stage-text">{{ testStage }}</span>
+                </div>
+                <!-- 模型思考 -->
+                <div v-if="testThinking" class="stream-block stream-thinking">
+                  <div class="stream-label">思考</div>
+                  <div class="stream-body">{{ testThinking }}</div>
+                </div>
+                <!-- 模型回答 -->
+                <div v-if="testContent" class="stream-block stream-content">
+                  <div class="stream-label">回答</div>
+                  <div class="stream-body">{{ testContent }}</div>
+                </div>
+              </div>
 
               <!-- 测试结果 -->
               <div
@@ -619,6 +663,84 @@ function handleCancel(): void {
 
 .test-message {
   word-break: break-word;
+}
+
+/* ---- 流式进度区 ---- */
+.test-stream {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-relaxed);
+}
+
+.stream-stage {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-secondary);
+  padding-bottom: var(--space-2);
+  margin-bottom: var(--space-2);
+  border-bottom: 1px dashed var(--color-border);
+}
+
+.stream-stage .stage-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  flex-shrink: 0;
+  animation: stage-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes stage-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.stream-stage .stage-text {
+  font-weight: var(--fw-medium);
+}
+
+.stream-block {
+  margin-top: var(--space-2);
+}
+
+.stream-block:first-of-type {
+  margin-top: 0;
+}
+
+.stream-label {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: var(--space-1);
+}
+
+.stream-thinking .stream-label {
+  color: #7c3aed;
+}
+
+.stream-content .stream-label {
+  color: var(--color-primary);
+}
+
+.stream-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-text);
+  font-family: var(--font-base);
+}
+
+.stream-thinking .stream-body {
+  color: var(--color-text-secondary);
+  font-style: italic;
 }
 
 .validation-error {
