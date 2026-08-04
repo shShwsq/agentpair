@@ -1440,6 +1440,24 @@ function isUserMessageItem(item: DisplayItem): boolean {
     />
 
     <main class="main">
+      <!-- 暂停/实时按钮行(固定在滚动容器外,不随对话滚动) -->
+      <div v-if="isRunning" class="conv-header">
+        <!-- 暂停态:橙色徽标 + 恢复按钮;运行态:红色实时徽标 + 暂停按钮 -->
+        <span v-if="isPaused" class="paused-indicator">
+          <span class="paused-bars" /><span>已暂停</span>
+        </span>
+        <span v-else class="live-indicator">
+          <span class="live-dot" />实时
+        </span>
+        <button
+          class="btn-pause"
+          :disabled="pausing"
+          :title="isPaused ? '恢复执行' : '暂停执行'"
+          @click="handleTogglePause"
+        >
+          {{ pausing ? '处理中...' : isPaused ? '恢复' : '暂停' }}
+        </button>
+      </div>
       <div ref="conversationRef" class="main-scroll">
       <!-- 加载中 -->
       <div v-if="loading" class="loading-state">
@@ -1491,23 +1509,6 @@ function isUserMessageItem(item: DisplayItem): boolean {
 
         <!-- 协作对话流(无外框,顶部仅在运行时显示实时徽标) -->
         <section v-if="roundGroups.length > 0 || isRunning" class="conversation-section">
-          <div v-if="isRunning" class="conv-header">
-            <!-- 暂停态:橙色徽标 + 恢复按钮;运行态:红色实时徽标 + 暂停按钮 -->
-            <span v-if="isPaused" class="paused-indicator">
-              <span class="paused-bars" /><span>已暂停</span>
-            </span>
-            <span v-else class="live-indicator">
-              <span class="live-dot" />实时
-            </span>
-            <button
-              class="btn-pause"
-              :disabled="pausing"
-              :title="isPaused ? '恢复执行' : '暂停执行'"
-              @click="handleTogglePause"
-            >
-              {{ pausing ? '处理中...' : isPaused ? '恢复' : '暂停' }}
-            </button>
-          </div>
           <!-- 用户指令(右对齐,像聊天界面的用户消息气泡) -->
           <div v-if="userDirective" class="user-directive">
             <ConversationMessage
@@ -2609,7 +2610,7 @@ function isUserMessageItem(item: DisplayItem): boolean {
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);
-  margin-bottom: var(--space-3);
+  padding: var(--space-3) var(--space-6);
 }
 
 .live-indicator {
