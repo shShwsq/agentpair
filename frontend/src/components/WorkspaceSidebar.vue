@@ -786,8 +786,8 @@ defineExpose({ openTaskFile })
             >
               <svg
                 viewBox="0 0 24 24"
-                width="14"
-                height="14"
+                width="16"
+                height="16"
                 fill="none"
                 stroke="currentColor"
                 stroke-width="2"
@@ -799,8 +799,39 @@ defineExpose({ openTaskFile })
                 <line x1="21" y1="21" x2="16.65" y2="16.65" />
               </svg>
             </button>
-            <button class="icon-btn" title="刷新任务列表" @click="loadTasks">↻</button>
-            <button class="icon-btn add-btn" title="提交新任务" @click="goToNewTask">+</button>
+            <button class="icon-btn" title="刷新任务列表" aria-label="刷新任务列表" @click="loadTasks">
+              <svg
+                viewBox="0 0 24 24"
+                width="16"
+                height="16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <polyline points="23 4 23 10 17 10" />
+                <polyline points="1 20 1 14 7 14" />
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+              </svg>
+            </button>
+            <button class="icon-btn" title="提交新任务" aria-label="提交新任务" @click="goToNewTask">
+              <svg
+                viewBox="0 0 24 24"
+                width="16"
+                height="16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
           </div>
         </div>
 
@@ -1222,12 +1253,13 @@ defineExpose({ openTaskFile })
 
 .sidebar-actions {
   display: flex;
-  gap: 2px;
+  align-items: center;
+  gap: 4px;
 }
 
 .icon-btn {
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1237,6 +1269,7 @@ defineExpose({ openTaskFile })
   cursor: pointer;
   border-radius: var(--radius-sm);
   font-size: 13px;
+  line-height: 1;
   transition: all var(--transition-fast);
 }
 
@@ -1252,13 +1285,6 @@ defineExpose({ openTaskFile })
 
 .back-btn {
   flex-shrink: 0;
-}
-
-/* 提交新任务按钮:加号放大显示 */
-.add-btn {
-  font-size: 18px;
-  font-weight: var(--fw-medium);
-  line-height: 1;
 }
 
 /* 搜索按钮激活态:高亮提示当前处于搜索模式 */
