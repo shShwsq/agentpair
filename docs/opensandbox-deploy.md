@@ -149,20 +149,34 @@ AgentPair 在沙箱里执行 `git` / `rg`(ripgrep)/ `python3` / `awk` / `find` �
 
 ```bash
 # 在服务器上,进入 AgentPair 仓库根目录
+# 默认同时预装 Qoder CLI 国际版 + 国内版
 bash scripts/build-sandbox-image.sh
+
+# 只装国内版(零依赖二进制,镜像更小)
+bash scripts/build-sandbox-image.sh --no-qoder-cli
+
+# 只装国际版
+bash scripts/build-sandbox-image.sh --no-qoder-cli-cn
+
+# 仅基础工具(不装任何 Qoder CLI)
+bash scripts/build-sandbox-image.sh --no-qoder-cli --no-qoder-cli-cn
 ```
 
 脚本会:
 1. 检查 docker 可用(含 daemon 是否运行、当前用户是否在 docker 组)
-2. 生成 `Dockerfile.sandbox`(已存在则跳过,便于你手动改后重跑)
+2. 按参数生成 `Dockerfile.sandbox`(已存在且配置一致则跳过;配置变更会备份原文件后重新生成)
 3. `docker build -t agentpair-sandbox:latest`
-4. 逐个验证镜像内 `git` / `rg` / `python3` / `awk` / `find` 都能找到
+4. 逐个验证镜像内 `git` / `rg` / `python3` / `awk` / `find` / `curl` 及所选 Qoder CLI 都能找到
+
+两版 CLI 的差异:
+- **Qoder CLI 国际版**(`qodercli`):npm 包,需 Node.js >= 20.0.0,账号在 qoder.com
+- **Qoder CN CLI 国内版**(`qoderclicn`,原通义灵码):零依赖二进制,仅需 curl 拉安装脚本,账号在 qoder.cn
 
 完成后在 AgentPair 的 `.env` 里设 `SANDBOX_IMAGE=agentpair-sandbox:latest`。
 
 ### 2.2 手动构建(了解脚本做了什么)
 
-脚本生成的 `Dockerfile.sandbox` 内容:
+脚本生成的 `Dockerfile.sandbox` 内容(基础工具部分,两版 CLI 的安装块见 2.3):
 
 ```dockerfile
 FROM ubuntu:22.04
@@ -170,6 +184,7 @@ FROM ubuntu:22.04
 # 避免 tzdata 等交互式安装卡住
 ENV DEBIAN_FRONTEND=noninteractive
 
+# 基础工具:curl 用于 NodeSource 脚本(国际版)+ qoder.cn/install(国内版)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         ripgrep \
@@ -180,6 +195,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         coreutils \
         findutils \
         gawk \
+        curl \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3 /usr/bin/python
 
@@ -202,17 +218,18 @@ Server 直接用本地 Docker daemon,无需推到 registry。
 
 ### 2.3 可选:Qoder CLI 执行器依赖
 
-若任务使用 Qoder CLI 执行器(`task.executor=qoder_cli`),沙箱内还需具备 Qoder CLI 运行环境。Qoder CLI 是 npm 包,且 [acp_bridge.py](../backend/app/agents/acp_bridge.py) 用 Python 标准库实现,因此依赖:
+AgentPair 支持两种 Qoder CLI 执行器,账号体系不互通,可按需选用:
 
-- **Node.js >= 20.0.0**(npm 安装方式的前提,见 [官方安装文档](https://docs.qoder.com/cli/install))
-- **Python3**(acp_bridge.py 依赖,2.2 的镜像已含)
-- **qodercli 可执行文件**(全局安装或镜像预装)
+| 执行器 | task.executor | CLI 命令 | 账号 | 依赖 | PAT 环境变量 |
+|--------|---------------|----------|------|------|--------------|
+| 国际版 | `qoder_cli` | `qodercli` | qoder.com | Node.js >= 20.0.0 + npm | `QODER_PERSONAL_ACCESS_TOKEN` |
+| 国内版 | `qoder_cli_cn` | `qoderclicn` | qoder.cn | 无(零依赖二进制) | `QODERCN_PERSONAL_ACCESS_TOKEN` |
 
-有两种方式,二选一:
+[acp_bridge.py](../backend/app/agents/acp_bridge.py) 用 Python 标准库实现,两版均需 **Python3**(2.2 的镜像已含)。安装方式二选一:
 
 #### 方式 A:镜像预装(推荐,启动快、无网络依赖)
 
-在 `Dockerfile.sandbox` 里追加(注意需在切到 `user` 之前用 root 安装):
+**国际版**(在切到 `user` 之前用 root 安装):
 
 ```dockerfile
 # 装 Node.js 20.x(Qoder CLI 要求 >= 20.0.0)
@@ -223,30 +240,37 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 
 # 全局安装 Qoder CLI(官方 npm 包 @qoder-ai/qodercli)
 RUN npm install -g @qoder-ai/qodercli
+```
 
-# 切回非 root 用户
-USER user
+**国内版**(零依赖二进制,仅需 curl):
+
+```dockerfile
+USER root
+RUN curl -fsSL https://qoder.cn/install | bash
 ```
 
 构建后验证:
 
 ```bash
-docker run --rm agentpair-sandbox:latest qodercli --version
-docker run --rm agentpair-sandbox:latest node --version
+docker run --rm agentpair-sandbox:latest qodercli --version      # 国际版
+docker run --rm agentpair-sandbox:latest qoderclicn --version    # 国内版
 ```
 
-#### 方式 B:运行时自动安装(首次启动慢,需沙箱能访问 npm registry)
+#### 方式 B:运行时自动安装(首次启动慢,需沙箱能访问外网)
 
-不在镜像里预装,让 [qoder_cli_agent.py](../backend/app/agents/qoder_cli_agent.py) 在首次启动时执行 `QODER_CLI_INSTALL_CMD` 安装。前提是镜像里已有 Node.js >= 20.0.0(按方式 A 装 Node.js,但跳过 `npm install -g @qoder-ai/qodercli` 这一行),否则 npm 命令不存在,安装会失败。
-
-对应 `.env` 配置(默认值已可用,无需额外设置):
+不在镜像里预装,让 [qoder_cli_agent.py](../backend/app/agents/qoder_cli_agent.py) 在首次启动时执行 `*_INSTALL_CMD` 安装。对应 `.env` 配置(默认值已可用):
 
 ```bash
+# 国际版(前提:镜像已装 Node.js >= 20.0.0,否则 npm 不存在)
 QODER_CLI_BIN=qodercli
 QODER_CLI_INSTALL_CMD=npm install -g @qoder-ai/qodercli
+
+# 国内版(零依赖,仅需镜像含 curl)
+QODER_CLI_CN_BIN=qoderclicn
+QODER_CLI_CN_INSTALL_CMD=curl -fsSL https://qoder.cn/install | bash
 ```
 
-> 注意:[BRIDGE_STARTUP_TIMEOUT 默认 30 秒](../backend/app/agents/qoder_cli_agent.py),首次自动安装可能超时。生产环境建议用方式 A 预装,避免每次任务都拉 npm 包。
+> 注意:[BRIDGE_STARTUP_TIMEOUT 默认 30 秒](../backend/app/agents/qoder_cli_agent.py),首次自动安装可能超时。生产环境建议用方式 A 预装,避免每次任务都拉包。
 
 ## 三、配置 SSH Key(给沙箱用,可选)
 
