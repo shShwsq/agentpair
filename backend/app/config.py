@@ -51,10 +51,21 @@ class Settings(BaseSettings):
     # 沙箱配置(阶段 2 起)
     # mode: mock(本地未部署 Server)/ sandbox(连真实 OpenSandbox Server)
     SANDBOX_MODE: str = "mock"
+    # OpenSandbox Server 地址,形如 http://your-server-ip:8080
     SANDBOX_SERVER_URL: str = "http://localhost:8080"
+    # Server 鉴权 API Key(对应 server 配置 [server].api_key,留空则不鉴权)
     SANDBOX_API_KEY: str = ""
-    SANDBOX_IMAGE: str = "opensandbox/code-interpreter:v1.0.2"
+    # 沙箱镜像:必须预装 git / ripgrep(rg) / python3 / awk / coreutils
+    # 官方 ubuntu 镜像不含 git 和 rg,需按 docs/opensandbox-deploy.md 构建自定义镜像
+    SANDBOX_IMAGE: str = "ubuntu"
+    # 沙箱超时(分钟)
     SANDBOX_TIMEOUT_MINUTES: int = 30
+    # 宿主机 SSH key 目录(可选,挂载到沙箱 /home/user/.ssh 供 git clone SSH 协议用)
+    # 留空不挂载;设为 ~/.ssh 则只读挂载到沙箱。需在 server [storage].allowed_host_paths 放行
+    SANDBOX_SSH_KEY_HOST_PATH: str = ""
+    # 沙箱资源限制(可选,传给 SDK resource 参数,如 cpu="2" memory="4Gi")
+    SANDBOX_CPU: str = ""
+    SANDBOX_MEMORY: str = ""
 
 
 settings = Settings()

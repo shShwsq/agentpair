@@ -18,12 +18,14 @@ OpenSandbox 的 Python SDK 是 async/await 风格,但我们的 react_agent 是�
 """
 import asyncio
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from app.config import settings
 
@@ -90,14 +92,22 @@ class SandboxSession:
             return self._mock_read_file(path)
 
     def close(self) -> None:
-        """关闭沙箱,释放资源"""
+        """关闭沙箱,释放资源
+
+        sandbox 模式用 destroy()(kill + close 本地资源,避免 httpx 连接泄漏);
+        destroy 不可用时回退到 kill()
+        """
         if self._closed:
             return
         self._closed = True
 
         if self.mode == "sandbox" and self.sandbox:
             try:
-                self._run_async(self.sandbox.kill())
+                destroy = getattr(self.sandbox, "destroy", None)
+                if destroy is not None:
+                    self._run_async(destroy())
+                else:
+                    self._run_async(self.sandbox.kill())
             except Exception as e:
                 logger.warning(f"关闭沙箱失败: {e}")
         elif self._mock_dir:
@@ -213,20 +223,84 @@ def create_sandbox() -> SandboxSession:
         raise ValueError(f"未知 SANDBOX_MODE: {mode}")
 
 
+def _parse_domain(server_url: str) -> str:
+    """从 SANDBOX_SERVER_URL 提取 SDK 需要的 domain(host:port,无 scheme)
+
+    SDK 的 ConnectionConfig.domain 接受 "host:port" 形式(无 http:// 前缀)
+    """
+    if "://" in server_url:
+        parsed = urlparse(server_url)
+        return parsed.netloc
+    return server_url.lstrip("/")
+
+
+def _build_volumes() -> list[Any]:
+    """根据配置构建 SSH key 挂载卷(可选)
+
+    沙箱默认用户是 user,把宿主机 SSH 目录只读挂载到 /home/user/.ssh,
+    供 git clone git@github.com:... 使用。需在 server [storage].allowed_host_paths 放行。
+    """
+    if not settings.SANDBOX_SSH_KEY_HOST_PATH:
+        return []
+    from opensandbox.models.sandboxes import Host, Volume
+
+    host_path = os.path.expanduser(settings.SANDBOX_SSH_KEY_HOST_PATH)
+    if not os.path.isdir(host_path):
+        logger.warning(
+            f"[sandbox] SANDBOX_SSH_KEY_HOST_PATH 不存在或不是目录,跳过挂载: {host_path}"
+        )
+        return []
+    return [
+        Volume(
+            name="ssh-keys",
+            host=Host(path=host_path),
+            mountPath="/home/user/.ssh",
+            readOnly=True,
+        )
+    ]
+
+
+def _build_resource() -> dict[str, str] | None:
+    """根据配置构建资源限制(可选)"""
+    resource: dict[str, str] = {}
+    if settings.SANDBOX_CPU:
+        resource["cpu"] = settings.SANDBOX_CPU
+    if settings.SANDBOX_MEMORY:
+        resource["memory"] = settings.SANDBOX_MEMORY
+    return resource or None
+
+
 def _create_real_sandbox() -> SandboxSession:
     """创建真实沙箱
 
-    OpenSandbox SDK 是 async/await 风格,这里用 asyncio.run 启动
+    OpenSandbox SDK 是 async/await 风格,这里用 asyncio.run 启动。
+    必须显式传 ConnectionConfig(domain + api_key),否则 SDK 只会连 localhost:8080。
     """
     from datetime import timedelta
 
     from opensandbox import Sandbox
+    from opensandbox.config import ConnectionConfig
+
+    domain = _parse_domain(settings.SANDBOX_SERVER_URL)
+    config = ConnectionConfig(
+        domain=domain,
+        api_key=settings.SANDBOX_API_KEY or None,
+        request_timeout=timedelta(seconds=30),
+    )
+    volumes = _build_volumes()
+    resource = _build_resource()
 
     async def _create():
-        sandbox = await Sandbox.create(
-            settings.SANDBOX_IMAGE,
-            timeout=timedelta(minutes=settings.SANDBOX_TIMEOUT_MINUTES),
-        )
+        kwargs: dict[str, Any] = {
+            "image": settings.SANDBOX_IMAGE,
+            "connection_config": config,
+            "timeout": timedelta(minutes=settings.SANDBOX_TIMEOUT_MINUTES),
+        }
+        if volumes:
+            kwargs["volumes"] = volumes
+        if resource:
+            kwargs["resource"] = resource
+        sandbox = await Sandbox.create(**kwargs)
         return sandbox
 
     sandbox = SandboxSession(mode="sandbox")._run_async(_create())

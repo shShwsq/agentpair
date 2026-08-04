@@ -2,48 +2,97 @@
 
 本文档指导如何在 Linux 服务器上部署 OpenSandbox Server,并让 AgentPair 后端连接到它。
 
+> 配置项以 OpenSandbox 官方 `server/configuration.md` 为准。本文只覆盖 AgentPair 接入需要的最小配置。
+
 ## 前置条件
 
-- **Linux 服务器**(Ubuntu 20.04+ / CentOS 7+ / Debian 11+ 推荐)
-- **Docker** 已安装并运行(`docker --version` 能输出版本号)
+- **Linux 服务器**(Ubuntu 20.04+ / CentOS 7+ / Debian 11+ 推荐;macOS / Windows WSL2 也支持)
+- **Docker Engine 20.10+** 已安装并运行(`docker --version` 能输出版本号)
 - **Python 3.10+**(`python3 --version`)
 - **pip / uv** 任一即可
 - **服务器对外开放端口 8080**(或你自定义的端口),供后端连接
 
 ## 一、安装 OpenSandbox Server
 
-OpenSandbox 提供两种安装方式,推荐用 `uvx` 方式(最简单):
-
-### 1.1 安装 uv(若已装可跳过)
+### 1.1 安装 Server
 
 ```bash
-# 一键安装 uv(Python 包管理器,OpenSandbox 文档用它)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
-uv --version  # 验证
+# 用 pip
+pip install opensandbox-server
+
+# 或用 uv
+uv pip install opensandbox-server
+
+# 验证:能输出版本号即可
+opensandbox-server --version
 ```
 
-### 1.2 启动 Server
+> 不要用 `uvx opensandbox-server` 长期运行:`uvx` 是临时执行,每次启动都可能重新拉包,systemd 托管时路径也不好定位。装成正式命令更稳。
+
+### 1.2 生成配置文件
 
 ```bash
-# 初始化配置文件
-uvx opensandbox-server init-config ~/.sandbox.toml --example docker
+# 生成 Docker runtime 配置模板(推荐)
+opensandbox-server init-config ~/.sandbox.toml --example docker
 
-# 启动 Server(前台运行,看日志)
-uvx opensandbox-server
+# 覆盖已有配置
+opensandbox-server init-config ~/.sandbox.toml --example docker --force
+```
 
-# 或后台运行 + 日志
-nohup uvx opensandbox-server > ~/opensandbox.log 2>&1 &
+生成的模板包含 `[runtime]`、`[docker]`、`[egress]` 等全部必要字段。**必须检查/修改以下两项**:
+
+```toml
+[server]
+# 模板默认是 127.0.0.1,只能本机访问。要让后端远程连接,必须改成 0.0.0.0
+host = "0.0.0.0"
+port = 8080
+
+# 鉴权:留空则不鉴权,但非交互启动需设环境变量 OPENSANDBOX_INSECURE_SERVER=YES(见 1.4)
+# 生产环境强烈建议设一个随机长字符串:
+# api_key = "your-secret-api-key"
+
+[runtime]
+type = "docker"
+# init-config 会自动填入当前版本的 execd 镜像,手写时不能省,否则启动失败
+execd_image = "opensandbox/execd:v1.0.21"
+
+[storage]
+# 允许挂载到沙箱的宿主机路径前缀。空列表 = 禁止任何 host 挂载(安全默认)
+# 要把 SSH key 挂载进沙箱,需放行对应路径前缀,例如:
+# allowed_host_paths = ["/home"]
+```
+
+完整配置参考:https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md
+
+### 1.3 启动 Server
+
+```bash
+# 前台运行,看日志
+opensandbox-server
+
+# 后台运行 + 日志
+nohup opensandbox-server > ~/opensandbox.log 2>&1 &
 
 # 验证:返回 JSON 即成功
 curl http://localhost:8080/health
 ```
 
-启动后,Server 监听 `http://0.0.0.0:8080`。
+### 1.4 关于鉴权的重要说明
 
-### 1.3 配置 systemd(可选,生产推荐)
+`[server].api_key` 留空时,Server 仍然可以启动,但**非交互环境**(systemd / nohup / Docker / CI)下必须显式确认风险,否则启动会卡住:
 
-让服务开机自启 + 崩溃自动重启:
+```bash
+# 方式 A:设环境变量(推荐用于 systemd / nohup)
+export OPENSANDBOX_INSECURE_SERVER=YES
+
+# 方式 B:在配置里设 api_key(生产推荐)
+# [server]
+# api_key = "your-secret-api-key"
+```
+
+设了 `api_key` 后,所有 API 请求(除 `/health`、`/docs`、`/redoc`)必须带 header `OPEN-SANDBOX-API-KEY: your-secret-api-key`。AgentPair 后端通过 `SANDBOX_API_KEY` 环境变量传入。
+
+### 1.5 配置 systemd(可选,生产推荐)
 
 ```bash
 sudo tee /etc/systemd/system/opensandbox.service > /dev/null <<EOF
@@ -55,10 +104,12 @@ Requires=docker.service
 [Service]
 Type=simple
 User=$(whoami)
-ExecStart=$(which uvx) opensandbox-server
+ExecStart=$(which opensandbox-server)
 Restart=on-failure
 RestartSec=5
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin
+# 若 [server].api_key 留空,必须加这一行,否则非交互启动会卡住
+Environment=OPENSANDBOX_INSECURE_SERVER=YES
 
 [Install]
 WantedBy=multi-user.target
@@ -69,24 +120,66 @@ sudo systemctl enable --now opensandbox
 sudo systemctl status opensandbox
 ```
 
-## 二、配置 SSH Key(给沙箱用)
+## 二、准备沙箱镜像
 
-沙箱里执行 `git clone git@github.com:...` 需要 SSH 凭证。否则 clone 会失败。
+AgentPair 在沙箱里执行 `git` / `rg`(ripgrep)/ `python3` / `awk` / `find` 等命令。官方 `ubuntu` 镜像不含 `git` 和 `rg`,需构建自定义镜像。
 
-### 2.1 生成专用 SSH Key
+在服务器上创建 `Dockerfile.sandbox`:
+
+```dockerfile
+FROM ubuntu:22.04
+
+# 避免 tzdata 等交互式安装卡住
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        ripgrep \
+        python3 \
+        python3-pip \
+        ca-certificates \
+        openssh-client \
+        coreutils \
+        findutils \
+        gawk \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3 /usr/bin/python
+
+# 沙箱默认非 root 用户 user,确保 home 目录存在
+RUN useradd -m -s /bin/bash user
+USER user
+WORKDIR /home/user
+```
+
+构建并加载(Server 直接用本地 Docker daemon,无需推到 registry):
+
+```bash
+docker build -f Dockerfile.sandbox -t agentpair-sandbox:latest .
+# 验证
+docker run --rm agentpair-sandbox:latest rg --version
+docker run --rm agentpair-sandbox:latest git --version
+```
+
+后续在 AgentPair 的 `.env` 里设 `SANDBOX_IMAGE=agentpair-sandbox:latest`。
+
+## 三、配置 SSH Key(给沙箱用,可选)
+
+沙箱里执行 `git clone git@github.com:...` 需要 SSH 凭证。如果你只用 HTTPS+token 方式 clone(后端 `clone_repo_with_fallback` 会优先用 token),可以跳过本节。
+
+### 3.1 生成专用 SSH Key
 
 ```bash
 ssh-keygen -t ed25519 -C "opensandbox@your-server" -f ~/.ssh/id_ed25519_opensandbox -N ""
 cat ~/.ssh/id_ed25519_opensandbox.pub
 ```
 
-### 2.2 添加到 GitHub
+### 3.2 添加到 GitHub
 
 - 打开 https://github.com/settings/keys
 - 点 "New SSH key",把上一步输出的公钥粘贴进去
 - Title 随意,比如 `OpenSandbox Server`
 
-### 2.3 配置 SSH 自动用这个 key
+### 3.3 配置 SSH 自动用这个 key
 
 ```bash
 cat >> ~/.ssh/config <<EOF
@@ -105,48 +198,69 @@ ssh -T git@github.com
 # 看到 "Hi xxx! You've successfully authenticated" 即成功
 ```
 
-### 2.4 让沙箱能读到 SSH Key
+### 3.4 让沙箱能读到 SSH Key(关键)
 
-OpenSandbox 的沙箱默认是非 root 用户执行。需要把 SSH key 挂载或复制到容器可访问的位置。最简单做法:**在 server 的 config 里配置 volume 挂载**。
+OpenSandbox 的 `[docker]` 段**没有** `volumes` 字段。挂载宿主机目录到沙箱的正确方式是:
 
-编辑 `~/.sandbox.toml`,找到 `[docker]` 段(若没有则加上):
+1. **Server 端**:在 `~/.sandbox.toml` 的 `[storage].allowed_host_paths` 放行 SSH 目录所在路径前缀
+2. **后端**:通过 SDK 的 `volumes` 参数挂载(已在 `sandbox/client.py` 实现)
+
+修改 `~/.sandbox.toml`:
 
 ```toml
-[docker]
-# 把宿主机的 SSH key 和 git 配置挂载到沙箱
-volumes = [
-    "/home/youruser/.ssh:/home/user/.ssh:ro",
-]
+[storage]
+# 放行 /home 前缀,允许挂载 ~/.ssh 到沙箱
+allowed_host_paths = ["/home"]
 ```
-
-把 `youruser` 换成你的实际用户名。
 
 重启 Server:
 
 ```bash
 sudo systemctl restart opensandbox
-# 或 nohup 方式:kill 后重新启动
 ```
 
-## 三、后端连接配置
+在 AgentPair 后端的 `.env` 里设:
 
-在你的开发机或部署后端的服务器上,修改 AgentPair 的 `backend/.env`:
+```bash
+# 挂载宿主机 ~/.ssh 到沙箱 /home/user/.ssh(只读)
+SANDBOX_SSH_KEY_HOST_PATH=~/.ssh
+```
+
+后端 `client.py` 会自动把这个路径作为只读 Volume 挂载到每个沙箱的 `/home/user/.ssh`。
+
+## 四、后端连接配置
+
+在 AgentPair 后端的 `backend/.env` 里配置:
 
 ```bash
 # 切换到真实沙箱模式
 SANDBOX_MODE=sandbox
 
-# Linux 服务器地址(若 Server 部署在远程)
+# OpenSandbox Server 地址(远程服务器填 IP)
 SANDBOX_SERVER_URL=http://your-server-ip:8080
 
-# API Key(若 Server 开启鉴权则填,否则留空)
+# API Key(对应 Server 的 [server].api_key;Server 留空则这里也留空)
 SANDBOX_API_KEY=
 
-# 沙箱镜像(默认官方 code-interpreter,预装 Python runtime)
-SANDBOX_IMAGE=opensandbox/code-interpreter:v1.0.2
+# 沙箱镜像(第二节构建的自定义镜像)
+SANDBOX_IMAGE=agentpair-sandbox:latest
 
-# 沙箱超时
+# 沙箱超时(分钟)
 SANDBOX_TIMEOUT_MINUTES=30
+
+# 可选:挂载宿主机 SSH key(第三节)
+SANDBOX_SSH_KEY_HOST_PATH=~/.ssh
+
+# 可选:资源限制
+SANDBOX_CPU=2
+SANDBOX_MEMORY=4Gi
+```
+
+确保后端安装了 OpenSandbox SDK:
+
+```bash
+cd backend
+pip install opensandbox
 ```
 
 重启后端:
@@ -155,73 +269,94 @@ SANDBOX_TIMEOUT_MINUTES=30
 uvicorn app.main:app --reload
 ```
 
-## 四、验证
+## 五、验证
 
-提交一个审计任务,看日志里是否出现 `[sandbox] git clone` 而不是 `[mock] git clone`:
+提交一个审计任务,看后端日志里是否出现 `[sandbox] git clone` 而不是 `[mock]`:
 
-```bash
-# 后端日志里应该看到
+```
 [sandbox] git clone: git@github.com:xxx/xxx.git
 [sandbox] search: rg --line-number ...
 ```
 
 如果看到 `[mock]`,说明 `SANDBOX_MODE` 没切到 `sandbox`。
 
-## 五、常见问题
+## 六、常见问题
 
-### 5.1 沙箱里 git clone 失败:Permission denied (publickey)
+### 6.1 Server 启动卡住 / 无输出
+
+**原因**:`[server].api_key` 留空且未设 `OPENSANDBOX_INSECURE_SERVER=YES`,非交互环境会等待 TTY 确认。
+
+**解决**:要么在 `[server].api_key` 设一个值,要么设环境变量 `OPENSANDBOX_INSECURE_SERVER=YES`。
+
+### 6.2 后端连不上 Server
+
+**排查**:
+1. 确认 `~/.sandbox.toml` 里 `[server].host = "0.0.0.0"`(模板默认 127.0.0.1,只能本机访问)
+2. 确认防火墙放行 8080 端口:`sudo ufw allow 8080` 或 `firewall-cmd --add-port=8080/tcp`
+3. 在后端机器上 `curl http://your-server-ip:8080/health` 验证连通性
+
+### 6.3 沙箱里 git clone 失败:Permission denied (publickey)
 
 **原因**:沙箱没读到 SSH key,或 key 没添加到 GitHub。
 
 **排查**:
-1. 在后端日志看 clone 失败的 stderr
-2. 临时把 `SANDBOX_MODE=sandbox` 改成在沙箱里跑 `ssh -T git@github.com` 验证
+1. 确认 `.env` 里 `SANDBOX_SSH_KEY_HOST_PATH` 已设
+2. 确认 Server 的 `[storage].allowed_host_paths` 放行了对应路径前缀
+3. 后端日志看 clone 失败的 stderr
 
-### 5.2 沙箱里 rg 命令不存在
+### 6.4 沙箱里 rg 命令不存在
 
-**原因**:官方 code-interpreter 镜像可能没装 ripgrep。
+**原因**:用了 `ubuntu` 官方镜像,没装 ripgrep。
 
-**解决**:要么用 grep fallback(改 sandbox_tools.py 的搜索实现),要么自定义镜像。
+**解决**:按第二节构建 `agentpair-sandbox:latest` 自定义镜像,并在 `.env` 设 `SANDBOX_IMAGE=agentpair-sandbox:latest`。
 
-自定义镜像方式:在仓库根目录写 `Dockerfile.sandbox`:
+### 6.5 沙箱创建失败:image pull 超时
 
-```dockerfile
-FROM opensandbox/code-interpreter:v1.0.2
-RUN apt-get update && apt-get install -y ripgrep && rm -rf /var/lib/apt/lists/*
-```
-
-构建并推到你的镜像仓库,然后改 `.env` 的 `SANDBOX_IMAGE`。
-
-### 5.3 沙箱创建失败:image pull 超时
-
-官方镜像在国内拉取可能慢。可以:
+`ubuntu` / `agentpair-sandbox` 镜像在 Server 本地。若用了远程 registry 镜像,国内拉取可能慢:
 - 配置 Docker 镜像加速器(阿里云 ACR 等)
-- 或预先 `docker pull opensandbox/code-interpreter:v1.0.2`
+- 或预先 `docker pull` 到本地
 
-### 5.4 沙箱执行命令超时
+### 6.6 沙箱执行命令超时
 
-`SANDBOX_TIMEOUT_MINUTES` 是整个沙箱的生命周期超时,单个命令超时在 `sandbox_tools.py` 里写死(120s for clone, 60s for others)。如有需要调整。
+`SANDBOX_TIMEOUT_MINUTES` 是整个沙箱的生命周期超时。单个命令超时在 `sandbox_tools.py` 里:
+- `git clone`:120s
+- 其他命令:60s(默认)
+- `semgrep`:300s
 
-### 5.5 沙箱内存/CPU 不够
+如需调整,改 `sandbox_tools.py` 对应调用的 `timeout` 参数。
 
-在 `~/.sandbox.toml` 配置资源限制:
+### 6.7 沙箱内存/CPU 不够
 
-```toml
-[docker]
-memory = "2g"
-cpus = "2.0"
+在 AgentPair 的 `.env` 配置:
+
+```bash
+SANDBOX_CPU=2
+SANDBOX_MEMORY=4Gi
 ```
 
-## 六、生产环境注意事项
+后端会通过 SDK 的 `resource` 参数传给 Server。注意:**不要**在 `~/.sandbox.toml` 的 `[docker]` 段找 `memory` / `cpus` 字段——官方配置没有这两项,资源限制只能通过 SDK 在创建沙箱时传入。
 
-1. **API Key 鉴权**:生产环境一定要给 Server 加鉴权,否则任何人都能创建沙箱。在 `~/.sandbox.toml` 配置 `[auth] api_key = "xxx"`,然后 `SANDBOX_API_KEY=xxx`
+## 七、生产环境注意事项
+
+1. **API Key 鉴权**:生产环境一定要给 Server 设 `[server].api_key`,否则任何人都能创建沙箱
 2. **网络隔离**:Server 端口只对后端服务开放,不要暴露到公网
-3. **资源配额**:限制单用户/单任务的沙箱数量,防止恶意消耗
+3. **资源配额**:用 `SANDBOX_CPU` / `SANDBOX_MEMORY` 限制单沙箱资源,防恶意消耗
 4. **日志留存**:Server 日志要收集,便于排查沙箱执行问题
 5. **定期清理**:沙箱意外退出可能留下 dangling 容器,定期 `docker container prune`
 
+## 配置项对照表
+
+| AgentPair `.env` | OpenSandbox Server 配置 | 说明 |
+|---|---|---|
+| `SANDBOX_SERVER_URL` | `[server].host` + `[server].port` | 后端解析出 `host:port` 传给 SDK 的 `domain` |
+| `SANDBOX_API_KEY` | `[server].api_key` | 两边必须一致,或都留空 |
+| `SANDBOX_IMAGE` | — | 沙箱容器镜像,Server 本地需存在 |
+| `SANDBOX_SSH_KEY_HOST_PATH` | `[storage].allowed_host_paths` | 后端挂载,Server 放行路径前缀 |
+| `SANDBOX_CPU` / `SANDBOX_MEMORY` | — | 通过 SDK `resource` 参数传入 |
+
 ## 参考链接
 
-- 官方仓库:https://github.com/alibaba/OpenSandbox
-- SDK 文档:见仓库 `sdks/` 目录
-- CLI 工具:`pip install opensandbox-cli`,命令 `osb`
+- 官方仓库:https://github.com/opensandbox-group/OpenSandbox
+- Server 配置参考:https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md
+- Python SDK 文档:https://open-sandbox.ai/sdks/python
+- 安装指南:https://open-sandbox.ai/getting-started/installation
