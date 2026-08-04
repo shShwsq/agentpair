@@ -245,14 +245,16 @@ RUN npm install -g @qoder-ai/qodercli
 **国内版**(零依赖二进制,仅需 curl):
 
 ```dockerfile
-# install 脚本默认装到执行用户的 ~/.local/bin,root 执行时装到 /root/.local/bin,
-# 切到非 root 用户后 PATH 不含该路径。安装后复制到 /usr/local/bin 确保全局可用。
+# install 脚本把二进制装到执行用户的 ~/.local/bin,root 执行时装到 /root/.local/bin,
+# 切到非 root 用户后 PATH 不含该路径。安装后全盘查找并复制到 /usr/local/bin 确保全局可用。
 USER root
 RUN curl -fsSL https://qoder.cn/install | bash \
-    && QODER_CN_BIN="$(find /root /usr/local /opt -name qoderclicn -type f 2>/dev/null | head -1)" \
-    && if [ -n "$QODER_CN_BIN" ] && [ "$QODER_CN_BIN" != "/usr/local/bin/qoderclicn" ]; then \
+    && QODER_CN_BIN="$(find / -name qoderclicn -type f 2>/dev/null | head -1)" \
+    && if [ -z "$QODER_CN_BIN" ]; then echo "未找到 qoderclicn" >&2; exit 1; fi \
+    && if [ "$QODER_CN_BIN" != "/usr/local/bin/qoderclicn" ]; then \
         cp "$QODER_CN_BIN" /usr/local/bin/qoderclicn && chmod +x /usr/local/bin/qoderclicn; \
-    fi
+    fi \
+    && /usr/local/bin/qoderclicn --version
 ```
 
 构建后验证:

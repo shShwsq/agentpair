@@ -103,9 +103,9 @@ else
     elif [ "$WITH_QODER_CLI_CN" -eq 1 ] && ! grep -q "qoder.cn/install" "$DOCKERFILE"; then
         NEED_REGEN=1
         REGEN_REASON="标记为含国内版但缺 qoder.cn/install 安装行,需重新生成"
-    elif [ "$WITH_QODER_CLI_CN" -eq 1 ] && ! grep -q "/usr/local/bin/qoderclicn" "$DOCKERFILE"; then
+    elif [ "$WITH_QODER_CLI_CN" -eq 1 ] && grep -q "find /root /usr/local /opt" "$DOCKERFILE"; then
         NEED_REGEN=1
-        REGEN_REASON="国内版安装块缺 PATH 修复(未复制到 /usr/local/bin),需重新生成"
+        REGEN_REASON="国内版安装块为旧版(限定目录 find,二进制可能装到其他位置),需重新生成"
     fi
 fi
 
@@ -165,16 +165,23 @@ EOF
 
 # ---- Qoder CN CLI 国内版(qoderclicn,原通义灵码,零依赖二进制)----
 # 见 https://qoder.cn(install 脚本自动适配 arm64/amd64)
-# 注意:install 脚本把二进制装到执行用户的 ~/.local/bin,
-#   root 执行时装到 /root/.local/bin,切到非 root 用户后 PATH 不含该路径。
-#   安装后查找实际位置,复制到 /usr/local/bin 确保所有用户可用。
+# install 脚本把二进制装到执行用户的 ~/.local/bin,root 执行时装到 /root/.local/bin,
+# 切到非 root 用户后 PATH 不含该路径。安装后全盘查找并复制到 /usr/local/bin 确保全局可用。
 USER root
 RUN curl -fsSL https://qoder.cn/install | bash \
-    && QODER_CN_BIN="$(find /root /usr/local /opt -name qoderclicn -type f 2>/dev/null | head -1)" \
-    && if [ -n "$QODER_CN_BIN" ] && [ "$QODER_CN_BIN" != "/usr/local/bin/qoderclicn" ]; then \
+    && echo "=== install 脚本完成,全盘查找 qoderclicn ===" \
+    && find / -name 'qoderclicn*' -type f 2>/dev/null \
+    && QODER_CN_BIN="$(find / -name qoderclicn -type f 2>/dev/null | head -1)" \
+    && if [ -z "$QODER_CN_BIN" ]; then \
+        echo "ERROR: install 脚本执行后未找到 qoderclicn 二进制" >&2; \
+        echo "--- /root/.local/bin ---" >&2; ls -la /root/.local/bin/ >&2 2>/dev/null || true; \
+        echo "--- /root 内容 ---" >&2; ls -la /root/ >&2 2>/dev/null || true; \
+        exit 1; \
+    fi \
+    && if [ "$QODER_CN_BIN" != "/usr/local/bin/qoderclicn" ]; then \
         cp "$QODER_CN_BIN" /usr/local/bin/qoderclicn && chmod +x /usr/local/bin/qoderclicn; \
     fi \
-    && /usr/local/bin/qoderclicn --version >/dev/null 2>&1 || true
+    && /usr/local/bin/qoderclicn --version
 EOF
     fi
 
