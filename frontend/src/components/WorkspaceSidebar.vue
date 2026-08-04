@@ -965,15 +965,47 @@ defineExpose({ openTaskFile })
       <!-- 视图:工作区文件树 -->
       <template v-else>
         <div class="sidebar-header">
-          <button class="icon-btn back-btn" title="返回任务列表" @click="backToTasks">←</button>
+          <button class="icon-btn back-btn" title="返回任务列表" aria-label="返回任务列表" @click="backToTasks">
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <line x1="19" y1="12" x2="5" y2="12" />
+              <polyline points="12 19 5 12 12 5" />
+            </svg>
+          </button>
           <span class="sidebar-title">文件树</span>
           <div class="sidebar-actions">
             <button
               class="icon-btn"
               title="刷新文件树"
+              aria-label="刷新文件树"
               :disabled="!available"
               @click="refreshTree"
-            >↻</button>
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="16"
+                height="16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <polyline points="23 4 23 10 17 10" />
+                <polyline points="1 20 1 14 7 14" />
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+              </svg>
+            </button>
           </div>
         </div>
 
@@ -1045,8 +1077,25 @@ defineExpose({ openTaskFile })
               "
               class="tree-restore-btn"
               title="显示文件查看面板"
+              aria-label="显示文件查看面板"
               @click.stop="showFilePanelAgain"
-            >↗</button>
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="12"
+                height="12"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                <polyline points="15 3 21 3 21 9" />
+                <line x1="10" y1="14" x2="21" y2="3" />
+              </svg>
+            </button>
           </div>
           <div v-if="treeRoot.loaded && treeRoot.children.length === 0" class="empty-tree">
             (空目录)
@@ -1063,21 +1112,75 @@ defineExpose({ openTaskFile })
       <div class="file-panel-header">
         <span class="file-path" :title="selectedFilePath ?? undefined">{{ selectedFileName }}</span>
         <div class="file-pagination">
-          <button class="page-btn" :disabled="!hasPrevPage || loadingFile" @click="loadPrevPage">
-            ↑
+          <button
+            class="page-btn"
+            title="上一页"
+            aria-label="上一页"
+            :disabled="!hasPrevPage || loadingFile"
+            @click="loadPrevPage"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <line x1="12" y1="19" x2="12" y2="5" />
+              <polyline points="5 12 12 5 19 12" />
+            </svg>
           </button>
           <span class="page-info">
             {{ fileStartLine }}-{{ fileEndLine }} / {{ fileTotalLines }}
           </span>
-          <button class="page-btn" :disabled="!hasNextPage || loadingFile" @click="loadNextPage">
-            ↓
+          <button
+            class="page-btn"
+            title="下一页"
+            aria-label="下一页"
+            :disabled="!hasNextPage || loadingFile"
+            @click="loadNextPage"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <polyline points="19 12 12 19 5 12" />
+            </svg>
           </button>
         </div>
         <button
           class="icon-btn file-close-btn"
           title="隐藏文件查看面板"
+          aria-label="隐藏文件查看面板"
           @click="hideFilePanel"
-        >×</button>
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="16"
+            height="16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
       </div>
       <div ref="fileContentRef" class="file-content">
         <div v-if="loadingFile" class="file-loading">
@@ -1713,9 +1816,6 @@ defineExpose({ openTaskFile })
 /* 文件查看面板头部的隐藏按钮 */
 .file-close-btn {
   flex-shrink: 0;
-  font-size: 16px;
-  font-weight: var(--fw-medium);
-  line-height: 1;
 }
 
 .file-close-btn:hover {
