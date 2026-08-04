@@ -761,9 +761,14 @@ def test_credential(db: Session, user_id, agent_type: str = AGENT_TYPE) -> tuple
                         f"session/new 失败:CLI 要求 authenticate 但不支持非交互式认证。"
                         f"错误: {err_msg}"
                     )
-                if any(kw in low for kw in ("unauthorized", "token", "401",
-                                            "quota", "credit", "limit", "余额", "配额")):
-                    return False, f"PAT 认证或配额失败: {err_msg}"
+                if any(kw in low for kw in ("unauthorized", "token", "401")):
+                    return False, f"PAT 认证失败: {err_msg}"
+                if any(kw in low for kw in ("quota", "credit", "limit", "余额", "配额",
+                                            "pricing", "pricingurl")):
+                    return False, (
+                        f"账户配额不足,请前往充值后重试。"
+                        f"错误详情: {err_msg}"
+                    )
                 return False, f"模型响应测试失败: {err_msg}"
 
         except RuntimeError as e:
