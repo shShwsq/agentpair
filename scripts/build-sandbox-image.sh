@@ -103,9 +103,6 @@ else
     elif [ "$WITH_QODER_CLI_CN" -eq 1 ] && ! grep -q "qoder.cn/install" "$DOCKERFILE"; then
         NEED_REGEN=1
         REGEN_REASON="标记为含国内版但缺 qoder.cn/install 安装行,需重新生成"
-    elif [ "$WITH_QODER_CLI_CN" -eq 1 ] && ! grep -q "cp -L /root/.local/bin/qoderclicn" "$DOCKERFILE"; then
-        NEED_REGEN=1
-        REGEN_REASON="国内版安装块为旧版(未用 cp -L 复制 symlink,二进制定位失败),需重新生成"
     fi
 fi
 
