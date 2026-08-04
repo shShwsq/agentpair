@@ -216,12 +216,11 @@ const displayContent = computed(() => {
   gap: var(--space-2);
 }
 
-/* reasoning 独立卡片:淡灰背景 + 左边框,与 content 卡片视觉区分 */
+/* reasoning 独立卡片:淡灰背景,与 content 卡片视觉区分 */
 .msg-reasoning-card {
   padding: var(--space-2) var(--space-3);
   background: var(--color-surface-alt);
   border-radius: var(--radius-md);
-  border-left: 2px solid var(--color-text-muted);
 }
 
 .msg-reasoning-header {
@@ -321,7 +320,6 @@ const displayContent = computed(() => {
 .msg-content-card {
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-lg);
-  border-left: 3px solid transparent;
   font-size: var(--fs-sm);
   white-space: pre-wrap;
   word-break: break-word;
@@ -330,17 +328,14 @@ const displayContent = computed(() => {
 
 .msg-user-agent {
   background: var(--color-info-light);
-  border-left-color: var(--color-info);
 }
 
 .msg-react-agent {
   background: #faf5ff;
-  border-left-color: #a855f7;
 }
 
 .msg-tool {
   background: var(--color-surface-alt);
-  border-left-color: var(--color-text-muted);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   color: var(--color-text-secondary);
@@ -353,23 +348,19 @@ const displayContent = computed(() => {
    这里只负责配色 */
 .msg-user-message {
   background: var(--color-primary-light);
-  border-left-color: var(--color-primary);
   color: var(--color-text);
 }
 
 .msg-error {
   background: var(--color-danger-light);
-  border-left-color: var(--color-danger);
 }
 
 .msg-summary {
   background: linear-gradient(135deg, #faf5ff 0%, #f0f4ff 100%);
-  border-left-color: var(--color-primary);
 }
 
 .msg-streaming {
   background: linear-gradient(135deg, #fefce8 0%, #fef3c7 100%);
-  border-left-color: #f59e0b;
 }
 
 .msg-content-muted {

@@ -1867,7 +1867,6 @@ function isUserMessageItem(item: DisplayItem): boolean {
   height: 100%;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--color-border);
   background: var(--color-bg);
 }
 
@@ -1918,7 +1917,6 @@ function isUserMessageItem(item: DisplayItem): boolean {
     z-index: 20;
     width: min(380px, 85vw);
     box-shadow: var(--shadow-xl);
-    border-left: 1px solid var(--color-border-strong);
   }
 }
 
