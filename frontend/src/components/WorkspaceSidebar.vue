@@ -10,7 +10,7 @@
  * 树扁平化为带 depth 的一维列表渲染,避免递归组件。
  */
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import {
   getWorkspaceInfo,
@@ -27,6 +27,15 @@ import type { TaskListItem, TaskStatus } from '@/types/task'
 import type { WorkspaceEntry } from '@/types/workspace'
 
 const router = useRouter()
+const route = useRoute()
+
+// ============================================================
+// 当前查看的任务(基于路由 /tasks/:id,用于侧栏 active 高亮)
+// ============================================================
+
+const activeTaskId = computed<string | null>(() =>
+  route.name === 'task-detail' ? (route.params.id as string) ?? null : null,
+)
 
 // ============================================================
 // 对外事件:任务被删除/标题被修改时通知父组件(父可据此跳转/同步状态)
@@ -888,6 +897,7 @@ defineExpose({ openTaskFile })
             v-for="t in tasks"
             :key="t.id"
             class="task-item"
+            :class="{ 'task-item-active': activeTaskId === t.id }"
             @click="goToTaskDetail(t.id)"
           >
             <div class="task-item-main">
@@ -1500,17 +1510,63 @@ defineExpose({ openTaskFile })
 }
 
 .task-item {
+  position: relative;
   display: flex;
   align-items: stretch;
   gap: 0;
   padding: var(--space-2) var(--space-3);
   cursor: pointer;
-  transition: background var(--transition-fast);
-  border-bottom: 1px solid var(--color-border);
+  /* 建立 stacking context,让 ::before 背景层位于内容之下但不穿透到侧栏背景 */
+  isolation: isolate;
 }
 
-.task-item:hover {
+/* 圆角背景块(hover/active 共用,缩进显示,带圆角) */
+.task-item::before {
+  content: '';
+  position: absolute;
+  inset: 2px var(--space-2);
+  background: transparent;
+  border-radius: var(--radius-md);
+  z-index: -1;
+  transition: background var(--transition-fast);
+  pointer-events: none;
+}
+
+.task-item:hover::before {
   background: var(--color-surface-alt);
+}
+
+/* 缩进式分割线:左侧与 padding 对齐,右侧留出操作按钮空间 */
+.task-item::after {
+  content: '';
+  position: absolute;
+  left: var(--space-3);
+  right: 76px; /* 避让右侧 more-btn + workspace-btn 区域 */
+  bottom: 0;
+  height: 1px;
+  background: var(--color-border);
+  pointer-events: none;
+}
+
+/* 最后一个任务项不显示分割线 */
+.task-item:last-child::after {
+  display: none;
+}
+
+/* ---- 正在查看的任务 active 态:圆角主色背景块 ---- */
+.task-item-active::before,
+.task-item-active:hover::before {
+  background: var(--color-primary-light);
+}
+
+/* active 态:标题文字变主色 */
+.task-item-active .task-input {
+  color: var(--color-primary);
+}
+
+/* active 态:淡化分割线,避免与浅色背景冲突 */
+.task-item-active::after {
+  background: transparent;
 }
 
 .task-item-main {
