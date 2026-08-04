@@ -157,28 +157,28 @@ async function handleSend(): Promise<void> {
 
 <style scoped>
 .msg-input-wrapper {
+  width: 94%;
+  margin: 0 auto var(--space-4);
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
-  background: var(--color-surface);
-  border-top: 1px solid var(--color-border);
 }
 
 .msg-input-row {
   display: flex;
   align-items: flex-end;
   gap: var(--space-2);
-  background: var(--color-surface-alt);
+  background: transparent;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   padding: var(--space-2);
-  transition: border-color var(--transition-fast);
+  box-shadow: var(--shadow-md);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
 .msg-input-row:focus-within {
   border-color: var(--color-primary);
-  background: var(--color-surface);
+  box-shadow: var(--shadow-lg);
 }
 
 .msg-input {
