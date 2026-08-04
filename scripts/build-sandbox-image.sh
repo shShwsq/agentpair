@@ -56,14 +56,20 @@ fi
 # ---------- 生成 Dockerfile(若不存在) ----------
 # 检测:旧 Dockerfile 不含 qodercli 时,备份原文件并覆盖重生成
 # 不用 sed 追加(反引号/转义/curl 缺失等问题太多),直接覆盖最可靠
+#
+# 检测条件:
+#   含 Qoder CLI 时,必须同时含 "qodercli" 和 "curl"(NodeSource 安装脚本依赖)
+#   否则视为不合规,备份重生成(兼容上次 sed 追加失败遗留的污染文件)
 NEED_REGEN=0
 REGEN_REASON=""
 if [ ! -f "$DOCKERFILE" ]; then
     NEED_REGEN=1
     REGEN_REASON="文件不存在,全新生成"
-elif [ "$WITH_QODER_CLI" -eq 1 ] && ! grep -q "qodercli" "$DOCKERFILE"; then
-    NEED_REGEN=1
-    REGEN_REASON="旧 Dockerfile 不含 Qoder CLI,需重新生成"
+elif [ "$WITH_QODER_CLI" -eq 1 ]; then
+    if ! grep -q "qodercli" "$DOCKERFILE" || ! grep -q "curl" "$DOCKERFILE"; then
+        NEED_REGEN=1
+        REGEN_REASON="旧 Dockerfile 不完整(缺 qodercli 或 curl 依赖),需重新生成"
+    fi
 elif [ "$WITH_QODER_CLI" -eq 0 ] && grep -q "qodercli" "$DOCKERFILE"; then
     NEED_REGEN=1
     REGEN_REASON="旧 Dockerfile 含 Qoder CLI,但本次指定 --no-qoder-cli,需重新生成"
