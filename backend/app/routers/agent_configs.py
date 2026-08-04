@@ -7,6 +7,7 @@
 - GET    /agents/configs               当前用户已配置的 agent 列表(鉴权,不含凭据原文)
 - GET    /agents/configs/{agent_type}  单个 agent 配置详情(含各字段填写状态)
 - PUT    /agents/configs/{agent_type}  保存/更新某 agent 配置(凭证加密存储)
+- POST   /agents/configs/{agent_type}/test  测试凭证连通性(启动临时沙箱 + ACP 握手)
 - DELETE /agents/configs/{agent_type}  删除某 agent 配置
 
 安全约定(与 model_configs.py 一致):
@@ -32,6 +33,7 @@ from app.schemas.agent_configs import (
     AgentConfigDetailOut,
     AgentConfigListResponse,
     AgentConfigOut,
+    AgentTestResponse,
     AgentTypeMeta,
     CredentialField,
     SaveAgentConfigRequest,
@@ -153,6 +155,42 @@ def save_config(
         current_user.id, agent_type, row.is_active,
     )
     return _to_detail_out(row)
+
+
+@router.post("/configs/{agent_type}/test", response_model=AgentTestResponse)
+def test_config(
+    agent_type: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> AgentTestResponse:
+    """测试 agent 凭证连通性(启动临时沙箱 + ACP 握手)
+
+    验证凭证有效性后立即销毁临时沙箱,不污染任务执行环境。
+    耗时较长(约 10-30s,含沙箱启动 + ACP bridge 就绪 + 握手)。
+    """
+    _require_registered(agent_type)
+
+    # 必须先保存配置才能测试(测试用的是已加密存储的凭证)
+    row = _find_config(db, current_user.id, agent_type)
+    if row is None or not row.credentials_encrypted:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"未配置 {agent_type} 凭证,请先保存配置再测试",
+        )
+
+    # 按 agent_type 分派到对应的测试函数
+    # 当前只有 qoder_cli,后续扩展时在此添加分支
+    if agent_type == "qoder_cli":
+        from app.agents.qoder_cli_agent import test_credential
+
+        ok, message = test_credential(db, current_user.id)
+        return AgentTestResponse(ok=ok, message=message)
+
+    # 未实现的 agent 类型
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail=f"agent 类型 {agent_type} 暂不支持测试连接",
+    )
 
 
 @router.delete("/configs/{agent_type}", response_model=AgentConfigListResponse)

@@ -25,12 +25,14 @@ import {
   getAgentConfigs,
   getAgentTypes,
   saveAgentConfig,
+  testAgentConfig,
 } from '@/api/agent_configs'
 import { getGitHubBindURL, getGitHubStatus, syncEmail, unbindGitHub } from '@/api/github'
 import type { GitHubStatus } from '@/types/github'
 import type {
   AgentConfigDetailOut,
   AgentConfigOut,
+  AgentTestResult,
   AgentTypeMeta,
   CredentialValue,
 } from '@/types/agent_configs'
@@ -173,6 +175,10 @@ const agentDialogDetail = ref<AgentConfigDetailOut | null>(null)
 const agentDialogLoading = ref(false)
 const agentSaving = ref(false)
 const agentError = ref('')
+/** 测试连接中(禁用测试按钮 + spinner) */
+const agentTesting = ref(false)
+/** 测试结果(null=未测试) */
+const agentTestResult = ref<AgentTestResult | null>(null)
 
 /** 按类型查找已配置项(用于表格状态展示) */
 function findConfig(agent_type: string): AgentConfigOut | null {
@@ -194,6 +200,7 @@ async function openAgentDialog(meta: AgentTypeMeta): Promise<void> {
   agentDialogDetail.value = null
   agentDialogLoading.value = true
   agentError.value = ''
+  agentTestResult.value = null
   agentDialogOpen.value = true
   try {
     agentDialogDetail.value = await getAgentConfig(meta.agent_type)
@@ -213,7 +220,9 @@ async function handleAgentSave(credentials: CredentialValue[], is_active: boolea
   try {
     agentDialogDetail.value = await saveAgentConfig(meta.agent_type, { credentials, is_active })
     await refreshAgentConfigs()
-    agentDialogOpen.value = false
+    // 保存成功后不自动关闭弹窗,让用户可继续点「测试连接」验证
+    // 清空旧的测试结果(凭证可能已变)
+    agentTestResult.value = null
     showToast(`${meta.display_name} 配置已保存`, 'success')
   } catch (err) {
     agentError.value = extractErrorMessage(err)
@@ -231,12 +240,32 @@ async function handleAgentClear(): Promise<void> {
     await deleteAgentConfig(meta.agent_type)
     await refreshAgentConfigs()
     agentDialogDetail.value = null
+    agentTestResult.value = null
     agentDialogOpen.value = false
     showToast(`${meta.display_name} 配置已清除`, 'success')
   } catch (err) {
     agentError.value = extractErrorMessage(err)
   } finally {
     agentSaving.value = false
+  }
+}
+
+async function handleAgentTest(): Promise<void> {
+  const meta = agentDialogMeta.value
+  if (!meta) return
+  agentError.value = ''
+  agentTesting.value = true
+  agentTestResult.value = null
+  try {
+    agentTestResult.value = await testAgentConfig(meta.agent_type)
+  } catch (err) {
+    // 网络错误/后端 500 等:构造一个失败结果展示
+    agentTestResult.value = {
+      ok: false,
+      message: extractErrorMessage(err),
+    }
+  } finally {
+    agentTesting.value = false
   }
 }
 
@@ -525,8 +554,11 @@ async function loadAgentTypesAndConfigs(): Promise<void> {
           :detail="agentDialogDetail"
           :saving="agentSaving || agentDialogLoading"
           :error="agentError"
+          :testing="agentTesting"
+          :test-result="agentTestResult"
           @save="handleAgentSave"
           @clear="handleAgentClear"
+          @test="handleAgentTest"
           @cancel="agentDialogOpen = false"
         />
 

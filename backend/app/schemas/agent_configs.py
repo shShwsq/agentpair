@@ -89,3 +89,19 @@ class AgentConfigListResponse(BaseModel):
     """用户已配置的 agent 列表"""
 
     configs: list[AgentConfigOut] = Field(default_factory=list)
+
+
+# ============================================================
+# 凭证测试响应(POST /agents/configs/{agent_type}/test)
+# ============================================================
+
+
+class AgentTestResponse(BaseModel):
+    """测试 agent 凭证连通性的响应
+
+    用于「智能体配置」页面的「测试连接」按钮。
+    在临时沙箱内启动 CLI + ACP 握手,验证凭证有效性。
+    """
+
+    ok: bool
+    message: str

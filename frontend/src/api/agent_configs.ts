@@ -6,6 +6,7 @@
  * - GET    /agents/configs             当前用户已配置的 agent 列表(鉴权)
  * - GET    /agents/configs/{type}     单个配置详情(鉴权)
  * - PUT    /agents/configs/{type}      保存配置(鉴权)
+ * - POST   /agents/configs/{type}/test 测试凭证连通性(鉴权,启动临时沙箱)
  * - DELETE /agents/configs/{type}      删除配置(鉴权,返回剩余列表)
  *
  * 返回值已解包(取 response.data),调用方直接拿业务数据。
@@ -14,6 +15,7 @@ import client from './client'
 import type {
   AgentConfigDetailOut,
   AgentConfigListResponse,
+  AgentTestResult,
   AgentTypeMeta,
   SaveAgentConfigRequest,
 } from '@/types/agent_configs'
@@ -44,4 +46,14 @@ export function saveAgentConfig(
 /** 删除指定 agent 类型的配置(返回删除后剩余的列表) */
 export function deleteAgentConfig(agent_type: string): Promise<AgentConfigListResponse> {
   return client.delete(`/agents/configs/${agent_type}`).then((r) => r.data)
+}
+
+/**
+ * 测试指定 agent 类型的凭证连通性(启动临时沙箱 + ACP 握手)
+ *
+ * 耗时较长(约 10-30s),调用方应显示 loading 状态。
+ * 必须先保存配置才能测试(测试用的是已加密存储的凭证)。
+ */
+export function testAgentConfig(agent_type: string): Promise<AgentTestResult> {
+  return client.post(`/agents/configs/${agent_type}/test`).then((r) => r.data)
 }

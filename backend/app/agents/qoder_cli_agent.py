@@ -463,6 +463,98 @@ def _stop_acp_bridge(session, execution_id: str) -> None:
 
 
 # ============================================================
+# 凭证测试:用于「智能体配置」页面的测试连接按钮
+# ============================================================
+
+
+def test_credential(db: Session, user_id) -> tuple[bool, str]:
+    """测试 Qoder CLI 凭证是否可用
+
+    在临时沙箱内启动 ACP bridge 并发起 initialize 请求,验证:
+    1. 沙箱镜像含 qodercli + node + npm
+    2. PAT 有效(Qoder 服务端认证通过)
+    3. 网络可达 qoder.com
+
+    临时沙箱在测试结束后立即销毁,不污染任务执行环境。
+
+    返回 (ok, message):
+        ok=True: 测试通过,message 为成功提示
+        ok=False: 测试失败,message 为人类可读的错误原因(可显示给用户)
+    """
+    # ---- 加载凭证 ----
+    try:
+        credentials = _load_credentials(db, user_id)
+    except RuntimeError as e:
+        return False, f"凭证加载失败: {e}"
+
+    credential_envs = _build_credential_envs(credentials)
+    if not credential_envs:
+        return False, "凭证映射为空(请检查 registry 配置)"
+
+    # ---- 检查沙箱模式 ----
+    if settings.SANDBOX_MODE == "mock":
+        return False, "测试连接需要 SANDBOX_MODE=sandbox(mock 模式无 qodercli)"
+
+    # ---- 创建临时沙箱 ----
+    # 注意:不复用任务的沙箱会话,避免污染任务上下文
+    from app.sandbox.client import create_sandbox
+
+    logger.info("[qoder_cli_test] 创建临时沙箱测试凭证")
+    session = create_sandbox()
+    bridge_exec_id: str | None = None
+
+    try:
+        # ---- 准备 CLI 环境(写 bridge 脚本 + 检查/安装 CLI) ----
+        try:
+            _ensure_cli_env(session)
+        except RuntimeError as e:
+            return False, f"Qoder CLI 环境准备失败: {e}"
+
+        # ---- 启动 ACP bridge(凭证经 envs 注入) ----
+        try:
+            bridge_exec_id = _start_acp_bridge(session, credential_envs)
+            endpoint_url, endpoint_headers = session.get_endpoint(ACP_BRIDGE_PORT)
+            _wait_for_bridge_ready(session, bridge_exec_id, endpoint_url, endpoint_headers)
+        except RuntimeError as e:
+            err_msg = str(e)
+            # bridge 日志可能含认证失败关键词
+            if any(kw in err_msg.lower() for kw in ("auth", "unauthorized", "token", "401", "credential")):
+                return False, f"PAT 认证失败: {err_msg}"
+            return False, f"ACP bridge 启动失败: {err_msg}"
+
+        # ---- ACP 握手(真正验证 PAT) ----
+        # qodercli 在 PAT 无效时通常会在 initialize 前后报认证错误
+        client = ACPClient(endpoint_url, endpoint_headers)
+        try:
+            result = client.initialize()
+            protocol_version = result.get("protocolVersion", "?")
+            logger.info(
+                f"[qoder_cli_test] ACP 握手成功: protocolVersion={protocol_version}, "
+                f"result={json.dumps(result, ensure_ascii=False)[:200]}"
+            )
+            return True, f"连接成功(ACP 协议版本 {protocol_version})"
+        except RuntimeError as e:
+            err_msg = str(e)
+            if any(kw in err_msg.lower() for kw in ("auth", "unauthorized", "token", "401")):
+                return False, f"PAT 认证失败: {err_msg}"
+            return False, f"ACP 握手失败: {err_msg}"
+        finally:
+            client.close()
+
+    except Exception as e:
+        logger.exception("[qoder_cli_test] 测试过程异常")
+        return False, f"测试异常: {e}"
+    finally:
+        # ---- 清理:停止 bridge + 销毁沙箱 ----
+        if bridge_exec_id:
+            _stop_acp_bridge(session, bridge_exec_id)
+        try:
+            session.close()
+        except Exception as e:
+            logger.warning(f"[qoder_cli_test] 关闭沙箱失败(忽略): {e}")
+
+
+# ============================================================
 # ACP 事件处理:翻译为 event_bus 事件 + 落库 Conversation
 # ============================================================
 

@@ -10,11 +10,16 @@
  * - text 类型:普通明文输入框
  *
  * secret 字段已配置时占位提示「已设置,留空保留」;未配置时用字段定义的 placeholder。
- * 草稿在 open=true 时重置;保存/清除由父组件调 API 持久化。
+ * 草稿在 open=true 时重置;保存/清除/测试由父组件调 API 持久化。
+ *
+ * 测试连接:已配置凭据时显示「测试连接」按钮,父组件调
+ * POST /agents/configs/{type}/test 启动临时沙箱验证 PAT 有效性,
+ * 结果通过 testResult prop 回传展示。
  */
 import { computed, reactive, watch } from 'vue'
 import type {
   AgentConfigDetailOut,
+  AgentTestResult,
   AgentTypeMeta,
   CredentialField,
   CredentialValue,
@@ -31,12 +36,18 @@ const props = defineProps<{
   saving: boolean
   /** 错误信息(父组件 API 失败时传入) */
   error?: string
+  /** 测试连接中(禁用测试按钮 + spinner) */
+  testing?: boolean
+  /** 测试结果(父组件调 test API 后传入),null 表示未测试 */
+  testResult?: AgentTestResult | null
 }>()
 
 const emit = defineEmits<{
   (e: 'save', credentials: CredentialValue[], is_active: boolean): void
   (e: 'clear'): void
   (e: 'cancel'): void
+  /** 测试连接(父组件调 API,结果通过 testResult prop 回传) */
+  (e: 'test'): void
 }>()
 
 /** 字段值草稿:key 为字段 key,value 为输入框当前值 */
@@ -120,8 +131,15 @@ function handleClear(): void {
   emit('clear')
 }
 
+function handleTest(): void {
+  // 测试中或保存中不允许重复触发
+  if (props.testing || props.saving) return
+  emit('test')
+}
+
 function handleCancel(): void {
-  if (props.saving) return // 提交中不允许取消
+  // 提交中/测试中不允许取消
+  if (props.saving || props.testing) return
   emit('cancel')
 }
 </script>
@@ -228,10 +246,31 @@ function handleCancel(): void {
               <input
                 v-model="draft.is_active"
                 type="checkbox"
-                :disabled="saving"
+                :disabled="saving || testing"
               />
               <span>启用此执行器(任务提交页可选)</span>
             </label>
+
+            <!-- 测试连接结果区(已配置凭据时显示) -->
+            <div v-if="hasCredentials" class="test-section">
+              <button
+                class="btn btn-test"
+                :disabled="saving || testing"
+                @click="handleTest"
+              >
+                <span v-if="testing" class="btn-spinner test-spinner" />
+                {{ testing ? '测试中...' : '测试连接' }}
+              </button>
+
+              <!-- 测试结果 -->
+              <div
+                v-if="testResult"
+                :class="['test-result', testResult.ok ? 'test-ok' : 'test-fail']"
+              >
+                <span class="test-icon">{{ testResult.ok ? '✓' : '✗' }}</span>
+                <span class="test-message">{{ testResult.message }}</span>
+              </div>
+            </div>
           </div>
 
           <footer class="dialog-footer">
@@ -242,7 +281,7 @@ function handleCancel(): void {
               <button
                 v-if="hasCredentials"
                 class="btn btn-danger"
-                :disabled="saving"
+                :disabled="saving || testing"
                 @click="handleClear"
               >
                 <span v-if="saving" class="btn-spinner danger" />
@@ -250,12 +289,12 @@ function handleCancel(): void {
               </button>
               <button
                 class="btn btn-secondary"
-                :disabled="saving"
+                :disabled="saving || testing"
                 @click="handleCancel"
-              >取消</button>
+              >{{ hasCredentials ? '关闭' : '取消' }}</button>
               <button
                 class="btn btn-primary"
-                :disabled="!canSubmit"
+                :disabled="!canSubmit || testing"
                 @click="handleSubmit"
               >
                 <span v-if="saving" class="btn-spinner" />
@@ -526,6 +565,60 @@ function handleCancel(): void {
   gap: var(--space-3);
   padding: var(--space-3) var(--space-5);
   border-top: 1px solid var(--color-border);
+}
+
+/* ---- 测试连接区 ---- */
+.test-section {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px dashed var(--color-border);
+}
+
+.btn-test {
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  border-color: var(--color-border-strong);
+  width: 100%;
+}
+
+.btn-test:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.test-spinner {
+  border-color: rgba(100, 116, 139, 0.3);
+  border-top-color: var(--color-text-secondary);
+}
+
+.test-result {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-relaxed);
+}
+
+.test-ok {
+  background: var(--color-success-light);
+  color: var(--color-success);
+}
+
+.test-fail {
+  background: #fef2f2;
+  color: var(--color-danger);
+}
+
+.test-icon {
+  font-weight: var(--fw-bold);
+  flex-shrink: 0;
+}
+
+.test-message {
+  word-break: break-word;
 }
 
 .validation-error {

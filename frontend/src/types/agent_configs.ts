@@ -92,3 +92,11 @@ export interface SaveAgentConfigRequest {
 export interface AgentConfigListResponse {
   configs: AgentConfigOut[]
 }
+
+/** 测试 agent 凭证连通性的响应(POST /agents/configs/{agent_type}/test) */
+export interface AgentTestResult {
+  /** 是否通过 */
+  ok: boolean
+  /** 人类可读的结果说明(成功/失败原因) */
+  message: string
+}
