@@ -601,6 +601,9 @@ def test_credential(db: Session, user_id, agent_type: str = AGENT_TYPE) -> tuple
         session.run_command(f"rm -rf {config_dirs} 2>/dev/null", timeout=5)
 
         try:
+            logger.info(
+                f"[qoder_cli_test] 注入环境变量 keys: {list(credential_envs.keys())}"
+            )
             bridge_exec_id = _start_acp_bridge(session, credential_envs, agent_type=agent_type)
             endpoint_url, endpoint_headers = session.get_endpoint(ACP_BRIDGE_PORT)
             logger.info(
@@ -608,6 +611,19 @@ def test_credential(db: Session, user_id, agent_type: str = AGENT_TYPE) -> tuple
             )
             _wait_for_bridge_ready(session, bridge_exec_id, endpoint_url, endpoint_headers)
             logger.info("[qoder_cli_test] bridge 就绪,开始 ACP 握手")
+
+            # 诊断:确认环境变量真的传到了 bridge 进程(及 qoderclicn 子进程)
+            # 通过 /proc/<pid>/environ 检查,只显示 key 不显示 value
+            diag_cmd = (
+                'BRIDGE_PID=$(pgrep -f acp_bridge.py | head -1);'
+                'if [ -n "$BRIDGE_PID" ]; then'
+                '  echo "bridge PID=$BRIDGE_PID";'
+                '  cat /proc/$BRIDGE_PID/environ 2>/dev/null | tr "\\0" "\\n"'
+                '    | grep -iE "QODER|TOKEN" | sed "s/=.*/=<set>/";'
+                'else echo "WARN: 未找到 bridge 进程"; fi'
+            )
+            diag_result = session.run_command(diag_cmd, timeout=5)
+            logger.info(f"[qoder_cli_test] bridge 进程环境变量诊断: {diag_result}")
         except RuntimeError as e:
             err_msg = str(e)
             # bridge 日志可能含认证失败关键词
@@ -657,9 +673,15 @@ def test_credential(db: Session, user_id, agent_type: str = AGENT_TYPE) -> tuple
                     if bridge_exec_id:
                         logs, _ = session.get_background_logs(bridge_exec_id)
                         logger.warning(
-                            f"[qoder_cli_test] 认证超时 bridge 日志: {(logs or '')[-800:]}"
+                            f"[qoder_cli_test] 认证超时({agent_type}),"
+                            f"bridge 完整日志(最多3000字符):\n{(logs or '')[-3000:]}"
                         )
-                    return False, "ACP 认证超时(90s),请检查网络或 PAT 有效性"
+                    return False, (
+                        f"ACP 认证超时(90s,{agent_type})。"
+                        f"可能原因:PAT 无效/过期、沙箱网络不通、"
+                        f"CLI 版本不支持环境变量认证。"
+                        f"请查看后端日志 [qoder_cli_test] 开头的输出排查。"
+                    )
                 except RuntimeError as e:
                     err_msg = str(e)
                     low = err_msg.lower()
