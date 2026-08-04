@@ -216,17 +216,15 @@ def _build_volumes() -> list[Any]:
 
     沙箱默认用户是 user,把宿主机 SSH 目录只读挂载到 /home/user/.ssh,
     供 git clone git@github.com:... 使用。需在 server [storage].allowed_host_paths 放行。
+
+    注意:SANDBOX_SSH_KEY_HOST_PATH 是 Server 宿主机上的路径(跨机部署时后端
+    无法也不应本地验证),必须是绝对路径,不要用 ~。
     """
     if not settings.SANDBOX_SSH_KEY_HOST_PATH:
         return []
     from opensandbox.models.sandboxes import Host, Volume
 
-    host_path = os.path.expanduser(settings.SANDBOX_SSH_KEY_HOST_PATH)
-    if not os.path.isdir(host_path):
-        logger.warning(
-            f"[sandbox] SANDBOX_SSH_KEY_HOST_PATH 不存在或不是目录,跳过挂载: {host_path}"
-        )
-        return []
+    host_path = settings.SANDBOX_SSH_KEY_HOST_PATH
     return [
         Volume(
             name="ssh-keys",
