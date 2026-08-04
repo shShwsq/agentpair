@@ -435,6 +435,53 @@ def _ensure_cli_env(session, agent_type: str = AGENT_TYPE) -> None:
     logger.info(f"[qoder_cli] 环境就绪: {cli_bin} 可用,bridge 脚本已写入 {BRIDGE_SCRIPT_PATH}")
 
 
+def _quick_verify_pat_print(
+    session,
+    credential_envs: dict[str, str],
+    agent_type: str = AGENT_TYPE,
+    timeout: int = 15,
+) -> tuple[bool, str]:
+    """用 print 模式快速验证 PAT 有效性(ACP 认证超时时的补充诊断)
+
+    通过 `qoderclicn -p "OK"` 直接发一个最简 prompt:
+    - 几秒内返回文本 → PAT 有效,问题在 ACP 认证流程
+    - 报认证错误      → PAT 无效/过期
+    - 超时/卡住       → 网络问题或 CLI 异常
+
+    注意:print 模式会消耗少量 LLM credits,仅作为 ACP 认证失败后的
+    补充诊断调用,不在主流程中执行。
+
+    返回 (ok, detail):ok=True 表示 PAT 验证通过,detail 含 CLI 输出摘要。
+    """
+    cli_bin = _get_bin(agent_type)
+    # 用同步 run_command 执行(带 timeout),环境变量通过 env 内联 export 注入
+    # (run_command 不支持 envs 参数,且 print 模式是短命令,适合同步执行)
+    env_exports = " ".join(f'{k}="{v}"' for k, v in credential_envs.items())
+    cmd = f"{env_exports} {cli_bin} -p 'OK' 2>&1"
+    logger.info(
+        f"[qoder_cli_test] PAT 快速诊断(print 模式): "
+        f"cmd={cli_bin} -p 'OK', timeout={timeout}s (会消耗少量 credits)"
+    )
+
+    try:
+        output = session.run_command(cmd, timeout=timeout, check=False)
+        output = (output or "").strip()
+        logger.info(
+            f"[qoder_cli_test] print 模式返回: 输出长度={len(output)}, "
+            f"内容预览={output[:300]}"
+        )
+        if output and "error" not in output.lower() and "unauthorized" not in output.lower():
+            return True, output[:500]
+        return False, output[:500] if output else "无输出"
+    except Exception as e:
+        # run_command 超时会抛 RuntimeError
+        err_str = str(e)
+        logger.warning(f"[qoder_cli_test] print 模式异常: {err_str[:300]}")
+        if "timeout" in err_str.lower() or "timed out" in err_str.lower():
+            return False, f"print 模式超时({timeout}s),CLI 可能挂起(网络/PAT 问题)"
+        return False, f"print 模式执行异常: {err_str[:300]}"
+
+
 # ============================================================
 # ACP bridge 生命周期管理
 # ============================================================
@@ -644,54 +691,17 @@ def test_credential(db: Session, user_id, agent_type: str = AGENT_TYPE) -> tuple
                 f"authMethods={[m.get('id') for m in auth_methods]}"
             )
 
-            # ---- ACP 认证(若 Agent 要求) ----
-            # CLI 通过 authMethods 声明需要认证,客户端必须调 authenticate
-            # 才能创建 session。PAT 经环境变量注入,在此步骤完成服务端认证。
+            # ---- 跳过 authenticate,直接 session/new ----
+            # qoderclicn/qodercli 的 authenticate 方法在沙箱无 TTY 环境下会静默挂起
+            # (需交互式登录流程),但 PAT 经环境变量注入后内部已自动完成认证,
+            # session/new 可直接成功。因此跳过 authenticate,避免 30-90s 无意义等待。
+            # 若 session/new 报 Authentication required,说明该 CLI 版本强制要求
+            # authenticate,目前无解决方案(需 CLI 支持非交互式认证)。
             if auth_methods:
-                # 动态选择认证方法:优先含 "login" 的,否则取第一个
-                # (不同 CLI 版本可能用不同的 method_id,如 qodercli-login / qoderclicn-login)
-                method_id = ""
-                for m in auth_methods:
-                    mid = m.get("id", "")
-                    if "login" in mid:
-                        method_id = mid
-                        break
-                if not method_id:
-                    method_id = auth_methods[0].get("id", "")
-                if not method_id:
-                    return False, "ACP 握手成功但未找到可用的认证方法"
-
-                logger.info(f"[qoder_cli_test] 开始 ACP 认证: methodId={method_id}")
-                try:
-                    # authenticate 涉及网络往返验证 PAT,给 90s 超时
-                    auth_result = client.authenticate(method_id, timeout=90)
-                    logger.info(
-                        f"[qoder_cli_test] ACP 认证成功: "
-                        f"{json.dumps(auth_result, ensure_ascii=False)[:200]}"
-                    )
-                except httpx.TimeoutException:
-                    if bridge_exec_id:
-                        logs, _ = session.get_background_logs(bridge_exec_id)
-                        logger.warning(
-                            f"[qoder_cli_test] 认证超时({agent_type}),"
-                            f"bridge 完整日志(最多3000字符):\n{(logs or '')[-3000:]}"
-                        )
-                    return False, (
-                        f"ACP 认证超时(90s,{agent_type})。"
-                        f"可能原因:PAT 无效/过期、沙箱网络不通、"
-                        f"CLI 版本不支持环境变量认证。"
-                        f"请查看后端日志 [qoder_cli_test] 开头的输出排查。"
-                    )
-                except RuntimeError as e:
-                    err_msg = str(e)
-                    low = err_msg.lower()
-                    if any(kw in low for kw in ("auth", "unauthorized", "token", "401",
-                                                "credential", "authentication required")):
-                        return False, f"PAT 认证失败: {err_msg}"
-                    return False, f"ACP 认证失败: {err_msg}"
-                except Exception as e:
-                    logger.exception("[qoder_cli_test] ACP 认证异常")
-                    return False, f"ACP 认证异常: {e}"
+                logger.info(
+                    f"[qoder_cli_test] 跳过 authenticate(PAT 经环境变量自动认证),"
+                    f"authMethods={[m.get('id') for m in auth_methods]}"
+                )
 
             # ---- 发送测试 prompt 验证模型可响应 ----
             try:
@@ -733,7 +743,7 @@ def test_credential(db: Session, user_id, agent_type: str = AGENT_TYPE) -> tuple
 
                 reply = "".join(reply_chunks).strip()
                 if not reply:
-                    return False, "ACP 认证成功,但模型未响应(请检查 PAT 配额或网络)"
+                    return False, "session/new 成功,但模型未响应(请检查 PAT 配额或网络)"
 
                 preview = reply[:80] + ("..." if len(reply) > 80 else "")
                 logger.info(f"[qoder_cli_test] 模型响应: {preview}")
@@ -742,11 +752,16 @@ def test_credential(db: Session, user_id, agent_type: str = AGENT_TYPE) -> tuple
                     f"模型响应: {preview}"
                 )
             except httpx.TimeoutException:
-                return False, "ACP 认证成功,但模型响应超时(30s,请检查网络或配额)"
+                return False, "session/new 成功,但模型响应超时(30s,请检查网络或配额)"
             except RuntimeError as e:
                 err_msg = str(e)
                 low = err_msg.lower()
-                if any(kw in low for kw in ("auth", "unauthorized", "token", "401",
+                if "auth" in low or "authentication required" in low:
+                    return False, (
+                        f"session/new 失败:CLI 要求 authenticate 但不支持非交互式认证。"
+                        f"错误: {err_msg}"
+                    )
+                if any(kw in low for kw in ("unauthorized", "token", "401",
                                             "quota", "credit", "limit", "余额", "配额")):
                     return False, f"PAT 认证或配额失败: {err_msg}"
                 return False, f"模型响应测试失败: {err_msg}"
@@ -1120,22 +1135,15 @@ def run_qoder_cli_agent(
             # 握手
             init_result = client.initialize()
 
-            # 认证(若 Agent 要求)
-            # 动态选择认证方法:优先含 "login" 的 method_id
-            # (qodercli-login 国际版 / qoderclicn-login 国内版,见 test_credential 同款逻辑)
+            # 跳过 authenticate,直接 session/new
+            # qoderclicn/qodercli 的 authenticate 在沙箱无 TTY 环境下会静默挂起,
+            # 但 PAT 经环境变量注入后内部已自动认证,session/new 可直接成功。
             auth_methods = init_result.get("authMethods", []) or []
             if auth_methods:
-                method_id = ""
-                for m in auth_methods:
-                    mid = m.get("id", "")
-                    if "login" in mid:
-                        method_id = mid
-                        break
-                if not method_id:
-                    method_id = auth_methods[0].get("id", "")
-                if method_id:
-                    logger.info(f"[qoder_cli:{agent_type}] ACP 认证: methodId={method_id}")
-                    client.authenticate(method_id)
+                logger.info(
+                    f"[qoder_cli:{agent_type}] 跳过 authenticate(PAT 经环境变量自动认证),"
+                    f"authMethods={[m.get('id') for m in auth_methods]}"
+                )
 
             # 创建会话(cwd 设为仓库路径,让 CLI 在仓库目录下工作)
             cwd = repo_path or BRIDGE_WORK_DIR

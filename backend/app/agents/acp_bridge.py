@@ -183,7 +183,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
 
         request_id = request.get("id")
+        request_method = request.get("method", "")
         request_line = json.dumps(request, ensure_ascii=False)
+
+        print(f"[bridge] >>> 发送到 CLI: method={request_method}, id={request_id}", file=sys.stderr, flush=True)
 
         # 发送请求 + 流式读取响应(持锁,串行)
         try:
@@ -204,11 +207,36 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self.end_headers()
 
                 # 逐行读取 stdout,立即推送 SSE
+                # 使用 readline + 超时检测,避免 CLI 无输出时永久挂起
                 assert _cli.proc.stdout is not None
-                for line in _cli.proc.stdout:
-                    line = line.strip()
+                import select as _select
+                stdout_fd = _cli.proc.stdout.fileno()
+                deadline = time.time() + 120  # 单次请求最多等 120s
+                line_count = 0
+
+                while time.time() < deadline:
+                    # 用 select 检查 stdout 是否有数据(1s 超时,便于周期性检查 deadline)
+                    ready, _, _ = _select.select([stdout_fd], [], [], 1.0)
+                    if not ready:
+                        # 暂无数据,检查 CLI 进程是否还活着
+                        if not _cli.alive:
+                            print(f"[bridge] CLI 进程在等待响应时退出(method={request_method})", file=sys.stderr, flush=True)
+                            break
+                        continue
+
+                    raw_line = _cli.proc.stdout.readline()
+                    if not raw_line:
+                        # EOF,CLI 进程关闭了 stdout
+                        print(f"[bridge] CLI stdout EOF(method={request_method})", file=sys.stderr, flush=True)
+                        break
+
+                    line = raw_line.strip()
                     if not line:
                         continue
+
+                    line_count += 1
+                    print(f"[bridge] <<< CLI stdout [{line_count}]: {line[:500]}", file=sys.stderr, flush=True)
+
                     sse_data = f"data: {line}\n\n"
                     try:
                         self.wfile.write(sse_data.encode("utf-8"))
@@ -220,9 +248,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     try:
                         msg = json.loads(line)
                         if request_id is not None and msg.get("id") == request_id:
+                            print(f"[bridge] 收到匹配 id={request_id} 的最终响应,结束流", file=sys.stderr, flush=True)
                             break
                     except json.JSONDecodeError:
                         continue
+
+                if line_count == 0:
+                    print(f"[bridge] 警告:CLI 在 120s 内未输出任何响应行(method={request_method})", file=sys.stderr, flush=True)
         except Exception as e:
             # 响应头未发时返回 JSON 错误;已发则只能日志记录
             try:

@@ -1,4 +1,5 @@
 """FastAPI 应用入口"""
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -9,6 +10,16 @@ from app.routers import agent_configs, auth, health, skills, tasks
 from app.routers import github as github_router
 from app.routers import model_configs as model_configs_router
 from app.routers import workspace as workspace_router
+
+# 日志配置:开发期 DEBUG,生产期 INFO
+# 通过 LOG_LEVEL 环境变量覆盖(默认按 APP_ENV 决定)
+_log_level = getattr(settings, "LOG_LEVEL", None) or (
+    "DEBUG" if settings.APP_DEBUG else "INFO"
+)
+logging.basicConfig(
+    level=_log_level,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 
 # 导入场景模块,触发注册
 from app.scenarios import code_review  # noqa: F401

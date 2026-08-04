@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     APP_DEBUG: bool = True
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
+    # 日志级别(DEBUG/INFO/WARNING/ERROR),留空则按 APP_DEBUG 决定(DEBUG 时 DEBUG,否则 INFO)
+    LOG_LEVEL: str = ""
     # 邮件链接的基础 URL(开发期指向前端 dev server 或后端)
     APP_BASE_URL: str = "http://localhost:5173"
 
