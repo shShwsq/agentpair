@@ -12,6 +12,7 @@
  */
 import { computed, reactive, watch } from 'vue'
 import ModelCombobox, { type ComboboxOption } from '@/components/ModelCombobox.vue'
+import BaseSelect from '@/components/BaseSelect.vue'
 import type {
   EmbeddingConfigItem,
   EmbeddingProvider,
@@ -139,6 +140,16 @@ const modelOptions = computed<ComboboxOption[]>(() => {
 })
 
 // ---- 厂商切换:自动填 baseUrl + 选默认模型 ----
+/** 厂商选项:自定义 + 当前 kind 对应的厂商列表 */
+const providerOptions = computed(() => {
+  const providers =
+    props.kind === 'llm' ? props.catalog?.llmProviders : props.catalog?.embeddingProviders
+  return [
+    { value: '', label: '自定义' },
+    ...(providers ?? []).map((p) => ({ value: p.id, label: p.name })),
+  ]
+})
+
 function onProviderChange(): void {
   draft.model = ''
   if (props.kind === 'llm') {
@@ -226,16 +237,13 @@ function handleConfirm(): void {
               </div>
               <div class="field">
                 <label>厂商</label>
-                <select v-model="draft.provider" :disabled="saving" @change="onProviderChange">
-                  <option value="">自定义</option>
-                  <option
-                    v-for="p in kind === 'llm' ? catalog?.llmProviders : catalog?.embeddingProviders"
-                    :key="p.id"
-                    :value="p.id"
-                  >
-                    {{ p.name }}
-                  </option>
-                </select>
+                <BaseSelect
+                  v-model="draft.provider"
+                  :options="providerOptions"
+                  :disabled="saving"
+                  class="field-select"
+                  @change="onProviderChange"
+                />
               </div>
             </div>
 
@@ -393,8 +401,7 @@ function handleConfirm(): void {
   color: var(--color-text-secondary);
 }
 
-.field input,
-.field select {
+.field input {
   width: 100%;
   height: 38px;
   padding: 0 var(--space-3);
@@ -410,17 +417,24 @@ function handleConfirm(): void {
   color: var(--color-text-muted);
 }
 
-.field input:focus,
-.field select:focus {
+.field input:focus {
   outline: none;
   border-color: var(--color-primary);
   box-shadow: 0 0 0 3px var(--color-primary-light);
 }
 
-.field input:disabled,
-.field select:disabled {
+.field input:disabled {
   background: var(--color-surface-alt);
   cursor: not-allowed;
+}
+
+/* BaseSelect 在表单字段内:撑满宽度 + 触发器高度对齐 input(38px) */
+.field :deep(.base-select) {
+  width: 100%;
+}
+
+.field :deep(.base-select-trigger) {
+  height: 38px;
 }
 
 .field-checkbox label {

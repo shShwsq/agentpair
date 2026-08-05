@@ -370,7 +370,8 @@ onBeforeUnmount(() => {
   /* 高于弹窗(1000)与 toast(2000) */
   z-index: 3000;
   margin: 0;
-  padding: var(--space-1);
+  /* 不留外边距:让高亮块紧贴列表边框 */
+  padding: 0;
   list-style: none;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
@@ -384,8 +385,9 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* 文字保持左右内边距可读;高亮背景由 padding 外侧填满,紧贴列表边框 */
   padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
+  border-radius: 0;
   cursor: pointer;
   transition: background var(--transition-fast);
 }

@@ -21,6 +21,7 @@ import AppHeader from '@/components/AppHeader.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import ModelCombobox from '@/components/ModelCombobox.vue'
+import BaseSelect from '@/components/BaseSelect.vue'
 import BrandLogo from '@/components/BrandLogo.vue'
 import { createTask, getScenarios } from '@/api/task'
 import { getMyModels } from '@/api/model_configs'
@@ -100,7 +101,7 @@ const modelSelectLabel = computed(() =>
 // 见 https://docs.qoder.cn/cli/model
 
 /** Qoder CLI 模型分级选项 */
-const qoderModelOptions = [
+const qoderModelOptions: { value: string; label: string }[] = [
   { value: '', label: '默认(智能路由 Auto)' },
   { value: 'auto', label: '智能路由 (Auto)' },
   { value: 'ultimate', label: '极致 (Ultimate)' },
@@ -114,25 +115,25 @@ const qoderModelOptions = [
   { value: 'glm-5.2', label: 'GLM-5.2' },
   { value: 'kimi-k2.7-code', label: 'Kimi-K2.7-Code' },
   { value: 'minimax-m3', label: 'MiniMax-M3' },
-] as const
+]
 
 /** 思考强度选项 */
-const qoderEffortOptions = [
+const qoderEffortOptions: { value: string; label: string }[] = [
   { value: '', label: '默认' },
   { value: 'low', label: 'Low(最快)' },
   { value: 'medium', label: 'Medium(适中)' },
   { value: 'high', label: 'High(深入)' },
   { value: 'xhigh', label: 'XHigh(深度分析)' },
   { value: 'max', label: 'Max(最大推理)' },
-] as const
+]
 
 /** 上下文窗口选项 */
-const qoderContextOptions = [
+const qoderContextOptions: { value: number; label: string }[] = [
   { value: 0, label: '默认' },
   { value: 200000, label: '200K' },
   { value: 400000, label: '400K' },
   { value: 1000000, label: '1M' },
-] as const
+]
 
 /** Qoder CLI 配置面板是否展开 */
 const qoderConfigOpen = ref(false)
@@ -421,6 +422,26 @@ function modelLabel(cfg: LLMConfigItemOut): string {
   return cfg.has_api_key ? name : `${name}(未配置 Key)`
 }
 
+// ---- BaseSelect 选项(computed,适配 {value,label} 结构) ----
+
+/** user_agent 评估模型选项 */
+const llmConfigOptions = computed(() => [
+  { value: '', label: useAgentExecutor.value ? '默认评估模型' : '默认模型' },
+  ...llmConfigs.value.map((cfg) => ({ value: cfg.id, label: modelLabel(cfg) })),
+])
+
+/** react_agent 模型选项(仅 builtin,空=同评估模型) */
+const reactLlmConfigOptions = computed(() => [
+  { value: '', label: '同评估模型' },
+  ...llmConfigs.value.map((cfg) => ({ value: cfg.id, label: modelLabel(cfg) })),
+])
+
+/** 执行器选项:内置 + 用户已配置且启用的 agent CLI */
+const executorOptions = computed(() => [
+  { value: 'builtin', label: '内置' },
+  ...agentExecutors.value.map((a) => ({ value: a.agent_type, label: a.display_name })),
+])
+
 onMounted(async () => {
   try {
     const [scenarioList, models, ghStatus, skills, agentCfgs] = await Promise.all([
@@ -516,20 +537,12 @@ onMounted(async () => {
               <span class="config-label">user_agent</span>
             </div>
             <div class="model-select">
-              <select
+              <BaseSelect
                 v-model="selectedLlmConfigId"
+                :options="llmConfigOptions"
                 :disabled="loadingModels"
                 :aria-label="modelSelectLabel"
-              >
-                <option value="">{{ useAgentExecutor ? '默认评估模型' : '默认模型' }}</option>
-                <option
-                  v-for="cfg in llmConfigs"
-                  :key="cfg.id"
-                  :value="cfg.id"
-                >
-                  {{ modelLabel(cfg) }}
-                </option>
-              </select>
+              />
               <RouterLink
                 v-if="llmConfigs.length === 0 && !loadingModels"
                 to="/models"
@@ -561,37 +574,21 @@ onMounted(async () => {
             <div class="react-controls">
               <!-- 执行器选择(下拉框):内置 + 用户已配置且启用的 agent CLI -->
               <div class="executor-select">
-                <select
+                <BaseSelect
                   v-model="selectedExecutor"
+                  :options="executorOptions"
                   aria-label="执行器选择"
-                >
-                  <option value="builtin">内置</option>
-                  <option
-                    v-for="agent in agentExecutors"
-                    :key="agent.agent_type"
-                    :value="agent.agent_type"
-                  >
-                    {{ agent.display_name }}
-                  </option>
-                </select>
+                />
               </div>
 
             <!-- react_agent 模型(仅 builtin:可与 user_agent 用不同模型;空=同评估模型) -->
             <div v-if="!useAgentExecutor" class="model-select react-model-select">
-              <select
+              <BaseSelect
                 v-model="selectedReactLlmConfigId"
+                :options="reactLlmConfigOptions"
                 :disabled="loadingModels"
                 aria-label="react_agent 模型"
-              >
-                <option value="">同评估模型</option>
-                <option
-                  v-for="cfg in llmConfigs"
-                  :key="cfg.id"
-                  :value="cfg.id"
-                >
-                  {{ modelLabel(cfg) }}
-                </option>
-              </select>
+              />
             </div>
 
               <!-- Qoder CLI 模型配置(仅 qoder_cli / qoder_cli_cn 执行器显示) -->
@@ -626,27 +623,30 @@ onMounted(async () => {
                   <div v-show="qoderConfigOpen" class="qoder-config-dropdown">
                     <div class="qoder-config-row">
                       <label class="qoder-config-label">模型</label>
-                      <select v-model="qoderModel" class="qoder-config-select">
-                        <option v-for="opt in qoderModelOptions" :key="opt.value" :value="opt.value">
-                          {{ opt.label }}
-                        </option>
-                      </select>
+                      <BaseSelect
+                        v-model="qoderModel"
+                        :options="qoderModelOptions"
+                        size="sm"
+                        class="qoder-config-select"
+                      />
                     </div>
                     <div class="qoder-config-row">
                       <label class="qoder-config-label">思考强度</label>
-                      <select v-model="qoderReasoningEffort" class="qoder-config-select">
-                        <option v-for="opt in qoderEffortOptions" :key="opt.value" :value="opt.value">
-                          {{ opt.label }}
-                        </option>
-                      </select>
+                      <BaseSelect
+                        v-model="qoderReasoningEffort"
+                        :options="qoderEffortOptions"
+                        size="sm"
+                        class="qoder-config-select"
+                      />
                     </div>
                     <div class="qoder-config-row">
                       <label class="qoder-config-label">上下文窗口</label>
-                      <select v-model.number="qoderContextWindow" class="qoder-config-select">
-                        <option v-for="opt in qoderContextOptions" :key="opt.value" :value="opt.value">
-                          {{ opt.label }}
-                        </option>
-                      </select>
+                      <BaseSelect
+                        v-model.number="qoderContextWindow"
+                        :options="qoderContextOptions"
+                        size="sm"
+                        class="qoder-config-select"
+                      />
                     </div>
                   </div>
                 </Transition>
@@ -1009,43 +1009,18 @@ onMounted(async () => {
   gap: var(--space-2);
 }
 
-.model-select select {
-  height: 36px;
-  padding: 0 var(--space-3);
-  font-size: var(--fs-sm);
-  color: var(--color-text);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: border-color var(--transition-fast);
+/* BaseSelect 宽度约束(高度/边框/内边距由组件内部 size="md" 处理) */
+.model-select .base-select {
   max-width: 200px;
 }
 
-.model-select select:focus {
-  outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px var(--color-primary-light);
-}
-
 /* ---- 执行器选择(下拉框) ---- */
-.executor-select select {
-  height: 36px;
-  padding: 0 var(--space-3);
-  font-size: var(--fs-sm);
-  color: var(--color-text);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: border-color var(--transition-fast);
-  min-width: 120px;
+.executor-select {
+  display: inline-flex;
 }
 
-.executor-select select:focus {
-  outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px var(--color-primary-light);
+.executor-select .base-select {
+  min-width: 120px;
 }
 
 .model-empty-link {
@@ -1415,7 +1390,7 @@ onMounted(async () => {
     width: 100%;
   }
 
-  .model-select select {
+  .model-select .base-select {
     max-width: 100%;
     flex: 1;
   }
@@ -1519,22 +1494,9 @@ onMounted(async () => {
   color: var(--color-text-secondary);
 }
 
+/* BaseSelect 根容器:仅需撑满 flex 行;高度/边框/内边距由组件内部 size="sm" 处理 */
 .qoder-config-select {
   flex: 1;
-  height: 34px;
-  padding: 0 var(--space-2);
-  font-size: var(--fs-sm);
-  color: var(--color-text);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-}
-
-.qoder-config-select:focus {
-  outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px var(--color-primary-light);
 }
 
 /* ---- 高级选项:Skill 多选(下拉浮层,挂在模型选择右边) ---- */
