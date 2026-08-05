@@ -1216,17 +1216,87 @@ class _ACPCollector:
     - plan                → event_bus plan 事件
     - error               → thinking_delta(phase=error)
 
-    同时累积 reasoning / content 文本,供调用方生成 summary 和落库 thinking。
+    迭代切段(与 react_agent 对齐):
+    ACP 一次 prompt 调用内部可能包含多次 ReAct 迭代
+    (thought → message → tool_call → tool_result → thought → ...)。
+    本类按 tool_call 切段:每遇到 tool_call 就结束当前思考迭代
+    (推送 phase=end + 落库一条 thinking),并开启新迭代(新 conv_id),
+    让前端以独立流式卡片展示每次思考,呈现"思考→输出→工具→思考→输出→工具"
+    的真实顺序,而非所有思考堆一块、所有输出堆一块。
+
+    全程累积(reasoning_full / content_full)仍保留,供调用方生成 summary
+    和提取 plan;落库的 thinking 则按迭代分段,每段一条记录。
     """
 
-    def __init__(self, task: Task, db: Session, round_idx: int, conv_id: str):
+    def __init__(self, task: Task, db: Session, round_idx: int):
         self.task = task
         self.db = db
         self.round_idx = round_idx
-        self.conv_id = conv_id
+        # 全程累积(供调用方生成 summary / 提取 plan / 日志)
         self.reasoning_full = ""
         self.content_full = ""
         self.tool_call_count = 0
+        # 当前迭代状态
+        self.iteration = 0
+        self.current_conv_id = str(uuid.uuid4())
+        self.reasoning_buf = ""
+        self.content_buf = ""
+        # 当前迭代是否已推送 start(懒启动:首个 delta 到达时才推 start,
+        # 避免空迭代产生空卡片)
+        self._iter_started = False
+
+    def _ensure_iter_started(self) -> None:
+        """懒启动:首个 delta 到达时推送 phase=start"""
+        if self._iter_started:
+            return
+        publish(self.task.id, "thinking_delta", {
+            "conv_id": self.current_conv_id,
+            "round_idx": self.round_idx,
+            "role": "react_agent",
+            "phase": "start",
+            "delta": "",
+            "iteration": self.iteration,
+        })
+        self._iter_started = True
+
+    def _flush_iteration(self) -> None:
+        """结束当前迭代:推送 phase=end + 落库 thinking(若有内容)
+
+        若当前迭代从未收到 delta(_iter_started=False),跳过,避免空卡片。
+        """
+        if not self._iter_started:
+            return
+        publish(self.task.id, "thinking_delta", {
+            "conv_id": self.current_conv_id,
+            "round_idx": self.round_idx,
+            "role": "react_agent",
+            "phase": "end",
+            "delta": "",
+            "iteration": self.iteration,
+        })
+        # 落库当前迭代思考(content + reasoning),不推 SSE(流式卡片已展示)
+        if self.content_buf or self.reasoning_buf:
+            _add_conversation(
+                self.db, self.task,
+                round_idx=self.round_idx,
+                role="react_agent", type="thinking",
+                content=self.content_buf,
+                reasoning=self.reasoning_buf,
+                publish_event=False,
+            )
+        self._iter_started = False
+
+    def _start_new_iteration(self) -> None:
+        """开新迭代:iteration+1, 新 conv_id, 清空 buf(懒启动,不立即推 start)"""
+        self.iteration += 1
+        self.current_conv_id = str(uuid.uuid4())
+        self.reasoning_buf = ""
+        self.content_buf = ""
+        self._iter_started = False
+
+    def close(self) -> None:
+        """prompt 调用结束:flush 最后一段迭代"""
+        self._flush_iteration()
 
     def __call__(self, msg: dict) -> None:
         """处理一条 ACP 通知"""
@@ -1259,7 +1329,11 @@ class _ACPCollector:
         elif update_type == "agent_message_chunk":
             self._handle_text(text)
         elif update_type == "tool_call":
+            # 工具调用前:结束当前思考迭代,让前端把这段思考归入独立卡片
+            self._flush_iteration()
             self._handle_tool_call(update)
+            # 工具调用后:开新迭代,后续 thought/message 进新卡片
+            self._start_new_iteration()
         elif update_type == "tool_call_update":
             # status=completed 时携带工具结果
             if update.get("status") == "completed":
@@ -1274,25 +1348,31 @@ class _ACPCollector:
     def _handle_thinking(self, delta: str) -> None:
         if not delta:
             return
+        self._ensure_iter_started()
         self.reasoning_full += delta
+        self.reasoning_buf += delta
         publish(self.task.id, "thinking_delta", {
-            "conv_id": self.conv_id,
+            "conv_id": self.current_conv_id,
             "round_idx": self.round_idx,
             "role": "react_agent",
             "phase": "reasoning",
             "delta": delta,
+            "iteration": self.iteration,
         })
 
     def _handle_text(self, delta: str) -> None:
         if not delta:
             return
+        self._ensure_iter_started()
         self.content_full += delta
+        self.content_buf += delta
         publish(self.task.id, "thinking_delta", {
-            "conv_id": self.conv_id,
+            "conv_id": self.current_conv_id,
             "round_idx": self.round_idx,
             "role": "react_agent",
             "phase": "content",
             "delta": delta,
+            "iteration": self.iteration,
         })
 
     def _handle_tool_call(self, update: dict) -> None:
@@ -1343,12 +1423,14 @@ class _ACPCollector:
     def _handle_error(self, text: str) -> None:
         if not text:
             text = "(未知错误)"
+        self._ensure_iter_started()
         publish(self.task.id, "thinking_delta", {
-            "conv_id": self.conv_id,
+            "conv_id": self.current_conv_id,
             "round_idx": self.round_idx,
             "role": "react_agent",
             "phase": "error",
             "delta": text,
+            "iteration": self.iteration,
         })
 
 
@@ -1568,17 +1650,10 @@ def run_qoder_cli_agent(
             )
 
             # ---- 流式发送 prompt ----
-            conv_id = str(uuid.uuid4())
-            collector = _ACPCollector(task, db, round_idx, conv_id)
-
-            # 推送流开始
-            publish(task.id, "thinking_delta", {
-                "conv_id": conv_id,
-                "round_idx": round_idx,
-                "role": "react_agent",
-                "phase": "start",
-                "delta": "",
-            })
+            # collector 内部按 tool_call 切段管理多次 ReAct 迭代:
+            # 每段思考独立 conv_id + phase=start/end,落库为独立 thinking 记录,
+            # 与 react_agent 行为一致(前端按 thinking 起点切迭代)。
+            collector = _ACPCollector(task, db, round_idx)
 
             try:
                 result = client.prompt(
@@ -1589,36 +1664,19 @@ def run_qoder_cli_agent(
             except Exception as e:
                 logger.exception(f"[task={task.id}] Qoder CLI prompt 失败")
                 publish(task.id, "thinking_delta", {
-                    "conv_id": conv_id,
+                    "conv_id": collector.current_conv_id,
                     "round_idx": round_idx,
                     "role": "react_agent",
                     "phase": "error",
                     "delta": f"[Qoder CLI 调用失败: {e}]",
+                    "iteration": collector.iteration,
                 })
                 raise
             finally:
                 # 无论成功失败都关闭 recorder(刷盘 + 关文件)
                 recorder.close()
-
-            # 推送流结束
-            publish(task.id, "thinking_delta", {
-                "conv_id": conv_id,
-                "round_idx": round_idx,
-                "role": "react_agent",
-                "phase": "end",
-                "delta": "",
-            })
-
-            # ---- 落库 thinking(content + reasoning) ----
-            # 不推 SSE(流式卡片已展示),与 react_agent 一致
-            if collector.content_full or collector.reasoning_full:
-                _add_conversation(
-                    db, task, round_idx=round_idx,
-                    role="react_agent", type="thinking",
-                    content=collector.content_full,
-                    reasoning=collector.reasoning_full,
-                    publish_event=False,
-                )
+                # flush 最后一段思考迭代(推 end + 落库 thinking)
+                collector.close()
 
         finally:
             client.close()
