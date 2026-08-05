@@ -1657,6 +1657,11 @@ def test_credential_streaming(
             )
 
             content_full: list[str] = []
+            # MiniMax 等厂商 thinking=only / reasoningSplit 时,模型回复全部走
+            # reasoning_content,Kimi CLI 转成 thought_chunk/reasoning 通知发出,
+            # 永远不发 agent_message_chunk。这里累积 thinking,reply 为空时回退使用,
+            # 避免被误判为"模型未响应"。
+            reasoning_full: list[str] = []
             event_q: queue.Queue = queue.Queue()
             _SENTINEL = object()
 
@@ -1673,6 +1678,7 @@ def test_credential_streaming(
                     return
                 if update_type in ("thought_chunk", "thinking", "reasoning"):
                     event_q.put(("thinking", text))
+                    reasoning_full.append(text)
                 elif update_type == "agent_message_chunk":
                     event_q.put(("content", text))
                     content_full.append(text)
@@ -1732,15 +1738,23 @@ def test_credential_streaming(
                 return
 
             reply = "".join(content_full).strip()
+            # MiniMax 等厂商 thinking=only 时,模型回复全部在 reasoning_content,
+            # 不会发 agent_message_chunk。此时把 thinking 内容作为回复返回,
+            # 让前端能看到模型实际输出,而不是误报"模型未响应"。
+            reply_source = "content"
+            if not reply and reasoning_full:
+                reply = "".join(reasoning_full).strip()
+                reply_source = "reasoning"
             if not reply:
                 yield done(False, "session/new 成功,但模型未响应(请检查配额或网络)")
                 return
 
             preview = reply[:80] + ("..." if len(reply) > 80 else "")
-            logger.info(f"[{agent_type}_test] 模型响应: {preview}")
+            logger.info(f"[{agent_type}_test] 模型响应({reply_source}): {preview}")
+            suffix = "(模型仅返回思考内容)" if reply_source == "reasoning" else ""
             yield done(
                 True,
-                f"连接成功(ACP 协议版本 {protocol_version}),模型响应: {preview}",
+                f"连接成功(ACP 协议版本 {protocol_version}),模型响应{suffix}: {preview}",
             )
 
         except RuntimeError as e:
