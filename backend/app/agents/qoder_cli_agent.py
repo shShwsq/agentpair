@@ -1251,7 +1251,10 @@ class _ACPCollector:
         # 提取文本(content 可能是 str / dict / list)
         text = _extract_text(content)
 
-        if update_type in ("thought_chunk", "thinking", "reasoning"):
+        if update_type in (
+            "thought_chunk", "thinking", "reasoning",
+            "agent_thought_chunk",  # qodercli 变体:CLI 内部思考(含等待子 agent 等)
+        ):
             self._handle_thinking(text)
         elif update_type == "agent_message_chunk":
             self._handle_text(text)
