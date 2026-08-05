@@ -245,6 +245,7 @@ export interface TaskListItem {
 export type SSEEventType =
   | 'connected'
   | 'conversation'
+  | 'conversation_update'
   | 'status'
   | 'thinking_delta'
   | 'plan'
@@ -277,6 +278,12 @@ export interface ConversationEventData {
   /** 完整评估/思考链(如 user_agent evaluation 的覆盖情况+判断),可折叠回看 */
   reasoning?: string | null
   created_at: string | null
+}
+
+/** conversation_update 事件 data(更新已有对话项的 content,如 Kimi 增量参数补全) */
+export interface ConversationUpdateEventData {
+  id: string
+  content: string
 }
 
 /** status 事件 data */

@@ -764,6 +764,10 @@ class _ACPCollector:
         self.reasoning_buf = ""
         self.content_buf = ""
         self._iter_started = False
+        # tool_call 状态追踪:toolCallId -> {title, kind, tool_name, raw_input, input_text}
+        # Qoder CN 的 rawInput 在 tool_call 事件里一次性给出;
+        # Kimi 的参数在 tool_call_update(in_progress)里增量构建,需累积 input_text。
+        self._pending_tool_calls: dict[str, dict] = {}
 
     def _ensure_iter_started(self) -> None:
         """懒启动:首个 delta 到达时推送 phase=start"""
@@ -846,8 +850,13 @@ class _ACPCollector:
             self._handle_tool_call(update)
             self._start_new_iteration()
         elif update_type == "tool_call_update":
-            if update.get("status") == "completed":
-                self._handle_tool_result(content)
+            tool_call_id = update.get("toolCallId", "")
+            status = update.get("status", "")
+            if status == "in_progress":
+                # Kimi 的工具参数经 in_progress 增量构建,累积到 pending 缓存
+                self._accumulate_tool_input(tool_call_id, text)
+            elif status == "completed":
+                self._handle_tool_result(tool_call_id, update)
         elif update_type == "plan":
             self._handle_plan(update.get("entries", []))
         elif update_type == "error":
@@ -886,26 +895,229 @@ class _ACPCollector:
         })
 
     def _handle_tool_call(self, update: dict) -> None:
-        """记录工具调用(落库 conversation,推送 SSE)"""
+        """记录工具调用(落库 conversation,推送 SSE)
+
+        提取工具名、参数(rawInput / 增量 input_text),生成:
+        - intent:人类可读一句话,末尾带 [tool_name] 标签(供前端提取)
+        - detail:完整参数 JSON / 命令文本(前端等宽显示)
+
+        content 格式:`{intent}\n{detail}`(前端 toolCallParts 按首行拆分)
+        """
         self.tool_call_count += 1
-        tool_name = update.get("title", "") or update.get("toolCallId", "")
-        intent = f"调用 {tool_name}" if tool_name else "工具调用"
-        _add_conversation(
+        tool_call_id = update.get("toolCallId", "")
+        title = update.get("title", "") or tool_call_id
+        kind = update.get("kind", "other")
+        raw_input = update.get("rawInput")  # Qoder 有,Kimi 无
+
+        # 解析人类可读的工具名(优先 _meta.qoder.toolName,其次 kind 推断)
+        meta = update.get("_meta") or {}
+        qoder_meta = meta.get("qoder") or {}
+        tool_name = qoder_meta.get("toolName", "") or self._infer_tool_name(title, kind)
+
+        # 缓存,等 tool_call_update 累积输入 / completed 拿输出
+        self._pending_tool_calls[tool_call_id] = {
+            "title": title,
+            "kind": kind,
+            "tool_name": tool_name,
+            "raw_input": raw_input or {},
+            "input_text": "",  # Kimi 增量累积
+            "conv_id": None,  # 落库后填充,completed 时用于更新
+        }
+
+        # 生成 intent + detail(Kimi 此时 input_text 为空,detail 可能为空)
+        intent, detail = self._build_tool_intent_detail(tool_name, raw_input, "")
+
+        # content: intent + "\n" + detail(前端按首行拆分)
+        content = f"{intent}\n{detail}" if detail else intent
+
+        conv = _add_conversation(
             self.db, self.task,
             round_idx=self.round_idx,
             role="react_agent", type="tool_call",
-            content=intent,
+            content=content,
         )
+        self._pending_tool_calls[tool_call_id]["conv_id"] = conv.id
 
-    def _handle_tool_result(self, content: Any) -> None:
-        """记录工具结果(落库 conversation,推送 SSE)"""
-        text = _extract_text(content)
+    def _accumulate_tool_input(self, tool_call_id: str, text: str) -> None:
+        """记录 Kimi 的 tool_call_update(in_progress)累积参数
+
+        Kimi 的工具参数不在 tool_call 事件的 rawInput 里(无此字段),
+        而是通过 tool_call_update(status=in_progress)的 content 逐步构建。
+        每次 in_progress 事件包含**完整累积文本**(非 delta),直接替换。
+
+        节流推送 conversation_update,让前端实时看到参数构建过程
+        (子智能体调用可能持续数分钟,否则用户只看到"启动子智能体"无详情)。
+        """
+        pending = self._pending_tool_calls.get(tool_call_id)
+        if pending is None or not text:
+            return
+        # Kimi in_progress 每次是完整累积文本,直接替换(非 += 拼接)
+        pending["input_text"] = text
+        self._throttled_tool_call_update(tool_call_id, pending)
+
+    def _throttled_tool_call_update(self, tool_call_id: str, pending: dict) -> None:
+        """节流推送 tool_call conversation 更新(SSE only,不写 DB)
+
+        Kimi 一次子智能体调用可能产生 100+ 个 in_progress 事件,
+        全量推送会造成 SSE 风暴。按时间(0.5s)+ 长度增量(80 字符)节流。
+
+        DB 不写:in_progress 期间内容是临时态,completed 时才落库最终内容。
+        若用户在此期间刷新,从 DB 拿到的是上一版内容(可接受)。
+        """
+        conv_id = pending.get("conv_id")
+        if not conv_id:
+            return
+        now = time.time()
+        last_push = pending.get("last_push_time", 0.0)
+        last_len = pending.get("last_push_len", 0)
+        text_len = len(pending.get("input_text", ""))
+        # 节流:距上次推送 < 0.5s 且长度增长 < 80 字符时跳过
+        if now - last_push < 0.5 and text_len - last_len < 80:
+            return
+        pending["last_push_time"] = now
+        pending["last_push_len"] = text_len
+
+        intent, detail = self._build_tool_intent_detail(
+            pending.get("tool_name", ""), None, pending.get("input_text", ""),
+        )
+        new_content = f"{intent}\n{detail}" if detail else intent
+        publish(self.task.id, "conversation_update", {
+            "id": str(conv_id),
+            "content": new_content,
+        })
+
+    def _handle_tool_result(self, tool_call_id: str, update: dict) -> None:
+        """记录工具结果(落库 conversation,推送 SSE)
+
+        优先用 rawOutput(Qoder 和 Kimi 完成时都有,完整不截断),
+        回退到 content 文本。
+
+        对 Kimi(参数经 in_progress 增量构建):completed 时用累积的 input_text
+        更新 tool_call conversation 的 content(补全 intent + detail),
+        并推 SSE 让前端刷新显示。
+        """
+        raw_output = update.get("rawOutput", "")
+        if not raw_output:
+            raw_output = _extract_text(update.get("content"))
+        if not raw_output:
+            raw_output = "(无输出)"
+
+        pending = self._pending_tool_calls.get(tool_call_id, {})
+        tool_name = pending.get("tool_name", "工具")
+        input_text = pending.get("input_text", "")
+        conv_id = pending.get("conv_id")
+
+        # Kimi:参数在 in_progress 增量构建,tool_call 落库时 detail 为空
+        # 这里用累积的 input_text 补全 tool_call conversation 的 intent + detail
+        if input_text and conv_id and not pending.get("raw_input"):
+            intent, detail = self._build_tool_intent_detail(
+                tool_name, None, input_text,
+            )
+            new_content = f"{intent}\n{detail}" if detail else intent
+            # 更新已落库的 tool_call conversation
+            self.db.query(Conversation).filter(
+                Conversation.id == conv_id,
+            ).update({"content": new_content})
+            self.db.commit()
+            # 推 SSE 让前端刷新(用 conversation_update 事件)
+            publish(self.task.id, "conversation_update", {
+                "id": str(conv_id),
+                "content": new_content,
+            })
+
         _add_conversation(
             self.db, self.task,
             round_idx=self.round_idx,
             role="react_agent", type="tool_result",
-            content=(text or str(content))[:500],
+            content=raw_output,
         )
+
+    @staticmethod
+    def _infer_tool_name(title: str, kind: str) -> str:
+        """从 title/kind 推断工具名(无 _meta.qoder.toolName 时)"""
+        if kind == "execute":
+            return "Bash"
+        if kind == "think":
+            return "Agent"
+        # title 本身就是工具名(如 "Agent")或命令文本
+        if title and not title.startswith("/"):
+            # 短 title 通常是工具名,长 title 通常是命令(取首词)
+            if len(title) <= 30 and " " not in title:
+                return title
+            return "Bash"
+        return "工具"
+
+    @staticmethod
+    def _build_tool_intent_detail(
+        tool_name: str, raw_input: dict | None, input_text: str,
+    ) -> tuple[str, str]:
+        """生成人类可读的 intent + 完整参数 detail
+
+        返回 (intent, detail):
+        - intent:一句话描述,末尾带 [tool_name] 标签
+        - detail:完整参数 JSON 或命令文本(前端等宽显示)
+
+        各工具类型的 intent:
+        - Agent(子智能体):"子任务: {description}" 或 "子任务: {prompt摘要}"
+        - Bash(命令执行):"执行: {command摘要}"
+        - 其他:"调用 {tool_name}"
+        """
+        raw_input = raw_input or {}
+        detail = ""
+
+        if tool_name == "Agent":
+            # Qoder CN: rawInput 有 description / prompt / subagent_type
+            desc = raw_input.get("description", "")
+            prompt = raw_input.get("prompt", "")
+            sub_type = raw_input.get("subagent_type", "")
+
+            if desc:
+                intent = f"子任务: {desc}"
+            elif sub_type:
+                intent = f"子任务: {sub_type}"
+            elif prompt:
+                intent = f"子任务: {prompt[:80]}"
+            else:
+                intent = "启动子智能体"
+
+            # Kimi: 无 rawInput,参数在 input_text(JSON 字符串,可能不完整)
+            if not raw_input and input_text:
+                k_prompt = ""
+                try:
+                    params = json.loads(input_text)
+                    k_prompt = params.get("prompt", "") or params.get("description", "")
+                except json.JSONDecodeError:
+                    # in_progress 期间 JSON 不完整(无闭合引号/大括号),
+                    # 用 regex 提取 prompt 字段值,让前端实时看到正在构建的子任务描述
+                    k_prompt = _extract_json_string_field(input_text, "prompt")
+                if k_prompt:
+                    intent = f"子任务: {k_prompt[:80]}"
+                detail = input_text
+            elif raw_input:
+                detail = json.dumps(raw_input, ensure_ascii=False, indent=2)
+            intent += " [Agent]"
+
+        elif tool_name == "Bash":
+            cmd = raw_input.get("command", "") or input_text
+            desc = raw_input.get("description", "")
+            if cmd:
+                # intent 显示命令摘要(首行,最多 100 字符)
+                cmd_first = cmd.split("\n")[0][:100]
+                intent = f"执行: {cmd_first}" if not desc else f"执行: {desc}"
+            else:
+                intent = "执行命令"
+            detail = cmd or (json.dumps(raw_input, ensure_ascii=False, indent=2) if raw_input else "")
+            intent += " [Bash]"
+
+        else:
+            intent = f"调用 {tool_name}"
+            if raw_input:
+                detail = json.dumps(raw_input, ensure_ascii=False, indent=2)
+            elif input_text:
+                detail = input_text
+            intent += f" [{tool_name}]"
+
+        return intent, detail
 
     def _handle_plan(self, entries: list) -> None:
         """处理 plan 通知,推送 plan 事件"""
@@ -968,6 +1180,30 @@ def _extract_text(content: Any) -> str:
     return str(content)
 
 
+# 从(可能不完整的)JSON 文本中提取字符串字段值
+# 用于 Kimi in_progress 期间的增量参数,JSON 可能未闭合(无结束引号/大括号)
+_INCOMPLETE_JSON_FIELD_RE = re.compile(
+    r'"(\w+)"\s*:\s*"((?:[^"\\]|\\.)*)'
+)
+
+
+def _extract_json_string_field(text: str, field: str) -> str:
+    """从(可能不完整的)JSON 文本中提取指定字符串字段的值
+
+    Kimi 的 tool_call_update(in_progress)每次包含完整累积文本,但 JSON 可能
+    尚未闭合(如 `{"prompt": "审计 /home/user/...`)。本函数用 regex 提取
+    指定字段的值,无需完整 JSON 解析。
+
+    返回解码后的字符串值,未找到返回空字符串。
+    """
+    for m in _INCOMPLETE_JSON_FIELD_RE.finditer(text):
+        if m.group(1) == field:
+            raw_val = m.group(2)
+            # 处理常见转义序列(\\n \\" \\\\ 等)
+            return raw_val.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
+    return ""
+
+
 # ============================================================
 # 对话落库辅助
 # ============================================================
@@ -977,11 +1213,13 @@ def _add_conversation(
     db: Session, task: Task, *, round_idx: int, role: str, type: str,
     content: str, reasoning: str | None = None,
     publish_event: bool = True,
-) -> None:
+) -> Conversation:
     """记录一条对话,可选推送 SSE 事件
 
     - thinking 不推 SSE(流式卡片已展示,避免重复)
     - tool_call / tool_result 推 SSE(前端对话列表实时追加)
+
+    返回创建的 Conversation 对象(供调用方后续更新,如 Kimi 增量参数补全)。
     """
     conv = Conversation(
         task_id=task.id,
@@ -1003,6 +1241,7 @@ def _add_conversation(
             "content": conv.content,
             "created_at": conv.created_at.isoformat() if conv.created_at else None,
         })
+    return conv
 
 
 # ============================================================

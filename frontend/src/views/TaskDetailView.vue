@@ -411,6 +411,14 @@ function connectSSE(taskId: string): void {
         void loadCoverage()
       }
     },
+    onConversationUpdate: (data) => {
+      if (!task.value) return
+      // 更新已有对话项的 content(如 Kimi 增量参数补全后刷新 tool_call 显示)
+      const conv = task.value.conversations.find((c) => c.id === data.id)
+      if (conv) {
+        conv.content = data.content
+      }
+    },
     onStatus: (data) => {
       if (task.value) {
         task.value.status = data.status

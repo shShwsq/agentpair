@@ -18,6 +18,7 @@ import type {
   ChecklistReviewEventData,
   ConnectedData,
   ConversationEventData,
+  ConversationUpdateEventData,
   DoneEventData,
   PlanEventData,
   QuestionEventData,
@@ -31,6 +32,8 @@ import type {
 export interface StreamCallbacks {
   onConnected?: (data: ConnectedData) => void
   onConversation?: (data: ConversationEventData) => void
+  /** 更新已有对话项的 content(如 Kimi 增量参数补全后刷新 tool_call 显示) */
+  onConversationUpdate?: (data: ConversationUpdateEventData) => void
   onStatus?: (data: StatusEventData) => void
   /** 流式 token 增量(打字机效果)。每个 LLM 调用按 conv_id 累积 */
   onThinkingDelta?: (data: ThinkingDeltaEventData) => void
@@ -64,6 +67,7 @@ export function subscribeTaskStream(
   const eventTypes: SSEEventType[] = [
     'connected',
     'conversation',
+    'conversation_update',
     'status',
     'thinking_delta',
     'plan',
@@ -85,6 +89,9 @@ export function subscribeTaskStream(
             break
           case 'conversation':
             callbacks.onConversation?.(data as unknown as ConversationEventData)
+            break
+          case 'conversation_update':
+            callbacks.onConversationUpdate?.(data as unknown as ConversationUpdateEventData)
             break
           case 'status':
             callbacks.onStatus?.(data as unknown as StatusEventData)

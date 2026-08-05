@@ -138,6 +138,26 @@ const displayContent = computed(() => {
   if (props.item.type === 'thinking') return stripPlanBlock(c)
   return c
 })
+
+/**
+ * tool_result / tool_call 长详情可折叠:
+ * - tool_result:子智能体输出可能数千字符(审计报告)
+ * - tool_call:子智能体参数可能很长(Agent 的 prompt + description)
+ * 超过阈值(10 行 / 500 字符)时默认折叠,点击展开。
+ */
+const DETAIL_COLLAPSE_LINES = 10
+const detailExpanded = ref(false)
+const shouldCollapseDetail = computed(() => {
+  const t = props.item.type
+  if (t !== 'tool_result' && t !== 'tool_call') return false
+  const c = displayContent.value || ''
+  if (c.length > 500) return true
+  return c.split('\n').length > DETAIL_COLLAPSE_LINES
+})
+/** 折叠区标签:tool_result 显示"工具结果",tool_call 显示"调用参数" */
+const detailLabel = computed(() =>
+  props.item.type === 'tool_call' ? '调用参数' : '工具结果',
+)
 </script>
 
 <template>
@@ -206,8 +226,28 @@ const displayContent = computed(() => {
       <!-- content 独立卡片 -->
       <!-- tool_call:首行作为意图标题高亮,其余作为等宽调用详情 -->
       <div v-if="toolCallParts" class="msg-tool-intent">{{ toolCallParts.intent }}</div>
+
+      <!-- tool_result / tool_call 超长详情:可折叠(子智能体输出/参数可能数千字符) -->
       <div
-        v-if="displayContent"
+        v-if="shouldCollapseDetail"
+        :class="['msg-content-card', 'msg-tool-result', `msg-${variant}`]"
+      >
+        <div
+          class="msg-tool-result-header"
+          @click="detailExpanded = !detailExpanded"
+        >
+          <span class="msg-reasoning-toggle">
+            {{ detailExpanded ? '▼' : '▶' }}
+          </span>
+          <span class="msg-tool-result-label">{{ detailLabel }}</span>
+          <span class="msg-reasoning-meta">{{ displayContent.length }} 字符</span>
+        </div>
+        <div v-if="detailExpanded" class="msg-tool-result-body">{{ displayContent }}</div>
+      </div>
+
+      <!-- 其他类型:普通卡片 -->
+      <div
+        v-else-if="displayContent"
         :class="['msg-content-card', `msg-${variant}`]"
       >{{ displayContent }}</div>
     </template>
@@ -382,5 +422,42 @@ const displayContent = computed(() => {
   padding: var(--space-1) var(--space-2);
   background: var(--color-primary-light);
   border-radius: var(--radius-sm);
+}
+
+/* tool_result / tool_call 长详情可折叠区域:超长内容默认折叠 */
+.msg-tool-result {
+  padding: 0;
+  overflow: hidden;
+}
+
+.msg-tool-result-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  user-select: none;
+  padding: var(--space-1) var(--space-2);
+  transition: background 0.15s ease;
+}
+
+.msg-tool-result-header:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.msg-tool-result-label {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--color-text-secondary);
+}
+
+.msg-tool-result-body {
+  padding: var(--space-2);
+  border-top: 1px solid var(--color-border);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--fs-xs);
+  max-height: 500px;
+  overflow-y: auto;
 }
 </style>
