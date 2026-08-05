@@ -492,16 +492,12 @@ onMounted(async () => {
           <div class="config-row">
             <div class="config-label-group">
               <span class="config-label">user_agent 模型</span>
-              <span class="config-hint">评估用</span>
             </div>
             <div class="model-select">
               <select
                 v-model="selectedLlmConfigId"
                 :disabled="loadingModels"
                 :aria-label="modelSelectLabel"
-                :title="useAgentExecutor
-                  ? 'user_agent 评估使用的模型(执行模型由 CLI 配置管理)'
-                  : '内置执行器与 user_agent 评估使用的模型'"
               >
                 <option value="">{{ useAgentExecutor ? '默认评估模型' : '默认模型' }}</option>
                 <option
@@ -524,36 +520,24 @@ onMounted(async () => {
           <div class="config-row">
             <div class="config-label-group">
               <span class="config-label">react_agent</span>
-              <span class="config-hint">
-                {{ useAgentExecutor ? 'CLI 自管模型' : '可选独立模型' }}
-              </span>
             </div>
             <div class="react-controls">
-              <!-- 执行器选择:内置 + 用户已配置且启用的 agent CLI -->
-              <div
-                class="executor-segmented"
-                role="tablist"
-                aria-label="执行器选择"
-              >
-                <button
-                  type="button"
-                  :class="['exec-btn', { active: selectedExecutor === 'builtin' }]"
-                  role="tab"
-                  :aria-selected="selectedExecutor === 'builtin'"
-                  title="系统内置 ReAct 智能体(右侧可独立选择 react_agent 模型)"
-                  @click="selectedExecutor = 'builtin'"
-                >内置</button>
-                <button
-                v-for="agent in agentExecutors"
-                :key="agent.agent_type"
-                type="button"
-                :class="['exec-btn', { active: selectedExecutor === agent.agent_type }]"
-                role="tab"
-                :aria-selected="selectedExecutor === agent.agent_type"
-                :title="`${agent.display_name}(react 角色模型由该 agent 自管)`"
-                @click="selectedExecutor = agent.agent_type"
-              >{{ agent.display_name }}</button>
-            </div>
+              <!-- 执行器选择(下拉框):内置 + 用户已配置且启用的 agent CLI -->
+              <div class="executor-select">
+                <select
+                  v-model="selectedExecutor"
+                  aria-label="执行器选择"
+                >
+                  <option value="builtin">内置</option>
+                  <option
+                    v-for="agent in agentExecutors"
+                    :key="agent.agent_type"
+                    :value="agent.agent_type"
+                  >
+                    {{ agent.display_name }}
+                  </option>
+                </select>
+              </div>
 
             <!-- react_agent 模型(仅 builtin:可与 user_agent 用不同模型;空=同评估模型) -->
             <div v-if="!useAgentExecutor" class="model-select react-model-select">
@@ -561,7 +545,6 @@ onMounted(async () => {
                 v-model="selectedReactLlmConfigId"
                 :disabled="loadingModels"
                 aria-label="react_agent 模型"
-                title="内置 react_agent 使用的模型。选「同评估模型」=回退到 user_agent 评估模型"
               >
                 <option value="">同评估模型</option>
                 <option
@@ -816,27 +799,29 @@ onMounted(async () => {
                 />
               </div>
 
-              <!-- 仓库加载/错误提示 -->
-              <p v-if="reposLoading" class="repo-hint">加载仓库列表...</p>
-              <p v-if="reposError" class="repo-error">{{ reposError }}</p>
-              <p v-if="repoUrlError" class="repo-error">{{ repoUrlError }}</p>
-              <p
-                v-if="repoInputMode === 'select'
-                  && !reposLoading
-                  && !reposError
-                  && reposLoaded
-                  && githubRepos.length === 0"
-                class="repo-hint"
-              >你的 GitHub 账号下暂无仓库</p>
-              <p
-                v-if="repoInputMode === 'select'
-                  && !reposLoading
-                  && !reposLoaded"
-                class="repo-hint"
-              >
-                未绑定 GitHub?
-                <RouterLink to="/settings" class="repo-link">前往设置绑定 →</RouterLink>
-              </p>
+              <!-- 仓库加载/错误提示(固定高度,避免出现/消失时整行上移) -->
+              <div class="repo-hint-area">
+                <p v-if="reposLoading" class="repo-hint">加载仓库列表...</p>
+                <p v-if="reposError" class="repo-error">{{ reposError }}</p>
+                <p v-if="repoUrlError" class="repo-error">{{ repoUrlError }}</p>
+                <p
+                  v-if="repoInputMode === 'select'
+                    && !reposLoading
+                    && !reposError
+                    && reposLoaded
+                    && githubRepos.length === 0"
+                  class="repo-hint"
+                >你的 GitHub 账号下暂无仓库</p>
+                <p
+                  v-if="repoInputMode === 'select'
+                    && !reposLoading
+                    && !reposLoaded"
+                  class="repo-hint"
+                >
+                  未绑定 GitHub?
+                  <RouterLink to="/settings" class="repo-link">前往设置绑定 →</RouterLink>
+                </p>
+              </div>
             </div>
 
             <!-- 发送按钮 -->
@@ -942,12 +927,6 @@ onMounted(async () => {
   white-space: nowrap;
 }
 
-.config-hint {
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-  white-space: nowrap;
-}
-
 /* 第 3 行 react_agent 控件容器:横向排列执行器 + CLI 配置 / 技能 */
 .react-controls {
   display: flex;
@@ -1019,38 +998,24 @@ onMounted(async () => {
   box-shadow: 0 0 0 3px var(--color-primary-light);
 }
 
-/* ---- 执行器选择(内置 + 动态 agent 分段控件) ---- */
-.executor-segmented {
-  display: inline-flex;
-  align-items: center;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: 2px;
-  gap: 2px;
-}
-
-.exec-btn {
-  padding: var(--space-1) var(--space-3);
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-medium);
-  color: var(--color-text-secondary);
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-  white-space: nowrap;
-}
-
-.exec-btn:hover {
+/* ---- 执行器选择(下拉框) ---- */
+.executor-select select {
+  height: 36px;
+  padding: 0 var(--space-3);
+  font-size: var(--fs-sm);
   color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: border-color var(--transition-fast);
+  min-width: 120px;
 }
 
-.exec-btn.active {
-  color: var(--color-primary);
-  background: var(--color-surface-alt);
-  box-shadow: var(--shadow-sm);
+.executor-select select:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-light);
 }
 
 .model-empty-link {
@@ -1243,10 +1208,17 @@ onMounted(async () => {
   box-shadow: 0 0 0 3px var(--color-danger-light);
 }
 
+.repo-hint-area {
+  /* 固定高度占位,避免加载提示出现/消失时整行上移 */
+  min-height: 1.5em;
+  display: block;
+}
+
 .repo-hint,
 .repo-error {
   font-size: var(--fs-xs);
   margin: 0;
+  line-height: 1.5;
 }
 
 .repo-hint {
