@@ -100,21 +100,20 @@ const modelSelectLabel = computed(() =>
 // ---- Qoder CLI 模型配置(仅 qoder_cli 执行器显示) ----
 // 见 https://docs.qoder.cn/cli/model
 
-/** Qoder CLI 模型分级选项 */
+/** Qoder CLI 模型选项(value 必须与 CLI --model 接受的名称严格大小写匹配,
+ * 见 https://docs.qoder.cn/cli/model 及 ACP 错误返回的 Available models 列表) */
 const qoderModelOptions: { value: string; label: string }[] = [
   { value: '', label: '默认(智能路由 Auto)' },
-  { value: 'auto', label: '智能路由 (Auto)' },
-  { value: 'ultimate', label: '极致 (Ultimate)' },
-  { value: 'performance', label: '性能 (Performance)' },
-  { value: 'efficient', label: '经济 (Efficient)' },
-  { value: 'lite', label: '轻量 (Lite)' },
-  { value: 'qwen3.7-max', label: 'Qwen3.7-Max' },
-  { value: 'qwen3.7-plus', label: 'Qwen3.7-Plus' },
-  { value: 'deepseek-v4-pro', label: 'DeepSeek-V4-Pro' },
-  { value: 'deepseek-v4-flash', label: 'DeepSeek-V4-Flash' },
-  { value: 'glm-5.2', label: 'GLM-5.2' },
-  { value: 'kimi-k2.7-code', label: 'Kimi-K2.7-Code' },
-  { value: 'minimax-m3', label: 'MiniMax-M3' },
+  { value: 'Auto', label: '智能路由 (Auto)' },
+  { value: 'Qwen3.8-Max', label: 'Qwen3.8-Max' },
+  { value: 'Qwen3.7-Max', label: 'Qwen3.7-Max' },
+  { value: 'Qwen3.7-Plus', label: 'Qwen3.7-Plus' },
+  { value: 'Qwen3.6-Flash', label: 'Qwen3.6-Flash' },
+  { value: 'DeepSeek-V4-Pro', label: 'DeepSeek-V4-Pro' },
+  { value: 'DeepSeek-V4-Flash', label: 'DeepSeek-V4-Flash' },
+  { value: 'GLM-5.2', label: 'GLM-5.2' },
+  { value: 'Kimi-K2.7-Code', label: 'Kimi-K2.7-Code' },
+  { value: 'MiniMax-M2.7', label: 'MiniMax-M2.7' },
 ]
 
 /** 思考强度选项 */

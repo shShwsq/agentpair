@@ -28,6 +28,7 @@ import re
 import time
 import uuid
 from collections.abc import Generator
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -91,9 +92,17 @@ class ACPClient:
         client.close()
     """
 
-    def __init__(self, base_url: str, headers: dict[str, str] | None = None):
+    def __init__(
+        self,
+        base_url: str,
+        headers: dict[str, str] | None = None,
+        recorder: _ACPRecorder | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.headers = headers or {}
+        # 可选的原始响应记录器:在 _rpc 的 SSE 循环里记录每一行原文,
+        # 任何解析/过滤之前落盘。None 表示不记录(如 test_credential 流程)。
+        self.recorder = recorder
         # read timeout=None:session/prompt 可能长时间流式输出
         self._client = httpx.Client(
             timeout=httpx.Timeout(connect=10, read=None, write=30, pool=30),
@@ -123,6 +132,14 @@ class ACPClient:
         (read=None 无限等待)。测试场景应传有限值,避免模型无响应时卡死。
         """
         request_id = request.get("id")
+        method = request.get("method", "?")
+
+        # 记录请求开始元信息(便于事后按 JSONL 边界定位每个 RPC 调用)
+        if self.recorder:
+            self.recorder.record_raw(
+                f"--> {method} id={request_id} params={json.dumps(request.get('params', {}), ensure_ascii=False)}",
+                kind="meta",
+            )
 
         with self._client.stream(
             "POST",
@@ -132,14 +149,26 @@ class ACPClient:
         ) as response:
             if response.status_code != 200:
                 response.read()
-                body = response.text[:500]
+                body = response.text
+                # 完整记录 HTTP 错误响应体(不截断)
+                if self.recorder:
+                    self.recorder.record_raw(
+                        f"HTTP {response.status_code}\n{body}",
+                        kind="http_error",
+                    )
                 raise RuntimeError(
-                    f"ACP 请求失败: HTTP {response.status_code}, body={body}"
+                    f"ACP 请求失败: HTTP {response.status_code}, body={body[:500]}"
                 )
 
             final_result: dict | None = None
 
             for line in response.iter_lines():
+                # 最先记录原始行(不解析、不过滤、不截断),
+                # 确保即使后续 JSONDecodeError 或分发逻辑跳过,
+                # 原始 SSE 文本仍完整保留在 JSONL 中。
+                if self.recorder:
+                    self.recorder.record_raw(line, kind="line")
+
                 line = line.strip()
                 if not line or not line.startswith("data:"):
                     continue
@@ -1063,6 +1092,99 @@ def test_credential_streaming(
 
 
 # ============================================================
+# ACP 响应记录:完整 JSONL 落盘(供事后分析/回放)
+# ============================================================
+
+# 默认输出目录:backend/logs/acp/
+_ACP_LOG_DIR = Path(__file__).resolve().parents[2] / "logs" / "acp"
+
+
+class _ACPRecorder:
+    """把 ACP 通信的原始响应以 JSONL 形式落盘(不解析、不过滤)
+
+    每个 task + round 一份文件,路径:
+        {backend}/logs/acp/{task_id}_r{round_idx}_{YYYYmmdd_HHMMSS}.jsonl
+
+    记录层级:在 ACPClient._rpc 的 SSE 循环里,每读到一行就 record_raw,
+    在任何解析/过滤之前落盘。因此能完整保留:
+    - 所有 data: 行(不论是否合法 JSON)
+    - 非 data: 行(SSE 注释/event: 等)
+    - HTTP 错误响应体(非 200 时)
+    - 元信息(请求开始/结束标记)
+
+    每行 JSONL 结构:
+        {"seq": 1, "ts": "ISO 时间(本地时区)",
+         "kind": "line" | "http_error" | "meta",
+         "raw": "<原始文本,不截断>"}
+
+    用途:
+    - 完整保留 ACP 原始响应(不截断、不过滤、不解析)
+    - 与 uvicorn 主日志隔离,便于按 task/round 定位
+    - 支持事后回放、协议合规验证、CLI 行为对比
+    - 便于后续修改分发逻辑(基于原始数据决定如何处理新事件类型)
+
+    写入失败不影响主流程(只记 logger.warning)。
+    """
+
+    def __init__(self, task_id: str, round_idx: int, log_dir: Path | None = None):
+        self.task_id = task_id
+        self.round_idx = round_idx
+        self._dir = log_dir or _ACP_LOG_DIR
+        self._path: Path | None = None
+        self._fh = None
+        self._seq = 0
+        self._open()
+
+    def _open(self) -> None:
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            fname = f"{self.task_id}_r{self.round_idx}_{ts}.jsonl"
+            self._path = self._dir / fname
+            # 用 append 模式:同 task+round+秒级时间戳重启时追加,不覆盖
+            self._fh = self._path.open("a", encoding="utf-8")
+            logger.info(f"[acp_recorder] 记录到: {self._path}")
+        except Exception as e:
+            logger.warning(f"[acp_recorder] 打开文件失败(忽略): {e}")
+            self._fh = None
+            self._path = None
+
+    def record_raw(self, raw: str, kind: str = "line") -> None:
+        """记录一行原始文本(不解析、不截断、不过滤)
+
+        kind:
+            "line"       - SSE 流中的一行(data: / event: / 注释 / 空行等)
+            "http_error" - HTTP 非 200 时的响应体
+            "meta"       - 元信息(请求方法、开始/结束标记等)
+        """
+        if self._fh is None:
+            return
+        try:
+            self._seq += 1
+            entry = {
+                "seq": self._seq,
+                "ts": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+                "kind": kind,
+                "raw": raw,
+            }
+            self._fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            self._fh.flush()
+        except Exception as e:
+            logger.warning(f"[acp_recorder] 写入失败(忽略): {e}")
+
+    def close(self) -> None:
+        if self._fh:
+            try:
+                self._fh.close()
+            except Exception:
+                pass
+            self._fh = None
+            logger.info(
+                f"[acp_recorder] 关闭: {self._path}, 共 {self._seq} 条事件"
+            )
+
+
+# ============================================================
 # ACP 事件处理:翻译为 event_bus 事件 + 落库 Conversation
 # ============================================================
 
@@ -1108,9 +1230,13 @@ class _ACPCollector:
 
     def __call__(self, msg: dict) -> None:
         """处理一条 ACP 通知"""
-        # 记录原始 msg 结构(qodercli 实际输出可能与标准有差异,便于核对)
+        # 注意:原始 msg 的完整记录由 ACPClient._rpc 层负责(记录每一行 SSE 原文),
+        # 这里只做事件分发。logger.debug 仅输出类型摘要,避免污染 uvicorn 主日志。
+        params_preview = msg.get("params") or {}
+        update_preview = params_preview.get("update") or {}
         logger.debug(
-            f"[acp] raw msg: {json.dumps(msg, ensure_ascii=False)[:500]}"
+            f"[acp] {msg.get('method', '')} / "
+            f"{update_preview.get('sessionUpdate', '')}"
         )
 
         method = msg.get("method", "")
@@ -1405,7 +1531,9 @@ def run_qoder_cli_agent(
         _wait_for_bridge_ready(session, bridge_exec_id, endpoint_url, endpoint_headers)
 
         # ---- ACP 通信 ----
-        client = ACPClient(endpoint_url, endpoint_headers)
+        # 创建原始响应记录器(每个 task+round 一份 JSONL,记录所有 SSE 原文)
+        recorder = _ACPRecorder(task.id, round_idx)
+        client = ACPClient(endpoint_url, endpoint_headers, recorder=recorder)
         try:
             # 握手
             init_result = client.initialize()
@@ -1465,6 +1593,9 @@ def run_qoder_cli_agent(
                     "delta": f"[Qoder CLI 调用失败: {e}]",
                 })
                 raise
+            finally:
+                # 无论成功失败都关闭 recorder(刷盘 + 关文件)
+                recorder.close()
 
             # 推送流结束
             publish(task.id, "thinking_delta", {
