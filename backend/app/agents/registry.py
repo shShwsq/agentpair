@@ -65,6 +65,69 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
         "executor_module": "app.agents.qoder_cli_agent",
         "executor_func": "run_qoder_cli_agent",
     },
+    "kimi_cli": {
+        "display_name": "Kimi Code CLI",
+        "description": (
+            "沙箱内运行 Kimi Code CLI(开源 https://github.com/MoonshotAI/kimi-code),"
+            "通过 ACP 协议通信,模型经 KIMI_MODEL_* 环境变量注入(支持自部署 LLM 端点)"
+        ),
+        "credential_fields": [
+            {
+                "key": "api_key",
+                "label": "API Key",
+                "type": CREDENTIAL_FIELD_SECRET,
+                "required": True,
+                "placeholder": "粘贴你的 LLM API Key",
+                "help_url": "https://platform.moonshot.cn/console/api-keys",
+                "help_text": "LLM 供应商的 API Key(如 Moonshot / OpenAI 兼容端点),经 KIMI_MODEL_API_KEY 注入",
+            },
+            {
+                "key": "base_url",
+                "label": "API Base URL",
+                "type": CREDENTIAL_FIELD_TEXT,
+                "required": False,
+                "placeholder": "https://api.moonshot.ai/v1",
+                "help_text": "LLM API 基址(留空用 provider 默认;自部署填你的端点),经 KIMI_MODEL_BASE_URL 注入",
+            },
+            {
+                "key": "model",
+                "label": "模型名",
+                "type": CREDENTIAL_FIELD_TEXT,
+                "required": False,
+                "placeholder": "kimi-for-coding",
+                "help_text": "发送给 API 的模型 ID(留空默认 kimi-for-coding),经 KIMI_MODEL_NAME 注入",
+            },
+        ],
+        "sandbox": {
+            # kimi CLI 可执行文件名(沙箱内 PATH 查找或绝对路径)
+            "bin_config_key": "KIMI_CLI_BIN",
+            "bin_default": "kimi",
+            # 安装命令(沙箱内未检测到 kimi 时执行)
+            # 前提:沙箱镜像已装 Node.js >= 20(见 docs/opensandbox-deploy.md)
+            "install_cmd_config_key": "KIMI_CLI_INSTALL_CMD",
+            "install_cmd_default": "npm install -g @moonshot-ai/kimi-code",
+            # ACP 启动参数:kimi 用 `kimi acp` 子命令(非 --acp 标志)
+            "acp_args": ["acp"],
+            # Kimi ACP 模式不支持 --model / --reasoning-effort 等 CLI 参数
+            # 模型经 KIMI_MODEL_NAME 环境变量注入,思考强度经 set_config_option 设置
+            "inject_cli_model_args": False,
+            # 凭证 → 环境变量映射(KIMI_MODEL_* 系列,合成临时 provider)
+            "credential_env": {
+                "api_key": "KIMI_MODEL_API_KEY",
+                "base_url": "KIMI_MODEL_BASE_URL",
+                "model": "KIMI_MODEL_NAME",
+            },
+            # 默认环境变量(仅当凭证未设置时注入)
+            # KIMI_MODEL_NAME:启用开关 + 默认模型名
+            # KIMI_MODEL_PROVIDER_TYPE:默认 kimi provider(Moonshot 兼容)
+            "credential_env_defaults": {
+                "KIMI_MODEL_NAME": "kimi-for-coding",
+                "KIMI_MODEL_PROVIDER_TYPE": "kimi",
+            },
+        },
+        "executor_module": "app.agents.kimi_cli_agent",
+        "executor_func": "run_kimi_cli_agent",
+    },
     "qoder_cli_cn": {
         "display_name": "Qoder CN CLI",
         "description": "沙箱内运行 Qoder CN CLI(国内版,原通义灵码),通过 ACP 协议通信,模型由 Qoder CN 账号配额管理",

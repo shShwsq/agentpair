@@ -86,5 +86,12 @@ class Settings(BaseSettings):
     # qoderclicn 安装命令(官方安装脚本)
     QODER_CLI_CN_INSTALL_CMD: str = "curl -fsSL https://qoder.cn/install | bash"
 
+    # Kimi Code CLI 配置(kimi_cli executor 用,开源 https://github.com/MoonshotAI/kimi-code)
+    # kimi 可执行文件名/路径(沙箱内 PATH 查找或绝对路径)
+    KIMI_CLI_BIN: str = "kimi"
+    # kimi 安装命令(沙箱内未检测到 kimi 时执行,需沙箱镜像有 Node.js >= 20)
+    # 推荐在镜像中预装 kimi,避免每次任务都拉 npm 包
+    KIMI_CLI_INSTALL_CMD: str = "npm install -g @moonshot-ai/kimi-code"
+
 
 settings = Settings()
