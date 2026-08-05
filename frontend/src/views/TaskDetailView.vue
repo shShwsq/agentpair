@@ -1108,6 +1108,29 @@ function toolCallCount(seg: IterationSegment): number {
   ).length
 }
 
+/**
+ * 判断 tool item 是否属于子智能体(Agent)调用,用于加缩进+左边线。
+ * - tool_call:原始 content 末尾含 [Agent] 标签(后端 _build_tool_intent_detail 注入)
+ * - tool_result:向前找最近的 tool_call,若它是 Agent 调用,则此 result 是其输出
+ */
+function isSubAgentToolItem(
+  item: DisplayItem,
+  items: DisplayItem[],
+  index: number,
+): boolean {
+  if (item.type === 'tool_call') {
+    return /\[Agent\]/.test(item.content || '')
+  }
+  if (item.type === 'tool_result') {
+    for (let i = index - 1; i >= 0; i--) {
+      if (items[i].type === 'tool_call') {
+        return /\[Agent\]/.test(items[i].content || '')
+      }
+    }
+  }
+  return false
+}
+
 /** 迭代摘要:工具数量 + 工具名预览(最多 3 个) */
 function iterationSummary(seg: IterationSegment): string {
   // 流式中:显示正在思考
@@ -1641,9 +1664,10 @@ function isUserMessageItem(item: DisplayItem): boolean {
                           </div>
                           <div v-if="isToolGroupExpanded(iter.id)" class="tool-group-body">
                             <ConversationMessage
-                              v-for="ti in iter.toolItems"
+                              v-for="(ti, idx) in iter.toolItems"
                               :key="ti.id"
                               :item="ti"
+                              :is-sub-agent="isSubAgentToolItem(ti, iter.toolItems, idx)"
                               @toggle-reasoning="toggleReasoning"
                             />
                           </div>

@@ -1157,8 +1157,13 @@ def _extract_text(content: Any) -> str:
 
     content 可能是:
     - str:直接返回
-    - dict:取 text / content / value 字段
+    - dict:取 text / content / value 字段(即使值为空字符串也返回,
+      表示"有该字段但内容为空",调用方据此过滤无内容的 chunk)
     - list:遍历取每项的 text 字段拼接
+
+    注意:dict 含 text 字段但值为空时返回空字符串(而非 json.dumps 整个 dict)。
+    Kimi 的 agent_thought_chunk 经常发送 {"type":"text","text":""} 空片段,
+    若 fallback 到 json.dumps 会把 JSON 原文当文本堆积到 reasoning 里。
     """
     if content is None:
         return ""
@@ -1167,7 +1172,9 @@ def _extract_text(content: Any) -> str:
     if isinstance(content, dict):
         for key in ("text", "content", "value", "delta"):
             val = content.get(key)
-            if isinstance(val, str) and val:
+            if isinstance(val, str):
+                # 即使为空也返回:text 字段存在表示这是文本内容,空=无内容
+                # (不要 fallback 到 json.dumps,否则空片段会变成 JSON 字符串堆积)
                 return val
         return json.dumps(content, ensure_ascii=False)
     if isinstance(content, list):
