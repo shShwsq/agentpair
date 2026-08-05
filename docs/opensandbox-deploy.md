@@ -280,6 +280,16 @@ QODER_CLI_CN_INSTALL_CMD=curl -fsSL https://qoder.cn/install | bash
 
 > 注意:[BRIDGE_STARTUP_TIMEOUT 默认 30 秒](../backend/app/agents/qoder_cli_agent.py),首次自动安装可能超时。生产环境建议用方式 A 预装,避免每次任务都拉包。
 
+### 2.4 可选:Kimi Code CLI 执行器依赖
+
+AgentPair 还支持开源的 [Kimi Code CLI](https://github.com/MoonshotAI/kimi-code) 作为执行器(`task.executor=kimi_cli`),适合自部署 LLM 端点的场景。Kimi Code 要求 Node.js >= 22.19(比 Qoder 的 20.0.0 高),部署与接入详见独立文档:**[kimi-code-deploy.md](./kimi-code-deploy.md)**。
+
+| 执行器 | task.executor | CLI 命令 | 账号 | 依赖 | 凭证环境变量 |
+|--------|---------------|----------|------|------|--------------|
+| Kimi Code | `kimi_cli` | `kimi acp` | 任意 OpenAI 兼容端点(含自部署) | Node.js >= 22.19 + npm | `KIMI_MODEL_API_KEY` / `KIMI_MODEL_BASE_URL` / `KIMI_MODEL_NAME` |
+
+> 若同一镜像要同时预装 qodercli + kimi,统一用 Node 22.x(qodercli 兼容 Node 22)。
+
 ## 三、配置 SSH Key(给沙箱用,可选)
 
 沙箱里执行 `git clone git@github.com:...` 需要 SSH 凭证。如果你只用 HTTPS+token 方式 clone(后端 `clone_repo_with_fallback` 会优先用 token),可以跳过本节。
