@@ -9,6 +9,7 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
+import BrandLogo from '@/components/BrandLogo.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 
@@ -46,10 +47,7 @@ function toggleWorkspace(): void {
       <main class="main">
         <div class="welcome-card">
           <div class="welcome-icon">
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 2a4 4 0 0 1 4 4v1h1a3 3 0 0 1 3 3v3a3 3 0 0 1-3 3h-1v1a4 4 0 0 1-4 4" />
-              <path d="M12 2a4 4 0 0 0-4 4v1H7a3 3 0 0 0-3 3v3a3 3 0 0 0 3 3h1v1a4 4 0 0 0 4 4" />
-            </svg>
+            <BrandLogo :size="48" />
           </div>
           <h1>欢迎使用 AgentPair</h1>
           <p>双智能体协作系统 · user_agent 澄清意图,react_agent 执行任务</p>
@@ -67,18 +65,25 @@ function toggleWorkspace(): void {
           <div class="feature-grid">
             <div class="feature">
               <div class="feature-icon">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M9 11H1l8-8 8 8h-8v10" transform="rotate(180 9 11)" />
-                </svg>
+                <BrandLogo :size="24" />
               </div>
               <h3>user_agent</h3>
               <p>对照场景判据评估结果,针对未覆盖项追问,确保任务完整</p>
             </div>
             <div class="feature">
               <div class="feature-icon">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="16 18 22 12 16 6" />
-                  <polyline points="8 6 2 12 8 18" />
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <!-- 机器人头部 -->
+                  <rect x="4" y="7" width="16" height="12" rx="3" />
+                  <!-- 天线 -->
+                  <line x1="12" y1="3" x2="12" y2="7" />
+                  <circle cx="12" cy="3" r="1.2" fill="currentColor" stroke="none" />
+                  <!-- 双眼 -->
+                  <circle cx="9" cy="13" r="1.2" fill="currentColor" stroke="none" />
+                  <circle cx="15" cy="13" r="1.2" fill="currentColor" stroke="none" />
+                  <!-- 底部支架/底座 -->
+                  <line x1="8" y1="19" x2="8" y2="21" />
+                  <line x1="16" y1="19" x2="16" y2="21" />
                 </svg>
               </div>
               <h3>react_agent</h3>

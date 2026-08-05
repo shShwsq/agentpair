@@ -34,11 +34,11 @@ withDefaults(
     aria-hidden="true"
   >
     <!-- 左节点 -->
-    <circle cx="6" cy="12" r="3" />
+    <circle cx="6" cy="12" r="3.8" />
     <!-- 右节点 -->
-    <circle cx="18" cy="12" r="3" />
+    <circle cx="18" cy="12" r="3.8" />
     <!-- S 形互联曲线:两节点上下交叉连接,形成协作/成对的视觉 -->
-    <path d="M9 9 C 12 5, 12 5, 15 9" />
-    <path d="M9 15 C 12 19, 12 19, 15 15" />
+    <path d="M9.2 9 C 12 3, 12 3, 14.8 9" />
+    <path d="M9.2 15 C 12 21, 12 21, 14.8 15" />
   </svg>
 </template>
