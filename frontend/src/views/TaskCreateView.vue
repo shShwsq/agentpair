@@ -490,11 +490,8 @@ onMounted(async () => {
       <main class="main">
         <!-- 顶部配置区:三行布局(场景 / user_agent 模型 / react_agent 设置) -->
         <div class="topbar">
-          <!-- 第 1 行:场景 -->
-          <div class="config-row">
-            <div class="config-label-group">
-              <span class="config-label">场景</span>
-            </div>
+          <!-- 第 1 行:场景(无标签,直接靠左) -->
+          <div class="config-row config-row-scenario">
             <div class="scenario-segmented" role="tablist" aria-label="场景选择">
               <button
                 v-for="s in scenarios"
@@ -900,7 +897,6 @@ onMounted(async () => {
 .topbar {
   display: flex;
   flex-direction: column;
-  /* 用分隔线划分各行,不用 gap(gap 会让 border 出现在间距中间) */
   margin-bottom: var(--space-4);
 }
 
@@ -910,12 +906,12 @@ onMounted(async () => {
   align-items: center;
   gap: var(--space-3);
   flex-wrap: wrap;
-  padding: var(--space-3) 0;
+  padding: var(--space-2) 0;
 }
 
-/* 行间细分隔线(首行不画,避免顶部多一条线) */
-.config-row + .config-row {
-  border-top: 1px solid var(--color-border);
+/* 第 1 行场景:无标签,直接靠左 */
+.config-row-scenario {
+  padding-left: 0;
 }
 
 .config-label-group {
