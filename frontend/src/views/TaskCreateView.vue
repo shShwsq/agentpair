@@ -512,7 +512,13 @@ onMounted(async () => {
           <!-- 第 2 行:user_agent 模型 -->
           <div class="config-row">
             <div class="config-label-group">
-              <span class="config-label">user_agent 模型</span>
+              <span class="agent-avatar avatar-user-agent" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M9 11l3 3L22 4" />
+                  <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+                </svg>
+              </span>
+              <span class="config-label">user_agent</span>
             </div>
             <div class="model-select">
               <select
@@ -540,6 +546,12 @@ onMounted(async () => {
           <!-- 第 3 行:react_agent 设置(执行器 + CLI 模型配置 / 技能) -->
           <div class="config-row">
             <div class="config-label-group">
+              <span class="agent-avatar avatar-react-agent" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="16 18 22 12 16 6" />
+                  <polyline points="8 6 2 12 8 18" />
+                </svg>
+              </span>
               <span class="config-label">react_agent</span>
             </div>
             <div class="react-controls">
@@ -888,7 +900,7 @@ onMounted(async () => {
 .topbar {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  /* 用分隔线划分各行,不用 gap(gap 会让 border 出现在间距中间) */
   margin-bottom: var(--space-4);
 }
 
@@ -898,14 +910,21 @@ onMounted(async () => {
   align-items: center;
   gap: var(--space-3);
   flex-wrap: wrap;
+  padding: var(--space-3) 0;
+}
+
+/* 行间细分隔线(首行不画,避免顶部多一条线) */
+.config-row + .config-row {
+  border-top: 1px solid var(--color-border);
 }
 
 .config-label-group {
   display: inline-flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--space-2);
   flex-shrink: 0;
-  min-width: 88px;
+  /* 固定宽度,确保三行控件起点严格对齐(容纳头像 + 标签文字) */
+  width: 116px;
 }
 
 .config-label {
@@ -913,6 +932,26 @@ onMounted(async () => {
   font-weight: var(--fw-medium);
   color: var(--color-text-secondary);
   white-space: nowrap;
+}
+
+/* agent 头像:圆形徽标 + 白色图标 */
+.agent-avatar {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+
+.avatar-user-agent {
+  background: var(--color-info);
+}
+
+.avatar-react-agent {
+  background: #7c3aed;
 }
 
 /* 第 3 行 react_agent 控件容器:横向排列执行器 + CLI 配置 / 技能 */
