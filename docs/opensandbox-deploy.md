@@ -282,13 +282,67 @@ QODER_CLI_CN_INSTALL_CMD=curl -fsSL https://qoder.cn/install | bash
 
 ### 2.4 可选:Kimi Code CLI 执行器依赖
 
-AgentPair 还支持开源的 [Kimi Code CLI](https://github.com/MoonshotAI/kimi-code) 作为执行器(`task.executor=kimi_cli`),适合自部署 LLM 端点的场景。Kimi Code 要求 Node.js >= 22.19(比 Qoder 的 20.0.0 高),部署与接入详见独立文档:**[kimi-code-deploy.md](./kimi-code-deploy.md)**。
+AgentPair 还支持开源的 [Kimi Code CLI](https://github.com/MoonshotAI/kimi-code) 作为执行器(`task.executor=kimi_cli`),通过 ACP 协议通信,模型经 `KIMI_MODEL_*` 环境变量注入。
 
 | 执行器 | task.executor | CLI 命令 | 账号 | 依赖 | 凭证环境变量 |
 |--------|---------------|----------|------|------|--------------|
-| Kimi Code | `kimi_cli` | `kimi acp` | 任意 OpenAI 兼容端点(含自部署) | Node.js >= 22.19 + npm | `KIMI_MODEL_API_KEY` / `KIMI_MODEL_BASE_URL` / `KIMI_MODEL_NAME` |
+| Kimi Code | `kimi_cli` | `kimi acp` | 任意 OpenAI 兼容端点(含 Moonshot 官方 / 自部署) | Node.js >= 22.19 + npm | `KIMI_MODEL_API_KEY` / `KIMI_MODEL_BASE_URL` / `KIMI_MODEL_NAME` |
 
-> 若同一镜像要同时预装 qodercli + kimi,统一用 Node 22.x(qodercli 兼容 Node 22)。
+与 Qoder CLI 的关键差异:
+- **ACP 启动命令**:`kimi acp` 子命令(非 `--acp` 标志)
+- **权限绕过**:无 `--yolo` 启动参数,通过 `session/set_config_option(mode=yolo)` 在 `session/new` 后设置(由 [kimi_cli_agent.py](../backend/app/agents/kimi_cli_agent.py) 自动完成)
+- **模型选择**:不支持 `--model` CLI 参数,经 `KIMI_MODEL_NAME` 环境变量注入
+- **凭证字段**:不是 PAT,而是 `api_key` + `base_url` + `model` 三字段(用户在「智能体配置」填写)
+- **Node 版本**:要求 >= 22.19(比 Qoder 的 20.0.0 高,若同镜像装两者统一用 Node 22.x)
+
+安装方式二选一:
+
+#### 方式 A:镜像预装(推荐,启动快、无网络依赖)
+
+```dockerfile
+# 装 Node.js 22.x(Kimi Code 要求 >= 22.19;Qoder CLI 也兼容 Node 22)
+USER root
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# 全局安装 Kimi Code CLI(官方 npm 包 @moonshot-ai/kimi-code,bin 名 kimi)
+RUN npm install -g @moonshot-ai/kimi-code \
+    && kimi --version
+```
+
+构建后验证:
+
+```bash
+docker run --rm agentpair-sandbox:latest kimi --version
+docker run --rm agentpair-sandbox:latest node --version   # 应输出 v22.x
+```
+
+#### 方式 B:运行时自动安装(首次启动慢,需沙箱能访问外网)
+
+不在镜像里预装,让 [kimi_cli_agent.py](../backend/app/agents/kimi_cli_agent.py) 在首次启动时执行 `KIMI_CLI_INSTALL_CMD` 安装。前提是镜像已含 Node.js >= 22.19。对应 `.env` 配置(默认值已可用):
+
+```bash
+KIMI_CLI_BIN=kimi
+KIMI_CLI_INSTALL_CMD=npm install -g @moonshot-ai/kimi-code
+```
+
+> 注意:[BRIDGE_STARTUP_TIMEOUT 默认 30 秒](../backend/app/agents/acp_base.py),首次自动安装 `@moonshot-ai/kimi-code` 含 native postinstall 脚本,可能超时。生产环境建议用方式 A 预装。
+
+#### 凭证配置
+
+Kimi Code 不从 shell 读取 `KIMI_API_KEY` 等密钥,而是通过 `KIMI_MODEL_*` 环境变量族在内存里合成临时 provider。用户在「智能体配置」→ Kimi Code CLI 中填写三个字段,后端按 [registry.py](../backend/app/agents/registry.py) 的 `credential_env` 映射:
+
+| 用户填写字段 | 注入的环境变量 | 必填 | 默认值(由 registry 注入) |
+|--------------|----------------|------|---------------------------|
+| API Key | `KIMI_MODEL_API_KEY` | 是 | — |
+| API Base URL | `KIMI_MODEL_BASE_URL` | 否 | provider 内置默认(Moonshot 官方) |
+| 模型名 | `KIMI_MODEL_NAME` | 否 | `kimi-for-coding` |
+| — | `KIMI_MODEL_PROVIDER_TYPE` | — | `kimi`(不暴露给用户) |
+
+两种典型场景:
+- **Moonshot 官方 API**:申请 API Key 填入,base_url 和模型名留空(用默认)
+- **自部署 LLM 端点**(vLLM / Xinference / Ollama 等 OpenAI 兼容端点):三个字段都填,base_url 含 `/v1` 后缀。沙箱需能访问该端点
 
 ## 三、配置 SSH Key(给沙箱用,可选)
 
