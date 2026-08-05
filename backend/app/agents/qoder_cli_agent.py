@@ -667,6 +667,9 @@ def test_credential(db: Session, user_id, agent_type: str = AGENT_TYPE) -> tuple
             # 测试时强制用最便宜的模型配置,最小化 credits 消耗
             # Qwen3.6-Flash:Flash 系列轻量模型,credits 最低
             # low:最少思考强度,几乎不思考
+            # 注:文档 https://docs.qoder.cn/cli/model 称可用 --model efficient 切换经济分级,
+            # 但实测 CLI 报 "Invalid model 'efficient'",分级模型只能通过 TUI /model 切换,
+            # --model 仅接受具体模型名(Auto/Qwen3.x-*/DeepSeek-V4-*/GLM-5.2 等)
             test_acp_args = ["--model", "Qwen3.6-Flash", "--reasoning-effort", "low"]
             bridge_exec_id = _start_acp_bridge(
                 session, credential_envs,
