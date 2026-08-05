@@ -382,9 +382,11 @@ def run_react_agent(
                                 })
                             break
 
-            # 工具意图:人类可读的一句话说明,合并到 content 首行(前端拆分渲染)
+            # 工具意图:人类可读的一句话说明(首行) + 原始参数 JSON(后续行)
+            # 格式向 qoder CLI agent 看齐:intent 首行人类可读,detail 是纯参数 JSON
+            # 前端 ConversationMessage 按 \n 拆分:首行高亮为标题,其余作为等宽详情
             intent = _build_tool_intent(fn_name, fn_args)
-            call_detail = f"调用 {fn_name}({json.dumps(fn_args, ensure_ascii=False)[:200]})"
+            call_detail = json.dumps(fn_args, ensure_ascii=False)
             _add_conversation(
                 db, task, round_idx=round_idx,
                 role="react_agent", type="tool_call",
@@ -398,7 +400,7 @@ def run_react_agent(
                 _add_conversation(
                     db, task, round_idx=round_idx,
                     role="react_agent", type="tool_result",
-                    content=result_str[:500],
+                    content=result_str,
                 )
                 # 完整结果传给 LLM(工具自身已控制返回量:
                 # read_file 默认 200 行、search_code 默认 50 匹配等)
@@ -680,35 +682,39 @@ def _build_tool_intent(fn_name: str, fn_args: dict) -> str:
 
     用于工具调用卡片标题,让用户一眼看出"这个工具调用打算做什么"。
     纯模板映射,不调 LLM。未知工具回退到工具名。
+    末尾追加 [tool_name] 标签:前端用正则提取工具名,用于 plan step 归属推断。
+    (向 qoder CLI agent 看齐:intent 人类可读 + 附带工具分类信息)
     """
     if fn_name == "clone_repo":
-        return f"克隆仓库 {fn_args.get('repo_url', '?')}"
-    if fn_name == "list_files":
+        intent = f"克隆仓库 {fn_args.get('repo_url', '?')}"
+    elif fn_name == "list_files":
         subdir = fn_args.get("subdir", "")
-        return f"查看目录结构: {subdir or '根目录'}"
-    if fn_name == "find_files":
-        return f"查找文件: {fn_args.get('pattern', '?')}"
-    if fn_name == "read_file":
-        return f"读取文件 {fn_args.get('file_path', '?')}"
-    if fn_name == "search_code":
-        return f"搜索代码: {fn_args.get('pattern', '?')}"
-    if fn_name == "query_cve":
-        return (
+        intent = f"查看目录结构: {subdir or '根目录'}"
+    elif fn_name == "find_files":
+        intent = f"查找文件: {fn_args.get('pattern', '?')}"
+    elif fn_name == "read_file":
+        intent = f"读取文件 {fn_args.get('file_path', '?')}"
+    elif fn_name == "search_code":
+        intent = f"搜索代码: {fn_args.get('pattern', '?')}"
+    elif fn_name == "query_cve":
+        intent = (
             f"查询 {fn_args.get('package_name', '?')}@"
             f"{fn_args.get('version', '?')} 的已知漏洞"
         )
-    if fn_name == "write_file":
+    elif fn_name == "write_file":
         mode = fn_args.get("mode", "write")
-        return f"{mode == 'append' and '追加' or '写入'}文件 {fn_args.get('file_path', '?')}"
-    if fn_name == "run_python_code":
-        return "执行 Python 代码"
-    if fn_name == "run_semgrep":
-        return "运行 Semgrep 静态分析"
-    if fn_name == "list_skills":
-        return "查看可用技能列表"
-    if fn_name == "skill":
-        return f"获取技能指令: {fn_args.get('skill_name', '?')}"
-    return f"调用 {fn_name}"
+        intent = f"{mode == 'append' and '追加' or '写入'}文件 {fn_args.get('file_path', '?')}"
+    elif fn_name == "run_python_code":
+        intent = "执行 Python 代码"
+    elif fn_name == "run_semgrep":
+        intent = "运行 Semgrep 静态分析"
+    elif fn_name == "list_skills":
+        intent = "查看可用技能列表"
+    elif fn_name == "skill":
+        intent = f"获取技能指令: {fn_args.get('skill_name', '?')}"
+    else:
+        intent = f"调用 {fn_name}"
+    return f"{intent} [{fn_name}]"
 
 
 # ============================================================

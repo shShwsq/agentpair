@@ -79,13 +79,19 @@ const streamingExpanded = computed(() => props.item.streaming?.reasoning_expande
  * tool_call content 拆分:后端把意图放在首行,原始调用详情放后续行。
  * 首行作为卡片标题高亮显示,其余作为等宽详情。
  * 无换行时(旧数据兼容)返回 null,走普通渲染。
+ *
+ * intent 首行末尾可能带 [tool_name] 标签(供 TaskDetailView 提取工具名做 plan step 推断),
+ * 展示时剥掉标签,只显示人类可读部分。
  */
 const toolCallParts = computed<{ intent: string; detail: string } | null>(() => {
   if (props.item.type !== 'tool_call' || !props.item.content) return null
   const idx = props.item.content.indexOf('\n')
   if (idx < 0) return null
+  const rawIntent = props.item.content.slice(0, idx)
+  // 剥掉末尾的 [tool_name] 标签(展示用,不暴露内部工具名给用户)
+  const intent = rawIntent.replace(/\s*\[\w+\]$/, '')
   return {
-    intent: props.item.content.slice(0, idx),
+    intent,
     detail: props.item.content.slice(idx + 1),
   }
 })

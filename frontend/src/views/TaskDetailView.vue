@@ -768,8 +768,10 @@ const TOOL_STEP_KEYWORDS: Record<string, string[]> = {
 
 /** 从工具调用 content 提取工具名 */
 function extractToolNameFromContent(content: string): string {
-  // content 形如 "读取文件 xxx\n调用 read_file({...})" 或 "调用 read_file({...})"
-  const m = content.match(/(?:^|\n)调用\s+(\w+)\s*\(/)
+  // 新格式(向 qoder CLI 看齐):"人类可读意图 [tool_name]\n{参数JSON}"
+  // 匹配首行末尾的 [tool_name] 标签(首行是 intent,后续行是参数 JSON)
+  const firstLine = content.split('\n', 1)[0]
+  const m = firstLine.match(/\[(\w+)\]$/)
   return m ? m[1] : ''
 }
 
@@ -1084,9 +1086,11 @@ function toggleToolGroup(iterId: string): void {
 
 /** 从工具调用 content 中提取工具名(用于折叠摘要预览) */
 function extractToolName(content: string): string {
-  // content 形如 "调用 semgrep_scan({...})" 或 "调用 read_file({...})"
-  const m = content.match(/^调用\s+(\w+)\s*\(/)
-  return m ? m[1] : content.slice(0, 30)
+  // 新格式:"人类可读意图 [tool_name]\n{参数JSON}"
+  // 匹配首行末尾的 [tool_name] 标签
+  const firstLine = content.split('\n', 1)[0]
+  const m = firstLine.match(/\[(\w+)\]$/)
+  return m ? m[1] : firstLine.slice(0, 30)
 }
 
 /** 迭代内的工具调用数(只数 tool_call,不数 tool_result) */
