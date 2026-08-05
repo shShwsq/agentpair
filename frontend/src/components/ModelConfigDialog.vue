@@ -428,13 +428,13 @@ function handleConfirm(): void {
   cursor: not-allowed;
 }
 
-/* BaseSelect 在表单字段内:撑满宽度 + 触发器高度对齐 input(38px) */
+/* BaseSelect 在表单字段内:撑满宽度 + 触发器最小高度对齐 input(38px) */
 .field :deep(.base-select) {
   width: 100%;
 }
 
 .field :deep(.base-select-trigger) {
-  height: 38px;
+  min-height: 38px;
 }
 
 .field-checkbox label {
