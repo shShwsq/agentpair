@@ -240,6 +240,24 @@ const reposLoaded = ref(false)
 const reposLoading = ref(false)
 const reposError = ref('')
 
+/** 仓库提示弹窗(加载失败/无仓库/未绑定 等),用一个统一弹窗承载,避免行内提示抖动 */
+const repoDialogOpen = ref(false)
+/** 弹窗正文(空串=不显示) */
+const repoDialogMessage = ref('')
+/** 弹窗是否提供"前往设置绑定"链接 */
+const repoDialogShowBindLink = ref(false)
+
+/** 打开仓库提示弹窗 */
+function showRepoDialog(message: string, showBindLink = false): void {
+  repoDialogMessage.value = message
+  repoDialogShowBindLink.value = showBindLink
+  repoDialogOpen.value = true
+}
+
+function closeRepoDialog(): void {
+  repoDialogOpen.value = false
+}
+
 /** repo_url 输入模式 */
 const repoInputMode = ref<'url' | 'select'>('url')
 /** 选择模式下,当前选中的仓库 full_name(owner/repo) */
@@ -253,8 +271,12 @@ async function loadGitHubRepos(): Promise<void> {
     const res = await listGitHubRepos()
     githubRepos.value = res.repos
     reposLoaded.value = true
+    if (res.repos.length === 0) {
+      showRepoDialog('你的 GitHub 账号下暂无仓库')
+    }
   } catch (err) {
     reposError.value = extractErrorMessage(err)
+    showRepoDialog(`加载仓库列表失败:${reposError.value}`)
   } finally {
     reposLoading.value = false
   }
@@ -262,6 +284,11 @@ async function loadGitHubRepos(): Promise<void> {
 
 function switchToSelectMode(): void {
   repoInputMode.value = 'select'
+  // 未绑定 GitHub 时提示弹窗,不发起请求
+  if (!githubBound.value) {
+    showRepoDialog('未绑定 GitHub 账号', true)
+    return
+  }
   // 懒加载仓库列表(首次进入选择模式才请求)
   if (!reposLoaded.value) loadGitHubRepos()
 }
@@ -750,8 +777,12 @@ onMounted(async () => {
                   :class="['mode-btn', { active: repoInputMode === 'select' }]"
                   role="tab"
                   :aria-selected="repoInputMode === 'select'"
+                  :disabled="reposLoading"
                   @click="switchToSelectMode"
-                >GitHub 选择</button>
+                >
+                  <span v-if="reposLoading && repoInputMode === 'select'" class="mode-spinner" />
+                  GitHub 选择
+                </button>
               </div>
 
               <!-- URL 输入 + 分支(同一行) -->
@@ -798,30 +829,6 @@ onMounted(async () => {
                   aria-label="分支"
                 />
               </div>
-
-              <!-- 仓库加载/错误提示(固定高度,避免出现/消失时整行上移) -->
-              <div class="repo-hint-area">
-                <p v-if="reposLoading" class="repo-hint">加载仓库列表...</p>
-                <p v-if="reposError" class="repo-error">{{ reposError }}</p>
-                <p v-if="repoUrlError" class="repo-error">{{ repoUrlError }}</p>
-                <p
-                  v-if="repoInputMode === 'select'
-                    && !reposLoading
-                    && !reposError
-                    && reposLoaded
-                    && githubRepos.length === 0"
-                  class="repo-hint"
-                >你的 GitHub 账号下暂无仓库</p>
-                <p
-                  v-if="repoInputMode === 'select'
-                    && !reposLoading
-                    && !reposLoaded"
-                  class="repo-hint"
-                >
-                  未绑定 GitHub?
-                  <RouterLink to="/settings" class="repo-link">前往设置绑定 →</RouterLink>
-                </p>
-              </div>
             </div>
 
             <!-- 发送按钮 -->
@@ -864,6 +871,36 @@ onMounted(async () => {
         </p>
       </main>
     </div>
+
+    <!-- 仓库提示弹窗(加载失败/无仓库/未绑定) -->
+    <Teleport to="body">
+      <Transition name="dialog-fade">
+        <div v-if="repoDialogOpen" class="repo-dialog-mask" @click.self="closeRepoDialog">
+          <div class="repo-dialog-card" role="dialog" aria-modal="true">
+            <header class="repo-dialog-header">
+              <h3>提示</h3>
+              <button
+                class="repo-dialog-close"
+                aria-label="关闭"
+                @click="closeRepoDialog"
+              >×</button>
+            </header>
+            <div class="repo-dialog-body">
+              <p class="repo-dialog-message">{{ repoDialogMessage }}</p>
+              <RouterLink
+                v-if="repoDialogShowBindLink"
+                to="/settings"
+                class="repo-dialog-link"
+                @click="closeRepoDialog"
+              >前往设置绑定 →</RouterLink>
+            </div>
+            <footer class="repo-dialog-footer">
+              <button class="btn btn-primary" @click="closeRepoDialog">知道了</button>
+            </footer>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>
 
@@ -1144,6 +1181,9 @@ onMounted(async () => {
 }
 
 .mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
   padding: var(--space-1) var(--space-3);
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
@@ -1208,34 +1248,139 @@ onMounted(async () => {
   box-shadow: 0 0 0 3px var(--color-danger-light);
 }
 
-.repo-hint-area {
-  /* 固定高度占位,避免加载提示出现/消失时整行上移 */
-  min-height: 1.5em;
-  display: block;
+/* GitHub 选择按钮内的小型加载动画 */
+.mode-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--color-border-strong);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  display: inline-block;
+  vertical-align: middle;
 }
 
-.repo-hint,
-.repo-error {
-  font-size: var(--fs-xs);
+.mode-btn:disabled {
+  opacity: 0.7;
+  cursor: progress;
+}
+
+/* ---- 仓库提示弹窗 ---- */
+.repo-dialog-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: var(--space-4);
+}
+
+.repo-dialog-card {
+  background: var(--color-surface);
+  border-radius: var(--radius-xl);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.repo-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.repo-dialog-header h3 {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
   margin: 0;
-  line-height: 1.5;
+  color: var(--color-text);
 }
 
-.repo-hint {
+.repo-dialog-close {
+  background: none;
+  border: none;
+  font-size: 24px;
+  line-height: 1;
   color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
 }
 
-.repo-error {
-  color: var(--color-danger);
+.repo-dialog-close:hover {
+  background: var(--color-surface-alt);
+  color: var(--color-text);
 }
 
-.repo-link {
+.repo-dialog-body {
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.repo-dialog-message {
+  font-size: var(--fs-sm);
+  color: var(--color-text);
+  margin: 0;
+  line-height: 1.6;
+}
+
+.repo-dialog-link {
+  font-size: var(--fs-sm);
   color: var(--color-primary);
   text-decoration: none;
+  font-weight: var(--fw-medium);
 }
 
-.repo-link:hover {
+.repo-dialog-link:hover {
   text-decoration: underline;
+}
+
+.repo-dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-3) var(--space-5);
+  border-top: 1px solid var(--color-border);
+}
+
+.repo-dialog-footer .btn {
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
+}
+
+.repo-dialog-footer .btn-primary {
+  background: var(--color-primary);
+  color: white;
+}
+
+.repo-dialog-footer .btn-primary:hover {
+  filter: brightness(1.05);
+}
+
+/* 弹窗淡入淡出 */
+.dialog-fade-enter-active,
+.dialog-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.dialog-fade-enter-from,
+.dialog-fade-leave-to {
+  opacity: 0;
 }
 
 /* ---- 发送按钮 ---- */
