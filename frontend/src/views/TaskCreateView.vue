@@ -20,6 +20,7 @@ import { useRouter } from 'vue-router'
 import AppHeader from '@/components/AppHeader.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
+import ModelCombobox from '@/components/ModelCombobox.vue'
 import { createTask, getScenarios } from '@/api/task'
 import { getMyModels } from '@/api/model_configs'
 import { getAgentConfigs } from '@/api/agent_configs'
@@ -258,11 +259,6 @@ function closeRepoDialog(): void {
   repoDialogOpen.value = false
 }
 
-/** repo_url 输入模式 */
-const repoInputMode = ref<'url' | 'select'>('url')
-/** 选择模式下,当前选中的仓库 full_name(owner/repo) */
-const selectedRepoFullName = ref('')
-
 async function loadGitHubRepos(): Promise<void> {
   if (reposLoaded.value || reposLoading.value) return
   reposLoading.value = true
@@ -282,24 +278,22 @@ async function loadGitHubRepos(): Promise<void> {
   }
 }
 
-function switchToSelectMode(): void {
-  repoInputMode.value = 'select'
-  // 未绑定 GitHub 时提示弹窗,不发起请求
-  if (!githubBound.value) {
-    showRepoDialog('未绑定 GitHub 账号', true)
-    return
-  }
-  // 懒加载仓库列表(首次进入选择模式才请求)
-  if (!reposLoaded.value) loadGitHubRepos()
-}
+/**
+ * 仓库下拉框选项(可输入下拉框)。
+ * value=clone_url(选中后写入 repoUrl),label=full_name(私有标记)。
+ */
+const repoComboboxOptions = computed(() =>
+  githubRepos.value.map((r) => ({
+    value: r.clone_url,
+    label: `${r.full_name}${r.private ? ' (私有)' : ''}`,
+  })),
+)
 
-// 选中仓库 → 同步 clone_url 到 repoUrl,并填默认分支
-watch(selectedRepoFullName, (fullName) => {
-  if (!fullName) return
-  const repo = githubRepos.value.find((r) => r.full_name === fullName)
-  if (!repo) return
-  repoUrl.value = repo.clone_url
-  if (!branch.value.trim()) {
+/** 从下拉选中仓库时,若分支为空则自动填默认分支 */
+watch(repoUrl, (url) => {
+  if (!url) return
+  const repo = githubRepos.value.find((r) => r.clone_url === url)
+  if (repo && !branch.value.trim()) {
     branch.value = repo.default_branch
   }
 })
@@ -311,8 +305,6 @@ watch(selectedScenario, () => {
   taskTitle.value = ''
   repoUrl.value = ''
   branch.value = ''
-  repoInputMode.value = 'url'
-  selectedRepoFullName.value = ''
   // 根据场景推荐重置 skill 选中状态(skill 列表已加载时才生效)
   applyRecommendedSkills()
   nextTick(autoResize)
@@ -448,6 +440,8 @@ onMounted(async () => {
       selectedLlmConfigId.value = (firstWithKey ?? models.llm_configs[0]).id
     }
     if (ghStatus) githubStatus.value = ghStatus
+    // 已绑定 GitHub:预加载仓库列表,供可输入下拉框选择(失败由弹窗提示)
+    if (ghStatus?.bound) loadGitHubRepos()
     // skill 列表加载成功后,默认全选;若已选场景则按推荐重置
     if (skills && skills.length > 0) {
       allSkills.value = skills
@@ -756,38 +750,21 @@ onMounted(async () => {
 
           <!-- 底部:GitHub 仓库 + 分支 + 提交按钮 -->
           <div class="chat-footer">
-            <!-- 仓库输入/选择区 -->
+            <!-- 仓库输入/选择区:可输入下拉框(已绑定 GitHub 时可从仓库列表选;否则纯输入) -->
             <div class="repo-area">
-              <!-- 模式切换(已绑定 GitHub 才显示) -->
-              <div
-                v-if="githubBound"
-                class="repo-mode-toggle"
-                role="tablist"
-                aria-label="仓库输入方式"
-              >
-                <button
-                  type="button"
-                  :class="['mode-btn', { active: repoInputMode === 'url' }]"
-                  role="tab"
-                  :aria-selected="repoInputMode === 'url'"
-                  @click="repoInputMode = 'url'"
-                >输入地址</button>
-                <button
-                  type="button"
-                  :class="['mode-btn', { active: repoInputMode === 'select' }]"
-                  role="tab"
-                  :aria-selected="repoInputMode === 'select'"
+              <div class="repo-input-row">
+                <!-- 已绑定 GitHub:可输入 + 下拉选择仓库 -->
+                <ModelCombobox
+                  v-if="githubBound"
+                  :model-value="repoUrl"
+                  :options="repoComboboxOptions"
                   :disabled="reposLoading"
-                  @click="switchToSelectMode"
-                >
-                  <span v-if="reposLoading && repoInputMode === 'select'" class="mode-spinner" />
-                  GitHub 选择
-                </button>
-              </div>
-
-              <!-- URL 输入 + 分支(同一行) -->
-              <div v-if="repoInputMode === 'url'" class="repo-input-row">
+                  :placeholder="reposLoading ? '加载仓库列表...' : '选择或输入 GitHub 仓库地址'"
+                  @update:model-value="repoUrl = $event"
+                />
+                <!-- 未绑定:纯输入框 -->
                 <input
+                  v-else
                   v-model.trim="repoUrl"
                   type="url"
                   class="repo-input"
@@ -795,32 +772,6 @@ onMounted(async () => {
                   placeholder="https://github.com/owner/repo"
                   aria-label="GitHub 仓库地址"
                 />
-                <input
-                  v-model.trim="branch"
-                  type="text"
-                  class="branch-input"
-                  placeholder="默认分支"
-                  aria-label="分支"
-                />
-              </div>
-
-              <!-- 选择模式 -->
-              <div v-else class="repo-select-row">
-                <select
-                  v-model="selectedRepoFullName"
-                  :disabled="reposLoading"
-                  class="repo-select"
-                  aria-label="选择 GitHub 仓库"
-                >
-                  <option value="">选择仓库...</option>
-                  <option
-                    v-for="r in githubRepos"
-                    :key="r.full_name"
-                    :value="r.full_name"
-                  >
-                    {{ r.full_name }}{{ r.private ? ' (私有)' : '' }}
-                  </option>
-                </select>
                 <input
                   v-model.trim="branch"
                   type="text"
@@ -1170,50 +1121,18 @@ onMounted(async () => {
   gap: var(--space-2);
 }
 
-.repo-mode-toggle {
-  display: inline-flex;
-  align-self: flex-start;
-  background: var(--color-bg);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: 2px;
-  gap: 2px;
-}
-
-.mode-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-3);
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-medium);
-  color: var(--color-text-secondary);
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-  white-space: nowrap;
-}
-
-.mode-btn:hover {
-  color: var(--color-text);
-}
-
-.mode-btn.active {
-  color: var(--color-primary);
-  background: var(--color-surface);
-  box-shadow: var(--shadow-sm);
-}
-
-.repo-input-row,
-.repo-select-row {
+.repo-input-row {
   display: flex;
   gap: var(--space-2);
 }
 
+/* repo 下拉框撑满(已绑定时);纯输入框同样撑满 */
+.repo-input-row .combobox {
+  flex: 1;
+  min-width: 0;
+}
+
 .repo-input,
-.repo-select,
 .branch-input {
   height: 36px;
   padding: 0 var(--space-3);
@@ -1226,8 +1145,7 @@ onMounted(async () => {
   transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
-.repo-input,
-.repo-select {
+.repo-input {
   flex: 1;
   min-width: 0;
 }
@@ -1237,7 +1155,6 @@ onMounted(async () => {
 }
 
 .repo-input:focus,
-.repo-select:focus,
 .branch-input:focus {
   border-color: var(--color-primary);
   box-shadow: 0 0 0 3px var(--color-primary-light);
@@ -1246,23 +1163,6 @@ onMounted(async () => {
 .repo-input.invalid {
   border-color: var(--color-danger);
   box-shadow: 0 0 0 3px var(--color-danger-light);
-}
-
-/* GitHub 选择按钮内的小型加载动画 */
-.mode-spinner {
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--color-border-strong);
-  border-top-color: var(--color-primary);
-  border-radius: 50%;
-  animation: spin 0.6s linear infinite;
-  display: inline-block;
-  vertical-align: middle;
-}
-
-.mode-btn:disabled {
-  opacity: 0.7;
-  cursor: progress;
 }
 
 /* ---- 仓库提示弹窗 ---- */
