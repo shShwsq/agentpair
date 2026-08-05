@@ -21,6 +21,7 @@ import AppHeader from '@/components/AppHeader.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import ModelCombobox from '@/components/ModelCombobox.vue'
+import BrandLogo from '@/components/BrandLogo.vue'
 import { createTask, getScenarios } from '@/api/task'
 import { getMyModels } from '@/api/model_configs'
 import { getAgentConfigs } from '@/api/agent_configs'
@@ -510,10 +511,7 @@ onMounted(async () => {
           <div class="config-row">
             <div class="config-label-group">
               <span class="agent-avatar avatar-user-agent" aria-hidden="true">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M9 11l3 3L22 4" />
-                  <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
-                </svg>
+                <BrandLogo :size="16" />
               </span>
               <span class="config-label">user_agent</span>
             </div>
@@ -545,8 +543,17 @@ onMounted(async () => {
             <div class="config-label-group">
               <span class="agent-avatar avatar-react-agent" aria-hidden="true">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="16 18 22 12 16 6" />
-                  <polyline points="8 6 2 12 8 18" />
+                  <!-- 机器人头部 -->
+                  <rect x="4" y="7" width="16" height="12" rx="3" />
+                  <!-- 天线 -->
+                  <line x1="12" y1="3" x2="12" y2="7" />
+                  <circle cx="12" cy="3" r="1.2" fill="currentColor" stroke="none" />
+                  <!-- 双眼 -->
+                  <circle cx="9" cy="13" r="1.2" fill="currentColor" stroke="none" />
+                  <circle cx="15" cy="13" r="1.2" fill="currentColor" stroke="none" />
+                  <!-- 底部支架/底座 -->
+                  <line x1="8" y1="19" x2="8" y2="21" />
+                  <line x1="16" y1="19" x2="16" y2="21" />
                 </svg>
               </span>
               <span class="config-label">react_agent</span>

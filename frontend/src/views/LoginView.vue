@@ -12,6 +12,7 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import BrandLogo from '@/components/BrandLogo.vue'
 import { forgotPassword, getGitHubAuthorizeURL } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 import { extractErrorMessage } from '@/utils/error'
@@ -120,12 +121,7 @@ function handleGitHub(): void {
       <!-- 品牌区 -->
       <div class="auth-header">
         <div class="logo">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2a4 4 0 0 1 4 4v1h1a3 3 0 0 1 3 3v3a3 3 0 0 1-3 3h-1v1a4 4 0 0 1-4 4" />
-            <path d="M12 2a4 4 0 0 0-4 4v1H7a3 3 0 0 0-3 3v3a3 3 0 0 0 3 3h1v1a4 4 0 0 0 4 4" />
-            <circle cx="9" cy="11" r="1" fill="currentColor" />
-            <circle cx="15" cy="11" r="1" fill="currentColor" />
-          </svg>
+          <BrandLogo :size="32" />
         </div>
         <h1>AgentPair</h1>
         <p class="subtitle">双智能体协作系统</p>
