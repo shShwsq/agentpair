@@ -69,8 +69,16 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
 
     scenario_id = task.scenario
 
-    # 阶段 6:按 task.llm_config_id 加载用户保存的 LLM 配置(覆盖 env 默认)
+    # 阶段 6:加载 LLM 配置
+    # - llm_client:user_agent 评估用(来自 task.llm_config_id)
+    # - react_client:内置 react_agent 用(来自 task.react_llm_config_id,空时回退到 llm_config_id)
+    #   外部 CLI 执行器忽略 react_client(模型由 CLI 自管)
     llm_client = _build_llm_client(db, task.user_id, task.llm_config_id)
+    react_client, react_client_source = _build_react_llm_client(db, task)
+    logger.info(
+        f"[task={task.id}] LLM 配置:user_agent=task.llm_config_id,"
+        f"react_agent 来源={react_client_source}, executor={task.executor}"
+    )
 
     # 加载用户的 GitHub access_token(解密),供 clone_repo 访问私有仓库
     # 空串表示未绑定,clone_repo_with_fallback 会回退到 SSH/匿名 HTTPS
@@ -231,12 +239,13 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             # 修复 4:传入上轮 plan(previous_plan),让本轮从已有进度续接;
             #   返回本轮结束时的 plan 供下一轮使用
             # 执行器抽象:按 task.executor 选择 builtin / 外部 CLI provider
+            # client=react_client:builtin 用它执行;CLI 忽略
             is_first = round_idx == 1
             _results, summary, current_plan = executor.run(
                 task, db,
                 round_idx=round_idx,
                 followup_query=None if is_first else followup,
-                client=llm_client,
+                client=react_client,
                 repo_context=repo_context if is_first else None,
                 previous_plan=current_plan if not is_first else None,
             )
@@ -604,12 +613,20 @@ def _publish_status(task: Task) -> None:
     })
 
 
-def _build_llm_client(db: Session, user_id, llm_config_id: str | None = None) -> LLMClient | None:
-    """按 task.user_id + task.llm_config_id 加载用户保存的 LLM 配置
+def _build_llm_client(
+    db: Session,
+    user_id,
+    llm_config_id: str | None = None,
+    *,
+    label: str = "llm_config_id",
+) -> LLMClient | None:
+    """按 user_id + llm_config_id 加载用户保存的 LLM 配置
 
     - user_id 为空(匿名任务)或 llm_config_id 为空 → 返回 None,agent 回退到 env 默认
     - 找到指定配置 → 返回 LLMClient.from_config_dict(...)
     - 找不到配置 id 或构造失败 → 记日志并回退到 None
+
+    label 仅用于日志区分(user_agent / react_agent)。
     """
     if user_id is None or not llm_config_id:
         return None
@@ -624,12 +641,41 @@ def _build_llm_client(db: Session, user_id, llm_config_id: str | None = None) ->
                 target = c
                 break
         if target is None:
-            logger.warning(f"[user={user_id}] 未找到 llm_config_id={llm_config_id},回退到 env 默认")
+            logger.warning(
+                f"[user={user_id}] 未找到 {label}={llm_config_id},回退到 env 默认"
+            )
             return None
         return LLMClient.from_config_dict(target)
     except Exception as e:
-        logger.warning(f"[user={user_id}] 加载用户 LLM 配置失败,回退到 env 默认: {e}")
+        logger.warning(f"[user={user_id}] 加载用户 LLM 配置失败({label}),回退到 env 默认: {e}")
         return None
+
+
+def _build_react_llm_client(
+    db: Session,
+    task: Task,
+) -> tuple[LLMClient | None, str]:
+    """构造内置 react_agent 使用的 LLMClient
+
+    仅 executor=builtin 时调用方有意义(外部 CLI 忽略 client)。
+    优先级:task.react_llm_config_id → task.llm_config_id(回退) → None(env 默认)
+
+    返回 (client, source_label):
+        source_label 取值 "react_llm_config_id" / "llm_config_id" / "env_default",
+        仅供日志记录用。
+    """
+    react_id = task.react_llm_config_id
+    if react_id:
+        client = _build_llm_client(
+            db, task.user_id, react_id, label="react_llm_config_id"
+        )
+        # 即使 client 为 None(未找到/加载失败)也认为用的是 react_llm_config_id 槽位
+        return client, "react_llm_config_id"
+    # 回退到 user_agent 的配置
+    client = _build_llm_client(
+        db, task.user_id, task.llm_config_id, label="llm_config_id(fallback)"
+    )
+    return client, "llm_config_id"
 
 
 def _load_github_token(db: Session, user_id) -> str:
@@ -773,7 +819,9 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
     _publish_status(task)
 
     # 加载上下文(与 run_dual_agent_audit 一致)
+    # llm_client:user_agent 评估;react_client:内置 react_agent(空时回退到 llm_config_id)
     llm_client = _build_llm_client(db, task.user_id, task.llm_config_id)
+    react_client, _ = _build_react_llm_client(db, task)
     github_token = _load_github_token(db, task.user_id)
     set_current_github_token(github_token)
     allowed_skills = task.allowed_skills
@@ -829,7 +877,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
                 task, db,
                 round_idx=round_idx,
                 followup_query=followup,
-                client=llm_client,
+                client=react_client,
                 repo_context=None,  # 重启不传 repo_context(仓库已 clone,react_agent 自行从 sandbox 取)
                 previous_plan=current_plan if round_idx > start_round_idx + 1 else None,
             )

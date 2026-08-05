@@ -35,8 +35,13 @@ class TaskCreateRequest(BaseModel):
     params: dict[str, Any] | None = None
 
     # 用户选择的 LLM 配置 id(对应 user_llm_configs.llm_configs[].id)
-    # 为空表示用 env 默认配置或匿名任务
+    # 语义:user_agent 评估模型;为空表示用 env 默认配置或匿名任务
     llm_config_id: str | None = None
+
+    # 内置 react_agent 使用的 LLM 配置 id(仅 executor=builtin 时生效)。
+    # 为空时回退到 llm_config_id(react_agent 与 user_agent 共用同一模型)。
+    # 外部 CLI 执行器忽略此字段。
+    react_llm_config_id: str | None = None
 
     # 执行器选择:"builtin"(默认,内置 react_agent)或 registry 中已注册的 agent_type(如 "qoder_cli")
     # 外部 CLI 模式下,react 角色模型由该 CLI 账号配额管理;
@@ -94,6 +99,7 @@ class TaskResponse(BaseModel):
     user_input: str
     params: dict[str, Any] | None = None
     llm_config_id: str | None = None
+    react_llm_config_id: str | None = None
     executor: str = "builtin"
     status: str
     current_stage: str | None

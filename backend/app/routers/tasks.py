@@ -164,6 +164,7 @@ def create_task(
             params=params,
             user_id=current_user.id if current_user else None,
             llm_config_id=req.llm_config_id,
+            react_llm_config_id=req.react_llm_config_id,
             executor=req.executor,
             status=TaskStatus.PENDING,
             current_stage="已提交,等待执行",

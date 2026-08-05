@@ -116,12 +116,20 @@ export interface TaskCreateRequest {
   title?: string
   user_input?: string
   params?: Record<string, unknown>
-  /** 用户选择的 LLM 配置 id(对应 user_llm_configs.llm_configs[].id) */
+  /** user_agent 评估使用的 LLM 配置 id(对应 user_llm_configs.llm_configs[].id) */
   llm_config_id?: string
+  /**
+   * 内置 react_agent 使用的 LLM 配置 id(仅 executor=builtin 时生效)。
+   * 为空时回退到 llm_config_id(react_agent 与 user_agent 共用同一模型)。
+   * 外部 CLI 执行器忽略此字段(模型由 CLI 账号配额管理)。
+   */
+  react_llm_config_id?: string
   /**
    * 执行器选择:"builtin"(默认,内置 react_agent)或某个 agent_type(如 "qoder_cli")
    *
-   * agent CLI 模式下,模型配置由该 agent 自管,llm_config_id 被忽略。
+   * builtin 模式下,react_agent 用 react_llm_config_id(回退到 llm_config_id),
+   * user_agent 用 llm_config_id。
+   * CLI 模式下,react 角色模型由该 CLI 自管,llm_config_id 仅用于 user_agent 评估。
    * 候选 agent 列表由后端 GET /agents/configs 动态返回(is_active=true 的)。
    */
   executor?: string
@@ -193,6 +201,8 @@ export interface TaskDetail {
   user_input: string
   params?: Record<string, unknown> | null
   llm_config_id?: string | null
+  /** 内置 react_agent 模型 id(空时回退到 llm_config_id) */
+  react_llm_config_id?: string | null
   /** 执行器:"builtin"(内置 react_agent)或某个 agent_type(如 "qoder_cli") */
   executor?: string
   status: TaskStatus

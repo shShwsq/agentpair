@@ -58,7 +58,14 @@ const selectedScenarioDecl = computed<Scenario | null>(() =>
 // ---- 模型列表 ----
 
 const llmConfigs = ref<LLMConfigItemOut[]>([])
+/** user_agent 评估模型 */
 const selectedLlmConfigId = ref('')
+/**
+ * 内置 react_agent 模型(仅 builtin 模式生效)。
+ * 空字符串 = 同评估模型(回退到 selectedLlmConfigId);
+ * 非空 = 显式选另一个模型。
+ */
+const selectedReactLlmConfigId = ref('')
 const loadingModels = ref(true)
 
 // ---- 执行器选择(内置 + 用户已配置且启用的 agent) ----
@@ -369,6 +376,11 @@ async function handleSubmit(): Promise<void> {
       title: taskTitle.value.trim() || undefined,
       user_input: finalUserInput,
       llm_config_id: selectedLlmConfigId.value || undefined,
+      // 仅 builtin 模式下传 react_llm_config_id;空串不传(后端回退到 llm_config_id)
+      react_llm_config_id:
+        selectedExecutor.value === 'builtin'
+          ? (selectedReactLlmConfigId.value || undefined)
+          : undefined,
       executor: selectedExecutor.value,
       allowed_skills: allowedSkillsPayload,
       params,
@@ -480,9 +492,7 @@ onMounted(async () => {
           <div class="config-row">
             <div class="config-label-group">
               <span class="config-label">user_agent 模型</span>
-              <span class="config-hint">
-                {{ useAgentExecutor ? '评估用' : 'react_agent 与 user_agent 共用' }}
-              </span>
+              <span class="config-hint">评估用</span>
             </div>
             <div class="model-select">
               <select
@@ -515,7 +525,7 @@ onMounted(async () => {
             <div class="config-label-group">
               <span class="config-label">react_agent</span>
               <span class="config-hint">
-                {{ useAgentExecutor ? 'CLI 自管模型' : '使用上方模型' }}
+                {{ useAgentExecutor ? 'CLI 自管模型' : '可选独立模型' }}
               </span>
             </div>
             <div class="react-controls">
@@ -530,20 +540,39 @@ onMounted(async () => {
                   :class="['exec-btn', { active: selectedExecutor === 'builtin' }]"
                   role="tab"
                   :aria-selected="selectedExecutor === 'builtin'"
-                  title="系统内置 ReAct 智能体(使用上方选择的 LLM 配置)"
+                  title="系统内置 ReAct 智能体(右侧可独立选择 react_agent 模型)"
                   @click="selectedExecutor = 'builtin'"
                 >内置</button>
                 <button
-                  v-for="agent in agentExecutors"
-                  :key="agent.agent_type"
-                  type="button"
-                  :class="['exec-btn', { active: selectedExecutor === agent.agent_type }]"
-                  role="tab"
-                  :aria-selected="selectedExecutor === agent.agent_type"
-                  :title="`${agent.display_name}(react 角色模型由该 agent 自管)`"
-                  @click="selectedExecutor = agent.agent_type"
-                >{{ agent.display_name }}</button>
-              </div>
+                v-for="agent in agentExecutors"
+                :key="agent.agent_type"
+                type="button"
+                :class="['exec-btn', { active: selectedExecutor === agent.agent_type }]"
+                role="tab"
+                :aria-selected="selectedExecutor === agent.agent_type"
+                :title="`${agent.display_name}(react 角色模型由该 agent 自管)`"
+                @click="selectedExecutor = agent.agent_type"
+              >{{ agent.display_name }}</button>
+            </div>
+
+            <!-- react_agent 模型(仅 builtin:可与 user_agent 用不同模型;空=同评估模型) -->
+            <div v-if="!useAgentExecutor" class="model-select react-model-select">
+              <select
+                v-model="selectedReactLlmConfigId"
+                :disabled="loadingModels"
+                aria-label="react_agent 模型"
+                title="内置 react_agent 使用的模型。选「同评估模型」=回退到 user_agent 评估模型"
+              >
+                <option value="">同评估模型</option>
+                <option
+                  v-for="cfg in llmConfigs"
+                  :key="cfg.id"
+                  :value="cfg.id"
+                >
+                  {{ modelLabel(cfg) }}
+                </option>
+              </select>
+            </div>
 
               <!-- Qoder CLI 模型配置(仅 qoder_cli / qoder_cli_cn 执行器显示) -->
               <div v-if="selectedExecutor.startsWith('qoder_cli')" class="qoder-config-panel">
