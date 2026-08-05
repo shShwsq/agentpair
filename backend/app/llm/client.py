@@ -337,6 +337,12 @@ class LLMClient:
         返回 { success, message, latency_ms, reply }
         用流式接口调用,收集完整 content 后返回,供前端展示模型实际回复。
         测试时强制关闭深度思考,避免思考链耗时过长(thinking_mode=only 的模型无法关闭)。
+
+        MiniMax 特殊处理:
+        - reasoningSplit=true 时思考内容走 reasoning_content 字段(content 为空)
+        - MiniMax-M2.7 是 thinking=only,强制开启思考,test() 关不掉
+        - 此时若只收集 content_delta,reply 恒为空,前端无法展示模型回复
+        - 因此 content 为空时回退用 reasoning_delta 作为回复,保证前端能看到模型输出
         """
         import time
 
@@ -348,15 +354,29 @@ class LLMClient:
             messages = [{"role": "user", "content": prompt}]
             # 收集完整 content,max_tokens 限制在合理范围(一句口号)
             collected: list[str] = []
+            reasoning_collected: list[str] = []
             has_any = False
             for chunk in self.chat_stream(messages, max_tokens=128):
                 if chunk.content_delta:
                     collected.append(chunk.content_delta)
                     has_any = True
+                if chunk.reasoning_delta:
+                    reasoning_collected.append(chunk.reasoning_delta)
+                    has_any = True
                 if chunk.finish_reason in ("stop", "tool_calls", "length"):
                     break
             latency_ms = int((time.perf_counter() - start) * 1000)
             reply = "".join(collected).strip()
+            # MiniMax 等厂商 thinking=only / reasoningSplit 时,content 可能为空,
+            # 全部输出在 reasoning_content。回退用 reasoning 作为回复,让前端能展示。
+            if not reply and reasoning_collected:
+                reasoning = "".join(reasoning_collected).strip()
+                return {
+                    "success": True,
+                    "message": "LLM 测试成功(模型仅返回思考内容)",
+                    "latency_ms": latency_ms,
+                    "reply": reasoning,
+                }
             if has_any and reply:
                 return {
                     "success": True,
@@ -364,10 +384,10 @@ class LLMClient:
                     "latency_ms": latency_ms,
                     "reply": reply,
                 }
-            # 没拿到 content 但流正常结束,也算成功(部分模型只输出 reasoning)
+            # 没拿到任何内容但流正常结束,也算成功
             return {
                 "success": True,
-                "message": "LLM 测试成功(未返回 content,可能仅思考)",
+                "message": "LLM 测试成功(未返回内容)",
                 "latency_ms": latency_ms,
                 "reply": None,
             }
