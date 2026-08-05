@@ -4,13 +4,50 @@
 
 ---
 
-## 阶段 0:最小骨架跑通
+## 当前总览
+
+| 阶段 | 名称 | 状态 |
+|------|------|------|
+| 0 | 最小骨架跑通 | ✅ 已完成 |
+| 1 | 单 react_agent 跑通真实审计 | ✅ 已完成 |
+| 2 | 加沙箱,代码在沙箱里跑 | ✅ 已完成 |
+| 3 | 加 Semgrep 和 CVE 查询 | ✅ 已完成 |
+| 4 | 引入 user_agent,双智能体协作 | ✅ 已完成 |
+| 5 | SKILL 机制 | ✅ 已完成 |
+| 6 | 用户系统与模型配置 | ✅ 已完成 |
+| 7 | 网站前端 | ✅ 已完成 |
+| 8 | 微信小程序 | ⬜ 未开始 |
+| 9 | 生产化与上线 | 🔨 部分完成 |
+
+### 超出原规划已实现的功能
+
+以下功能在迭代过程中自发产生,已落地到代码中:
+
+- **执行器抽象层(ExecutorAgent)**:把"执行智能体"抽象为统一接口,支持 builtin(内置 react_agent)和外部 CLI(通过 ACP 协议通信)两种 provider。新增 agent 类型只需在 registry 注册,无需改核心代码。
+- **ACP Bridge**:HTTP ↔ stdio 桥接服务,运行在沙箱内,让外部智能体 CLI(如 Qoder CLI / Qoder CN CLI)通过 ACP 协议接入。
+- **Qoder CLI Agent**:通过 ACP 协议调用 Qoder CLI(国际版 + 国内版)作为 react 角色,模型由 CLI 账号配额管理,不走后端 LLM 配置。
+- **场景降级**:checklist 不再从场景固定读取,改为 user_agent 第 0 轮动态生成 + 用户编辑确认。prompt 通用化,工具全部开放,结果结构通用化。
+- **任务暂停/恢复**:用户可暂停运行中的任务,后台线程在检查点(迭代边界/工具调用前)阻塞,恢复后继续。
+- **用户补充消息**:任务运行中/完成后,用户可追加消息触发新一轮协作(resume_audit_with_message)。
+- **跨轮记忆传递**:三级压缩策略(完整 → 丢工具摘要 → LLM 压缩早期轮次),控制 token 成本。
+- **循环检测**:滑动窗口检测重复工具调用(连续相同 + 交替循环),打破死循环。
+- **Plan 状态管理**:react_agent 在思考中输出 `<plan>` 清单,代码维护状态,跨轮续接避免重复规划。
+- **工作区浏览**:前端可浏览 react_agent clone 的工作区文件结构和内容(任务完成后保留 1 小时)。
+- **GitHub 私有仓库**:用户绑定 GitHub OAuth 后,clone 时用 access_token 访问私有仓库。
+- **思考链流式推送**:LLM 的 reasoning_content 通过 SSE thinking_delta 事件实时推给前端(打字机效果)。
+- **删除账号**:硬删除 + 级联清理(任务/配置/token)。
+- **多厂商 LLM 支持**:DashScope(通义千问)/ DeepSeek / 智谱 / Kimi / 豆包 / MiniMax 等,通过 models_catalog.json 统一管理差异。
+- **代码审查场景模板**:除安全审计外,新增 code_review 场景(预设提示词 + 推荐 skill)。
+
+---
+
+## 阶段 0:最小骨架跑通 ✅
 
 **目标**:后端能起,数据库能连,一个空的 agent 接口能返回假数据。
 
 **做什么**:
 - FastAPI 项目骨架 + 路由分层
-- SQLite + SQLAlchemy 模型(User / Task / Conversation / Finding)
+- SQLite + SQLAlchemy 模型(User / Task / Conversation / Result)
 - 一个 `/tasks` POST 接口,接受 repo_url,返回 task_id
 - 一个 `/tasks/{id}` GET 接口,返回 task 状态
 - 一个假的 agent runner,直接返回"发现 1 个 SQL 注入"这种硬编码结果
@@ -26,7 +63,7 @@ uvicorn app.main:app --reload
 
 ---
 
-## 阶段 1:单 react_agent 跑通真实审计
+## 阶段 1:单 react_agent 跑通真实审计 ✅
 
 **目标**:不要双 agent,先让一个 react_agent 真的能审计一个 GitHub 仓库。
 
@@ -48,7 +85,7 @@ uvicorn app.main:app --reload
 
 ---
 
-## 阶段 2:加沙箱,代码在沙箱里跑
+## 阶段 2:加沙箱,代码在沙箱里跑 ✅
 
 **目标**:把 clone 和工具执行从宿主机挪进 OpenSandbox,真正的隔离。
 
@@ -65,9 +102,15 @@ uvicorn app.main:app --reload
 
 **完成标志**:所有代码执行都在沙箱里,宿主机只做调度。
 
+**实际实现**:
+- `SandboxSession` 封装,支持 sandbox(真实 OpenSandbox)和 mock(本地文件系统模拟)两种模式
+- 使用 OpenSandbox 官方 `SandboxSync` 同步 API,对齐 react_agent 的同步循环
+- 支持 SSH key 挂载(私有仓库 clone)、资源限制(CPU/内存/执行时间)、端口转发
+- 后台命令管理(ACP bridge 等长驻服务)
+
 ---
 
-## 阶段 3:加 Semgrep 和 CVE 查询
+## 阶段 3:加 Semgrep 和 CVE 查询 ✅
 
 **目标**:工具集补全到 spec 里的完整版。
 
@@ -83,9 +126,15 @@ uvicorn app.main:app --reload
 
 **完成标志**:react_agent 工具集达到 spec 8.4 的完整版。
 
+**实际实现**:
+- `run_semgrep` 工具:在沙箱中执行 Semgrep,支持自定义规则
+- `query_cve` 工具:按依赖逐个查 OSV API
+- 额外工具:`list_files`(目录结构)、`find_files`(glob 查找)、`write_file`(工作区写文件)、`run_python_code`(沙箱执行 Python)
+- `list_skills` / `skill`:查看并加载专家技能
+
 ---
 
-## 阶段 4:引入 user_agent,双智能体协作
+## 阶段 4:引入 user_agent,双智能体协作 ✅
 
 **目标**:把 user_agent 加进来,跑通真正的双 agent 闭环。**这是核心创新,前面所有阶段都是为它做准备。**
 
@@ -108,9 +157,19 @@ uvicorn app.main:app --reload
 
 **完成标志**:user_agent 真的会追问,且追问后 react_agent 能补出新发现。
 
+**实际实现(超出原规划)**:
+- **场景降级**:checklist 不再固定,由 user_agent 第 0 轮动态生成 + 用户编辑确认,后续轮按此评估
+- **用户澄清(ask_user)**:第 0 轮初始评估时,user_agent 可向用户提问(最多 2 轮),前端弹窗交互
+- **跨轮记忆传递**:react_agent 和 user_agent 各自的三级压缩记忆策略
+- **Plan 状态管理**:跨轮 plan 续接,避免重复规划已完成项
+- **循环检测**:滑动窗口检测连续相同调用 + 交替循环,自动打破
+- **任务暂停/恢复**:用户可暂停运行中的任务,后台线程在检查点阻塞
+- **用户补充消息**:运行中注入 LLM 上下文 / 完成后触发新一轮协作
+- **思考链流式推送**:reasoning_content 通过 SSE 实时推给前端
+
 ---
 
-## 阶段 5:SKILL 机制
+## 阶段 5:SKILL 机制 ✅
 
 **目标**:把常用的多步审计操作封装成可复用技能,让 react_agent 调用。
 
@@ -128,9 +187,15 @@ uvicorn app.main:app --reload
 
 **完成标志**:技能可配置、可扩展,react_agent 能按需调用。
 
+**实际实现(与原设计差异)**:
+- SKILL 定义格式从 YAML 改为 **SKILL.md**(Markdown frontmatter + body),更接近主流 AI 工具的技能格式
+- `list_skills` / `skill` 工具:react_agent 查看可用技能列表并按需加载技能指令
+- 管理后台 CRUD API(`/skills`):创建/查看/更新/删除/重载技能
+- **场景降级后**:skill 不再与场景绑定,而是全局可用。用户创建任务时可选择允许调用的 skill(`allowed_skills`)
+
 ---
 
-## 阶段 6:用户系统与模型配置
+## 阶段 6:用户系统与模型配置 ✅
 
 **目标**:从单用户 demo 变成多用户可用。
 
@@ -148,9 +213,19 @@ uvicorn app.main:app --reload
 
 **完成标志**:多用户隔离 + 模型可配。
 
+**实际实现(超出原规划)**:
+- 邮箱密码注册/登录 + 邮箱验证 + 重置密码 + **修改密码**(spec 原设计禁止修改密码,实际实现为允许,见 spec 8.5 更新说明)
+- GitHub OAuth 登录(自动注册/关联已有账号)
+- GitHub 绑定:用于私有仓库 clone(repo scope)
+- 删除账号(硬删除 + 级联清理)
+- 用户 LLM 配置(UserLLMConfig):列表式配置,每个配置含 provider/api_key/model/enable_thinking/base_url
+- 用户 Agent 配置(UserAgentConfig):存储外部 CLI agent 的凭证(如 Qoder CLI PAT)
+- 任务级模型选择:`llm_config_id`(user_agent 用)+ `react_llm_config_id`(react_agent 用,空时回退)
+- 任务级执行器选择:`executor` 字段(builtin / qoder_cli / qoder_cli_cn)
+
 ---
 
-## 阶段 7:网站前端
+## 阶段 7:网站前端 ✅
 
 **目标**:Vue3 + TS 网站,能完整用图形界面跑双智能体任务。前端与场景解耦,同一套 UI 支持任意场景,不绑定安全审查。
 
@@ -172,9 +247,22 @@ uvicorn app.main:app --reload
 
 **完成标志**:网站端完整可用,能替代 curl 流程,且不耦合具体场景。
 
+**实际实现(超出原规划)**:
+- Vue3 + TypeScript + Vue Router + Pinia
+- 完整页面:LoginView / VerifyEmailView / ResetPasswordView / OAuthCallbackView / HomeView(任务列表)/ TaskCreateView / TaskDetailView / ModelSettingsView / SettingsView
+- 实时对话流:ConversationMessage 组件,支持 thinking / tool_call / tool_result / evaluation / question / summary 等消息类型
+- 流式思考链:thinking_delta SSE 事件,打字机效果实时展示 reasoning + content
+- 覆盖度看板:ChecklistReviewDialog(第 0 轮用户编辑确认清单)+ 任务详情页覆盖度展示
+- 工作区侧栏:WorkspaceSidebar 组件,浏览 clone 的文件结构和内容
+- 暂停/恢复按钮 + 用户消息输入框(UserMessageInput)
+- 报告导出:Markdown 下载 + HTML 打印为 PDF
+- 模型配置:ModelConfigDialog + ModelCombobox + AgentConfigDialog
+- GitHub 绑定:GitHubDialog
+- 全文搜索:任务列表支持按标题/输入/对话内容/结果内容搜索
+
 ---
 
-## 阶段 8:微信小程序
+## 阶段 8:微信小程序 ⬜
 
 **目标**:小程序端,核心功能可用。延续阶段 7 的场景无关方向,小程序 UI 同样不绑定安全审查。
 
@@ -196,7 +284,7 @@ uvicorn app.main:app --reload
 
 ---
 
-## 阶段 9:生产化与上线
+## 阶段 9:生产化与上线 🔨
 
 **目标**:能真上线给别人用。
 
@@ -215,6 +303,16 @@ uvicorn app.main:app --reload
 - 跑一个真实开源项目,看完整任务效果(结果质量因场景而异,不预设安全审查)
 
 **完成标志**:线上可访问,真实仓库任务可用。
+
+**当前进度**:
+- ✅ 数据库已支持 PostgreSQL(SQLAlchemy + PostgreSQL 方言,JSONB/UUID)
+- ✅ 任务异步执行(后台线程 threading,暂未用 Celery/RQ)
+- ✅ 沙箱部署脚本(scripts/build-sandbox-image.sh)
+- ✅ 资源限制(沙箱 CPU/内存/执行时间限制;react_agent MAX_ITERATIONS + 循环检测)
+- ⬜ 任务队列(Celery/RQ):当前用 threading,生产环境需切换
+- ⬜ 监控与日志系统
+- ⬜ 微信内容安全检测
+- ⬜ 域名 + HTTPS + 备案
 
 ---
 
