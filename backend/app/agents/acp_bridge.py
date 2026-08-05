@@ -211,18 +211,40 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 assert _cli.proc.stdout is not None
                 import select as _select
                 stdout_fd = _cli.proc.stdout.fileno()
-                deadline = time.time() + 120  # 单次请求最多等 120s
+                # 不设硬性 deadline:CLI 可能在等异步子 agent(数十秒~数分钟无输出)。
+                # 只在 CLI 进程退出或 stdout EOF 时结束,确保不丢失后续响应。
+                # select 用 5s 超时,便于周期性检查进程存活 + 推送 idle 心跳。
                 line_count = 0
+                idle_secs = 0.0
+                last_idle_log = 0.0
 
-                while time.time() < deadline:
-                    # 用 select 检查 stdout 是否有数据(1s 超时,便于周期性检查 deadline)
-                    ready, _, _ = _select.select([stdout_fd], [], [], 1.0)
+                while True:
+                    # 用 select 检查 stdout 是否有数据(5s 超时,便于周期性检查进程存活)
+                    ready, _, _ = _select.select([stdout_fd], [], [], 5.0)
                     if not ready:
                         # 暂无数据,检查 CLI 进程是否还活着
                         if not _cli.alive:
                             print(f"[bridge] CLI 进程在等待响应时退出(method={request_method})", file=sys.stderr, flush=True)
                             break
+                        # 推送 idle 心跳到 SSE(带 event: idle 标记,便于 recorder 记录)
+                        # 每 5s 一次,让后端知道 bridge 还活着、CLI 还在跑
+                        idle_secs += 5.0
+                        # 每 30s 打一次日志(避免刷屏)
+                        if idle_secs - last_idle_log >= 30.0:
+                            print(f"[bridge] 等待 CLI 响应中(method={request_method}, idle={int(idle_secs)}s)", file=sys.stderr, flush=True)
+                            last_idle_log = idle_secs
+                        # 推送 SSE 注释行(: 开头是 SSE 注释,客户端会忽略,
+                        # 但我们的 recorder 会记录原始行,便于事后分析 CLI 卡在哪)
+                        try:
+                            self.wfile.write(f": idle {int(idle_secs)}s\n\n".encode("utf-8"))
+                            self.wfile.flush()
+                        except BrokenPipeError:
+                            break  # 客户端断开连接
                         continue
+
+                    # 有数据,重置 idle 计数
+                    idle_secs = 0.0
+                    last_idle_log = 0.0
 
                     raw_line = _cli.proc.stdout.readline()
                     if not raw_line:
@@ -254,7 +276,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         continue
 
                 if line_count == 0:
-                    print(f"[bridge] 警告:CLI 在 120s 内未输出任何响应行(method={request_method})", file=sys.stderr, flush=True)
+                    print(f"[bridge] 警告:CLI 未输出任何响应行(method={request_method})", file=sys.stderr, flush=True)
         except Exception as e:
             # 响应头未发时返回 JSON 错误;已发则只能日志记录
             try:
