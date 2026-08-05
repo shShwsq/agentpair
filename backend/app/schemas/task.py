@@ -39,7 +39,8 @@ class TaskCreateRequest(BaseModel):
     llm_config_id: str | None = None
 
     # 执行器选择:"builtin"(默认,内置 react_agent)或 registry 中已注册的 agent_type(如 "qoder_cli")
-    # 外部 CLI 模式下,模型由该 CLI 的账号配额管理,llm_config_id 被忽略
+    # 外部 CLI 模式下,react 角色模型由该 CLI 账号配额管理;
+    # llm_config_id 仍用于 user_agent 评估(为空时回退 env 默认)
     executor: str = Field(default="builtin", pattern=_EXECUTOR_PATTERN)
 
     # 兼容字段:旧 API 直接传 repo_url

@@ -66,7 +66,8 @@ const loadingModels = ref(true)
 /**
  * 执行器:决定 react 角色由哪个 agent 执行
  * - 'builtin':系统内置 react_agent(使用上方选择的 LLM 配置)
- * - agent_type(如 'qoder_cli'):对应 agent CLI,模型由其配置自管,llm_config_id 被忽略
+ * - agent_type(如 'qoder_cli'):对应 agent CLI,react 角色模型由 CLI 自管;
+ *   上方选择的 LLM 配置仅用于 user_agent 评估
  *
  * 候选列表由后端 GET /agents/configs 动态返回(is_active=true 的)。
  */
@@ -74,12 +75,16 @@ const agentExecutors = ref<AgentConfigOut[]>([])
 /** 当前选中执行器:'builtin' 或某个 agent_type */
 const selectedExecutor = ref<string>('builtin')
 
-/** 是否选中了非内置执行器(此时禁用模型选择) */
+/** 是否选中了非内置执行器(CLI 自管 react 模型,LLM 配置仅供 user_agent) */
 const useAgentExecutor = computed(() => selectedExecutor.value !== 'builtin')
 
-/** 当前选中的 agent 执行器元信息(用于文案展示) */
-const selectedAgentExecutor = computed<AgentConfigOut | null>(() =>
-  agentExecutors.value.find((a) => a.agent_type === selectedExecutor.value) ?? null,
+/**
+ * 模型选择器在当前执行器下的语义标签
+ * - builtin:模型同时用于内置 react_agent 与 user_agent 评估
+ * - CLI:模型仅用于 user_agent 评估(执行模型由 CLI 自管)
+ */
+const modelSelectLabel = computed(() =>
+  useAgentExecutor.value ? '评估模型' : '使用模型',
 )
 
 // ---- Qoder CLI 模型配置(仅 qoder_cli 执行器显示) ----
@@ -487,19 +492,22 @@ onMounted(async () => {
                 :class="['exec-btn', { active: selectedExecutor === agent.agent_type }]"
                 role="tab"
                 :aria-selected="selectedExecutor === agent.agent_type"
-                :title="`${agent.display_name}(模型由该 agent 自管)`"
+                :title="`${agent.display_name}(react 角色模型由该 agent 自管,user_agent 评估模型在右侧选择)`"
                 @click="selectedExecutor = agent.agent_type"
               >{{ agent.display_name }}</button>
             </div>
 
-            <!-- 模型选择(agent 执行器模式下禁用:模型由 agent 自管) -->
-            <div class="model-select" :class="{ disabled: useAgentExecutor }">
+            <!-- 模型选择(builtin:react_agent + user_agent 共用;CLI:仅 user_agent 评估使用) -->
+            <div class="model-select">
               <select
                 v-model="selectedLlmConfigId"
-                :disabled="loadingModels || useAgentExecutor"
-                :aria-label="useAgentExecutor && selectedAgentExecutor ? `由 ${selectedAgentExecutor.display_name} 管理` : '使用模型'"
+                :disabled="loadingModels"
+                :aria-label="modelSelectLabel"
+                :title="useAgentExecutor
+                  ? 'user_agent 评估使用的模型(执行模型由 CLI 配置管理)'
+                  : '内置执行器与 user_agent 评估使用的模型'"
               >
-                <option value="">{{ useAgentExecutor && selectedAgentExecutor ? `由 ${selectedAgentExecutor.display_name} 管理` : '默认模型' }}</option>
+                <option value="">{{ useAgentExecutor ? '默认评估模型' : '默认模型' }}</option>
                 <option
                   v-for="cfg in llmConfigs"
                   :key="cfg.id"
@@ -509,7 +517,7 @@ onMounted(async () => {
                 </option>
               </select>
               <RouterLink
-                v-if="llmConfigs.length === 0 && !loadingModels && !useAgentExecutor"
+                v-if="llmConfigs.length === 0 && !loadingModels"
                 to="/models"
                 class="model-empty-link"
               >配置 →</RouterLink>
@@ -903,12 +911,6 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-}
-
-/* agent 执行器模式下模型选择禁用样式 */
-.model-select.disabled {
-  opacity: 0.45;
-  pointer-events: none;
 }
 
 .model-select select {
