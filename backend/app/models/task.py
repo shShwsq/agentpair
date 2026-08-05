@@ -62,8 +62,14 @@ class Task(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # 用户提交任务时选择的 LLM 配置 id(对应 user_llm_configs.llm_configs[].id)
-    # 为空表示用 env 默认配置或匿名任务
+    # 语义:user_agent 评估使用的模型;为空表示用 env 默认配置或匿名任务
     llm_config_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # 内置 react_agent 使用的 LLM 配置 id(仅 executor=builtin 时生效)。
+    # 为空时回退到 llm_config_id(react_agent 与 user_agent 共用同一模型)。
+    # 外部 CLI 执行器忽略此字段(模型由 CLI 账号配额管理)。
+    # 升级时需手动执行:ALTER TABLE tasks ADD COLUMN react_llm_config_id VARCHAR(64);
+    react_llm_config_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # 执行器选择:"builtin"(默认,内置 react_agent)或 registry 中已注册的 agent_type(如 "qoder_cli")
     # 决定 orchestrator 调用哪个 ExecutorAgent provider 执行 react 角色的任务

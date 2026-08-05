@@ -455,49 +455,35 @@ onMounted(async () => {
       <WorkspaceSidebar v-if="!workspaceCollapsed" />
 
       <main class="main">
-        <!-- 顶部:场景模式选择 + 模型选择 + 高级选项(技能多选) -->
+        <!-- 顶部配置区:三行布局(场景 / user_agent 模型 / react_agent 设置) -->
         <div class="topbar">
-          <div class="scenario-segmented" role="tablist" aria-label="场景选择">
-            <button
-              v-for="s in scenarios"
-              :key="s.id"
-              type="button"
-              :class="['seg-btn', { active: selectedScenario === s.id }]"
-              role="tab"
-              :aria-selected="selectedScenario === s.id"
-              @click="selectedScenario = s.id"
-            >{{ s.name }}</button>
-            <span v-if="scenarios.length === 0" class="seg-loading">场景加载中...</span>
+          <!-- 第 1 行:场景 -->
+          <div class="config-row">
+            <div class="config-label-group">
+              <span class="config-label">场景</span>
+            </div>
+            <div class="scenario-segmented" role="tablist" aria-label="场景选择">
+              <button
+                v-for="s in scenarios"
+                :key="s.id"
+                type="button"
+                :class="['seg-btn', { active: selectedScenario === s.id }]"
+                role="tab"
+                :aria-selected="selectedScenario === s.id"
+                @click="selectedScenario = s.id"
+              >{{ s.name }}</button>
+              <span v-if="scenarios.length === 0" class="seg-loading">场景加载中...</span>
+            </div>
           </div>
 
-          <div class="topbar-right">
-            <!-- 执行器选择:内置 + 用户已配置且启用的 agent CLI -->
-            <div
-              class="executor-segmented"
-              role="tablist"
-              aria-label="执行器选择"
-            >
-              <button
-                type="button"
-                :class="['exec-btn', { active: selectedExecutor === 'builtin' }]"
-                role="tab"
-                :aria-selected="selectedExecutor === 'builtin'"
-                title="系统内置 ReAct 智能体(使用下方选择的 LLM 配置)"
-                @click="selectedExecutor = 'builtin'"
-              >内置</button>
-              <button
-                v-for="agent in agentExecutors"
-                :key="agent.agent_type"
-                type="button"
-                :class="['exec-btn', { active: selectedExecutor === agent.agent_type }]"
-                role="tab"
-                :aria-selected="selectedExecutor === agent.agent_type"
-                :title="`${agent.display_name}(react 角色模型由该 agent 自管,user_agent 评估模型在右侧选择)`"
-                @click="selectedExecutor = agent.agent_type"
-              >{{ agent.display_name }}</button>
+          <!-- 第 2 行:user_agent 模型 -->
+          <div class="config-row">
+            <div class="config-label-group">
+              <span class="config-label">user_agent 模型</span>
+              <span class="config-hint">
+                {{ useAgentExecutor ? '评估用' : 'react_agent 与 user_agent 共用' }}
+              </span>
             </div>
-
-            <!-- 模型选择(builtin:react_agent + user_agent 共用;CLI:仅 user_agent 评估使用) -->
             <div class="model-select">
               <select
                 v-model="selectedLlmConfigId"
@@ -522,67 +508,103 @@ onMounted(async () => {
                 class="model-empty-link"
               >配置 →</RouterLink>
             </div>
+          </div>
 
-            <!-- Qoder CLI 模型配置(qoder_cli / qoder_cli_cn 执行器显示) -->
-            <div v-if="selectedExecutor.startsWith('qoder_cli')" class="qoder-config-panel">
-              <button
-                type="button"
-                class="qoder-config-toggle"
-                :aria-expanded="qoderConfigOpen"
-                @click="qoderConfigOpen = !qoderConfigOpen"
-              >
-                <svg
-                  class="qoder-chevron"
-                  :class="{ expanded: qoderConfigOpen }"
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <polyline points="9 18 15 12 9 6" />
-                </svg>
-                <span>Qoder 模型</span>
-                <span class="qoder-config-summary">
-                  {{ qoderModel || 'Auto' }} · {{ qoderReasoningEffort || '默认' }} · {{ qoderContextWindow ? (qoderContextWindow >= 1000000 ? '1M' : (qoderContextWindow / 1000) + 'K') : '默认' }}
-                </span>
-              </button>
-
-              <Transition name="collapse">
-                <div v-show="qoderConfigOpen" class="qoder-config-dropdown">
-                  <div class="qoder-config-row">
-                    <label class="qoder-config-label">模型</label>
-                    <select v-model="qoderModel" class="qoder-config-select">
-                      <option v-for="opt in qoderModelOptions" :key="opt.value" :value="opt.value">
-                        {{ opt.label }}
-                      </option>
-                    </select>
-                  </div>
-                  <div class="qoder-config-row">
-                    <label class="qoder-config-label">思考强度</label>
-                    <select v-model="qoderReasoningEffort" class="qoder-config-select">
-                      <option v-for="opt in qoderEffortOptions" :key="opt.value" :value="opt.value">
-                        {{ opt.label }}
-                      </option>
-                    </select>
-                  </div>
-                  <div class="qoder-config-row">
-                    <label class="qoder-config-label">上下文窗口</label>
-                    <select v-model.number="qoderContextWindow" class="qoder-config-select">
-                      <option v-for="opt in qoderContextOptions" :key="opt.value" :value="opt.value">
-                        {{ opt.label }}
-                      </option>
-                    </select>
-                  </div>
-                </div>
-              </Transition>
+          <!-- 第 3 行:react_agent 设置(执行器 + CLI 模型配置 / 技能) -->
+          <div class="config-row">
+            <div class="config-label-group">
+              <span class="config-label">react_agent</span>
+              <span class="config-hint">
+                {{ useAgentExecutor ? 'CLI 自管模型' : '使用上方模型' }}
+              </span>
             </div>
+            <div class="react-controls">
+              <!-- 执行器选择:内置 + 用户已配置且启用的 agent CLI -->
+              <div
+                class="executor-segmented"
+                role="tablist"
+                aria-label="执行器选择"
+              >
+                <button
+                  type="button"
+                  :class="['exec-btn', { active: selectedExecutor === 'builtin' }]"
+                  role="tab"
+                  :aria-selected="selectedExecutor === 'builtin'"
+                  title="系统内置 ReAct 智能体(使用上方选择的 LLM 配置)"
+                  @click="selectedExecutor = 'builtin'"
+                >内置</button>
+                <button
+                  v-for="agent in agentExecutors"
+                  :key="agent.agent_type"
+                  type="button"
+                  :class="['exec-btn', { active: selectedExecutor === agent.agent_type }]"
+                  role="tab"
+                  :aria-selected="selectedExecutor === agent.agent_type"
+                  :title="`${agent.display_name}(react 角色模型由该 agent 自管)`"
+                  @click="selectedExecutor = agent.agent_type"
+                >{{ agent.display_name }}</button>
+              </div>
 
-            <!-- 高级选项:Skill 多选(下拉浮层,默认折叠) -->
-            <div v-if="allSkills.length > 0" class="advanced-panel">
+              <!-- Qoder CLI 模型配置(仅 qoder_cli / qoder_cli_cn 执行器显示) -->
+              <div v-if="selectedExecutor.startsWith('qoder_cli')" class="qoder-config-panel">
+                <button
+                  type="button"
+                  class="qoder-config-toggle"
+                  :aria-expanded="qoderConfigOpen"
+                  @click="qoderConfigOpen = !qoderConfigOpen"
+                >
+                  <svg
+                    class="qoder-chevron"
+                    :class="{ expanded: qoderConfigOpen }"
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <polyline points="9 18 15 12 9 6" />
+                  </svg>
+                  <span>Qoder 模型</span>
+                  <span class="qoder-config-summary">
+                    {{ qoderModel || 'Auto' }} · {{ qoderReasoningEffort || '默认' }} · {{ qoderContextWindow ? (qoderContextWindow >= 1000000 ? '1M' : (qoderContextWindow / 1000) + 'K') : '默认' }}
+                  </span>
+                </button>
+
+                <Transition name="collapse">
+                  <div v-show="qoderConfigOpen" class="qoder-config-dropdown">
+                    <div class="qoder-config-row">
+                      <label class="qoder-config-label">模型</label>
+                      <select v-model="qoderModel" class="qoder-config-select">
+                        <option v-for="opt in qoderModelOptions" :key="opt.value" :value="opt.value">
+                          {{ opt.label }}
+                        </option>
+                      </select>
+                    </div>
+                    <div class="qoder-config-row">
+                      <label class="qoder-config-label">思考强度</label>
+                      <select v-model="qoderReasoningEffort" class="qoder-config-select">
+                        <option v-for="opt in qoderEffortOptions" :key="opt.value" :value="opt.value">
+                          {{ opt.label }}
+                        </option>
+                      </select>
+                    </div>
+                    <div class="qoder-config-row">
+                      <label class="qoder-config-label">上下文窗口</label>
+                      <select v-model.number="qoderContextWindow" class="qoder-config-select">
+                        <option v-for="opt in qoderContextOptions" :key="opt.value" :value="opt.value">
+                          {{ opt.label }}
+                        </option>
+                      </select>
+                    </div>
+                  </div>
+                </Transition>
+              </div>
+
+              <!-- 技能多选(仅内置执行器显示:CLI 用自身工具系统,本地 skill 无效) -->
+              <div v-if="!useAgentExecutor && allSkills.length > 0" class="advanced-panel">
               <button
                 type="button"
                 class="advanced-toggle"
@@ -646,6 +668,7 @@ onMounted(async () => {
                   </div>
                 </div>
               </Transition>
+              </div>
             </div>
           </div>
         </div>
@@ -859,13 +882,48 @@ onMounted(async () => {
   padding: var(--space-6) var(--space-6) var(--space-8);
 }
 
-/* ---- 顶部:场景模式 + 模型 ---- */
+/* ---- 顶部配置区:三行布局(场景 / user_agent 模型 / react_agent 设置) ---- */
 .topbar {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
+  flex-direction: column;
+  gap: var(--space-2);
   margin-bottom: var(--space-4);
+}
+
+/* 单行配置:左侧标签 + 右侧控件 */
+.config-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.config-label-group {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  min-width: 88px;
+}
+
+.config-label {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.config-hint {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+/* 第 3 行 react_agent 控件容器:横向排列执行器 + CLI 配置 / 技能 */
+.react-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
   flex-wrap: wrap;
 }
 
@@ -974,14 +1032,6 @@ onMounted(async () => {
 
 .model-empty-link:hover {
   text-decoration: underline;
-}
-
-/* ---- topbar 右侧:模型 + 高级选项 ---- */
-.topbar-right {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  flex-wrap: wrap;
 }
 
 /* ---- 错误提示 ---- */
@@ -1261,21 +1311,25 @@ onMounted(async () => {
 
 /* ---- 小屏适配 ---- */
 @media (max-width: 640px) {
-  .topbar {
+  /* 窄屏每行标签与控件上下排列 */
+  .config-row {
+    align-items: flex-start;
     flex-direction: column;
-    align-items: stretch;
+    gap: var(--space-1);
   }
 
-  .topbar-right {
-    justify-content: space-between;
+  .config-label-group {
+    min-width: 0;
   }
 
   .model-select {
     flex: 1;
+    width: 100%;
   }
 
   .model-select select {
     max-width: 100%;
+    flex: 1;
   }
 
   .branch-input {
@@ -1288,6 +1342,11 @@ onMounted(async () => {
     max-width: calc(100vw - var(--space-6) * 2);
     right: 0;
     left: 0;
+  }
+
+  .qoder-config-dropdown {
+    min-width: 0;
+    max-width: calc(100vw - var(--space-6) * 2);
   }
 }
 
