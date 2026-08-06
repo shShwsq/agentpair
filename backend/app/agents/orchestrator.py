@@ -335,6 +335,13 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         except Exception as mem_err:
             logger.warning(f"[task={task.id}] 归纳写入记忆失败(忽略): {mem_err}")
 
+        # 捕获工作区 diff(失败兜底,不影响任务完成;容器仍存活)
+        try:
+            from app.services.workspace_diff import save_workspace_diff_artifact
+            save_workspace_diff_artifact(task, db, task_id_str)
+        except Exception as diff_err:
+            logger.warning(f"[task={task.id}] 捕获工作区 diff 失败(忽略): {diff_err}")
+
     except Exception as e:
         logger.exception(f"[task={task.id}] 双智能体协作失败")
         task.status = TaskStatus.FAILED
@@ -998,6 +1005,13 @@ def _finish_resume(
         summarize_and_save_memory(task, db, None)
     except Exception as mem_err:
         logger.warning(f"[task={task.id}] 归纳写入记忆失败(忽略): {mem_err}")
+
+    # 捕获工作区 diff(失败兜底,不影响任务完成;容器仍存活)
+    try:
+        from app.services.workspace_diff import save_workspace_diff_artifact
+        save_workspace_diff_artifact(task, db, str(task.id))
+    except Exception as diff_err:
+        logger.warning(f"[task={task.id}] 捕获工作区 diff 失败(忽略): {diff_err}")
 
 
 def _load_react_summaries(db: Session, task_id) -> list[dict]:

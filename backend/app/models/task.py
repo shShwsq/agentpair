@@ -94,6 +94,9 @@ class Task(Base):
     results: Mapped[list["Result"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
     )
+    artifacts: Mapped[list["TaskArtifact"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
 
 
 class Conversation(Base):

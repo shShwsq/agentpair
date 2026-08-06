@@ -29,6 +29,7 @@ from app.database import SessionLocal, get_db
 from app.deps import get_optional_user, get_optional_user_sse
 from app.event_bus import publish, reset_task_bus, subscribe, unsubscribe
 from app.models.task import Conversation, Result, Task, TaskStatus
+from app.models.task_artifact import TaskArtifact
 from app.models.user import User
 from app.pause_controller import (
     clear_pause_state,
@@ -51,6 +52,7 @@ from app.schemas.task import (
     TaskResponse,
     TaskTitleUpdateRequest,
 )
+from app.schemas.task_artifact import TaskArtifactOut
 from app.tools import sandbox_tools
 from app.user_interaction import (
     clear_pending_checklist,
@@ -214,6 +216,69 @@ def get_task(
         c for c in task_resp.conversations if c.type != "history_compress"
     ]
     return task_resp
+
+
+# ============================================================
+# 任务工作区产物(diff/patch)
+# ============================================================
+
+
+@router.get("/tasks/{task_id}/artifacts")
+def list_task_artifacts(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> dict:
+    """列出任务的工作区产物(diff/patch 等)
+
+    任务完成时捕获的 git diff,持久化在 task_artifacts 表。
+    鉴权:任务归属用户或匿名任务可访问(与 get_task 一致)。按 created_at 升序返回。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权访问此任务")
+
+    artifacts = (
+        db.query(TaskArtifact)
+        .filter(TaskArtifact.task_id == task_id)
+        .order_by(TaskArtifact.created_at.asc())
+        .all()
+    )
+    return {"artifacts": [TaskArtifactOut.model_validate(a) for a in artifacts]}
+
+
+@router.get("/tasks/{task_id}/artifacts/{artifact_id}", response_model=TaskArtifactOut)
+def get_task_artifact(
+    task_id: uuid.UUID,
+    artifact_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> TaskArtifactOut:
+    """查询单个工作区产物(含完整 content)
+
+    鉴权:任务归属用户或匿名任务可访问(与 get_task 一致)。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权访问此任务")
+
+    artifact = (
+        db.query(TaskArtifact)
+        .filter(
+            TaskArtifact.id == artifact_id,
+            TaskArtifact.task_id == task_id,
+        )
+        .first()
+    )
+    if not artifact:
+        raise HTTPException(status_code=404, detail="产物不存在")
+    return TaskArtifactOut.model_validate(artifact)
 
 
 # ============================================================

@@ -40,6 +40,7 @@ async def lifespan(app: FastAPI):
     生产环境应切换到 Alembic 迁移管理 schema 变更。
     """
     from app.models import email_token, task, user  # noqa: F401
+    from app.models import task_artifact  # noqa: F401
     from app.models import user_agent_config  # noqa: F401
     from app.models import user_git_binding  # noqa: F401
     from app.models import user_llm_config  # noqa: F401

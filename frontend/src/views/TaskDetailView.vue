@@ -43,6 +43,7 @@ import {
   submitTaskChecklist,
 } from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
+import { listArtifacts } from '@/api/taskArtifacts'
 import { extractErrorMessage } from '@/utils/error'
 import type {
   AnswerItem,
@@ -59,6 +60,7 @@ import type {
   TaskStatus,
   ThinkingDeltaEventData,
 } from '@/types/task'
+import type { TaskArtifact } from '@/types/taskArtifact'
 
 const route = useRoute()
 const router = useRouter()
@@ -82,6 +84,50 @@ function toggleWorkspace(): void {
 
 function toggleDetail(): void {
   detailCollapsed.value = !detailCollapsed.value
+}
+
+// ---- 工作区变更(任务完成时捕获的 git diff patch) ----
+
+/** 任务的工作区 diff 产物(任务完成时由后端捕获,kind="git_diff") */
+const workspaceArtifact = ref<TaskArtifact | null>(null)
+/** 工作区变更区折叠状态(默认展开) */
+const workspaceChangesCollapsed = ref(false)
+
+/** diff 产物元信息(从 metadata_ 解析,缺省 0/false) */
+const artifactMeta = computed(() => {
+  const m = workspaceArtifact.value?.metadata_
+  return {
+    files_changed: Number(m?.files_changed ?? 0),
+    char_count: Number(m?.char_count ?? 0),
+    truncated: Boolean(m?.truncated ?? false),
+  }
+})
+
+/** patch 文本按行拆分(供模板逐行着色,文本插值自动转义,无 XSS 风险) */
+const diffLines = computed<string[]>(() => {
+  const c = workspaceArtifact.value?.content ?? ''
+  return c ? c.split('\n') : []
+})
+
+/** 按行首字符判定 diff 行类型(纯 CSS 着色) */
+function diffLineClass(line: string): string {
+  if (line.startsWith('+++') || line.startsWith('---')) return 'diff-line-meta'
+  if (line.startsWith('@@')) return 'diff-line-hunk'
+  if (line.startsWith('+')) return 'diff-line-add'
+  if (line.startsWith('-')) return 'diff-line-del'
+  return 'diff-line-ctx'
+}
+
+/** 拉取任务的工作区产物(取第一个 git_diff);静默失败,不影响主流程 */
+async function loadArtifact(taskId: string): Promise<void> {
+  try {
+    const res = await listArtifacts(taskId)
+    workspaceArtifact.value =
+      res.artifacts.find((a) => a.kind === 'git_diff') ?? null
+  } catch (err) {
+    console.warn('加载工作区变更失败:', err)
+    workspaceArtifact.value = null
+  }
 }
 
 // ---- 流式思考项(thinking_delta 累积)----
@@ -292,6 +338,8 @@ async function initTask(): Promise<void> {
 
     // 3. 加载覆盖度看板(task.checklist 存在才拉取)
     void loadCoverage()
+    // 4. 加载工作区变更(任务完成时捕获的 diff;进行中任务此时为空,完成时由 SSE done 触发重拉)
+    void loadArtifact(taskId)
   } catch (err) {
     error.value = extractErrorMessage(err)
     loading.value = false
@@ -471,6 +519,8 @@ function connectSSE(taskId: string): void {
       } catch (err) {
         console.error('拉取最终结果失败:', err)
       }
+      // 任务完成时后端刚写入工作区 diff,重拉一次展示(失败兜底,静默)
+      void loadArtifact(taskId)
     },
     onError: async (data) => {
       if (task.value) {
@@ -1695,6 +1745,38 @@ function isUserMessageItem(item: DisplayItem): boolean {
             {{ isPaused ? '已暂停,点击恢复按钮继续执行' : (task?.current_stage || '智能体思考中...') }}
           </div>
         </section>
+
+        <!-- 工作区变更(任务完成时捕获的 git diff patch,只读;文本插值自动转义,无 XSS 风险) -->
+        <section v-if="workspaceArtifact" class="workspace-changes-section">
+          <div
+            class="wc-header"
+            @click="workspaceChangesCollapsed = !workspaceChangesCollapsed"
+          >
+            <h2>
+              工作区变更
+              <span class="count">({{ artifactMeta.files_changed }} 个文件)</span>
+            </h2>
+            <span class="wc-meta">
+              {{ artifactMeta.char_count }} 字符
+              <span v-if="artifactMeta.truncated" class="wc-truncated">
+                · 已截断(仅查看,不可 git apply)
+              </span>
+            </span>
+            <button
+              class="wc-toggle"
+              :title="workspaceChangesCollapsed ? '展开' : '折叠'"
+            >
+              {{ workspaceChangesCollapsed ? '▸' : '▾' }}
+            </button>
+          </div>
+          <div v-if="!workspaceChangesCollapsed" class="diff-view">
+            <div
+              v-for="(line, i) in diffLines"
+              :key="i"
+              :class="['diff-line', diffLineClass(line)]"
+            >{{ line }}</div>
+          </div>
+        </section>
       </template>
       </div>
 
@@ -2798,4 +2880,63 @@ function isUserMessageItem(item: DisplayItem): boolean {
   0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
   30% { opacity: 1; transform: translateY(-4px); }
 }
+
+/* ---- 工作区变更(diff/patch 展示) ---- */
+.workspace-changes-section {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-sm);
+  padding: var(--space-6);
+  margin-bottom: var(--space-6);
+}
+.wc-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  cursor: pointer;
+  user-select: none;
+}
+.wc-header h2 {
+  font-size: var(--fs-lg);
+  margin: 0;
+}
+.wc-meta {
+  color: var(--color-text-muted);
+  font-size: var(--fs-sm);
+}
+.wc-truncated {
+  color: var(--color-warning);
+}
+.wc-toggle {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  padding: 0 var(--space-1);
+}
+.diff-view {
+  margin-top: var(--space-4);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-relaxed);
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  overflow-x: auto;
+  max-height: 70vh;
+}
+.diff-line {
+  white-space: pre;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+}
+.diff-line-add { background: rgba(22, 163, 74, 0.12); }
+.diff-line-del { background: rgba(220, 38, 38, 0.12); }
+.diff-line-hunk { color: var(--color-text-muted); }
+.diff-line-meta { color: var(--color-text-secondary); font-weight: var(--fw-medium); }
+.diff-line-ctx { color: var(--color-text); }
 </style>
