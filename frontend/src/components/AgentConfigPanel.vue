@@ -241,7 +241,13 @@ onUnmounted(() => {
                 class="help-btn"
                 aria-label="查看说明"
                 @click.stop="toggleHelp"
-              >?</button>
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="10" />
+                  <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+                  <line x1="12" y1="17" x2="12.01" y2="17" />
+                </svg>
+              </button>
               <Transition name="help-fade">
                 <div v-if="showHelp" class="help-popover" role="tooltip">
                   {{ meta.description }}
@@ -479,26 +485,27 @@ onUnmounted(() => {
 }
 
 .help-btn {
-  width: 20px;
-  height: 20px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-bold);
-  line-height: 1;
   color: var(--color-text-muted);
   background: transparent;
-  border: 1px solid var(--color-border-strong);
-  border-radius: 50%;
+  border: none;
   cursor: pointer;
-  transition: color var(--transition-fast), border-color var(--transition-fast);
+  transition: color var(--transition-fast);
 }
 
 .help-btn:hover {
   color: var(--color-primary);
-  border-color: var(--color-primary);
+}
+
+.help-btn svg {
+  width: 22px;
+  height: 22px;
+  display: block;
 }
 
 .help-popover {
