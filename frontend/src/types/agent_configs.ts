@@ -70,6 +70,12 @@ export interface AgentConfigDetailOut extends AgentConfigOut {
    * key 为字段名,value 为是否已设置。如 { "pat": true }
    */
   credential_status: Record<string, boolean>
+  /**
+   * 非 secret(text/select)字段的已配置值,供编辑时回显
+   *
+   * secret 字段不在此 dict 中(绝不回传原文)。如 { "base_url": "https://..." }
+   */
+  credential_values: Record<string, string>
 }
 
 /** 单个凭据值(保存时提交) */

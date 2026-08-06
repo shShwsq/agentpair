@@ -68,17 +68,36 @@ const draft = reactive<{
   is_active: true,
 })
 
-/** open 变 true 时重置草稿(根据当前 meta + detail 初始化) */
+/** open 变 true 时重置草稿;detail 异步加载完后再初始化一次(回显非 secret 字段)
+ *
+ * 监听 [open, detail]:
+ * - open=true 时初始化(detail 此时可能为 null,用空值/default)
+ * - detail 从 null 变成有值时(异步加载完成)重新初始化,回显已配置的非 secret 字段
+ * 加载期间 saving=true(含 agentDialogLoading)使输入框 disabled,
+ * 用户无法在 detail 到达前输入,不会被覆盖。
+ */
 watch(
-  () => props.open,
-  (isOpen) => {
+  () => [props.open, props.detail] as const,
+  ([isOpen]) => {
     if (!isOpen) return
     const fields = props.meta?.credential_fields ?? []
     const values: Record<string, string> = {}
     const show: Record<string, boolean> = {}
+    // 非 secret 字段已配置值(后端回传),secret 字段不在此 dict
+    const savedValues = props.detail?.credential_values ?? {}
     for (const f of fields) {
-      // select 字段:用 default 值初始化(确保未配置时也有合理默认)
-      values[f.key] = f.type === 'select' && f.default ? f.default : ''
+      if (f.type === 'secret') {
+        // secret 字段:不回显原文,留空(已配置时 placeholder 提示"已设置,留空保留")
+        values[f.key] = ''
+      } else if (f.key in savedValues) {
+        // 非 secret 字段:已配置则回显
+        values[f.key] = savedValues[f.key]
+      } else if (f.type === 'select' && f.default) {
+        // select 字段未配置时用默认值
+        values[f.key] = f.default
+      } else {
+        values[f.key] = ''
+      }
       show[f.key] = false
     }
     draft.values = values

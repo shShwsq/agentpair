@@ -84,10 +84,19 @@ class AgentConfigOut(BaseModel):
 
 
 class AgentConfigDetailOut(AgentConfigOut):
-    """单个 agent 配置详情(含各凭证字段的 has_value 状态,不含原文)"""
+    """单个 agent 配置详情(含各字段填写状态 + 非 secret 字段回显值)
 
-    # 各凭证字段的填写状态:{"pat": true, ...}
+    安全约定:
+    - secret 字段:只返回 credential_status[key]=bool,绝不回传原文
+    - text/select 字段:非敏感明文配置,在 credential_values 中回传已配置的值,
+      便于前端编辑时回显(用户不用每次重新填 base_url/model/provider_type 等)
+    """
+
+    # 各凭证字段的填写状态:{"pat": true, ...}(所有字段)
     credential_status: dict[str, bool] = Field(default_factory=dict)
+    # 非 secret(text/select)字段的已配置值:{"base_url": "https://...", "model": "..."}
+    # secret 字段不在此 dict 中(绝不回传)
+    credential_values: dict[str, str] = Field(default_factory=dict)
 
 
 class AgentConfigListResponse(BaseModel):

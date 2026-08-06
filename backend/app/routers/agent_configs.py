@@ -388,20 +388,27 @@ def _to_out(row: UserAgentConfig) -> AgentConfigOut:
 
 
 def _to_detail_out(row: UserAgentConfig) -> AgentConfigDetailOut:
-    """row → AgentConfigDetailOut(含各字段填写状态,不含原文)"""
+    """row → AgentConfigDetailOut(含各字段填写状态 + 非 secret 字段回显值)"""
     creds = _decrypt_credentials(row.credentials_encrypted)
     meta = AGENT_REGISTRY.get(row.agent_type, {})
     field_defs = get_credential_fields(row.agent_type)
 
-    # 各字段的填写状态
+    # 各字段的填写状态 + 非 secret 字段回显值
     credential_status: dict[str, bool] = {}
+    credential_values: dict[str, str] = {}
     has_any = False
     for fdef in field_defs:
         key = fdef["key"]
-        filled = bool(creds.get(key))
+        ftype = fdef.get("type", "secret")
+        val = creds.get(key, "")
+        filled = bool(val)
         credential_status[key] = filled
         if filled:
             has_any = True
+            # 非 secret 字段(text/select)回传已配置的值,供前端编辑时回显
+            # secret 字段绝不回传
+            if ftype != "secret":
+                credential_values[key] = val
 
     return AgentConfigDetailOut(
         agent_type=row.agent_type,
@@ -409,4 +416,5 @@ def _to_detail_out(row: UserAgentConfig) -> AgentConfigDetailOut:
         is_active=row.is_active,
         has_credentials=has_any,
         credential_status=credential_status,
+        credential_values=credential_values,
     )
