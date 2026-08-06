@@ -412,6 +412,7 @@ onUnmounted(() => {
             class="btn btn-toggle"
             :class="{ 'is-on': draft.is_active }"
             :disabled="saving || testing"
+            :title="draft.is_active ? '点击禁用此执行器(保存后生效)' : '点击启用此执行器(保存后生效)'"
             @click="draft.is_active = !draft.is_active"
           >
             {{ draft.is_active ? '启用中' : '已禁用' }}
