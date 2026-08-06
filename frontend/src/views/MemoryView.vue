@@ -308,6 +308,7 @@ onMounted(() => {
         <RouterLink to="/tasks/new">提交任务</RouterLink>
         <RouterLink to="/models">模型设置</RouterLink>
         <RouterLink to="/cli">CLI 设置</RouterLink>
+        <RouterLink to="/memory" class="router-link-active">记忆</RouterLink>
       </template>
     </AppHeader>
 
