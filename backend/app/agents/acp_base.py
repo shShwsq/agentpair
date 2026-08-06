@@ -1746,7 +1746,15 @@ def test_credential_streaming(
                 reply = "".join(reasoning_full).strip()
                 reply_source = "reasoning"
             if not reply:
-                yield done(False, "session/new 成功,但模型未响应(请检查配额或网络)")
+                # Kimi CLI 默认用 kimi provider 类型(Moonshot 专用协议,发送顶层 thinking 参数),
+                # 非 Moonshot 端点(MiniMax/DeepSeek/DashScope 等)可能不识别该参数而拒绝或静默无响应。
+                # 提示用户在「智能体配置」中将「供应商协议类型」改为 openai 后重试。
+                yield done(
+                    False,
+                    "session/new 成功,但模型未响应(请检查配额或网络)。"
+                    "若使用 MiniMax/DeepSeek/阿里云等非 Moonshot 端点,"
+                    "请在「智能体配置」中将「供应商协议类型」改为 openai 后重试。"
+                )
                 return
 
             preview = reply[:80] + ("..." if len(reply) > 80 else "")

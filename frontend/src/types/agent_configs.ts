@@ -13,22 +13,27 @@
  *
  * - secret 类型:password 输入框 + 眼睛切换显隐,加密存储且不回传明文
  * - text 类型:普通输入框,明文存储
+ * - select 类型:下拉选择,明文存储(如 provider_type)
  */
 export interface CredentialField {
   /** 字段 key,如 'pat' */
   key: string
   /** 展示标签,如 'Personal Access Token' */
   label: string
-  /** 输入类型:secret=密码输入+加密存储;text=明文 */
-  type: 'secret' | 'text'
+  /** 输入类型:secret=密码输入+加密存储;text=明文;select=下拉选择 */
+  type: 'secret' | 'text' | 'select'
   /** 是否必填 */
   required: boolean
-  /** 占位提示 */
+  /** 占位提示(text/secret) */
   placeholder: string
   /** 帮助链接(可选) */
   help_url: string | null
   /** 帮助文本(可选) */
   help_text: string | null
+  /** select 类型的可选项 */
+  options?: Array<{ value: string; label: string }>
+  /** select 类型的默认值(未配置时使用) */
+  default?: string
 }
 
 /** agent 类型元数据(GET /agents/types) */

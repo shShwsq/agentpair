@@ -77,7 +77,8 @@ watch(
     const values: Record<string, string> = {}
     const show: Record<string, boolean> = {}
     for (const f of fields) {
-      values[f.key] = ''
+      // select 字段:用 default 值初始化(确保未配置时也有合理默认)
+      values[f.key] = f.type === 'select' && f.default ? f.default : ''
       show[f.key] = false
     }
     draft.values = values
@@ -241,7 +242,7 @@ watch(
 
               <!-- text 类型:普通明文输入 -->
               <input
-                v-else
+                v-else-if="field.type === 'text'"
                 :id="`agent-field-${field.key}`"
                 v-model="draft.values[field.key]"
                 type="text"
@@ -250,6 +251,23 @@ watch(
                 :class="{ invalid: fieldError(field) }"
                 :disabled="saving"
               />
+
+              <!-- select 类型:下拉选择(如 provider_type) -->
+              <select
+                v-else-if="field.type === 'select'"
+                :id="`agent-field-${field.key}`"
+                v-model="draft.values[field.key]"
+                :class="{ invalid: fieldError(field) }"
+                :disabled="saving"
+              >
+                <option
+                  v-for="opt in field.options"
+                  :key="opt.value"
+                  :value="opt.value"
+                >
+                  {{ opt.label }}
+                </option>
+              </select>
 
               <span v-if="field.help_text" class="field-help">{{ field.help_text }}</span>
               <a
@@ -496,7 +514,8 @@ watch(
 }
 
 /* secret 字段用 monospace 便于核对 token */
-.field input {
+.field input,
+.field select {
   width: 100%;
   height: 42px;
   padding: 0 var(--space-3);
@@ -514,18 +533,21 @@ watch(
   font-family: var(--font-base);
 }
 
-.field input:focus {
+.field input:focus,
+.field select:focus {
   outline: none;
   border-color: var(--color-primary);
   box-shadow: 0 0 0 3px var(--color-primary-light);
 }
 
-.field input:disabled {
+.field input:disabled,
+.field select:disabled {
   background: var(--color-surface-alt);
   cursor: not-allowed;
 }
 
-.field input.invalid {
+.field input.invalid,
+.field select.invalid {
   border-color: var(--color-danger);
 }
 

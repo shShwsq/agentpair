@@ -23,8 +23,10 @@ from typing import Any
 
 # type='secret':敏感凭据(加密存储,前端用 password 输入,API 不回传原文)
 # type='text':非敏感配置(明文存储,如 base_url)
+# type='select':下拉选择(明文存储,如 provider_type;options 字段提供可选项)
 CREDENTIAL_FIELD_SECRET = "secret"
 CREDENTIAL_FIELD_TEXT = "text"
+CREDENTIAL_FIELD_SELECT = "select"
 
 
 # ============================================================
@@ -97,6 +99,32 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
                 "placeholder": "kimi-for-coding",
                 "help_text": "发送给 API 的模型 ID(留空默认 kimi-for-coding),经 KIMI_MODEL_NAME 注入",
             },
+            {
+                "key": "provider_type",
+                "label": "供应商协议类型",
+                "type": CREDENTIAL_FIELD_SELECT,
+                "required": False,
+                "options": [
+                    {
+                        "value": "kimi",
+                        "label": "kimi(Moonshot 官方,默认)",
+                    },
+                    {
+                        "value": "openai",
+                        "label": "openai(标准 OpenAI 兼容,推荐用于 MiniMax/DeepSeek/阿里云等第三方)",
+                    },
+                    {
+                        "value": "anthropic",
+                        "label": "anthropic(Anthropic 兼容)",
+                    },
+                ],
+                "default": "kimi",
+                "help_text": (
+                    "经 KIMI_MODEL_PROVIDER_TYPE 注入。kimi 用 Moonshot 专用协议(发送 thinking 参数等),"
+                    "仅 Moonshot 官方端点完全兼容;MiniMax / DeepSeek / 阿里云 DashScope 等 OpenAI 兼容端点"
+                    "建议选 openai,避免 Moonshot 专用参数导致请求失败或无响应。"
+                ),
+            },
         ],
         "sandbox": {
             # kimi CLI 可执行文件名(沙箱内 PATH 查找或绝对路径)
@@ -116,10 +144,13 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
                 "api_key": "KIMI_MODEL_API_KEY",
                 "base_url": "KIMI_MODEL_BASE_URL",
                 "model": "KIMI_MODEL_NAME",
+                "provider_type": "KIMI_MODEL_PROVIDER_TYPE",
             },
             # 默认环境变量(仅当凭证未设置时注入)
             # KIMI_MODEL_NAME:启用开关 + 默认模型名
             # KIMI_MODEL_PROVIDER_TYPE:默认 kimi provider(Moonshot 兼容)
+            #   非 Moonshot 端点(MiniMax/DeepSeek/DashScope 等)应在凭证中显式设为 openai,
+            #   否则 kimi trait 发送的顶层 thinking 参数会导致请求失败或无响应。
             "credential_env_defaults": {
                 "KIMI_MODEL_NAME": "kimi-for-coding",
                 "KIMI_MODEL_PROVIDER_TYPE": "kimi",

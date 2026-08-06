@@ -21,11 +21,16 @@ class CredentialField(BaseModel):
     label: str
     # secret:敏感凭据(password 输入,加密存储,API 不回传原文)
     # text:非敏感配置(明文存储)
+    # select:下拉选择(明文存储,如 provider_type;options 提供可选项)
     type: str
     required: bool = True
     placeholder: str = ""
     help_url: str | None = None
     help_text: str | None = None
+    # select 类型专用:可选项列表
+    options: list[dict[str, str]] | None = None
+    # select 类型专用:默认值(未配置时使用)
+    default: str | None = None
 
 
 class AgentTypeMeta(BaseModel):
