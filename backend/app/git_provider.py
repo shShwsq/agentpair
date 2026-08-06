@@ -1,0 +1,398 @@
+"""Git Provider 统一抽象层
+
+把不同 Git 托管平台(GitHub / Gitee)的 OAuth 与 API 差异收敛到统一的
+`GitProvider` 接口背后,上层路由 / 克隆工具只面对 provider id 与统一返回结构,
+不再硬编码任一平台的 URL、scope 或 token 注入格式。
+
+两套流程(沿用原 GitHub 设计):
+- 登录流程(scope 仅用户信息):拿 provider_user_id + email,用于登录/创建账号
+- 绑定流程(scope 额外含仓库):额外拿 access_token 落库,用于克隆私有仓库
+
+平台差异要点:
+- GitHub:token 注入 `https://x-access-token:{token}@github.com/...`;有
+  /user/emails(verified primary)端点,支持邮箱同步。
+- Gitee:token 注入 `https://oauth2:{token}@gitee.com/...`(用户名必须为字面量
+  oauth2);无 verified-emails 端点,不支持邮箱同步;repos 接口无 clone_url,
+  需由 full_name 构造。
+"""
+import logging
+import re
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
+import httpx
+
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class GitProviderError(Exception):
+    """Git provider OAuth / API 错误"""
+
+
+@dataclass
+class ProviderUserInfo:
+    """统一用户信息(各平台 /user 接口归一化后)"""
+
+    provider_user_id: str  # 平台用户 ID(GitHub id / Gitee id)
+    email: str | None  # 可能为 None(邮箱私密且平台无可验证邮箱端点)
+    login: str | None  # 用户名(如 octocat),一般有值
+    name: str | None  # 显示名(很多人不填,可能为 None)
+    avatar_url: str | None
+
+
+class GitProvider(ABC):
+    """Git 托管平台抽象基类
+
+    子类需实现平台相关的 OAuth 换 token、用户信息、仓库列表等。
+    URL 转换(to_ssh_url / to_https_url / inject_token_in_https)基于 `host`
+    与 `token_username` 做通用实现,子类只需声明这两个属性。
+    """
+
+    id: str  # "github" / "gitee"
+    display_name: str  # "GitHub" / "Gitee"(前端展示)
+    host: str  # "github.com" / "gitee.com"
+    token_username: str  # HTTPS 克隆鉴权的用户名部分
+    authorize_url: str  # OAuth 授权页 URL(前端拼接用,后端仅做元信息)
+    token_url: str  # OAuth 换 token 端点
+    user_url: str  # /user 接口
+    repos_url: str  # /user/repos 接口
+    scope_login: str  # 登录用 scope
+    scope_bind: str  # 绑定用 scope(含仓库访问)
+
+    # ---- OAuth / API(子类实现) ----
+
+    @abstractmethod
+    def exchange_code_for_token(self, code: str) -> str:
+        """用授权码换 access_token,失败抛 GitProviderError"""
+
+    @abstractmethod
+    def get_user_info(self, access_token: str) -> ProviderUserInfo:
+        """用 access_token 调 /user 拿用户信息,失败抛 GitProviderError"""
+
+    @abstractmethod
+    def get_user_emails(self, access_token: str) -> list[str]:
+        """拿可用的(可验证)邮箱列表,无则返回空"""
+
+    @abstractmethod
+    def list_repos(self, access_token: str) -> list[dict]:
+        """列出当前用户仓库(含私有),返回统一字段:
+        [{ "full_name", "name", "private", "html_url", "clone_url", "default_branch" }, ...]
+        """
+
+    @property
+    @abstractmethod
+    def supports_verified_email(self) -> bool:
+        """是否支持可验证邮箱(决定能否做邮箱同步)"""
+
+    # ---- 通用流程 ----
+
+    def oauth_login(self, code: str) -> ProviderUserInfo:
+        """完整 OAuth 登录流程:code → access_token → /user,并补充邮箱
+
+        失败抛 GitProviderError。
+        """
+        access_token = self.exchange_code_for_token(code)
+        info = self.get_user_info(access_token)
+
+        # 若公开 email 为空,尝试拿可验证邮箱
+        if not info.email:
+            emails = self.get_user_emails(access_token)
+            if emails:
+                info.email = emails[0]
+
+        return info
+
+    # ---- URL 转换(基于 host / token_username 的通用实现) ----
+
+    def to_ssh_url(self, repo_url: str) -> str:
+        """把 HTTPS URL 转成 SSH URL(已是 SSH 则原样返回)"""
+        if repo_url.startswith("git@"):
+            return repo_url
+        m = re.match(
+            rf"^https?://{re.escape(self.host)}/(.+?)(?:\.git)?/?$", repo_url
+        )
+        if m:
+            return f"git@{self.host}:{m.group(1)}.git"
+        return repo_url
+
+    def to_https_url(self, repo_url: str) -> str:
+        """把 SSH URL 转成 HTTPS URL(已是 HTTPS 则原样返回)"""
+        m = re.match(rf"^git@{re.escape(self.host)}:(.+?)(?:\.git)?$", repo_url)
+        if m:
+            return f"https://{self.host}/{m.group(1)}.git"
+        return repo_url
+
+    def inject_token_in_https(self, https_url: str, token: str) -> str:
+        """把 HTTPS URL 注入 access_token,形成带认证的 clone URL
+
+        GitHub: https://x-access-token:{token}@github.com/owner/repo.git
+        Gitee:  https://oauth2:{token}@gitee.com/owner/repo.git
+
+        若 URL 非本平台 HTTPS 或已含认证信息,原样返回。
+        """
+        if not token or not https_url.startswith(f"https://{self.host}/"):
+            return https_url
+        # 已含认证信息(user:pass@),不重复注入
+        authority = https_url.split("://", 1)[1].split("/", 1)[0]
+        if "@" in authority:
+            return https_url
+        return https_url.replace(
+            "https://",
+            f"https://{self.token_username}:{token}@",
+            1,
+        )
+
+
+# ============================================================
+# GitHub
+# ============================================================
+
+
+class GitHubProvider(GitProvider):
+    id = "github"
+    display_name = "GitHub"
+    host = "github.com"
+    token_username = "x-access-token"
+    authorize_url = "https://github.com/login/oauth/authorize"
+    token_url = "https://github.com/login/oauth/access_token"
+    user_url = "https://api.github.com/user"
+    repos_url = "https://api.github.com/user/repos"
+    scope_login = "user:email"
+    scope_bind = "user:email repo"
+
+    @property
+    def supports_verified_email(self) -> bool:
+        return True
+
+    def exchange_code_for_token(self, code: str) -> str:
+        if not settings.GITHUB_OAUTH_CLIENT_ID or not settings.GITHUB_OAUTH_CLIENT_SECRET:
+            raise GitProviderError(
+                "GitHub OAuth 未配置:请在 .env 设置 GITHUB_OAUTH_CLIENT_ID 和 GITHUB_OAUTH_CLIENT_SECRET"
+            )
+        payload = {
+            "client_id": settings.GITHUB_OAUTH_CLIENT_ID,
+            "client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
+            "code": code,
+            "redirect_uri": settings.GITHUB_OAUTH_REDIRECT_URI,
+        }
+        headers = {"Accept": "application/json"}
+        try:
+            with httpx.Client(timeout=10) as client:
+                r = client.post(self.token_url, data=payload, headers=headers)
+                r.raise_for_status()
+        except httpx.HTTPError as e:
+            raise GitProviderError(f"换取 access_token 失败: {e}") from e
+
+        data = r.json()
+        access_token = data.get("access_token")
+        if not access_token:
+            err = data.get("error_description") or data.get("error") or "未知错误"
+            raise GitProviderError(f"换取 access_token 失败: {err}")
+        return access_token
+
+    def get_user_info(self, access_token: str) -> ProviderUserInfo:
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/vnd.github+json",
+        }
+        try:
+            with httpx.Client(timeout=10) as client:
+                r = client.get(self.user_url, headers=headers)
+                r.raise_for_status()
+        except httpx.HTTPError as e:
+            raise GitProviderError(f"获取用户信息失败: {e}") from e
+
+        data = r.json()
+        provider_user_id = str(data.get("id") or "")
+        if not provider_user_id:
+            raise GitProviderError("GitHub 用户信息缺少 id 字段")
+        return ProviderUserInfo(
+            provider_user_id=provider_user_id,
+            email=data.get("email"),
+            login=data.get("login"),
+            name=data.get("name"),
+            avatar_url=data.get("avatar_url"),
+        )
+
+    def get_user_emails(self, access_token: str) -> list[str]:
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/vnd.github+json",
+        }
+        try:
+            with httpx.Client(timeout=10) as client:
+                r = client.get(
+                    "https://api.github.com/user/emails", headers=headers
+                )
+                r.raise_for_status()
+        except httpx.HTTPError:
+            return []
+
+        emails = []
+        for item in r.json():
+            if item.get("primary") and item.get("verified"):
+                emails.append(item.get("email", ""))
+        return [e for e in emails if e]
+
+    def list_repos(self, access_token: str) -> list[dict]:
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/vnd.github+json",
+        }
+        params = {
+            "affiliation": "owner,collaborator",
+            "per_page": 100,
+            "sort": "updated",
+            "direction": "desc",
+        }
+        try:
+            with httpx.Client(timeout=15) as client:
+                r = client.get(self.repos_url, headers=headers, params=params)
+                r.raise_for_status()
+        except httpx.HTTPError as e:
+            raise GitProviderError(f"列出 GitHub 仓库失败: {e}") from e
+
+        repos = []
+        for item in r.json():
+            repos.append({
+                "full_name": item.get("full_name", ""),
+                "name": item.get("name", ""),
+                "private": bool(item.get("private", False)),
+                "html_url": item.get("html_url", ""),
+                "clone_url": item.get("clone_url", ""),
+                "default_branch": item.get("default_branch", "main"),
+            })
+        return repos
+
+
+# ============================================================
+# Gitee
+# ============================================================
+
+
+class GiteeProvider(GitProvider):
+    id = "gitee"
+    display_name = "Gitee"
+    host = "gitee.com"
+    token_username = "oauth2"  # Gitee HTTPS 克隆鉴权用户名必须为字面量 oauth2
+    authorize_url = "https://gitee.com/oauth/authorize"
+    token_url = "https://gitee.com/oauth/token"
+    user_url = "https://gitee.com/api/v5/user"
+    repos_url = "https://gitee.com/api/v5/user/repos"
+    scope_login = "user_info"
+    scope_bind = "user_info projects"  # 克隆私有仓库需 projects
+
+    @property
+    def supports_verified_email(self) -> bool:
+        return False  # Gitee 无 GitHub 式 verified-emails 端点,不支持邮箱同步
+
+    def exchange_code_for_token(self, code: str) -> str:
+        if not settings.GITEE_OAUTH_CLIENT_ID or not settings.GITEE_OAUTH_CLIENT_SECRET:
+            raise GitProviderError(
+                "Gitee OAuth 未配置:请在 .env 设置 GITEE_OAUTH_CLIENT_ID 和 GITEE_OAUTH_CLIENT_SECRET"
+            )
+        payload = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "client_id": settings.GITEE_OAUTH_CLIENT_ID,
+            "client_secret": settings.GITEE_OAUTH_CLIENT_SECRET,
+            "redirect_uri": settings.GITEE_OAUTH_REDIRECT_URI,
+        }
+        headers = {"Accept": "application/json"}
+        try:
+            with httpx.Client(timeout=10) as client:
+                r = client.post(self.token_url, data=payload, headers=headers)
+                r.raise_for_status()
+        except httpx.HTTPError as e:
+            raise GitProviderError(f"换取 access_token 失败: {e}") from e
+
+        data = r.json()
+        access_token = data.get("access_token")
+        if not access_token:
+            err = data.get("error_description") or data.get("error") or "未知错误"
+            raise GitProviderError(f"换取 access_token 失败: {err}")
+        return access_token
+
+    def get_user_info(self, access_token: str) -> ProviderUserInfo:
+        try:
+            with httpx.Client(timeout=10) as client:
+                r = client.get(self.user_url, params={"access_token": access_token})
+                r.raise_for_status()
+        except httpx.HTTPError as e:
+            raise GitProviderError(f"获取用户信息失败: {e}") from e
+
+        data = r.json()
+        provider_user_id = str(data.get("id") or "")
+        if not provider_user_id:
+            raise GitProviderError("Gitee 用户信息缺少 id 字段")
+        # Gitee email 可能为空字符串,统一成 None
+        email = data.get("email") or None
+        return ProviderUserInfo(
+            provider_user_id=provider_user_id,
+            email=email,
+            login=data.get("login"),
+            name=data.get("name"),
+            avatar_url=data.get("avatar_url"),
+        )
+
+    def get_user_emails(self, access_token: str) -> list[str]:
+        """Gitee 无独立的可验证邮箱端点,/user 已返回 email,这里不再二次拉取"""
+        return []
+
+    def list_repos(self, access_token: str) -> list[dict]:
+        params = {
+            "access_token": access_token,
+            "per_page": 100,
+            "sort": "updated",
+            "direction": "desc",
+        }
+        try:
+            with httpx.Client(timeout=15) as client:
+                r = client.get(self.repos_url, params=params)
+                r.raise_for_status()
+        except httpx.HTTPError as e:
+            raise GitProviderError(f"列出 Gitee 仓库失败: {e}") from e
+
+        repos = []
+        for item in r.json():
+            full_name = item.get("full_name", "")
+            # Gitee repos 接口无 clone_url,由 full_name 构造 HTTPS 克隆地址
+            clone_url = f"https://{self.host}/{full_name}.git" if full_name else ""
+            repos.append({
+                "full_name": full_name,
+                "name": item.get("name", ""),
+                "private": bool(item.get("private", False)),
+                "html_url": item.get("html_url", ""),
+                "clone_url": clone_url,
+                "default_branch": item.get("default_branch", "master"),
+            })
+        return repos
+
+
+# ============================================================
+# 注册表
+# ============================================================
+
+
+PROVIDERS: dict[str, GitProvider] = {
+    "github": GitHubProvider(),
+    "gitee": GiteeProvider(),
+}
+
+
+def get_provider(provider_id: str) -> GitProvider:
+    """按 id 取 provider,未知 id 抛 GitProviderError"""
+    p = PROVIDERS.get(provider_id)
+    if p is None:
+        raise GitProviderError(f"未知的 git provider: {provider_id}")
+    return p
+
+
+def get_provider_for_url(repo_url: str) -> GitProvider | None:
+    """按 repo_url 的主机识别 provider,未知主机返回 None(走匿名/SSH 回退)"""
+    for p in PROVIDERS.values():
+        if f"://{p.host}/" in repo_url or f"@{p.host}:" in repo_url:
+            return p
+    return None

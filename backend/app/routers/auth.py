@@ -10,8 +10,8 @@
 - POST   /auth/password/forgot       忘记密码(发重置邮件)
 - POST   /auth/password/reset        重置密码
 - POST   /auth/password/change       修改密码(需登录)
-- POST   /auth/oauth/github          GitHub OAuth 登录
-- DELETE /auth/account               删除账号(硬删除,连带 task+配置+token)
+- POST   /auth/oauth/{provider}     Git 平台 OAuth 登录(github / gitee)
+- DELETE /auth/account               删除账号(硬删除,连带 task+配置+token+绑定)
 """
 import logging
 import uuid
@@ -30,14 +30,15 @@ from app.email_service import (
     send_verification_email,
     verify_token,
 )
-from app.github_oauth import GitHubOAuthError, github_oauth_login
+from app.git_provider import GitProviderError, get_provider
 from app.models.email_token import EmailTokenType
 from app.models.user import User
+from app.models.user_git_binding import UserGitBinding
 from app.schemas.user import (
     ChangePasswordRequest,
     DeleteAccountRequest,
     ForgotPasswordRequest,
-    GitHubOAuthRequest,
+    GitOAuthRequest,
     LoginRequest,
     MessageResponse,
     RefreshRequest,
@@ -326,8 +327,8 @@ def delete_account(
     """删除账号(硬删除,不可恢复)
 
     要求用户输入完整邮箱作为二次确认,后端校验匹配后执行硬删除:
-    - 连带删除该用户的 task、user_llm_config(email_token 已 CASCADE)
-    - 解除 GitHub 关联(github_id 释放,可被其他账号绑定)
+    - 连带删除该用户的 task、user_llm_config、user_git_bindings(email_token 已 CASCADE)
+    - 解除 Git 平台关联(provider_user_id 随绑定行释放,可被其他账号绑定)
 
     安全考虑:
     - 邮箱不匹配 → 400,不执行删除
@@ -351,55 +352,82 @@ def delete_account(
 
 
 # ============================================================
-# GitHub OAuth
+# Git 平台 OAuth 登录(GitHub / Gitee)
 # ============================================================
 
 
-@router.post("/oauth/github", response_model=TokenResponse)
-def github_oauth(
-    req: GitHubOAuthRequest, db: Session = Depends(get_db)
+@router.post("/oauth/{provider}", response_model=TokenResponse)
+def git_oauth(
+    provider: str,
+    req: GitOAuthRequest,
+    db: Session = Depends(get_db),
 ) -> TokenResponse:
-    """GitHub OAuth 登录
+    """Git 平台 OAuth 登录(github / gitee)
 
     - code 换 access_token 换用户信息
-    - github_id 已绑定 → 登录
-    - github_id 未绑定,email 已注册 → 关联 github_id
-    - github_id 未绑定,email 也未注册 → 自动创建账号(无密码)
+    - (provider, provider_user_id) 已绑定 → 登录
+    - 未绑定,email 已注册 → 关联(建 binding,access_token="" 仅登录)
+    - 未绑定,email 也未注册 → 自动创建账号(无密码)+ binding
     """
     try:
-        gh_user = github_oauth_login(req.code)
-    except GitHubOAuthError as e:
+        p = get_provider(provider)
+        gh_user = p.oauth_login(req.code)
+    except GitProviderError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
 
-    # 1. github_id 已绑定
-    user = db.query(User).filter(User.github_id == gh_user.github_id).first()
+    # 1. (provider, provider_user_id) 已绑定 → 登录该用户
+    binding = (
+        db.query(UserGitBinding)
+        .filter(
+            UserGitBinding.provider == provider,
+            UserGitBinding.provider_user_id == gh_user.provider_user_id,
+        )
+        .first()
+    )
+    user = binding.user if binding else None
+
     if not user and gh_user.email:
-        # 2. email 已注册,关联 github_id
+        # 2. email 已注册,关联该平台(建仅登录 binding,access_token="")
         user = db.query(User).filter(User.email == gh_user.email).first()
         if user:
-            user.github_id = gh_user.github_id
+            db.add(
+                UserGitBinding(
+                    user_id=user.id,
+                    provider=provider,
+                    provider_user_id=gh_user.provider_user_id,
+                    access_token="",
+                )
+            )
 
     if not user:
         # 3. 完全新用户,自动创建(无密码,只走 OAuth)
         if not gh_user.email:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="GitHub 账号无可用邮箱,无法自动注册",
+                detail=f"{p.display_name} 账号无可用邮箱,无法自动注册",
             )
         user = User(
             email=gh_user.email,
             password_hash="",  # OAuth 用户无密码
-            github_id=gh_user.github_id,
-            # OAuth 已隐含邮箱验证(GitHub 已 verified)
+            # OAuth 已隐含邮箱验证(平台已 verified)
             email_verified_at=datetime.now(timezone.utc),
         )
         db.add(user)
         db.flush()
+        db.add(
+            UserGitBinding(
+                user_id=user.id,
+                provider=provider,
+                provider_user_id=gh_user.provider_user_id,
+                access_token="",
+            )
+        )
 
     db.commit()
+    db.refresh(user)
 
     access, refresh = create_token_pair(user.id)
     return TokenResponse(

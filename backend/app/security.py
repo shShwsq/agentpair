@@ -10,8 +10,9 @@ JWT payload:
 - iat: 签发时间
 - exp: 过期时间
 
-对称加密(Fernet):用于加密存储第三方 OAuth token(如 GitHub access_token),
-避免凭据明文落库。密钥来自 settings.GITHUB_TOKEN_SECRET,留空则启动时随机生成。
+对称加密(Fernet):用于加密存储第三方 OAuth token(如 GitHub / Gitee access_token),
+避免凭据明文落库。密钥来自 settings.GITHUB_TOKEN_SECRET(与 provider 无关,所有
+git provider token 共用同一把 Fernet 密钥),留空则启动时随机生成。
 """
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -152,6 +153,7 @@ def _get_fernet() -> Fernet:
     """获取 Fernet 实例
 
     密钥来源:settings.GITHUB_TOKEN_SECRET(必须为 Fernet 兼容的 base64 串);
+    该密钥与 provider 无关,GitHub / Gitee 等 git provider 的 access_token 共用。
     留空则启动时随机生成(开发期方便,生产环境必须固定,否则重启后旧密文无法解密)。
     """
     key = settings.GITHUB_TOKEN_SECRET

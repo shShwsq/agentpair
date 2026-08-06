@@ -1,14 +1,15 @@
 """用户模型
 
-邮箱密码注册登录,GitHub 关联后续作为可选绑定(见 spec 8.5)
-阶段 6 实现:JWT 鉴权 + 邮箱验证 + 重置密码 + GitHub OAuth
+邮箱密码注册登录,Git 平台(GitHub / Gitee)关联后续作为可选绑定(见 spec 8.5),
+关联数据存于 user_git_bindings 表(见 models/user_git_binding.py)。
+阶段 6 实现:JWT 鉴权 + 邮箱验证 + 重置密码 + Git 平台 OAuth
 """
 import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, String, func
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
@@ -28,15 +29,9 @@ class User(Base):
     email_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    # GitHub 绑定(为空表示未绑定)
-    github_id: Mapped[str | None] = mapped_column(
-        String(255), unique=True, nullable=True
-    )
-    # GitHub access_token 加密密文(Fernet base64,空串表示未授权仓库访问)
-    # 由"绑定 GitHub"流程(scope=user:email repo)写入,用于克隆私有仓库
-    github_access_token: Mapped[str] = mapped_column(
-        String(2048), nullable=False, server_default=""
-    )
+    # Git 平台绑定(GitHub / Gitee)已迁移到 user_git_bindings 表
+    # (旧库可能仍残留 github_id / github_access_token 物理列,模型不再映射,
+    #  由启动时 migrate_legacy_github_bindings 一次性搬到 user_git_bindings)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -46,6 +41,15 @@ class User(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
+    )
+
+    # Git 平台绑定(GitHub / Gitee),一对多(每用户每 provider 一行)
+    # 级联删除由 FK ondelete=CASCADE 在数据库层完成;passive_deletes=True 让 ORM 不额外发 DELETE
+    git_bindings: Mapped[list["UserGitBinding"]] = relationship(
+        "UserGitBinding",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
     )
 
     # 便捷属性(非数据库字段)

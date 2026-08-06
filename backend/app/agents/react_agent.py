@@ -384,7 +384,7 @@ def run_react_agent(
 
             # 工具意图:人类可读的一句话说明(首行) + 原始参数 JSON(后续行)
             # 格式向 qoder CLI agent 看齐:intent 首行人类可读,detail 是纯参数 JSON
-            # (不含 task_id/github_token 等内部注入字段,只展示 LLM 传入的原始参数)
+            # (不含 task_id/git_tokens 等内部注入字段,只展示 LLM 传入的原始参数)
             # 前端 ConversationMessage 按 \n 拆分:首行高亮为标题,其余作为等宽详情
             intent = _build_tool_intent(fn_name, fn_args)
             call_detail = json.dumps(fn_args, ensure_ascii=False, indent=2)

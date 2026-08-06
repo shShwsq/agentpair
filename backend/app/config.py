@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     GITHUB_OAUTH_CLIENT_SECRET: str = ""
     GITHUB_OAUTH_REDIRECT_URI: str = "http://localhost:5173/auth/github/callback"
 
+    # Gitee OAuth(留空则 /auth/oauth/gitee 与 /git/gitee/* 报错)
+    # 在 https://gitee.com/oauth/applications 创建应用获取,回调地址用 /auth/gitee/callback
+    GITEE_OAUTH_CLIENT_ID: str = ""
+    GITEE_OAUTH_CLIENT_SECRET: str = ""
+    GITEE_OAUTH_REDIRECT_URI: str = "http://localhost:5173/auth/gitee/callback"
+
     # LLM(阶段 1:开发期单 provider 配置)
     LLM_PROVIDER: str = "dashscope"
     LLM_API_KEY: str = ""

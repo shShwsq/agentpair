@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import settings
+from app.git_provider import get_provider_for_url
 from app.sandbox.client import SandboxSession, create_sandbox
 
 logger = logging.getLogger(__name__)
@@ -164,15 +165,16 @@ def browse_read_file(task_id: str, file_path: str, offset: int = 1, max_lines: i
 # ============================================================
 
 
-def clone_repo(repo_url: str, branch: str | None = None, task_id: str = "", github_token: str = "") -> dict:
-    """克隆 GitHub 仓库(LLM 工具入口)
+def clone_repo(repo_url: str, branch: str | None = None, task_id: str = "", git_tokens: dict | None = None) -> dict:
+    """克隆 Git 仓库(LLM 工具入口)
 
     内部委托给 clone_repo_with_fallback,复用同一套协议回退逻辑:
     HTTPS+token → SSH → HTTPS 匿名。
 
-    github_token 由 execute_tool 从 ContextVar 注入,LLM 不可见。
+    git_tokens 由 execute_tool 从 ContextVar 注入,{provider: token},LLM 不可见。
+    clone_repo_with_fallback 按 repo_url 主机匹配 provider 取对应 token。
     """
-    return clone_repo_with_fallback(repo_url, branch, task_id, github_token)
+    return clone_repo_with_fallback(repo_url, branch, task_id, git_tokens or {})
 
 
 def _clone_repo_mock(ctx: dict, clone_url: str, repo_name: str, branch: str | None) -> dict:
@@ -1258,64 +1260,24 @@ def run_python_code(
 
 
 # ============================================================
-# 辅助:URL 转换
+# 辅助:URL 转换(委托给 git_provider 抽象,按主机识别平台)
 # ============================================================
-
-
-def _to_ssh_url(repo_url: str) -> str:
-    """把 GitHub HTTPS URL 转成 SSH URL"""
-    if repo_url.startswith("git@"):
-        return repo_url
-
-    m = re.match(r"^https?://github\.com/(.+?)(?:\.git)?/?$", repo_url)
-    if m:
-        path = m.group(1)
-        return f"git@github.com:{path}.git"
-
-    return repo_url
-
-
-def _to_https_url(repo_url: str) -> str:
-    """把 GitHub SSH URL 转成 HTTPS URL(镜像 _to_ssh_url)"""
-    m = re.match(r"^git@github\.com:(.+?)(?:\.git)?$", repo_url)
-    if m:
-        path = m.group(1)
-        return f"https://github.com/{path}.git"
-
-    # 已经是 https 形式,原样返回
-    return repo_url
-
-
-def _inject_token_in_https(https_url: str, token: str) -> str:
-    """把 GitHub HTTPS URL 注入 access_token,形成带认证的 clone URL
-
-    https://github.com/owner/repo.git
-        → https://x-access-token:{token}@github.com/owner/repo.git
-
-    若 URL 非 GitHub HTTPS 或已含认证信息,原样返回。
-    """
-    if not token or not https_url.startswith("https://github.com/"):
-        return https_url
-    # 已含认证信息,不重复注入
-    if "@" in https_url.split("://", 1)[1].split("/", 1)[0]:
-        return https_url
-    return https_url.replace(
-        "https://",
-        f"https://x-access-token:{token}@",
-        1,
-    )
 
 
 def clone_repo_with_fallback(
     repo_url: str, branch: str | None = None, task_id: str = "",
-    github_token: str = "",
+    git_tokens: dict | None = None,
 ) -> dict:
     """克隆仓库(协议回退:HTTPS+token → SSH → HTTPS 匿名)
 
     供 orchestrator 在 user_agent 评估前主动调用,也供 clone_repo 工具委托。
 
+    按 repo_url 主机识别 provider(github / gitee / 未知),取该 provider 的
+    access_token(git_tokens[provider.id])做 HTTPS 注入;未知主机无 token,
+    走 SSH / 匿名 HTTPS。
+
     回退链(按顺序尝试,首个成功即返回):
-    1. HTTPS + token(github_token 非空时,可访问私有仓库)
+    1. HTTPS + token(该 provider 有 token 时,可访问私有仓库)
     2. SSH(依赖宿主机/沙箱的 SSH key 配置,适合公开仓库)
     3. HTTPS 匿名(无 token,仅公开仓库)
     三者都失败才抛 RuntimeError。
@@ -1323,10 +1285,21 @@ def clone_repo_with_fallback(
     复用同一套 session 管理(_get_or_create_session + _set_repo_path),
     所以 clone 完成后 react_agent / workspace 路由可直接通过 task_id 复用会话。
     """
+    git_tokens = git_tokens or {}
+    provider = get_provider_for_url(repo_url)
+    # 该 provider 的 token(未知主机则为空)
+    token = git_tokens.get(provider.id, "") if provider else ""
+
     # 构造候选 URL:HTTPS+token、SSH、HTTPS 匿名(去重)
-    https_anon = _to_https_url(repo_url)
-    ssh_url = _to_ssh_url(repo_url)
-    https_with_token = _inject_token_in_https(https_anon, github_token) if github_token else ""
+    if provider:
+        https_anon = provider.to_https_url(repo_url)
+        ssh_url = provider.to_ssh_url(repo_url)
+        https_with_token = provider.inject_token_in_https(https_anon, token) if token else ""
+    else:
+        # 未知主机:原样当作 HTTPS,只试匿名 + SSH(若已是 git@ 形式)
+        https_anon = repo_url
+        ssh_url = repo_url if repo_url.startswith("git@") else repo_url
+        https_with_token = ""
 
     candidates: list[str] = []
     for u in [https_with_token, ssh_url, https_anon]:

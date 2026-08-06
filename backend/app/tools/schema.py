@@ -4,10 +4,10 @@
 skill 过滤改为按 task.allowed_skills(用户创建任务时选择)。
 
 - task_id 自动注入
-- github_token 自动注入(用于 clone_repo 访问私有仓库)
+- git_tokens 自动注入(用于 clone_repo 访问私有仓库,按 provider 提供对应 token)
 
 并发安全:用 contextvars 替代全局变量,每个后台线程有独立上下文,
-避免多任务并发执行时 task_id / allowed_skills / github_token 互相覆盖。
+避免多任务并发执行时 task_id / allowed_skills / git_tokens 互相覆盖。
 """
 import contextvars
 from typing import Any
@@ -21,10 +21,10 @@ from app.tools.skill_tool import list_available_skills, run_skill, set_current_a
 _CURRENT_TASK_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "current_task_id", default=""
 )
-# 当前任务的 GitHub access_token(解密后的明文,空串表示无)
-# clone_repo 工具用于克隆私有仓库,执行完即用即弃不持久化
-_CURRENT_GITHUB_TOKEN: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "current_github_token", default=""
+# 当前用户的各 git provider access_token(解密后的明文),{provider: token}
+# clone_repo 工具按 repo_url 主机匹配 provider 取对应 token,执行完即用即弃不持久化
+_CURRENT_GIT_TOKENS: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
+    "current_git_tokens", default_factory=dict
 )
 
 
@@ -44,12 +44,13 @@ def set_current_task(
     set_current_allowed_skills(allowed_skills)
 
 
-def set_current_github_token(token: str) -> None:
-    """orchestrator 在任务执行前设置当前用户的 GitHub access_token(明文)
+def set_current_git_tokens(tokens: dict[str, str]) -> None:
+    """orchestrator 在任务执行前设置当前用户的 git provider tokens(明文)
 
-    空串表示该用户未绑定 GitHub 或未授权仓库访问,clone_repo 会回退到匿名 HTTPS/SSH。
+    {provider: token},只含有 access_token 的 provider。空 dict 表示未绑定任何平台,
+    clone_repo 会回退到匿名 HTTPS/SSH。
     """
-    _CURRENT_GITHUB_TOKEN.set(token)
+    _CURRENT_GIT_TOKENS.set(tokens)
 
 
 # 工具名 → 函数的映射(通用工具,所有场景共用池)
@@ -374,13 +375,13 @@ def get_all_tools() -> list[dict[str, Any]]:
 def execute_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
     """执行通用工具调用
 
-    自动从 ContextVar 注入 task_id 和 github_token,LLM 看不到这两个参数。
-    github_token 只对 clone_repo 注入(其他工具不接受该参数,避免误传)。
+    自动从 ContextVar 注入 task_id 和 git_tokens,LLM 看不到这两个参数。
+    git_tokens 只对 clone_repo 注入(其他工具不接受该参数,避免误传)。
     """
     if tool_name not in TOOL_FUNCTIONS:
         raise ValueError(f"未知工具: {tool_name}")
     func = TOOL_FUNCTIONS[tool_name]
     arguments["task_id"] = _CURRENT_TASK_ID.get()
     if tool_name == "clone_repo":
-        arguments["github_token"] = _CURRENT_GITHUB_TOKEN.get()
+        arguments["git_tokens"] = _CURRENT_GIT_TOKENS.get()
     return func(**arguments)

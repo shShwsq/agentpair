@@ -66,8 +66,8 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=128)
 
 
-class GitHubOAuthRequest(BaseModel):
-    """GitHub OAuth 登录(传 code)"""
+class GitOAuthRequest(BaseModel):
+    """Git 平台 OAuth 登录(github / gitee,传 code)"""
 
     code: str
 
@@ -83,7 +83,7 @@ class UserResponse(BaseModel):
     id: uuid.UUID
     email: str
     email_verified: bool
-    github_id: str | None
+    git_providers: list[str]  # 已关联的 git provider id 列表(github / gitee)
     has_password: bool
     created_at: datetime
 
@@ -91,12 +91,18 @@ class UserResponse(BaseModel):
 
     @classmethod
     def from_user(cls, user) -> "UserResponse":
-        """从 User ORM 模型构造(转 email_verified_at → bool)"""
+        """从 User ORM 模型构造(转 email_verified_at → bool)
+
+        git_providers 从 user_git_bindings 聚合:需在请求级 session 内调用,
+        通过 user.git_bindings 关系访问(见 models 反向引用)。
+        若关系未加载,默认空列表(兼容无 session 场景)。
+        """
+        bindings = getattr(user, "git_bindings", None) or []
         return cls(
             id=user.id,
             email=user.email,
             email_verified=user.is_email_verified,
-            github_id=user.github_id,
+            git_providers=[b.provider for b in bindings],
             has_password=bool(user.password_hash),
             created_at=user.created_at,
         )
