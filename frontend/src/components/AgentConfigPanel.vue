@@ -605,7 +605,7 @@ onUnmounted(() => {
 .field label {
   display: block;
   font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
+  font-weight: var(--fw-semibold);
   margin-bottom: var(--space-1);
   color: var(--color-text);
 }
