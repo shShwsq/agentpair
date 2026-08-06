@@ -23,8 +23,9 @@ _CURRENT_TASK_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 # 当前用户的各 git provider access_token(解密后的明文),{provider: token}
 # clone_repo 工具按 repo_url 主机匹配 provider 取对应 token,执行完即用即弃不持久化
+# 无默认值:读取处用 .get({}) 兜底(orchestrator 执行前会 set)
 _CURRENT_GIT_TOKENS: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
-    "current_git_tokens", default_factory=dict
+    "current_git_tokens"
 )
 
 
