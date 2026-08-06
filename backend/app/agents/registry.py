@@ -119,11 +119,6 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
                     },
                 ],
                 "default": "kimi",
-                "help_text": (
-                    "经 KIMI_MODEL_PROVIDER_TYPE 注入。kimi 用 Moonshot 专用协议(发送 thinking 参数等),"
-                    "仅 Moonshot 官方端点完全兼容;MiniMax / DeepSeek / 阿里云 DashScope 等 OpenAI 兼容端点"
-                    "建议选 openai,避免 Moonshot 专用参数导致请求失败或无响应。"
-                ),
             },
         ],
         "sandbox": {
