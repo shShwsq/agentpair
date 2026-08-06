@@ -24,6 +24,8 @@ export interface UserPreferenceOut {
   preferences: Record<string, unknown>
   /** 自由文本兜底(≤ 8000 字符) */
   custom_prompt: string
+  /** 最后更新时间(ISO 字符串,未配置时为 null) */
+  updated_at: string | null
 }
 
 /** 保存用户偏好请求(PUT /memory/preferences body) */
@@ -40,6 +42,8 @@ export interface SaveUserPreferenceRequest {
  */
 export interface UserMemoryOut {
   content: string
+  /** 最后更新时间(ISO 字符串,未配置时为 null) */
+  updated_at: string | null
 }
 
 /** 保存全局长期记忆请求(PUT /memory/global body) */

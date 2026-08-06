@@ -12,6 +12,8 @@
 
 后续还有合并时截断(项目 8000 / 全局 10000)与注入时截断(2000)两道防线。
 """
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -22,6 +24,8 @@ class UserPreferenceOut(BaseModel):
     preferences: dict = Field(default_factory=dict)
     # 自由文本兜底(用户大段自定义偏好/评判标准补充)
     custom_prompt: str = ""
+    # 最后更新时间(可空 — 未配置时为 None;FastAPI 序列化为 ISO 字符串)
+    updated_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
@@ -37,6 +41,8 @@ class UserMemoryOut(BaseModel):
     """全局长期记忆响应(GET /memory/global)"""
 
     content: str = ""
+    # 最后更新时间(可空 — 未配置时为 None;FastAPI 序列化为 ISO 字符串)
+    updated_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 

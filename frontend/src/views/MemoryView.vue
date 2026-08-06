@@ -12,7 +12,7 @@
  *
  * 入口:主导航「记忆管理」项(与模型设置/CLI 设置并列)。
  */
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 
@@ -148,6 +148,8 @@ const aliasDrafts = reactive<Record<string, string>>({})
 const originalAlias = reactive<Record<string, string>>({})
 /** 该文件当前显示的是默认模板(DB 为空时预填,键=文件 id;仅 pref/global 会为 true) */
 const isTemplateDefault = reactive<Record<string, boolean>>({})
+/** 每份文件的最后更新时间(ISO 字符串,键=文件 id;null=从未保存) */
+const updatedAt = reactive<Record<string, string | null>>({})
 
 // ---- 透传存储(不在 UI 编辑,但保存时原样回传,避免数据丢失) ----
 /** 用户偏好的结构化 preferences JSONB(透传) */
@@ -248,7 +250,7 @@ async function loadAll(): Promise<void> {
       listProjects(),
     ])
     hydratePref(prefData)
-    hydrateGlobal(globalData.content || '')
+    hydrateGlobal(globalData)
     hydrateProjects(projectsData.projects || [])
   } catch (err) {
     loadError.value = extractErrorMessage(err)
@@ -270,9 +272,11 @@ function hydratePref(data: UserPreferenceOut): void {
     originals['pref'] = md
     isTemplateDefault['pref'] = false
   }
+  updatedAt['pref'] = data.updated_at ?? null
 }
 
-function hydrateGlobal(content: string): void {
+function hydrateGlobal(data: { content: string; updated_at?: string | null }): void {
+  const content = data.content || ''
   if (content.trim() === '') {
     drafts['global'] = GLOBAL_TEMPLATE
     originals['global'] = ''
@@ -282,6 +286,7 @@ function hydrateGlobal(content: string): void {
     originals['global'] = content
     isTemplateDefault['global'] = false
   }
+  updatedAt['global'] = data.updated_at ?? null
 }
 
 function hydrateProjects(list: ProjectOut[]): void {
@@ -294,6 +299,7 @@ function hydrateProjects(list: ProjectOut[]): void {
     originalAlias[fid] = p.alias || ''
     projectNotes[fid] = p.note ?? null
     projectIds[fid] = p.id
+    updatedAt[fid] = p.updated_at ?? null
   }
 }
 
@@ -304,6 +310,11 @@ function selectFile(id: string): void {
   activeId.value = id
   mode.value = 'edit'
   actionError.value = ''
+  // 切换文件后重置编辑器与行号槽滚动位置(避免上一文件的滚动位置残留)
+  nextTick(() => {
+    if (editorRef.value) editorRef.value.scrollTop = 0
+    if (gutterRef.value) gutterRef.value.scrollTop = 0
+  })
 }
 
 // ============================================================
@@ -323,7 +334,7 @@ async function handleSave(): Promise<void> {
       hydratePref(data)
     } else if (entry.kind === 'global') {
       const data = await saveGlobalMemory({ content: drafts['global'] })
-      hydrateGlobal(data.content || '')
+      hydrateGlobal(data)
     } else {
       const fid = entry.id
       const pid = projectIds[fid]
@@ -341,6 +352,7 @@ async function handleSave(): Promise<void> {
       aliasDrafts[fid] = data.alias || ''
       originalAlias[fid] = data.alias || ''
       projectNotes[fid] = data.note ?? null
+      updatedAt[fid] = data.updated_at ?? null
     }
     showToast('已保存', 'success')
   } catch (err) {
@@ -372,6 +384,7 @@ async function handleDelete(): Promise<void> {
     delete originalAlias[fid]
     delete projectNotes[fid]
     delete projectIds[fid]
+    delete updatedAt[fid]
     activeId.value = 'pref'
     mode.value = 'edit'
     showToast('项目记忆已删除', 'success')
@@ -393,6 +406,74 @@ function formatTime(iso: string | null | undefined): string {
     return d.toLocaleString('zh-CN', { hour12: false })
   } catch {
     return iso
+  }
+}
+
+/** 相对时间(用于侧栏"最后更新"):刚刚 / X 分钟前 / X 小时前 / X 天前 / YYYY-MM-DD */
+function formatRelative(iso: string | null | undefined): string {
+  if (!iso) return '从未保存'
+  try {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return iso
+    const diffMs = Date.now() - d.getTime()
+    const sec = Math.floor(diffMs / 1000)
+    if (sec < 60) return '刚刚'
+    const min = Math.floor(sec / 60)
+    if (min < 60) return `${min} 分钟前`
+    const hr = Math.floor(min / 60)
+    if (hr < 24) return `${hr} 小时前`
+    const day = Math.floor(hr / 24)
+    if (day < 7) return `${day} 天前`
+    return d.toLocaleDateString('zh-CN')
+  } catch {
+    return iso
+  }
+}
+
+// ============================================================
+// 代码编辑器:行号槽 + Tab 缩进 + 滚动同步
+// ============================================================
+const editorRef = ref<HTMLTextAreaElement | null>(null)
+const gutterRef = ref<HTMLPreElement | null>(null)
+
+/** 行号文本(每行一个数字,用换行连接,与 textarea 行高对齐) */
+const gutterText = computed(() => {
+  const md = drafts[activeId.value] ?? ''
+  const count = md === '' ? 1 : md.split('\n').length
+  return Array.from({ length: count }, (_, i) => String(i + 1)).join('\n')
+})
+
+/** textarea 滚动时同步行号槽 */
+function syncGutterScroll(): void {
+  if (gutterRef.value && editorRef.value) {
+    gutterRef.value.scrollTop = editorRef.value.scrollTop
+  }
+}
+
+/** Tab 键插入两个空格(代码编辑器行为),Shift+Tab 当前行退缩 */
+function handleEditorKeydown(e: KeyboardEvent): void {
+  if (e.key !== 'Tab') return
+  e.preventDefault()
+  const ta = e.target as HTMLTextAreaElement
+  const start = ta.selectionStart
+  const end = ta.selectionEnd
+  const val = drafts[activeId.value] ?? ''
+  if (e.shiftKey) {
+    // 当前行首若有缩进,删掉最多 2 个前导空格
+    const lineStart = val.lastIndexOf('\n', start - 1) + 1
+    const head = val.slice(lineStart, lineStart + 2)
+    if (head === '  ') {
+      drafts[activeId.value] = val.slice(0, lineStart) + val.slice(lineStart + 2)
+      const delta = start - lineStart >= 2 ? 2 : Math.max(0, start - lineStart)
+      nextTick(() => {
+        ta.selectionStart = ta.selectionEnd = Math.max(lineStart, start - delta)
+      })
+    }
+  } else {
+    drafts[activeId.value] = val.slice(0, start) + '  ' + val.slice(end)
+    nextTick(() => {
+      ta.selectionStart = ta.selectionEnd = start + 2
+    })
   }
 }
 
@@ -420,22 +501,6 @@ onMounted(() => {
       <main class="memory-main">
         <!-- ============ 左侧文件列表 ============ -->
         <aside class="file-sidebar">
-          <div class="sidebar-header">
-            <span>记忆文件</span>
-            <button
-              v-if="!loading && !loadError"
-              class="btn-icon"
-              title="刷新"
-              @click="loadAll"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="23 4 23 10 17 10" />
-                <polyline points="1 20 1 14 7 14" />
-                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-              </svg>
-            </button>
-          </div>
-
           <!-- 加载中 -->
           <div v-if="loading" class="sidebar-placeholder">
             <span class="status-spinner" /> 加载中...
@@ -457,7 +522,10 @@ onMounted(() => {
                   <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                   <polyline points="14 2 14 8 20 8" />
                 </svg>
-                <span class="file-label">用户偏好</span>
+                <span class="file-text">
+                  <span class="file-label">用户偏好</span>
+                  <span class="file-meta">{{ formatRelative(updatedAt['pref']) }}</span>
+                </span>
                 <span v-if="isDirty('pref')" class="dirty-dot" title="有未保存改动" />
               </button>
             </li>
@@ -471,7 +539,10 @@ onMounted(() => {
                   <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                   <polyline points="14 2 14 8 20 8" />
                 </svg>
-                <span class="file-label">全局记忆</span>
+                <span class="file-text">
+                  <span class="file-label">全局记忆</span>
+                  <span class="file-meta">{{ formatRelative(updatedAt['global']) }}</span>
+                </span>
                 <span v-if="isDirty('global')" class="dirty-dot" title="有未保存改动" />
               </button>
             </li>
@@ -490,16 +561,34 @@ onMounted(() => {
                   <path d="M3 3h18v18H3z" />
                   <path d="M3 9h18M9 21V9" />
                 </svg>
-                <span class="file-label" :title="p.alias || p.repo_url_raw">
-                  {{ p.alias || p.repo_url_raw }}
+                <span class="file-text">
+                  <span class="file-label" :title="p.alias || p.repo_url_raw">
+                    {{ p.alias || p.repo_url_raw }}
+                  </span>
+                  <span class="file-meta">{{ formatRelative(updatedAt[`project:${p.id}`]) }}</span>
                 </span>
                 <span v-if="isDirty(`project:${p.id}`)" class="dirty-dot" title="有未保存改动" />
               </button>
             </li>
           </ul>
 
-          <div v-if="hasAnyDirty" class="sidebar-footer-hint">
-            <span class="dirty-dot" /> 有未保存改动
+          <!-- 底栏:未保存提示 + 刷新 -->
+          <div class="sidebar-footer-hint">
+            <template v-if="hasAnyDirty">
+              <span class="dirty-dot" /> <span>有未保存改动</span>
+            </template>
+            <button
+              v-if="!loading && !loadError"
+              class="btn-icon footer-refresh"
+              title="刷新"
+              @click="loadAll"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10" />
+                <polyline points="1 20 1 14 7 14" />
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+              </svg>
+            </button>
           </div>
         </aside>
 
@@ -581,16 +670,24 @@ onMounted(() => {
               <div v-if="loading" class="content-placeholder">
                 <span class="status-spinner" /> 加载中...
               </div>
-              <!-- 编辑模式 -->
-              <textarea
-                v-else-if="mode === 'edit'"
-                v-model="drafts[activeEntry.id]"
-                class="md-editor"
-                :class="{ invalid: activeOverLimit }"
-                placeholder="用 Markdown 编写。支持标题、列表、代码块等。"
-                :disabled="saving || deleting"
-                spellcheck="false"
-              />
+              <!-- 编辑模式:行号槽 + textarea(代码编辑器风格) -->
+              <div v-else-if="mode === 'edit'" class="code-area" :class="{ invalid: activeOverLimit }">
+                <pre
+                  ref="gutterRef"
+                  class="line-gutter"
+                  aria-hidden="true"
+                >{{ gutterText }}</pre>
+                <textarea
+                  ref="editorRef"
+                  v-model="drafts[activeEntry.id]"
+                  class="md-editor"
+                  placeholder="用 Markdown 编写。支持标题、列表、代码块等。"
+                  :disabled="saving || deleting"
+                  spellcheck="false"
+                  @scroll="syncGutterScroll"
+                  @keydown="handleEditorKeydown"
+                />
+              </div>
               <!-- 预览模式 -->
               <div v-else class="md-preview">
                 <div v-if="previewHtml" class="markdown-body" v-html="previewHtml" />
@@ -675,18 +772,6 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-}
-
-.sidebar-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--space-3) var(--space-4);
-  border-bottom: 1px solid var(--color-border);
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-semibold);
-  color: var(--color-text-secondary);
-  letter-spacing: 0.02em;
 }
 
 .btn-icon {
@@ -786,18 +871,43 @@ onMounted(() => {
 .file-icon {
   color: var(--color-text-muted);
   flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 2px;
 }
 
 .file-item.active .file-icon {
   color: var(--color-primary);
 }
 
-.file-label {
+/* 文本列:标签 + 最后更新时间(两行) */
+.file-text {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  line-height: var(--lh-tight);
+}
+
+.file-label {
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.file-meta {
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-item.active .file-meta {
+  color: var(--color-primary);
+  opacity: 0.75;
 }
 
 .dirty-dot {
@@ -806,16 +916,24 @@ onMounted(() => {
   border-radius: 50%;
   background: var(--color-warning, #f59e0b);
   flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 6px;
 }
 
 .sidebar-footer-hint {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-4);
+  padding: var(--space-2) var(--space-3);
   border-top: 1px solid var(--color-border);
   font-size: var(--fs-xs);
   color: var(--color-text-muted);
+}
+
+.sidebar-footer-hint .footer-refresh {
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
 }
 
 /* ============ 右侧编辑器 ============ */
@@ -964,66 +1082,97 @@ onMounted(() => {
   cursor: not-allowed;
 }
 
-/* 内容区 */
+/* 内容区(全屏铺满,代码编辑器风格) */
 .editor-content {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding: var(--space-4) var(--space-5);
 }
 
 .content-placeholder {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  padding: var(--space-4) var(--space-5);
   color: var(--color-text-secondary);
   font-size: var(--fs-sm);
 }
 
+/* 代码编辑区:行号槽 + textarea */
+.code-area {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+  background: var(--color-surface);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-relaxed);
+}
+
+.code-area.invalid {
+  /* 超限时给整个编辑区一个左边框警示色 */
+  box-shadow: inset 2px 0 0 var(--color-danger);
+}
+
+/* 行号槽:与 textarea 共享 font-size/line-height/padding-top 以对齐 */
+.line-gutter {
+  flex-shrink: 0;
+  width: 52px;
+  margin: 0;
+  padding: var(--space-4) var(--space-2) var(--space-4) 0;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-relaxed);
+  color: var(--color-text-muted);
+  background: var(--color-surface-alt);
+  border-right: 1px solid var(--color-border);
+  overflow: hidden;
+  white-space: pre;
+  user-select: none;
+  pointer-events: none;
+}
+
 .md-editor {
   flex: 1;
-  width: 100%;
-  padding: var(--space-4);
+  min-width: 0;
+  padding: var(--space-4) var(--space-5);
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
   line-height: var(--lh-relaxed);
   color: var(--color-text);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  background: transparent;
+  border: none;
+  border-radius: 0;
   resize: none;
   outline: none;
-  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  tab-size: 2;
+  transition: box-shadow var(--transition-fast);
 }
 
 .md-editor:focus {
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px var(--color-primary-light);
+  box-shadow: inset 2px 0 0 var(--color-primary);
 }
 
 .md-editor:disabled {
-  background: var(--color-surface-alt);
   cursor: not-allowed;
-}
-
-.md-editor.invalid {
-  border-color: var(--color-danger);
+  opacity: 0.7;
 }
 
 .md-editor::placeholder {
   color: var(--color-text-muted);
 }
 
-/* 预览 */
+/* 预览(全屏铺满,自带内边距) */
 .md-preview {
   flex: 1;
   overflow-y: auto;
-  padding: var(--space-4);
+  padding: var(--space-4) var(--space-5);
   background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
 }
 
 .preview-empty {
