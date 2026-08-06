@@ -1650,6 +1650,7 @@ onMounted(async () => {
   line-height: var(--lh-snug);
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
