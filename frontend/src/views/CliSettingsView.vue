@@ -305,10 +305,7 @@ async function handleTest(type: string): Promise<void> {
         <template v-else>
           <!-- 页头 -->
           <div class="page-header">
-            <div>
-              <h1>CLI 智能体设置</h1>
-              <p class="subtitle">配置沙箱内运行的编码 agent 凭据,任务提交时可选</p>
-            </div>
+            <h1>CLI 智能体设置</h1>
           </div>
 
           <!-- ============ 选项卡 ============ -->
@@ -408,7 +405,7 @@ async function handleTest(type: string): Promise<void> {
 .main {
   flex: 1;
   min-width: 0;
-  max-width: 760px;
+  max-width: 1040px;
   margin: 0 auto;
   overflow-y: auto;
   padding: var(--space-6) var(--space-5) var(--space-8);
@@ -466,12 +463,6 @@ async function handleTest(type: string): Promise<void> {
 
 .page-header h1 {
   font-size: var(--fs-xl);
-  margin: 0 0 var(--space-1);
-}
-
-.subtitle {
-  color: var(--color-text-secondary);
-  font-size: var(--fs-sm);
   margin: 0;
 }
 
@@ -481,13 +472,6 @@ async function handleTest(type: string): Promise<void> {
   gap: var(--space-1);
   border-bottom: 1px solid var(--color-border);
   margin-bottom: var(--space-5);
-  overflow-x: auto;
-  white-space: nowrap;
-}
-
-/* 隐藏滚动条但保留滚动能力 */
-.tab-bar::-webkit-scrollbar {
-  height: 4px;
 }
 
 .tab {

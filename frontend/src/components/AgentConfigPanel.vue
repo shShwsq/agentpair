@@ -5,8 +5,12 @@
  * 由 AgentConfigDialog 演化而来:去掉弹窗外壳(Teleport/mask/card/header/footer),
  * 保留动态凭据字段渲染 + 校验 + 启用开关 + 测试连接(SSE 流式) + 保存/清除。
  *
- * 每个agent 类型在 CliSettingsView 中拥有独立 Panel 实例(v-show 切换),
+ * 每个 agent 类型在 CliSettingsView 中拥有独立 Panel 实例(v-show 切换),
  * 因此草稿、滚动位置、进行中的测试流跨 tab 切换都会保留,互不串台。
+ *
+ * 布局:顶部操作栏(状态 + 测试连接按钮) → 测试反馈区(流式/结果) → 描述 →
+ * 字段网格(secret 占整行,其余并排) → 启用开关 → 底部保存/清除。
+ * 测试按钮与反馈置于顶部,测试时无需滚动即可看到结果。
  *
  * 根据 meta.credential_fields 动态渲染输入框:
  * - secret 类型:password 输入框 + 眼睛切换显隐,font-mono 便于核对 token
@@ -194,6 +198,60 @@ watch(
 
     <template v-else>
       <div class="panel-body">
+        <!-- 顶部操作栏:状态 + 测试连接按钮(测试按钮上移,便于操作) -->
+        <div class="panel-topbar">
+          <div :class="['status-row', hasCredentials ? 'status-ok' : 'status-warn']">
+            <span class="status-dot" />
+            <span class="status-text">
+              {{ hasCredentials ? '当前已配置凭据' : '尚未配置凭据' }}
+            </span>
+          </div>
+          <button
+            v-if="hasCredentials"
+            class="btn btn-test"
+            :disabled="saving || testing"
+            @click="handleTest"
+          >
+            <span v-if="testing" class="btn-spinner test-spinner" />
+            {{ testing ? '测试中...' : '测试连接' }}
+          </button>
+        </div>
+
+        <!-- 测试反馈区(紧跟顶部,测试中/有结果时显示,无需滚动即可看到) -->
+        <div
+          v-if="hasCredentials && (testing || testResult || testStage || testThinking || testContent)"
+          class="test-feedback"
+        >
+          <!-- 流式进度(测试中显示):阶段 + 思考 + 回答 -->
+          <div
+            v-if="testing && (testStage || testThinking || testContent)"
+            ref="streamLogRef"
+            class="test-stream"
+          >
+            <div v-if="testStage" class="stream-stage">
+              <span class="stage-dot" />
+              <span class="stage-text">{{ testStage }}</span>
+            </div>
+            <div v-if="testThinking" class="stream-block stream-thinking">
+              <div class="stream-label">思考</div>
+              <div class="stream-body">{{ testThinking }}</div>
+            </div>
+            <div v-if="testContent" class="stream-block stream-content">
+              <div class="stream-label">回答</div>
+              <div class="stream-body">{{ testContent }}</div>
+            </div>
+          </div>
+          <!-- 测试结果 -->
+          <div
+            v-if="testResult"
+            :class="['test-result', testResult.ok ? 'test-ok' : 'test-fail']"
+          >
+            <span class="test-icon">{{ testResult.ok ? '✓' : '✗' }}</span>
+            <span class="test-message">{{ testResult.message }}</span>
+          </div>
+        </div>
+
+        <!-- 描述提示 -->
         <p class="dialog-tip">
           {{ meta.description }}
           <a
@@ -205,91 +263,87 @@ watch(
           >获取帮助 →</a>
         </p>
 
-        <!-- 当前状态 -->
-        <div :class="['status-row', hasCredentials ? 'status-ok' : 'status-warn']">
-          <span class="status-dot" />
-          <span class="status-text">
-            {{ hasCredentials ? '当前已配置凭据' : '尚未配置凭据' }}
-          </span>
-        </div>
+        <!-- 动态凭据字段(grid 并排,secret 占整行) -->
+        <div class="fields-grid">
+          <div
+            v-for="field in meta.credential_fields"
+            :key="field.key"
+            :class="['field', { 'field-full': field.type === 'secret' }]"
+          >
+            <label :for="`agent-field-${field.key}`">
+              {{ field.label }}
+              <span v-if="field.required" class="required-mark">*</span>
+            </label>
 
-        <!-- 动态凭据字段 -->
-        <div
-          v-for="field in meta.credential_fields"
-          :key="field.key"
-          class="field"
-        >
-          <label :for="`agent-field-${field.key}`">
-            {{ field.label }}
-            <span v-if="field.required" class="required-mark">*</span>
-          </label>
+            <!-- secret 类型:password 输入 + 眼睛切换显隐 -->
+            <div v-if="field.type === 'secret'" class="input-wrapper">
+              <input
+                :id="`agent-field-${field.key}`"
+                v-model="draft.values[field.key]"
+                :type="draft.show[field.key] ? 'text' : 'password'"
+                autocomplete="off"
+                :placeholder="fieldPlaceholder(field)"
+                :class="{ invalid: fieldError(field) }"
+                :disabled="saving"
+              />
+              <button
+                type="button"
+                class="toggle-pwd"
+                :aria-label="draft.show[field.key] ? '隐藏' : '显示'"
+                @click="draft.show[field.key] = !draft.show[field.key]"
+              >
+                <svg v-if="!draft.show[field.key]" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+                <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                  <line x1="1" y1="1" x2="23" y2="23" />
+                </svg>
+              </button>
+            </div>
 
-          <!-- secret 类型:password 输入 + 眼睛切换显隐 -->
-          <div v-if="field.type === 'secret'" class="input-wrapper">
+            <!-- text 类型:普通明文输入 -->
             <input
+              v-else-if="field.type === 'text'"
               :id="`agent-field-${field.key}`"
               v-model="draft.values[field.key]"
-              :type="draft.show[field.key] ? 'text' : 'password'"
+              type="text"
               autocomplete="off"
               :placeholder="fieldPlaceholder(field)"
               :class="{ invalid: fieldError(field) }"
               :disabled="saving"
             />
-            <button
-              type="button"
-              class="toggle-pwd"
-              :aria-label="draft.show[field.key] ? '隐藏' : '显示'"
-              @click="draft.show[field.key] = !draft.show[field.key]"
+
+            <!-- select 类型:下拉选择(如 provider_type) -->
+            <select
+              v-else-if="field.type === 'select'"
+              :id="`agent-field-${field.key}`"
+              v-model="draft.values[field.key]"
+              :class="{ invalid: fieldError(field) }"
+              :disabled="saving"
             >
-              <svg v-if="!draft.show[field.key]" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                <circle cx="12" cy="12" r="3" />
-              </svg>
-              <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
-                <line x1="1" y1="1" x2="23" y2="23" />
-              </svg>
-            </button>
+              <option
+                v-for="opt in field.options"
+                :key="opt.value"
+                :value="opt.value"
+              >
+                {{ opt.label }}
+              </option>
+            </select>
+
+            <div v-if="field.help_text || field.help_url" class="field-aux">
+              <span v-if="field.help_text" class="field-help">{{ field.help_text }}</span>
+              <a
+                v-if="field.help_url"
+                :href="field.help_url"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="field-help-link"
+              >如何获取? →</a>
+            </div>
+            <span v-if="fieldError(field)" class="field-error">{{ fieldError(field) }}</span>
           </div>
-
-          <!-- text 类型:普通明文输入 -->
-          <input
-            v-else-if="field.type === 'text'"
-            :id="`agent-field-${field.key}`"
-            v-model="draft.values[field.key]"
-            type="text"
-            autocomplete="off"
-            :placeholder="fieldPlaceholder(field)"
-            :class="{ invalid: fieldError(field) }"
-            :disabled="saving"
-          />
-
-          <!-- select 类型:下拉选择(如 provider_type) -->
-          <select
-            v-else-if="field.type === 'select'"
-            :id="`agent-field-${field.key}`"
-            v-model="draft.values[field.key]"
-            :class="{ invalid: fieldError(field) }"
-            :disabled="saving"
-          >
-            <option
-              v-for="opt in field.options"
-              :key="opt.value"
-              :value="opt.value"
-            >
-              {{ opt.label }}
-            </option>
-          </select>
-
-          <span v-if="field.help_text" class="field-help">{{ field.help_text }}</span>
-          <a
-            v-if="field.help_url"
-            :href="field.help_url"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="field-help-link"
-          >如何获取? →</a>
-          <span v-if="fieldError(field)" class="field-error">{{ fieldError(field) }}</span>
         </div>
 
         <!-- 启用开关 -->
@@ -301,50 +355,6 @@ watch(
           />
           <span>启用此执行器(任务提交页可选)</span>
         </label>
-
-        <!-- 测试连接结果区(已配置凭据时显示) -->
-        <div v-if="hasCredentials" class="test-section">
-          <button
-            class="btn btn-test"
-            :disabled="saving || testing"
-            @click="handleTest"
-          >
-            <span v-if="testing" class="btn-spinner test-spinner" />
-            {{ testing ? '测试中...' : '测试连接' }}
-          </button>
-
-          <!-- 流式进度(测试中显示):阶段 + 思考 + 回答 -->
-          <div
-            v-if="testing && (testStage || testThinking || testContent)"
-            ref="streamLogRef"
-            class="test-stream"
-          >
-            <!-- 当前阶段 -->
-            <div v-if="testStage" class="stream-stage">
-              <span class="stage-dot" />
-              <span class="stage-text">{{ testStage }}</span>
-            </div>
-            <!-- 模型思考 -->
-            <div v-if="testThinking" class="stream-block stream-thinking">
-              <div class="stream-label">思考</div>
-              <div class="stream-body">{{ testThinking }}</div>
-            </div>
-            <!-- 模型回答 -->
-            <div v-if="testContent" class="stream-block stream-content">
-              <div class="stream-label">回答</div>
-              <div class="stream-body">{{ testContent }}</div>
-            </div>
-          </div>
-
-          <!-- 测试结果 -->
-          <div
-            v-if="testResult"
-            :class="['test-result', testResult.ok ? 'test-ok' : 'test-fail']"
-          >
-            <span class="test-icon">{{ testResult.ok ? '✓' : '✗' }}</span>
-            <span class="test-message">{{ testResult.message }}</span>
-          </div>
-        </div>
       </div>
 
       <footer class="panel-footer">
@@ -410,17 +420,26 @@ watch(
 }
 
 .panel-body {
-  padding: var(--space-5);
+  padding: var(--space-4);
+}
+
+/* ---- 顶部操作栏:状态 + 测试连接按钮 ---- */
+.panel-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
 }
 
 .dialog-tip {
   font-size: var(--fs-sm);
   color: var(--color-text-secondary);
   background: var(--color-surface-alt);
-  padding: var(--space-3);
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
   border-left: 3px solid var(--color-primary);
-  margin: 0 0 var(--space-4);
+  margin: 0 0 var(--space-3);
   line-height: var(--lh-relaxed);
 }
 
@@ -439,9 +458,8 @@ watch(
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-1) var(--space-3);
   border-radius: var(--radius-md);
-  margin-bottom: var(--space-4);
   font-size: var(--fs-sm);
 }
 
@@ -467,20 +485,28 @@ watch(
   font-weight: var(--fw-medium);
 }
 
-/* ---- 表单字段 ---- */
-.field {
-  margin-bottom: var(--space-4);
+/* ---- 字段网格(并排,secret 占整行) ---- */
+.fields-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-3) var(--space-4);
 }
 
-.field:last-of-type {
-  margin-bottom: var(--space-4);
+.field {
+  display: flex;
+  flex-direction: column;
+}
+
+/* secret 字段(PAT/API Key)较长,占整行 */
+.field-full {
+  grid-column: 1 / -1;
 }
 
 .field label {
   display: block;
   font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
-  margin-bottom: var(--space-2);
+  margin-bottom: var(--space-1);
   color: var(--color-text);
 }
 
@@ -493,9 +519,9 @@ watch(
 .field input,
 .field select {
   width: 100%;
-  height: 42px;
+  height: 38px;
   padding: 0 var(--space-3);
-  font-size: var(--fs-base);
+  font-size: var(--fs-sm);
   font-family: var(--font-mono);
   color: var(--color-text);
   background: var(--color-surface);
@@ -532,7 +558,7 @@ watch(
 }
 
 .input-wrapper input {
-  padding-right: 44px;
+  padding-right: 40px;
 }
 
 .toggle-pwd {
@@ -543,8 +569,8 @@ watch(
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   color: var(--color-text-muted);
   border: none;
   background: transparent;
@@ -556,16 +582,20 @@ watch(
   color: var(--color-text);
 }
 
-.field-help {
-  display: block;
+.field-aux {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   margin-top: var(--space-1);
+  flex-wrap: wrap;
+}
+
+.field-help {
   font-size: var(--fs-xs);
   color: var(--color-text-muted);
 }
 
 .field-help-link {
-  display: inline-block;
-  margin-top: var(--space-1);
   font-size: var(--fs-xs);
   color: var(--color-primary);
   text-decoration: none;
@@ -576,7 +606,6 @@ watch(
 }
 
 .field-error {
-  display: block;
   margin-top: var(--space-1);
   font-size: var(--fs-xs);
   color: var(--color-danger);
@@ -590,7 +619,8 @@ watch(
   font-size: var(--fs-sm);
   color: var(--color-text);
   cursor: pointer;
-  padding: var(--space-2) 0;
+  padding: var(--space-2) 0 0;
+  margin-top: var(--space-2);
 }
 
 .active-toggle input {
@@ -605,22 +635,18 @@ watch(
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-5);
+  padding: var(--space-3) var(--space-4);
   border-top: 1px solid var(--color-border);
 }
 
-/* ---- 测试连接区 ---- */
-.test-section {
-  margin-top: var(--space-4);
-  padding-top: var(--space-4);
-  border-top: 1px dashed var(--color-border);
-}
-
+/* ---- 测试按钮(顶部) ---- */
 .btn-test {
   background: var(--color-surface);
   color: var(--color-text-secondary);
   border-color: var(--color-border-strong);
-  width: 100%;
+  height: 32px;
+  padding: 0 var(--space-3);
+  flex-shrink: 0;
 }
 
 .btn-test:hover:not(:disabled) {
@@ -633,11 +659,16 @@ watch(
   border-top-color: var(--color-text-secondary);
 }
 
+/* ---- 测试反馈区(紧跟顶部) ---- */
+.test-feedback {
+  margin-bottom: var(--space-3);
+}
+
 .test-result {
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
-  margin-top: var(--space-3);
+  margin-top: var(--space-2);
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
   font-size: var(--fs-sm);
@@ -665,12 +696,11 @@ watch(
 
 /* ---- 流式进度区 ---- */
 .test-stream {
-  margin-top: var(--space-3);
-  padding: var(--space-3);
+  padding: var(--space-2) var(--space-3);
   background: var(--color-surface-alt);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  max-height: 200px;
+  max-height: 160px;
   overflow-y: auto;
   font-size: var(--fs-sm);
   line-height: var(--lh-relaxed);
@@ -681,8 +711,8 @@ watch(
   align-items: center;
   gap: var(--space-2);
   color: var(--color-text-secondary);
-  padding-bottom: var(--space-2);
-  margin-bottom: var(--space-2);
+  padding-bottom: var(--space-1);
+  margin-bottom: var(--space-1);
   border-bottom: 1px dashed var(--color-border);
 }
 
@@ -753,7 +783,7 @@ watch(
 }
 
 .btn {
-  height: 38px;
+  height: 36px;
   padding: 0 var(--space-4);
   font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
