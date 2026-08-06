@@ -39,9 +39,6 @@ import type { ProjectOut, UserPreferenceOut } from '@/types/memory'
 /** 用户偏好默认模板(写入 custom_prompt,注入 user_agent) */
 const PREF_TEMPLATE = `# 用户偏好
 
-> 影响评估代理(user_agent)的评判标准与 checklist 生成。
-> 整段会作为 system prompt 的一部分注入 user_agent。
-
 ## 输出语言
 中文
 
@@ -59,9 +56,6 @@ const PREF_TEMPLATE = `# 用户偏好
 
 /** 全局长期记忆默认模板(写入 content,注入 user_agent) */
 const GLOBAL_TEMPLATE = `# 全局长期记忆
-
-> 跨项目通用经验/约定,注入 user_agent(注入时截断 2000 字符)。
-> 任务完成时也会自动归纳合并新发现到这里。
 
 ## 通用约定
 - 
@@ -532,15 +526,13 @@ onMounted(() => {
                   <span class="meta-sep">·</span>
                   <span class="subtitle">上次归纳: {{ formatTime(activeEntry.meta) }}</span>
                 </div>
-                <p v-else-if="activeEntry.kind === 'pref'" class="toolbar-desc">
-                  影响 user_agent 评判标准与 checklist 生成,注入其 system prompt
-                </p>
-                <p v-else class="toolbar-desc">
-                  跨项目通用经验,注入 user_agent(注入时截断 2000 字符)
-                </p>
+                <p v-if="actionError" class="action-error">{{ actionError }}</p>
               </div>
 
               <div class="toolbar-right">
+                <span class="char-count" :class="{ over: activeOverLimit }">
+                  {{ activeDraft.length }} / {{ activeLimit }}
+                </span>
                 <div class="mode-switch" role="group" aria-label="编辑/预览">
                   <button
                     :class="['mode-btn', { active: mode === 'edit' }]"
@@ -553,6 +545,23 @@ onMounted(() => {
                     @click="mode = 'preview'"
                   >预览</button>
                 </div>
+                <button
+                  v-if="activeEntry.kind === 'project'"
+                  class="btn btn-danger"
+                  :disabled="saving || deleting"
+                  @click="handleDelete"
+                >
+                  <span v-if="deleting" class="btn-spinner danger" />
+                  {{ deleting ? '删除中...' : '删除' }}
+                </button>
+                <button
+                  class="btn btn-primary"
+                  :disabled="!activeCanSave || saving || deleting || activeOverLimit"
+                  @click="handleSave"
+                >
+                  <span v-if="saving" class="btn-spinner" />
+                  {{ saving ? '保存中...' : (activeCanSave ? '保存' : '已保存') }}
+                </button>
               </div>
             </header>
 
@@ -589,34 +598,6 @@ onMounted(() => {
               </div>
             </div>
 
-            <!-- 底栏 -->
-            <footer class="editor-footer">
-              <div class="footer-left">
-                <span class="char-count" :class="{ over: activeOverLimit }">
-                  {{ activeDraft.length }} / {{ activeLimit }}
-                </span>
-                <span v-if="actionError" class="action-error">{{ actionError }}</span>
-              </div>
-              <div class="footer-right">
-                <button
-                  v-if="activeEntry.kind === 'project'"
-                  class="btn btn-danger"
-                  :disabled="saving || deleting"
-                  @click="handleDelete"
-                >
-                  <span v-if="deleting" class="btn-spinner danger" />
-                  {{ deleting ? '删除中...' : '删除' }}
-                </button>
-                <button
-                  class="btn btn-primary"
-                  :disabled="!activeCanSave || saving || deleting || activeOverLimit"
-                  @click="handleSave"
-                >
-                  <span v-if="saving" class="btn-spinner" />
-                  {{ saving ? '保存中...' : (activeCanSave ? '保存' : '已保存') }}
-                </button>
-              </div>
-            </footer>
           </template>
 
           <!-- 无选中文件兜底 -->
@@ -849,10 +830,10 @@ onMounted(() => {
 
 .editor-toolbar {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: var(--space-4);
-  padding: var(--space-4) var(--space-5);
+  padding: var(--space-3) var(--space-5);
   border-bottom: 1px solid var(--color-border);
   background: var(--color-surface);
 }
@@ -939,15 +920,12 @@ onMounted(() => {
   color: var(--color-text-muted);
 }
 
-.toolbar-desc {
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-  margin: 0;
-  line-height: var(--lh-relaxed);
-}
-
 .toolbar-right {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: nowrap;
 }
 
 /* 模式切换 */
@@ -1147,34 +1125,11 @@ onMounted(() => {
   margin: var(--space-4) 0;
 }
 
-/* 底栏 */
-.editor-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-5);
-  border-top: 1px solid var(--color-border);
-  background: var(--color-surface);
-}
-
-.footer-left {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  min-width: 0;
-}
-
-.footer-right {
-  display: flex;
-  gap: var(--space-2);
-  flex-shrink: 0;
-}
-
 .char-count {
   font-size: var(--fs-xs);
   font-family: var(--font-mono);
   color: var(--color-text-muted);
+  white-space: nowrap;
 }
 
 .char-count.over {
@@ -1185,6 +1140,7 @@ onMounted(() => {
 .action-error {
   font-size: var(--fs-xs);
   color: var(--color-danger);
+  margin: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
