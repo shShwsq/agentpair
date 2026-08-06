@@ -12,30 +12,14 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
-import AgentConfigDialog from '@/components/AgentConfigDialog.vue'
 import DeleteAccountDialog from '@/components/DeleteAccountDialog.vue'
 import GitHubDialog from '@/components/GitHubDialog.vue'
 import PasswordDialog from '@/components/PasswordDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import { changePassword, deleteAccount } from '@/api/auth'
-import {
-  deleteAgentConfig,
-  getAgentConfig,
-  getAgentConfigs,
-  getAgentTypes,
-  saveAgentConfig,
-  testAgentConfig,
-} from '@/api/agent_configs'
 import { getGitHubBindURL, getGitHubStatus, syncEmail, unbindGitHub } from '@/api/github'
 import type { GitHubStatus } from '@/types/github'
-import type {
-  AgentConfigDetailOut,
-  AgentConfigOut,
-  AgentTestResult,
-  AgentTypeMeta,
-  CredentialValue,
-} from '@/types/agent_configs'
 import { useAuthStore } from '@/stores/auth'
 import { extractErrorMessage } from '@/utils/error'
 
@@ -157,149 +141,10 @@ async function handleUnbind(): Promise<void> {
 }
 
 // ============================================================
-// 智能体 CLI 配置弹窗(动态多 agent)
-// ============================================================
-/** 所有已注册 agent 类型(后端动态返回,含凭据字段定义) */
-const agentTypes = ref<AgentTypeMeta[]>([])
-/** 当前用户已配置的 agent 列表(用于表格状态列) */
-const agentConfigs = ref<AgentConfigOut[]>([])
-/** agentTypes 是否仍在加载 */
-const agentTypesLoading = ref(true)
-
-const agentDialogOpen = ref(false)
-/** 当前弹窗对应的 agent 类型元数据 */
-const agentDialogMeta = ref<AgentTypeMeta | null>(null)
-/** 当前弹窗对应的 agent 配置详情(null=未配置或加载中) */
-const agentDialogDetail = ref<AgentConfigDetailOut | null>(null)
-/** 弹窗加载详情中(用于禁用表单) */
-const agentDialogLoading = ref(false)
-const agentSaving = ref(false)
-const agentError = ref('')
-/** 测试连接中(禁用测试按钮 + spinner) */
-const agentTesting = ref(false)
-/** 测试结果(null=未测试) */
-const agentTestResult = ref<AgentTestResult | null>(null)
-/** 当前测试阶段消息(流式) */
-const agentTestStage = ref('')
-/** 模型思考过程累积(流式) */
-const agentTestThinking = ref('')
-/** 模型回答累积(流式) */
-const agentTestContent = ref('')
-
-/** 按类型查找已配置项(用于表格状态展示) */
-function findConfig(agent_type: string): AgentConfigOut | null {
-  return agentConfigs.value.find((c) => c.agent_type === agent_type) ?? null
-}
-
-/** 刷新用户已配置的 agent 列表 */
-async function refreshAgentConfigs(): Promise<void> {
-  try {
-    const res = await getAgentConfigs()
-    agentConfigs.value = res.configs
-  } catch (err) {
-    console.warn('加载 agent 配置列表失败:', err)
-  }
-}
-
-async function openAgentDialog(meta: AgentTypeMeta): Promise<void> {
-  agentDialogMeta.value = meta
-  agentDialogDetail.value = null
-  agentDialogLoading.value = true
-  agentError.value = ''
-  agentTestResult.value = null
-  agentTestStage.value = ''
-  agentTestThinking.value = ''
-  agentTestContent.value = ''
-  agentDialogOpen.value = true
-  try {
-    agentDialogDetail.value = await getAgentConfig(meta.agent_type)
-  } catch (err) {
-    // 未配置时后端可能 404,静默处理:detail 保持 null(按未配置渲染)
-    console.warn('加载 agent 配置详情失败:', err)
-  } finally {
-    agentDialogLoading.value = false
-  }
-}
-
-async function handleAgentSave(credentials: CredentialValue[], is_active: boolean): Promise<void> {
-  const meta = agentDialogMeta.value
-  if (!meta) return
-  agentError.value = ''
-  agentSaving.value = true
-  try {
-    agentDialogDetail.value = await saveAgentConfig(meta.agent_type, { credentials, is_active })
-    await refreshAgentConfigs()
-    // 保存成功后不自动关闭弹窗,让用户可继续点「测试连接」验证
-    // 清空旧的测试结果与流式状态(凭证可能已变)
-    agentTestResult.value = null
-    agentTestStage.value = ''
-    agentTestThinking.value = ''
-    agentTestContent.value = ''
-    showToast(`${meta.display_name} 配置已保存`, 'success')
-  } catch (err) {
-    agentError.value = extractErrorMessage(err)
-  } finally {
-    agentSaving.value = false
-  }
-}
-
-async function handleAgentClear(): Promise<void> {
-  const meta = agentDialogMeta.value
-  if (!meta) return
-  agentError.value = ''
-  agentSaving.value = true
-  try {
-    await deleteAgentConfig(meta.agent_type)
-    await refreshAgentConfigs()
-    agentDialogDetail.value = null
-    agentTestResult.value = null
-    agentTestStage.value = ''
-    agentTestThinking.value = ''
-    agentTestContent.value = ''
-    agentDialogOpen.value = false
-    showToast(`${meta.display_name} 配置已清除`, 'success')
-  } catch (err) {
-    agentError.value = extractErrorMessage(err)
-  } finally {
-    agentSaving.value = false
-  }
-}
-
-async function handleAgentTest(): Promise<void> {
-  const meta = agentDialogMeta.value
-  if (!meta) return
-  agentError.value = ''
-  agentTesting.value = true
-  agentTestResult.value = null
-  agentTestStage.value = ''
-  agentTestThinking.value = ''
-  agentTestContent.value = ''
-  await testAgentConfig(meta.agent_type, {
-    onStage: (_stage, message) => {
-      agentTestStage.value = message
-    },
-    onThinking: (delta) => {
-      agentTestThinking.value += delta
-    },
-    onContent: (delta) => {
-      agentTestContent.value += delta
-    },
-    onDone: (ok, message) => {
-      agentTestResult.value = { ok, message }
-      agentTesting.value = false
-    },
-    onError: (message) => {
-      agentTestResult.value = { ok: false, message }
-      agentTesting.value = false
-    },
-  })
-}
-
-// ============================================================
 // 表格行
 // ============================================================
 interface SettingRow {
-  /** 行唯一 key:password/github/delete 固定;agent 行用 'agent:'+agent_type */
+  /** 行唯一 key:password/github/delete 固定 */
   key: string
   item: string
   desc: string
@@ -307,8 +152,6 @@ interface SettingRow {
   statusType: 'ok' | 'warn' | 'neutral' | 'danger'
   actionText: string
   loading?: boolean
-  /** 关联的 agent 类型元数据(仅 agent 行有),用于打开弹窗 */
-  agentMeta?: AgentTypeMeta
 }
 
 const rows = computed<SettingRow[]>(() => {
@@ -341,32 +184,6 @@ const rows = computed<SettingRow[]>(() => {
     },
   ]
 
-  // 动态 agent 行:遍历后端注册的 agent 类型,每种一行
-  const agentRows: SettingRow[] = agentTypes.value.map((meta) => {
-    const cfg = findConfig(meta.agent_type)
-    const configured = !!cfg && cfg.has_credentials
-    // agentTypes 未加载完时显示加载态
-    const loading = agentTypesLoading.value
-    return {
-      key: `agent:${meta.agent_type}`,
-      item: meta.display_name,
-      desc: meta.description,
-      status: loading
-        ? ''
-        : configured
-          ? '已设置'
-          : '未设置',
-      statusType: loading
-        ? 'neutral'
-        : configured
-          ? 'ok'
-          : 'warn',
-      actionText: configured ? '修改' : '设置',
-      loading,
-      agentMeta: meta,
-    }
-  })
-
   const tail: SettingRow[] = [
     {
       key: 'delete',
@@ -378,14 +195,13 @@ const rows = computed<SettingRow[]>(() => {
     },
   ]
 
-  return [...fixed, ...agentRows, ...tail]
+  return [...fixed, ...tail]
 })
 
 function openRow(row: SettingRow): void {
   if (row.key === 'password') openPasswordDialog()
   else if (row.key === 'github') openGitHubDialog()
   else if (row.key === 'delete') openDeleteDialog()
-  else if (row.agentMeta) openAgentDialog(row.agentMeta)
 }
 
 // ============================================================
@@ -448,8 +264,6 @@ async function handleSyncConfirm(): Promise<void> {
 onMounted(() => {
   // 预加载 GitHub 状态(用于表格状态列展示)
   refreshGitHubStatus()
-  // 并行加载 agent 类型列表 + 用户已配置列表
-  loadAgentTypesAndConfigs()
 
   // 检测 OAuthCallbackView 带来的邮箱不一致 query → 弹窗询问
   if (route.query.email_mismatch === '1') {
@@ -461,23 +275,6 @@ onMounted(() => {
     router.replace({ path: '/settings' })
   }
 })
-
-/** 并行加载 agent 类型与已配置列表(表格行状态依赖) */
-async function loadAgentTypesAndConfigs(): Promise<void> {
-  agentTypesLoading.value = true
-  try {
-    const [types, configs] = await Promise.all([
-      getAgentTypes(),
-      getAgentConfigs().catch(() => null), // 未登录或失败时静默,列表为空
-    ])
-    agentTypes.value = types
-    if (configs) agentConfigs.value = configs.configs
-  } catch (err) {
-    console.warn('加载 agent 类型失败:', err)
-  } finally {
-    agentTypesLoading.value = false
-  }
-}
 </script>
 
 <template>
@@ -495,6 +292,7 @@ async function loadAgentTypesAndConfigs(): Promise<void> {
         <RouterLink to="/">首页</RouterLink>
         <RouterLink to="/tasks/new">提交任务</RouterLink>
         <RouterLink to="/models">模型设置</RouterLink>
+        <RouterLink to="/cli">CLI 设置</RouterLink>
       </template>
     </AppHeader>
 
@@ -572,23 +370,6 @@ async function loadAgentTypesAndConfigs(): Promise<void> {
           @bind="handleBind"
           @unbind="handleUnbind"
           @cancel="ghDialogOpen = false"
-        />
-
-        <AgentConfigDialog
-          :open="agentDialogOpen"
-          :meta="agentDialogMeta"
-          :detail="agentDialogDetail"
-          :saving="agentSaving || agentDialogLoading"
-          :error="agentError"
-          :testing="agentTesting"
-          :test-result="agentTestResult"
-          :test-stage="agentTestStage"
-          :test-thinking="agentTestThinking"
-          :test-content="agentTestContent"
-          @save="handleAgentSave"
-          @clear="handleAgentClear"
-          @test="handleAgentTest"
-          @cancel="agentDialogOpen = false"
         />
 
         <DeleteAccountDialog

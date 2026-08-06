@@ -1,16 +1,21 @@
 <script setup lang="ts">
 /**
- * 智能体 CLI 配置 弹窗(动态表单)
+ * 智能体 CLI 配置 内联面板(动态表单)
  *
- * 复用 PasswordDialog / GitHubDialog 的视觉语言
- * (mask + card + header/body/footer,dialog-fade transition,Teleport to body)。
+ * 由 AgentConfigDialog 演化而来:去掉弹窗外壳(Teleport/mask/card/header/footer),
+ * 保留动态凭据字段渲染 + 校验 + 启用开关 + 测试连接(SSE 流式) + 保存/清除。
+ *
+ * 每个agent 类型在 CliSettingsView 中拥有独立 Panel 实例(v-show 切换),
+ * 因此草稿、滚动位置、进行中的测试流跨 tab 切换都会保留,互不串台。
  *
  * 根据 meta.credential_fields 动态渲染输入框:
  * - secret 类型:password 输入框 + 眼睛切换显隐,font-mono 便于核对 token
  * - text 类型:普通明文输入框
+ * - select 类型:下拉选择(如 provider_type)
  *
  * secret 字段已配置时占位提示「已设置,留空保留」;未配置时用字段定义的 placeholder。
- * 草稿在 open=true 时重置;保存/清除/测试由父组件调 API 持久化。
+ * 草稿在 detail 变化时重置(加载完成回显非 secret 字段、保存/清除后同步);
+ * 保存/清除/测试由父组件调 API 持久化。
  *
  * 测试连接:已配置凭据时显示「测试连接」按钮,父组件调
  * POST /agents/configs/{type}/test(SSE 流式)启动临时沙箱验证 PAT 有效性,
@@ -26,13 +31,11 @@ import type {
 } from '@/types/agent_configs'
 
 const props = defineProps<{
-  /** 是否显示 */
-  open: boolean
-  /** 类型元数据(含 credential_fields 定义),null 时弹窗不渲染表单 */
+  /** 类型元数据(含 credential_fields 定义),null 时面板不渲染表单 */
   meta: AgentTypeMeta | null
-  /** 当前配置状态(用于判断各字段是否已设置),null 表示加载中 */
+  /** 当前配置状态(用于判断各字段是否已设置),null 表示加载中或未配置 */
   detail: AgentConfigDetailOut | null
-  /** 提交中状态(禁用按钮 + spinner) */
+  /** 提交/加载中状态(禁用表单 + spinner) */
   saving: boolean
   /** 错误信息(父组件 API 失败时传入) */
   error?: string
@@ -51,7 +54,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'save', credentials: CredentialValue[], is_active: boolean): void
   (e: 'clear'): void
-  (e: 'cancel'): void
   /** 测试连接(父组件调 API,结果通过 testResult prop 回传) */
   (e: 'test'): void
 }>()
@@ -68,18 +70,18 @@ const draft = reactive<{
   is_active: true,
 })
 
-/** open 变 true 时重置草稿;detail 异步加载完后再初始化一次(回显非 secret 字段)
+/** detail 变化时重置草稿(加载完成回显非 secret 字段、保存/清除后同步)
  *
- * 监听 [open, detail]:
- * - open=true 时初始化(detail 此时可能为 null,用空值/default)
- * - detail 从 null 变成有值时(异步加载完成)重新初始化,回显已配置的非 secret 字段
- * 加载期间 saving=true(含 agentDialogLoading)使输入框 disabled,
+ * 监听 detail:
+ * - 面板首次挂载(detail 可能仍为 null)用空值/default 初始化
+ * - detail 从 null 变成有值(异步加载完成)重新初始化,回显已配置的非 secret 字段
+ * - detail 保存后更新 / 清除后变 null,同样重置
+ * 加载期间 saving=true(含 detailLoading)使输入框 disabled,
  * 用户无法在 detail 到达前输入,不会被覆盖。
  */
 watch(
-  () => [props.open, props.detail] as const,
-  ([isOpen]) => {
-    if (!isOpen) return
+  () => props.detail,
+  () => {
     const fields = props.meta?.credential_fields ?? []
     const values: Record<string, string> = {}
     const show: Record<string, boolean> = {}
@@ -108,10 +110,13 @@ watch(
   { immediate: true },
 )
 
-/** 是否已配置(决定 footer 按钮文案与是否显示「清除配置」) */
+/** 是否已配置(决定底部按钮文案与是否显示「清除配置」) */
 const hasCredentials = computed(
   () => !!props.detail && props.detail.has_credentials,
 )
+
+/** detail 仍未加载完(且无已配置信息):显示加载占位,避免空表单误导 */
+const isLoading = computed(() => props.saving && !props.detail)
 
 /** 指定字段是否已设置(用于 secret 字段的占位提示) */
 function isFieldSet(field: CredentialField): boolean {
@@ -163,12 +168,6 @@ function handleTest(): void {
   emit('test')
 }
 
-function handleCancel(): void {
-  // 提交中/测试中不允许取消
-  if (props.saving || props.testing) return
-  emit('cancel')
-}
-
 /** 流式日志容器 ref(测试中自动滚动到底部) */
 const streamLogRef = ref<HTMLElement | null>(null)
 
@@ -186,273 +185,231 @@ watch(
 </script>
 
 <template>
-  <Teleport to="body">
-    <Transition name="dialog-fade">
-      <div v-if="open && meta" class="dialog-mask" @click.self="handleCancel">
-        <div class="dialog-card" role="dialog" aria-modal="true">
-          <header class="dialog-header">
-            <h3>{{ meta.display_name }}</h3>
-            <button
-              class="dialog-close"
+  <div v-if="meta" class="agent-panel">
+    <!-- 加载占位:detail 未到达时避免空表单误导 -->
+    <div v-if="isLoading" class="panel-loading">
+      <div class="loading-spinner" />
+      <span>加载中...</span>
+    </div>
+
+    <template v-else>
+      <div class="panel-body">
+        <p class="dialog-tip">
+          {{ meta.description }}
+          <a
+            v-if="meta.help_url"
+            :href="meta.help_url"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="tip-link"
+          >获取帮助 →</a>
+        </p>
+
+        <!-- 当前状态 -->
+        <div :class="['status-row', hasCredentials ? 'status-ok' : 'status-warn']">
+          <span class="status-dot" />
+          <span class="status-text">
+            {{ hasCredentials ? '当前已配置凭据' : '尚未配置凭据' }}
+          </span>
+        </div>
+
+        <!-- 动态凭据字段 -->
+        <div
+          v-for="field in meta.credential_fields"
+          :key="field.key"
+          class="field"
+        >
+          <label :for="`agent-field-${field.key}`">
+            {{ field.label }}
+            <span v-if="field.required" class="required-mark">*</span>
+          </label>
+
+          <!-- secret 类型:password 输入 + 眼睛切换显隐 -->
+          <div v-if="field.type === 'secret'" class="input-wrapper">
+            <input
+              :id="`agent-field-${field.key}`"
+              v-model="draft.values[field.key]"
+              :type="draft.show[field.key] ? 'text' : 'password'"
+              autocomplete="off"
+              :placeholder="fieldPlaceholder(field)"
+              :class="{ invalid: fieldError(field) }"
               :disabled="saving"
-              aria-label="关闭"
-              @click="handleCancel"
-            >×</button>
-          </header>
-
-          <div class="dialog-body">
-            <p class="dialog-tip">
-              {{ meta.description }}
-              <a
-                v-if="meta.help_url"
-                :href="meta.help_url"
-                target="_blank"
-                rel="noopener noreferrer"
-                class="tip-link"
-              >获取帮助 →</a>
-            </p>
-
-            <!-- 当前状态 -->
-            <div :class="['status-row', hasCredentials ? 'status-ok' : 'status-warn']">
-              <span class="status-dot" />
-              <span class="status-text">
-                {{ hasCredentials ? '当前已配置凭据' : '尚未配置凭据' }}
-              </span>
-            </div>
-
-            <!-- 动态凭据字段 -->
-            <div
-              v-for="field in meta.credential_fields"
-              :key="field.key"
-              class="field"
+            />
+            <button
+              type="button"
+              class="toggle-pwd"
+              :aria-label="draft.show[field.key] ? '隐藏' : '显示'"
+              @click="draft.show[field.key] = !draft.show[field.key]"
             >
-              <label :for="`agent-field-${field.key}`">
-                {{ field.label }}
-                <span v-if="field.required" class="required-mark">*</span>
-              </label>
+              <svg v-if="!draft.show[field.key]" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+              <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                <line x1="1" y1="1" x2="23" y2="23" />
+              </svg>
+            </button>
+          </div>
 
-              <!-- secret 类型:password 输入 + 眼睛切换显隐 -->
-              <div v-if="field.type === 'secret'" class="input-wrapper">
-                <input
-                  :id="`agent-field-${field.key}`"
-                  v-model="draft.values[field.key]"
-                  :type="draft.show[field.key] ? 'text' : 'password'"
-                  autocomplete="off"
-                  :placeholder="fieldPlaceholder(field)"
-                  :class="{ invalid: fieldError(field) }"
-                  :disabled="saving"
-                />
-                <button
-                  type="button"
-                  class="toggle-pwd"
-                  :aria-label="draft.show[field.key] ? '隐藏' : '显示'"
-                  @click="draft.show[field.key] = !draft.show[field.key]"
-                >
-                  <svg v-if="!draft.show[field.key]" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                    <circle cx="12" cy="12" r="3" />
-                  </svg>
-                  <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
-                    <line x1="1" y1="1" x2="23" y2="23" />
-                  </svg>
-                </button>
-              </div>
+          <!-- text 类型:普通明文输入 -->
+          <input
+            v-else-if="field.type === 'text'"
+            :id="`agent-field-${field.key}`"
+            v-model="draft.values[field.key]"
+            type="text"
+            autocomplete="off"
+            :placeholder="fieldPlaceholder(field)"
+            :class="{ invalid: fieldError(field) }"
+            :disabled="saving"
+          />
 
-              <!-- text 类型:普通明文输入 -->
-              <input
-                v-else-if="field.type === 'text'"
-                :id="`agent-field-${field.key}`"
-                v-model="draft.values[field.key]"
-                type="text"
-                autocomplete="off"
-                :placeholder="fieldPlaceholder(field)"
-                :class="{ invalid: fieldError(field) }"
-                :disabled="saving"
-              />
+          <!-- select 类型:下拉选择(如 provider_type) -->
+          <select
+            v-else-if="field.type === 'select'"
+            :id="`agent-field-${field.key}`"
+            v-model="draft.values[field.key]"
+            :class="{ invalid: fieldError(field) }"
+            :disabled="saving"
+          >
+            <option
+              v-for="opt in field.options"
+              :key="opt.value"
+              :value="opt.value"
+            >
+              {{ opt.label }}
+            </option>
+          </select>
 
-              <!-- select 类型:下拉选择(如 provider_type) -->
-              <select
-                v-else-if="field.type === 'select'"
-                :id="`agent-field-${field.key}`"
-                v-model="draft.values[field.key]"
-                :class="{ invalid: fieldError(field) }"
-                :disabled="saving"
-              >
-                <option
-                  v-for="opt in field.options"
-                  :key="opt.value"
-                  :value="opt.value"
-                >
-                  {{ opt.label }}
-                </option>
-              </select>
+          <span v-if="field.help_text" class="field-help">{{ field.help_text }}</span>
+          <a
+            v-if="field.help_url"
+            :href="field.help_url"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="field-help-link"
+          >如何获取? →</a>
+          <span v-if="fieldError(field)" class="field-error">{{ fieldError(field) }}</span>
+        </div>
 
-              <span v-if="field.help_text" class="field-help">{{ field.help_text }}</span>
-              <a
-                v-if="field.help_url"
-                :href="field.help_url"
-                target="_blank"
-                rel="noopener noreferrer"
-                class="field-help-link"
-              >如何获取? →</a>
-              <span v-if="fieldError(field)" class="field-error">{{ fieldError(field) }}</span>
+        <!-- 启用开关 -->
+        <label class="active-toggle">
+          <input
+            v-model="draft.is_active"
+            type="checkbox"
+            :disabled="saving || testing"
+          />
+          <span>启用此执行器(任务提交页可选)</span>
+        </label>
+
+        <!-- 测试连接结果区(已配置凭据时显示) -->
+        <div v-if="hasCredentials" class="test-section">
+          <button
+            class="btn btn-test"
+            :disabled="saving || testing"
+            @click="handleTest"
+          >
+            <span v-if="testing" class="btn-spinner test-spinner" />
+            {{ testing ? '测试中...' : '测试连接' }}
+          </button>
+
+          <!-- 流式进度(测试中显示):阶段 + 思考 + 回答 -->
+          <div
+            v-if="testing && (testStage || testThinking || testContent)"
+            ref="streamLogRef"
+            class="test-stream"
+          >
+            <!-- 当前阶段 -->
+            <div v-if="testStage" class="stream-stage">
+              <span class="stage-dot" />
+              <span class="stage-text">{{ testStage }}</span>
             </div>
-
-            <!-- 启用开关 -->
-            <label class="active-toggle">
-              <input
-                v-model="draft.is_active"
-                type="checkbox"
-                :disabled="saving || testing"
-              />
-              <span>启用此执行器(任务提交页可选)</span>
-            </label>
-
-            <!-- 测试连接结果区(已配置凭据时显示) -->
-            <div v-if="hasCredentials" class="test-section">
-              <button
-                class="btn btn-test"
-                :disabled="saving || testing"
-                @click="handleTest"
-              >
-                <span v-if="testing" class="btn-spinner test-spinner" />
-                {{ testing ? '测试中...' : '测试连接' }}
-              </button>
-
-              <!-- 流式进度(测试中显示):阶段 + 思考 + 回答 -->
-              <div
-                v-if="testing && (testStage || testThinking || testContent)"
-                ref="streamLogRef"
-                class="test-stream"
-              >
-                <!-- 当前阶段 -->
-                <div v-if="testStage" class="stream-stage">
-                  <span class="stage-dot" />
-                  <span class="stage-text">{{ testStage }}</span>
-                </div>
-                <!-- 模型思考 -->
-                <div v-if="testThinking" class="stream-block stream-thinking">
-                  <div class="stream-label">思考</div>
-                  <div class="stream-body">{{ testThinking }}</div>
-                </div>
-                <!-- 模型回答 -->
-                <div v-if="testContent" class="stream-block stream-content">
-                  <div class="stream-label">回答</div>
-                  <div class="stream-body">{{ testContent }}</div>
-                </div>
-              </div>
-
-              <!-- 测试结果 -->
-              <div
-                v-if="testResult"
-                :class="['test-result', testResult.ok ? 'test-ok' : 'test-fail']"
-              >
-                <span class="test-icon">{{ testResult.ok ? '✓' : '✗' }}</span>
-                <span class="test-message">{{ testResult.message }}</span>
-              </div>
+            <!-- 模型思考 -->
+            <div v-if="testThinking" class="stream-block stream-thinking">
+              <div class="stream-label">思考</div>
+              <div class="stream-body">{{ testThinking }}</div>
+            </div>
+            <!-- 模型回答 -->
+            <div v-if="testContent" class="stream-block stream-content">
+              <div class="stream-label">回答</div>
+              <div class="stream-body">{{ testContent }}</div>
             </div>
           </div>
 
-          <footer class="dialog-footer">
-            <span v-if="error" class="validation-error">{{ error }}</span>
-            <span v-else></span>
-            <div class="footer-actions">
-              <!-- 已配置时显示「清除配置」按钮 -->
-              <button
-                v-if="hasCredentials"
-                class="btn btn-danger"
-                :disabled="saving || testing"
-                @click="handleClear"
-              >
-                <span v-if="saving" class="btn-spinner danger" />
-                清除配置
-              </button>
-              <button
-                class="btn btn-secondary"
-                :disabled="saving || testing"
-                @click="handleCancel"
-              >{{ hasCredentials ? '关闭' : '取消' }}</button>
-              <button
-                class="btn btn-primary"
-                :disabled="!canSubmit || testing"
-                @click="handleSubmit"
-              >
-                <span v-if="saving" class="btn-spinner" />
-                {{ saving ? '处理中...' : (hasCredentials ? '更新' : '保存') }}
-              </button>
-            </div>
-          </footer>
+          <!-- 测试结果 -->
+          <div
+            v-if="testResult"
+            :class="['test-result', testResult.ok ? 'test-ok' : 'test-fail']"
+          >
+            <span class="test-icon">{{ testResult.ok ? '✓' : '✗' }}</span>
+            <span class="test-message">{{ testResult.message }}</span>
+          </div>
         </div>
       </div>
-    </Transition>
-  </Teleport>
+
+      <footer class="panel-footer">
+        <span v-if="error" class="validation-error">{{ error }}</span>
+        <span v-else></span>
+        <div class="footer-actions">
+          <!-- 已配置时显示「清除配置」按钮 -->
+          <button
+            v-if="hasCredentials"
+            class="btn btn-danger"
+            :disabled="saving || testing"
+            @click="handleClear"
+          >
+            <span v-if="saving" class="btn-spinner danger" />
+            清除配置
+          </button>
+          <button
+            class="btn btn-primary"
+            :disabled="!canSubmit || testing"
+            @click="handleSubmit"
+          >
+            <span v-if="saving" class="btn-spinner" />
+            {{ saving ? '处理中...' : (hasCredentials ? '更新' : '保存') }}
+          </button>
+        </div>
+      </footer>
+    </template>
+  </div>
 </template>
 
 <style scoped>
-.dialog-mask {
-  position: fixed;
-  inset: 0;
-  background: rgba(15, 23, 42, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-  padding: var(--space-4);
-}
-
-.dialog-card {
+.agent-panel {
   background: var(--color-surface);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-xl);
-  width: 100%;
-  max-width: 460px;
-  max-height: 90vh;
+  box-shadow: var(--shadow-sm);
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
-.dialog-header {
+/* ---- 加载占位 ---- */
+.panel-loading {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: space-between;
-  padding: var(--space-4) var(--space-5);
-  border-bottom: 1px solid var(--color-border);
+  gap: var(--space-3);
+  padding: var(--space-16);
+  color: var(--color-text-secondary);
 }
 
-.dialog-header h3 {
-  font-size: var(--fs-lg);
-  font-weight: var(--fw-semibold);
-  margin: 0;
-  color: var(--color-text);
+.loading-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: panel-spin 0.8s linear infinite;
 }
 
-.dialog-close {
-  background: none;
-  border: none;
-  font-size: 24px;
-  line-height: 1;
-  color: var(--color-text-muted);
-  cursor: pointer;
-  padding: 4px 8px;
-  border-radius: var(--radius-sm);
-  transition: all var(--transition-fast);
+@keyframes panel-spin {
+  to { transform: rotate(360deg); }
 }
 
-.dialog-close:hover:not(:disabled) {
-  background: var(--color-surface-alt);
-  color: var(--color-text);
-}
-
-.dialog-close:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.dialog-body {
-  flex: 1;
-  overflow-y: auto;
+.panel-body {
   padding: var(--space-5);
 }
 
@@ -643,7 +600,7 @@ watch(
 }
 
 /* ---- footer ---- */
-.dialog-footer {
+.panel-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -823,17 +780,6 @@ watch(
   background: var(--color-primary-hover);
 }
 
-.btn-secondary {
-  background: var(--color-surface);
-  color: var(--color-text-secondary);
-  border-color: var(--color-border);
-}
-
-.btn-secondary:hover:not(:disabled) {
-  border-color: var(--color-border-strong);
-  color: var(--color-text);
-}
-
 .btn-danger {
   background: transparent;
   color: var(--color-danger);
@@ -861,16 +807,5 @@ watch(
 
 @keyframes btn-spin {
   to { transform: rotate(360deg); }
-}
-
-/* 弹窗淡入淡出 */
-.dialog-fade-enter-active,
-.dialog-fade-leave-active {
-  transition: opacity 0.2s ease;
-}
-
-.dialog-fade-enter-from,
-.dialog-fade-leave-to {
-  opacity: 0;
 }
 </style>

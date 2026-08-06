@@ -80,10 +80,14 @@ export interface AgentTestStreamCallbacks {
  * 必须先保存配置才能测试(测试用的是已加密存储的凭证)。
  *
  * 调用方应在调用前设置 loading,onDone/onError 后清除 loading。
+ *
+ * 可选 signal:离开页面或切换 agent 时调用方传入 AbortSignal 中止流,
+ * 避免后端沙箱继续空跑;中止后 fetch 抛 AbortError,此处静默忽略(不触发 onError)。
  */
 export async function testAgentConfig(
   agent_type: string,
   callbacks: AgentTestStreamCallbacks,
+  signal?: AbortSignal,
 ): Promise<void> {
   const token = getAccessToken()
   const headers: Record<string, string> = {
@@ -98,8 +102,11 @@ export async function testAgentConfig(
       method: 'POST',
       headers,
       body: null,
+      signal,
     })
   } catch (err) {
+    // 主动中止不视为错误,静默忽略(不触发 onError 回调,避免覆盖已被调用方清理的状态)
+    if (signal?.aborted) return
     callbacks.onError?.(`网络请求失败: ${err instanceof Error ? err.message : String(err)}`)
     return
   }
@@ -151,6 +158,8 @@ export async function testAgentConfig(
       parseAndDispatchSse(buffer, callbacks)
     }
   } catch (err) {
+    // 主动中止静默忽略(同上,不触发 onError)
+    if (signal?.aborted) return
     callbacks.onError?.(`流式读取失败: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
