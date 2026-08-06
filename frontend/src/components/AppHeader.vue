@@ -2,11 +2,14 @@
 /**
  * 应用顶栏(登录后的页面共用)
  *
- * 左侧品牌 + 导航(首页/提交任务/模型设置/CLI 设置/记忆),右侧用户信息 + 齿轮(账号设置)+ 登出。
- * 通过 slot 支持页面自定义导航项。
+ * 左侧品牌 + 导航(首页/提交任务/模型设置/CLI 设置/记忆管理),右侧用户信息 + 齿轮(账号设置)+ 登出。
+ *
+ * 导航为 slot 的默认内容:所有界面默认显示这 5 项,无需每个视图重复声明;
+ * 当前页高亮依赖 Vue Router 自动添加的 router-link-exact-active。
+ * 个别视图若需自定义导航,仍可用 <template #nav> 覆盖默认内容。
  *
  * 硬约束:账号设置(/settings)只由齿轮按钮进入,不入主导航。
- * 记忆管理(/memory)已提升为主导航项,与模型设置/CLI 设置并列。
+ * 记忆管理(/memory)作为主导航项,与模型设置/CLI 设置并列。
  */
 import { useRouter } from 'vue-router'
 
@@ -35,7 +38,13 @@ function handleLogout(): void {
           <span>AgentPair</span>
         </RouterLink>
         <nav class="nav">
-          <slot name="nav" />
+          <slot name="nav">
+            <RouterLink to="/">首页</RouterLink>
+            <RouterLink to="/tasks/new">提交任务</RouterLink>
+            <RouterLink to="/models">模型设置</RouterLink>
+            <RouterLink to="/cli">CLI 设置</RouterLink>
+            <RouterLink to="/memory">记忆管理</RouterLink>
+          </slot>
         </nav>
       </div>
       <!-- 右侧前置区(如右侧栏开关按钮);空 slot 时该 div 的 margin-left:auto 仍把用户区钉到右侧 -->
@@ -170,6 +179,7 @@ function handleLogout(): void {
 }
 
 /* 导航项(slot 里的 RouterLink/a):去掉强填充,用文字色 + 极细下划线指示当前页 */
+/* 高亮依赖 Vue Router 自动添加的 router-link-exact-active(精确匹配,避免 / 在子路由也高亮) */
 :deep(.nav a) {
   position: relative;
   padding: var(--space-2) var(--space-3);
@@ -186,13 +196,13 @@ function handleLogout(): void {
   background: var(--color-surface-alt);
 }
 
-:deep(.nav a.router-link-active) {
+:deep(.nav a.router-link-exact-active) {
   color: var(--color-primary);
   background: transparent;
   font-weight: var(--fw-semibold);
 }
 
-:deep(.nav a.router-link-active)::after {
+:deep(.nav a.router-link-exact-active)::after {
   content: '';
   position: absolute;
   left: var(--space-3);
