@@ -182,6 +182,89 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
         "executor_module": "app.agents.qoder_cli_agent",
         "executor_func": "run_qoder_cli_agent",
     },
+    "hermes_cli": {
+        "display_name": "Hermes CLI",
+        "description": (
+            "沙箱内运行 Hermes CLI(开源 https://github.com/NousResearch/hermes-agent),"
+            "通过 ACP 协议通信,支持多种 LLM 供应商(OpenRouter/Anthropic/OpenAI/GLM/Kimi/MiniMax/Gemini)"
+        ),
+        "credential_fields": [
+            {
+                "key": "provider",
+                "label": "LLM 供应商",
+                "type": CREDENTIAL_FIELD_SELECT,
+                "required": True,
+                "options": [
+                    {"value": "openrouter", "label": "OpenRouter(推荐,支持多模型聚合)"},
+                    {"value": "anthropic", "label": "Anthropic(Claude 直连)"},
+                    {"value": "openai", "label": "OpenAI(GPT 系列直连)"},
+                    {"value": "zai", "label": "z.ai / ZhipuAI(GLM 系列)"},
+                    {"value": "kimi-coding", "label": "Kimi / Moonshot(Kimi K2.5 等)"},
+                    {"value": "minimax", "label": "MiniMax(MiniMax-M2 等)"},
+                    {"value": "gemini", "label": "Google AI Studio / Gemini"},
+                ],
+                "default": "openrouter",
+                "help_text": (
+                    "选择 LLM 供应商。API Key 的环境变量名和默认模型因供应商而异,"
+                    "详见各供应商的 API Key 获取页面"
+                ),
+            },
+            {
+                "key": "api_key",
+                "label": "API Key",
+                "type": CREDENTIAL_FIELD_SECRET,
+                "required": True,
+                "placeholder": "粘贴你的 LLM API Key",
+                "help_url": "https://openrouter.ai/keys",
+                "help_text": (
+                    "所选供应商的 API Key。OpenRouter 在 openrouter.ai/keys 获取;"
+                    "其他供应商请到对应控制台获取"
+                ),
+            },
+            {
+                "key": "base_url",
+                "label": "API Base URL(可选)",
+                "type": CREDENTIAL_FIELD_TEXT,
+                "required": False,
+                "placeholder": "留空用供应商默认;自部署填你的端点",
+                "help_text": (
+                    "自定义 API 基址。留空时使用供应商官方端点;"
+                    "自部署/代理端点填完整 URL(如 https://api.example.com/v1)"
+                ),
+            },
+            {
+                "key": "model",
+                "label": "模型名(可选)",
+                "type": CREDENTIAL_FIELD_TEXT,
+                "required": False,
+                "placeholder": "留空用供应商默认模型",
+                "help_text": (
+                    "模型 ID。OpenRouter 用 provider/model 格式(如 anthropic/claude-opus-4.6);"
+                    "其他供应商用模型原名(如 gpt-4o / glm-4-plus / kimi-k2.5)"
+                ),
+            },
+        ],
+        "sandbox": {
+            # hermes CLI 可执行文件名(沙箱内 PATH 查找或绝对路径)
+            "bin_config_key": "HERMES_CLI_BIN",
+            "bin_default": "hermes",
+            # 安装命令(沙箱内未检测到 hermes 时执行)
+            # 前提:沙箱镜像已装 Python 3.10+ 和 pip
+            "install_cmd_config_key": "HERMES_CLI_INSTALL_CMD",
+            "install_cmd_default": "pip install hermes-agent",
+            # ACP 启动参数:hermes 用 `hermes acp` 子命令(非 --acp 标志)
+            "acp_args": ["acp"],
+            # Hermes ACP 模式不支持 --model / --reasoning-effort 等 CLI 参数
+            # 模型经 ~/.hermes/config.yaml 配置(由 pre_bridge_hook 写入)
+            "inject_cli_model_args": False,
+            # credential_env 为空:Hermes 按 provider 读取不同的 API Key 环境变量名
+            # (如 OPENROUTER_API_KEY / ANTHROPIC_API_KEY),无法静态映射,
+            # 由 hermes_cli_agent._hermes_credential_env_builder 动态构建
+            "credential_env": {},
+        },
+        "executor_module": "app.agents.hermes_cli_agent",
+        "executor_func": "run_hermes_cli_agent",
+    },
 }
 
 

@@ -99,5 +99,12 @@ class Settings(BaseSettings):
     # 推荐在镜像中预装 kimi,避免每次任务都拉 npm 包
     KIMI_CLI_INSTALL_CMD: str = "npm install -g @moonshot-ai/kimi-code"
 
+    # Hermes CLI 配置(hermes_cli executor 用,开源 https://github.com/NousResearch/hermes-agent)
+    # hermes 可执行文件名/路径(沙箱内 PATH 查找或绝对路径)
+    HERMES_CLI_BIN: str = "hermes"
+    # hermes 安装命令(沙箱内未检测到 hermes 时执行,需沙箱镜像有 Python 3.10+ 和 pip)
+    # 推荐在镜像中预装 hermes,避免每次任务都拉 pip 包(依赖较多)
+    HERMES_CLI_INSTALL_CMD: str = "pip install hermes-agent"
+
 
 settings = Settings()

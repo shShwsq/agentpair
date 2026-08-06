@@ -1363,16 +1363,29 @@ def run_acp_agent(
     agent_type: str = "",
     *,
     post_session_setup: Callable[[ACPClient, str, Task], None] | None = None,
+    credential_env_builder: Callable[[dict[str, str]], dict[str, str]] | None = None,
+    pre_bridge_hook: Callable[[Any, dict[str, str], str], None] | None = None,
 ) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
     """跑一轮 ACP CLI 执行器(通用流程)
 
     与 run_react_agent 签名对齐(不含 client 参数,外部 CLI 自带模型配置)。
-    agent_type 决定使用哪个 CLI(qoder_cli / qoder_cli_cn / kimi_cli)。
+    agent_type 决定使用哪个 CLI(qoder_cli / qoder_cli_cn / kimi_cli / hermes_cli)。
 
     post_session_setup: session/new 之后、prompt 之前执行的回调
         (client, session_id, task) -> None。
         kimi 用此回调调 set_config_option 设置 yolo 模式 / 模型 / 思考强度;
         qoder 不需要(启动参数已含 --yolo)。
+
+    credential_env_builder: 动态构建凭证环境变量的回调
+        (credentials: dict[str, str]) -> dict[str, str]。
+        若提供,替代默认的 _build_credential_envs 静态映射。
+        hermes 用此回调按 provider 选择动态映射 API key 环境变量名
+        (如 OPENROUTER_API_KEY / ANTHROPIC_API_KEY 等)。
+
+    pre_bridge_hook: bridge 启动前的沙箱准备回调
+        (session, credentials, agent_type) -> None。
+        在 _ensure_cli_env 之后、_start_acp_bridge 之前执行,
+        用于向沙箱写入 CLI 需要的配置文件(如 ~/.hermes/config.yaml)。
 
     返回:(results, summary, final_plan)
         results: 始终为空 list(结构化结果由 user_agent 在 done 时提取)
@@ -1395,7 +1408,11 @@ def run_acp_agent(
 
     # ---- 加载凭证 + 映射为环境变量 ----
     credentials = _load_credentials(db, task.user_id, agent_type)
-    credential_envs = _build_credential_envs(credentials, agent_type)
+    if credential_env_builder:
+        # 动态构建(如 hermes 按 provider 选择映射不同的 API key 环境变量名)
+        credential_envs = credential_env_builder(credentials)
+    else:
+        credential_envs = _build_credential_envs(credentials, agent_type)
     if not credential_envs:
         raise RuntimeError("凭证映射为空,无法注入环境变量(请检查 registry 配置)")
 
@@ -1406,6 +1423,11 @@ def run_acp_agent(
 
     # ---- 准备 CLI 环境 ----
     _ensure_cli_env(session, agent_type)
+
+    # ---- wrapper 层钩子:bridge 启动前的沙箱文件准备 ----
+    # hermes 用此回调写入 ~/.hermes/config.yaml(模型/provider/base_url 配置)
+    if pre_bridge_hook:
+        pre_bridge_hook(session, credentials, agent_type)
 
     # ---- 启动 ACP bridge ----
     bridge_exec_id = _start_acp_bridge(session, credential_envs, task, agent_type=agent_type)
@@ -1520,6 +1542,8 @@ def test_credential_streaming(
     *,
     post_session_setup: Callable[[ACPClient, str, Task | None], None] | None = None,
     test_acp_args: list[str] | None = None,
+    credential_env_builder: Callable[[dict[str, str]], dict[str, str]] | None = None,
+    pre_bridge_hook: Callable[[Any, dict[str, str], str], None] | None = None,
 ) -> Generator[dict, None, None]:
     """流式版测试凭证:yield SSE 事件 dict(供路由层格式化为 SSE)
 
@@ -1535,6 +1559,8 @@ def test_credential_streaming(
 
     post_session_setup: 测试场景的 session/new 后回调(kimi 用此设置 yolo 模式)
     test_acp_args: 测试时额外的 CLI 参数(qoder 用 ["--model","Qwen3.6-Flash",...])
+    credential_env_builder: 动态构建凭证环境变量的回调(hermes 用此按 provider 映射)
+    pre_bridge_hook: bridge 启动前的沙箱准备回调(hermes 用此写 ~/.hermes/config.yaml)
 
     done/error 为终止事件,生成器在此后结束。
     """
@@ -1551,7 +1577,10 @@ def test_credential_streaming(
         yield done(False, f"凭证加载失败: {e}")
         return
 
-    credential_envs = _build_credential_envs(credentials, agent_type)
+    if credential_env_builder:
+        credential_envs = credential_env_builder(credentials)
+    else:
+        credential_envs = _build_credential_envs(credentials, agent_type)
     if not credential_envs:
         yield done(False, "凭证映射为空(请检查 registry 配置)")
         return
@@ -1579,7 +1608,16 @@ def test_credential_streaming(
             return
 
         # 清理可能残留的旧登录态
-        session.run_command("rm -rf ~/.qoder ~/.qoder-cn ~/.kimi-code 2>/dev/null", timeout=5)
+        session.run_command("rm -rf ~/.qoder ~/.qoder-cn ~/.kimi-code ~/.hermes 2>/dev/null", timeout=5)
+
+        # ---- wrapper 层钩子:bridge 启动前的沙箱文件准备 ----
+        # hermes 用此回调写入 ~/.hermes/config.yaml(模型/provider/base_url 配置)
+        if pre_bridge_hook:
+            try:
+                pre_bridge_hook(session, credentials, agent_type)
+            except Exception as e:
+                yield done(False, f"沙箱配置文件准备失败: {e}")
+                return
 
         # ---- 启动 ACP bridge ----
         yield stage("bridge_start", "启动 ACP bridge(注入凭证,等待就绪)...")
