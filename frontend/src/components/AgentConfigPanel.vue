@@ -387,13 +387,8 @@ watch(
 
 <style scoped>
 .agent-panel {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-sm);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
 }
 
 /* ---- 加载占位 ---- */
@@ -420,7 +415,7 @@ watch(
 }
 
 .panel-body {
-  padding: var(--space-4);
+  padding: 0;
 }
 
 /* ---- 顶部操作栏:状态 + 测试连接按钮 ---- */
@@ -635,7 +630,7 @@ watch(
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-3) 0;
   border-top: 1px solid var(--color-border);
 }
 
