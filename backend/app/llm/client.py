@@ -283,6 +283,10 @@ class LLMClient:
         # 流式调用,SDK 返回迭代器
         stream = self.client.chat.completions.create(**kwargs)
 
+        # 流式拆分 <think>...</think>:某些端点把思考内嵌在 content 里,
+        # 拆分后标签内 → reasoning,标签外 → content(无标签时原样输出,无副作用)
+        splitter = _ThinkTagSplitter()
+
         for chunk in stream:
             if not chunk.choices:
                 continue
@@ -304,6 +308,16 @@ class LLMClient:
 
             content_delta = delta.content or ""
 
+            # 流式拆分 <think>...</think>(跨 chunk 标签边界由 splitter 处理)
+            split_reasoning = ""
+            split_content = ""
+            for r, c in splitter.feed(content_delta):
+                split_reasoning += r
+                split_content += c
+            if split_reasoning:
+                reasoning_delta = (reasoning_delta or "") + split_reasoning
+            content_delta = split_content
+
             # 工具调用增量(可能同时有多个 tool_call 并行)
             tool_call_deltas: list[ToolCallDelta] = []
             if delta.tool_calls:
@@ -315,14 +329,26 @@ class LLMClient:
                         arguments_fragment=tc.function.arguments if tc.function and tc.function.arguments else "",
                     ))
 
-            # 跳过完全空的 chunk(SSE keep-alive 等)
+            # finish_reason 时先 flush 拆分器剩余 buffer(未闭合 <think> 等)
+            flush_pairs: list[tuple[str, str]] = []
+            if choice.finish_reason:
+                flush_pairs = splitter.flush()
+
+            # 跳过完全空的 chunk(SSE keep-alive 等;有 flush 内容时不跳过)
             if (
                 not reasoning_delta
                 and not content_delta
                 and not tool_call_deltas
                 and not choice.finish_reason
+                and not flush_pairs
             ):
                 continue
+
+            # 先输出 flush 的内容(在 finish_reason chunk 之前,避免调用方
+            # 遇 finish_reason 即 break 时丢失剩余 buffer)
+            for r, c in flush_pairs:
+                if r or c:
+                    yield StreamChunk(reasoning_delta=r, content_delta=c)
 
             yield StreamChunk(
                 reasoning_delta=reasoning_delta,
@@ -330,6 +356,11 @@ class LLMClient:
                 tool_call_deltas=tool_call_deltas or None,
                 finish_reason=choice.finish_reason,
             )
+
+        # 流自然结束(无 finish_reason 或调用方未 break)兜底 flush
+        for r, c in splitter.flush():
+            if r or c:
+                yield StreamChunk(reasoning_delta=r, content_delta=c)
 
     def test(self, prompt: str = "你好,请用一句话介绍一下你自己。") -> dict[str, Any]:
         """测试 LLM 连通性并收集完整回复
@@ -436,6 +467,78 @@ class ToolCallDelta:
             f"ToolCallDelta(index={self.index}, id={self.id!r}, "
             f"name={self.name!r}, args_len={len(self.arguments_fragment)})"
         )
+
+
+class _ThinkTagSplitter:
+    """流式拆分 <think>...</think> 标签,将标签内文本重定向为 reasoning。
+
+    适用场景:某些模型/端点(DeepSeek-R1 开源版、MiniMax 未配 reasoning_split、
+    第三方代理)把思考内嵌在 content 里用 <think> 标签包裹,而非走
+    reasoning_content 字段。拆分后标签内 → reasoning_delta,标签外 → content_delta,
+    让思考链正确走思考流而非混入正式回复。content 中无 <think> 时原样输出,无副作用。
+
+    跨 chunk 边界处理:当 buffer 尾部可能是标签前缀时(如 "<thi" 是 "<think>" 的前缀),
+    保留不输出,等后续 chunk 拼接确认。未闭合的 <think> 在 flush 时按当前状态输出。
+    """
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+
+    def __init__(self) -> None:
+        self._in_thinking = False
+        self._buffer = ""
+
+    def feed(self, text: str) -> list[tuple[str, str]]:
+        """喂入增量文本,返回 [(reasoning_delta, content_delta), ...] 列表。
+
+        一段文本内可能多次开关标签,故可能产出多对增量。
+        返回空列表表示整个 buffer 都是未确定的标签前缀,调用方应等待后续输入。
+        """
+        if not text:
+            return []
+        self._buffer += text
+        out: list[tuple[str, str]] = []
+        while self._buffer:
+            tag = self._CLOSE if self._in_thinking else self._OPEN
+            idx = self._buffer.find(tag)
+            if idx == -1:
+                # 未找到完整标签:输出肯定安全的前缀,保留可能是标签前缀的尾部
+                safe = self._safe_prefix(self._buffer, tag)
+                if safe:
+                    out.append((safe, "") if self._in_thinking else ("", safe))
+                    self._buffer = self._buffer[len(safe):]
+                    if not self._buffer:
+                        break
+                else:
+                    # 整个 buffer 都是标签前缀,等待更多输入
+                    break
+            else:
+                # 找到标签:输出标签前的内容,跳过标签,切换状态
+                if idx > 0:
+                    out.append((self._buffer[:idx], "") if self._in_thinking else ("", self._buffer[:idx]))
+                self._buffer = self._buffer[idx + len(tag):]
+                self._in_thinking = not self._in_thinking
+        return out
+
+    def flush(self) -> list[tuple[str, str]]:
+        """流结束时调用,输出剩余 buffer(未闭合 <think> 按当前状态输出)。"""
+        if not self._buffer:
+            return []
+        out = self._buffer
+        self._buffer = ""
+        return [(out, "")] if self._in_thinking else [("", out)]
+
+    @staticmethod
+    def _safe_prefix(buffer: str, tag: str) -> str:
+        """返回 buffer 中肯定不属于 tag 前缀的安全部分(保留尾部可能是前缀的部分)。
+
+        例如 buffer="abc<thi", tag="<think>" → 返回 "abc",保留 "<thi" 等待确认。
+        """
+        max_overlap = min(len(buffer), len(tag) - 1)
+        for i in range(max_overlap, 0, -1):
+            if buffer[-i:] == tag[:i]:
+                return buffer[:-i]
+        return buffer
 
 
 class StreamChunk:

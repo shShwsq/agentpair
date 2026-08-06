@@ -1737,11 +1737,29 @@ def test_credential_streaming(
                     yield done(False, f"模型响应测试失败: {err_msg}")
                 return
 
-            reply = "".join(content_full).strip()
             # MiniMax 等厂商 thinking=only 时,模型回复全部在 reasoning_content,
             # 不会发 agent_message_chunk。此时把 thinking 内容作为回复返回,
             # 让前端能看到模型实际输出,而不是误报"模型未响应"。
             reply_source = "content"
+
+            # 自动拆分 <think>...</think>:某些模型/端点(Kimi CLI openai provider
+            # 转发的 MiniMax、DeepSeek-R1 开源版等)把思考内嵌在 content 里,
+            # 而非 reasoning_content 字段。Kimi CLI 不解析该标签,原样转发为
+            # agent_message_chunk。这里在最终回复里拆分:标签内 → reasoning,
+            # 标签外 → content,让前端看到干净的回复而非带标签的原文。
+            content_joined = "".join(content_full)
+            think_matches = re.findall(r"<think>(.*?)</think>", content_joined, re.DOTALL)
+            if think_matches:
+                extracted_reasoning = "".join(think_matches).strip()
+                extracted_content = re.sub(
+                    r"<think>.*?</think>", "", content_joined, flags=re.DOTALL
+                ).strip()
+                if extracted_reasoning:
+                    reasoning_full.append(extracted_reasoning)
+                reply = extracted_content
+            else:
+                reply = content_joined.strip()
+
             if not reply and reasoning_full:
                 reply = "".join(reasoning_full).strip()
                 reply_source = "reasoning"
