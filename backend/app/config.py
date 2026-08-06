@@ -102,9 +102,17 @@ class Settings(BaseSettings):
     # Hermes CLI 配置(hermes_cli executor 用,开源 https://github.com/NousResearch/hermes-agent)
     # hermes 可执行文件名/路径(沙箱内 PATH 查找或绝对路径)
     HERMES_CLI_BIN: str = "hermes"
-    # hermes 安装命令(沙箱内未检测到 hermes 时执行,需沙箱镜像有 Python 3.10+ 和 pip)
-    # 推荐在镜像中预装 hermes,避免每次任务都拉 pip 包(依赖较多)
-    HERMES_CLI_INSTALL_CMD: str = "pip install hermes-agent"
+    # hermes 安装命令(沙箱内未检测到 hermes 时执行)。
+    # 注意:hermes-agent 未发布到 PyPI,`pip install hermes-agent` 会失败;
+    # 用官方 install.sh(同 README):自动装 uv + Python 3.11 + 源码 + 依赖,符号链接 hermes 命令。
+    # 非 root 运行时装到 ~/.hermes/hermes-agent + ~/.local/bin/hermes(root 装 FHS: /usr/local/bin/hermes)。
+    # 强烈推荐用 build-sandbox-image.sh 在镜像中预装(root FHS → /usr/local/bin,PATH 必达):
+    # 运行时源码安装较慢(uv sync 含较多依赖,1-5 分钟),120s 安装超时 / BRIDGE_STARTUP_TIMEOUT 可能不够。
+    HERMES_CLI_INSTALL_CMD: str = (
+        'curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh '
+        '&& bash /tmp/hermes-install.sh --skip-setup --skip-browser --non-interactive '
+        '&& rm -f /tmp/hermes-install.sh'
+    )
 
     # Codex CLI 配置(codex_cli executor 用,开源 https://github.com/openai/codex,Apache-2.0)
     # codex 可执行文件名/路径(沙箱内 PATH 查找或绝对路径)

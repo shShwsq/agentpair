@@ -253,9 +253,9 @@ GitHub 和 Gitee 二者均支持,按需配置。留空的平台对应路由会�
 | 变量 | 默认值 |
 |---|---|
 | `HERMES_CLI_BIN` | `hermes` |
-| `HERMES_CLI_INSTALL_CMD` | `pip install hermes-agent` |
+| `HERMES_CLI_INSTALL_CMD` | 官方 `install.sh`(见 [文档](docs/opensandbox-deploy.md) §2.5)|
 
-> Hermes CLI 是纯 Python 包(不需要 Node.js)。凭证(`provider` / `api_key` / `base_url` / `model`)在「智能体配置」页面填写。后端通过 `credential_env_builder` 按 provider 动态映射 API Key 环境变量名(`OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` 等),通过 `pre_bridge_hook` 写入 `~/.hermes/config.yaml`(模型/provider/base_url)。权限绕过:`HERMES_YOLO_MODE=1` 自动注入(等价 `--yolo`)。支持 7 种供应商:OpenRouter / Anthropic / OpenAI / z.ai / Kimi / MiniMax / Gemini。
+> Hermes CLI 是 Python 包,**未发布到 PyPI**,用[官方安装脚本](https://github.com/NousResearch/hermes-agent#quick-install)安装(`curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`,自动装 uv + Python 3.11 源码,不需要 Node.js);`pip install hermes-agent` 会失败。凭证(`provider` / `api_key` / `base_url` / `model`)在「智能体配置」页面填写。后端通过 `credential_env_builder` 按 provider 动态映射 API Key 环境变量名(`OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` 等),通过 `pre_bridge_hook` 写入 `~/.hermes/config.yaml`(模型/provider/base_url)。权限绕过:`HERMES_YOLO_MODE=1` 自动注入(等价 `--yolo`)。支持 7 种供应商:OpenRouter / Anthropic / OpenAI / z.ai / Kimi / MiniMax / Gemini。
 
 **Codex CLI** —— `task.executor=codex_cli`
 

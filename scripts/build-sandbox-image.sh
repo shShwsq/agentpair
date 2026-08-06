@@ -5,14 +5,14 @@
 #   - Qoder CLI(国际版):Node.js + @qoder-ai/qodercli,需 qoder.com 账号
 #   - Qoder CN CLI(国内版,原通义灵码):零依赖二进制,仅需 curl,需 qoder.cn 账号
 #   - Kimi Code CLI(开源):Node.js + @moonshot-ai/kimi-code,需 LLM API Key
-#   - Hermes CLI(开源):Python + pip install hermes-agent,需 LLM API Key(支持多供应商)
+#   - Hermes CLI(开源):Python 包,官方 install.sh 安装(需 Python >=3.11),需 LLM API Key(支持多供应商)
 #   - Codex CLI(OpenAI 官方,开源):Node.js + @openai/codex,需 LLM API Key(支持自定义端点)
 #
 # 支持 task.executor=qoder_cli / qoder_cli_cn / kimi_cli / hermes_cli / codex_cli。
 #
 # Node 版本策略:qodercli 要求 >= 20.0.0,kimi 要求 >= 22.19,codex 要求 >= 16。
 # 只要任一 Node 类 CLI 启用(qoder_cli / kimi_cli / codex_cli),统一装 Node 22.x(三者都兼容)。
-# Hermes CLI 是纯 Python 包,不需要 Node.js(镜像已含 python3 + pip)。
+# Hermes CLI 是 Python 包(未发布 PyPI,用官方 install.sh 装 uv+Python 3.11+源码),不需要 Node.js。
 #
 # 用法:在装好 docker 的 Linux 服务器上执行
 #   bash scripts/build-sandbox-image.sh                                       # 默认装五款 CLI
@@ -38,7 +38,7 @@ DOCKERFILE="Dockerfile.sandbox"
 # - 国际版 qodercli:需 Node.js + npm(镜像体积较大,约 +200MB)
 # - 国内版 qoderclicn:零依赖二进制(仅需 curl,体积忽略不计)
 # - Kimi Code CLI:需 Node.js + npm(与国际版共享 Node 22.x 运行时)
-# - Hermes CLI:纯 Python 包(pip install,镜像已含 python3 + pip,体积增量取决于依赖)
+# - Hermes CLI:Python 包(未发布 PyPI,官方 install.sh 自动装 uv+Python 3.11+源码;体积增量取决于依赖)
 # - Codex CLI:Node.js + npm(OpenAI 官方,与 Node 类 CLI 共享 Node 22.x 运行时)
 WITH_QODER_CLI=1
 WITH_QODER_CLI_CN=1
@@ -87,14 +87,14 @@ for arg in "$@"; do
             echo "  --no-qoder-cli-cn      不装国内版"
             echo "  --with-kimi-cli        预装 Kimi Code CLI(Node.js + npm,需 LLM API Key)"
             echo "  --no-kimi-cli          不装 kimi"
-            echo "  --with-hermes-cli      预装 Hermes CLI(Python pip,需 LLM API Key,支持多供应商)"
+            echo "  --with-hermes-cli      预装 Hermes CLI(官方 install.sh,需 Python >=3.11,支持多供应商)"
             echo "  --no-hermes-cli        不装 hermes"
             echo "  --with-codex-cli       预装 Codex CLI(Node.js + npm,OpenAI 官方,需 LLM API Key)"
             echo "  --no-codex-cli         不装 codex"
             echo ""
             echo "基础工具(git/rg/python3/awk/find/curl)始终预装。"
             echo "Node.js 版本:只要 qoder_cli / kimi_cli / codex_cli 任一启用,统一装 Node 22.x(三者都兼容)。"
-            echo "Hermes CLI 是纯 Python 包,不需要 Node.js(镜像已含 python3 + pip)。"
+            echo "Hermes CLI 是 Python 包(未发布 PyPI,官方 install.sh 装 uv+Python 3.11+源码),不需要 Node.js。"
             exit 0
             ;;
         *)
@@ -174,9 +174,9 @@ else
     elif [ "$WITH_KIMI_CLI" -eq 1 ] && ! grep -q "@moonshot-ai/kimi-code" "$DOCKERFILE"; then
         NEED_REGEN=1
         REGEN_REASON="标记为含 Kimi 但缺 @moonshot-ai/kimi-code 安装行,需重新生成"
-    elif [ "$WITH_HERMES_CLI" -eq 1 ] && ! grep -q "hermes-agent" "$DOCKERFILE"; then
+    elif [ "$WITH_HERMES_CLI" -eq 1 ] && ! grep -q "hermes-agent.nousresearch.com/install.sh" "$DOCKERFILE"; then
         NEED_REGEN=1
-        REGEN_REASON="标记为含 Hermes 但缺 hermes-agent 安装行,需重新生成"
+        REGEN_REASON="标记为含 Hermes 但缺官方 install.sh 安装行(旧版用 pip install hermes-agent 会失败),需重新生成"
     elif [ "$WITH_CODEX_CLI" -eq 1 ] && ! grep -q "@openai/codex" "$DOCKERFILE"; then
         NEED_REGEN=1
         REGEN_REASON="标记为含 Codex 但缺 @openai/codex 安装行,需重新生成"
@@ -280,17 +280,26 @@ RUN curl -fsSL https://qoder.cn/install | bash \
 EOF
     fi
 
-    # ---- 追加 Hermes CLI(纯 Python 包,pip 安装)----
+    # ---- 追加 Hermes CLI(官方 install.sh 安装,需 Python >=3.11)----
     if [ "$WITH_HERMES_CLI" -eq 1 ]; then
         cat >> "$DOCKERFILE" <<'EOF'
 
 # ---- Hermes CLI(开源 https://github.com/NousResearch/hermes-agent)----
-# PyPI 包 hermes-agent,bin 名 hermes(hermes acp 启动 ACP 服务)
-# 纯 Python 包,镜像已含 python3 + pip,不需要 Node.js
-# 支持 7 种 LLM 供应商(OpenRouter/Anthropic/OpenAI/GLM/Kimi/MiniMax/Gemini)
-# --no-cache-dir 减小镜像体积(不缓存 pip 下载)
+# 注意:hermes-agent 未发布到 PyPI,`pip install hermes-agent` 会失败;改用官方 install.sh(同 README)。
+# 脚本自动:装 uv + Python 3.11 → clone 源码 → 建 venv → 装依赖 → 符号链接 hermes 命令。
+# 需 Python >=3.11(Ubuntu 22.04 自带 3.10 过低,由 uv 管理 3.11)。bin 名 hermes(hermes acp 启动 ACP)。
+#
+# root 安装走 FHS 布局:代码 /usr/local/lib/hermes-agent,命令 /usr/local/bin/hermes(全用户 PATH 可达),
+# uv 管理的 Python 放 /usr/local/share(世界可读,避免 venv 解释器符号链接被困在 /root,非 root user 无权访问)。
+#
+# --skip-setup      跳过交互式配置向导(API Key 等运行时由 hermes_cli_agent.py 注入)
+# --skip-browser    跳过 Playwright/Node 浏览器依赖(hermes acp 不需要,减小镜像体积)
+# --non-interactive 非 tty 下防止任何提示卡住(curl|bash 风格管道时尤其重要)
+# 两步「先下载再执行」比 curl|bash 更安全、可审计(避免 pipefail 缺失掩盖 curl 失败)。
 USER root
-RUN pip3 install --no-cache-dir hermes-agent \
+RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh \
+    && bash /tmp/hermes-install.sh --skip-setup --skip-browser --non-interactive \
+    && rm -f /tmp/hermes-install.sh \
     && hermes --version
 EOF
     fi

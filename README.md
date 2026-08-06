@@ -253,9 +253,9 @@ Each CLI executor has two config values: binary name/path + install command (aut
 | Variable | Default |
 |---|---|
 | `HERMES_CLI_BIN` | `hermes` |
-| `HERMES_CLI_INSTALL_CMD` | `pip install hermes-agent` |
+| `HERMES_CLI_INSTALL_CMD` | official `install.sh` (see [docs](docs/opensandbox-deploy.md) §2.5) |
 
-> Hermes CLI is a pure Python package (no Node.js needed). Credentials (`provider` / `api_key` / `base_url` / `model`) are filled in on the "Agent Settings" page. The backend dynamically maps the API key to the provider-specific env var (`OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / etc.) via `credential_env_builder`, and writes `~/.hermes/config.yaml` (model/provider/base_url) via `pre_bridge_hook`. Permission bypass: `HERMES_YOLO_MODE=1` auto-injected (equivalent to `--yolo`). Supports 7 providers: OpenRouter / Anthropic / OpenAI / z.ai / Kimi / MiniMax / Gemini.
+> Hermes CLI is a Python package **not published to PyPI** — install it via the [official installer](https://github.com/NousResearch/hermes-agent#quick-install) (`curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`; it provisions uv + Python 3.11 from source, no Node.js needed); `pip install hermes-agent` will fail. Credentials (`provider` / `api_key` / `base_url` / `model`) are filled in on the "Agent Settings" page. The backend dynamically maps the API key to the provider-specific env var (`OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / etc.) via `credential_env_builder`, and writes `~/.hermes/config.yaml` (model/provider/base_url) via `pre_bridge_hook`. Permission bypass: `HERMES_YOLO_MODE=1` auto-injected (equivalent to `--yolo`). Supports 7 providers: OpenRouter / Anthropic / OpenAI / z.ai / Kimi / MiniMax / Gemini.
 
 **Codex CLI** — `task.executor=codex_cli`
 

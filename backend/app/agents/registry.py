@@ -249,9 +249,13 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
             "bin_config_key": "HERMES_CLI_BIN",
             "bin_default": "hermes",
             # 安装命令(沙箱内未检测到 hermes 时执行)
-            # 前提:沙箱镜像已装 Python 3.10+ 和 pip
+            # hermes-agent 未发布 PyPI,用官方 install.sh 装(uv + Python 3.11 + 源码)
             "install_cmd_config_key": "HERMES_CLI_INSTALL_CMD",
-            "install_cmd_default": "pip install hermes-agent",
+            "install_cmd_default": (
+                'curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh '
+                '&& bash /tmp/hermes-install.sh --skip-setup --skip-browser --non-interactive '
+                '&& rm -f /tmp/hermes-install.sh'
+            ),
             # ACP 启动参数:hermes 用 `hermes acp` 子命令(非 --acp 标志)
             "acp_args": ["acp"],
             # Hermes ACP 模式不支持 --model / --reasoning-effort 等 CLI 参数

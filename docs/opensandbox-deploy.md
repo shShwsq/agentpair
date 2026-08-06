@@ -155,7 +155,7 @@ bash scripts/build-sandbox-image.sh
 # 只装国内版 + Hermes + Codex(零 Node 依赖的国内版 + 不需 Node 的 Hermes + 需 Node 的 Codex)
 bash scripts/build-sandbox-image.sh --no-qoder-cli --no-kimi-cli
 
-# 只装 Hermes(纯 Python,不需要 Node.js)
+# 只装 Hermes(Python 包,官方 install.sh 安装,不需要 Node.js)
 bash scripts/build-sandbox-image.sh --no-qoder-cli --no-qoder-cli-cn --no-kimi-cli --no-codex-cli
 
 # 不装 Hermes
@@ -178,10 +178,10 @@ bash scripts/build-sandbox-image.sh --no-qoder-cli --no-qoder-cli-cn --no-kimi-c
 - **Qoder CLI 国际版**(`qodercli`):npm 包,需 Node.js >= 20.0.0,账号在 qoder.com
 - **Qoder CN CLI 国内版**(`qoderclicn`,原通义灵码):零依赖二进制,仅需 curl 拉安装脚本,账号在 qoder.cn
 - **Kimi Code CLI**(`kimi`):npm 包,需 Node.js >= 22.19,账号为任意 OpenAI 兼容端点
-- **Hermes CLI**(`hermes`):Python pip 包,不需要 Node.js,支持 7 种 LLM 供应商
+- **Hermes CLI**(`hermes`):Python 包(未发布 PyPI,官方 install.sh 装 uv+Python 3.11+源码),不需要 Node.js,支持 7 种 LLM 供应商
 - **Codex CLI**(`codex`):npm 包,需 Node.js >= 16,OpenAI 官方,支持自定义 OpenAI 兼容端点
 
-> Node 版本策略:qodercli 要求 >= 20.0.0,kimi 要求 >= 22.19,codex 要求 >= 16。只要 qoder_cli / kimi_cli / codex_cli 任一启用,统一装 Node 22.x(三者都兼容)。Hermes 是纯 Python 包,不影响 Node 决策。
+> Node 版本策略:qodercli 要求 >= 20.0.0,kimi 要求 >= 22.19,codex 要求 >= 16。只要 qoder_cli / kimi_cli / codex_cli 任一启用,统一装 Node 22.x(三者都兼容)。Hermes 是 Python 包(官方 install.sh 安装,需 Python >=3.11),不需要 Node.js,不影响 Node 决策。
 
 完成后在 AgentPair 的 `.env` 里设 `SANDBOX_IMAGE=agentpair-sandbox:latest`。
 
@@ -361,7 +361,7 @@ AgentPair 还支持开源的 [Hermes CLI](https://github.com/NousResearch/hermes
 
 | 执行器 | task.executor | CLI 命令 | 账号 | 依赖 | 凭证注入方式 |
 |--------|---------------|----------|------|------|--------------|
-| Hermes | `hermes_cli` | `hermes acp` | 任意 LLM 供应商(OpenRouter/Anthropic/OpenAI/GLM/Kimi/MiniMax/Gemini) | Python 3.10+ + pip | 环境变量(API Key)+ config.yaml(模型/provider) |
+| Hermes | `hermes_cli` | `hermes acp` | 任意 LLM 供应商(OpenRouter/Anthropic/OpenAI/GLM/Kimi/MiniMax/Gemini) | Python >=3.11(官方 install.sh) | 环境变量(API Key)+ config.yaml(模型/provider) |
 
 与 Qoder/Kimi 的关键差异:
 - **ACP 启动命令**:`hermes acp` 子命令(与 Kimi 相同,非 `--acp` 标志)
@@ -369,17 +369,26 @@ AgentPair 还支持开源的 [Hermes CLI](https://github.com/NousResearch/hermes
 - **模型配置**:`LLM_MODEL` 环境变量已废弃,模型名/provider/base_url 必须写入 `~/.hermes/config.yaml`(由 `pre_bridge_hook` 在 bridge 启动前自动写入)
 - **API Key 动态映射**:Hermes 按 provider 读取不同的环境变量名(如 `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY`),由 `credential_env_builder` 回调动态构建,无法用 registry 的静态 `credential_env` 映射
 - **凭证字段**:不是 PAT,而是 `provider`(选择)+ `api_key` + `base_url`(可选)+ `model`(可选)四字段
-- **运行时依赖**:纯 Python 包,不需要 Node.js(镜像已含 python3 + pip)
+- **运行时依赖**:Python 包(未发布 PyPI,用官方 install.sh 装 uv + Python 3.11 + 源码),不需要 Node.js
 
 安装方式二选一:
 
 #### 方式 A:镜像预装(推荐,启动快、无网络依赖)
 
+`build-sandbox-image.sh` 默认预装 Hermes(见 2.1 一键构建,可用 `--no-hermes-cli` 关闭)。其 Dockerfile 片段等价于:
+
 ```dockerfile
-# Hermes CLI 是纯 Python 包,镜像已含 python3 + pip,不需要 Node.js
-# --no-cache-dir 减小镜像体积
+# hermes-agent 未发布到 PyPI,`pip install hermes-agent` 会失败;改用官方 install.sh(同 README)。
+# 脚本自动:装 uv + Python 3.11 → clone 源码 → 建 venv → 装依赖 → 符号链接 hermes 命令。
+# 需 Python >=3.11(Ubuntu 22.04 自带 3.10 过低,由 uv 管理 3.11)。
+# root 安装走 FHS 布局:代码 /usr/local/lib/hermes-agent,命令 /usr/local/bin/hermes(全用户 PATH 可达),
+# uv 管理的 Python 放 /usr/local/share(世界可读,避免 venv 解释器符号链接被困在 /root,非 root user 无权访问)。
+# --skip-setup 跳过交互式配置向导;--skip-browser 跳过 Playwright/Node 浏览器依赖(hermes acp 不需要);
+# --non-interactive 防 tty 提示卡住。两步「先下载再执行」比 curl|bash 更安全、可审计。
 USER root
-RUN pip3 install --no-cache-dir hermes-agent \
+RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh \
+    && bash /tmp/hermes-install.sh --skip-setup --skip-browser --non-interactive \
+    && rm -f /tmp/hermes-install.sh \
     && hermes --version
 ```
 
@@ -389,16 +398,18 @@ RUN pip3 install --no-cache-dir hermes-agent \
 docker run --rm agentpair-sandbox:latest hermes --version
 ```
 
-#### 方式 B:运行时自动安装(首次启动慢,需沙箱能访问外网)
+> 如需可复现/可审计的构建,可在 install.sh 后追加 `--branch <tag>` 或 `--commit <sha>` 固定版本(见 install.sh `--help`)。
 
-不在镜像里预装,让 [hermes_cli_agent.py](../backend/app/agents/hermes_cli_agent.py) 在首次启动时执行 `HERMES_CLI_INSTALL_CMD` 安装。前提是镜像已含 Python 3.10+ 和 pip。对应 `.env` 配置(默认值已可用):
+#### 方式 B:运行时自动安装(首次启动慢,需沙箱能访问外网,可能超时)
+
+不在镜像里预装,让 [hermes_cli_agent.py](../backend/app/agents/hermes_cli_agent.py) 在首次启动时执行 `HERMES_CLI_INSTALL_CMD` 安装(官方 install.sh,需沙箱能访问 hermes-agent.nousresearch.com / GitHub / PyPI)。对应 `.env` 配置(默认值已可用):
 
 ```bash
 HERMES_CLI_BIN=hermes
-HERMES_CLI_INSTALL_CMD=pip install hermes-agent
+HERMES_CLI_INSTALL_CMD=curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh && bash /tmp/hermes-install.sh --skip-setup --skip-browser --non-interactive && rm -f /tmp/hermes-install.sh
 ```
 
-> 注意:[BRIDGE_STARTUP_TIMEOUT 默认 30 秒](../backend/app/agents/acp_base.py),首次自动安装 `hermes-agent` 含较多 Python 依赖,可能超时。生产环境建议用方式 A 预装。
+> 注意:运行时源码安装含 `uv sync`(较多依赖),首次通常需 1-5 分钟,而 [安装超时仅 120 秒](../backend/app/agents/acp_base.py)、`BRIDGE_STARTUP_TIMEOUT` 默认 30 秒,极可能超时。**生产环境强烈建议用方式 A 预装**(root FHS → `/usr/local/bin/hermes`,PATH 必达);方式 B 仅作未预装时的兜底(非 root 装到 `~/.local/bin`,需该目录在 PATH)。
 
 #### 凭证配置
 
