@@ -31,6 +31,55 @@ import {
 import { extractErrorMessage } from '@/utils/error'
 import type { ProjectOut, UserPreferenceOut } from '@/types/memory'
 
+// ============================================================
+// 默认模板(后端初始为空,前端在内容为空时预填模板作为引导)
+// 保存后才会真正写入 DB 并注入 agent;纯模板未改动不计为"未保存"
+// ============================================================
+
+/** 用户偏好默认模板(写入 custom_prompt,注入 user_agent) */
+const PREF_TEMPLATE = `# 用户偏好
+
+> 影响评估代理(user_agent)的评判标准与 checklist 生成。
+> 整段会作为 system prompt 的一部分注入 user_agent。
+
+## 输出语言
+中文
+
+## 评判风格
+严格,安全与最佳实践优先于简洁;对关键问题必须给出复现步骤与修复示例。
+
+## 重点关注领域
+- 安全:硬编码密钥、注入、权限提升、SSRF
+- 性能与资源泄漏
+- 可读性与职责划分
+
+## 补充要求
+- 
+`
+
+/** 全局长期记忆默认模板(写入 content,注入 user_agent) */
+const GLOBAL_TEMPLATE = `# 全局长期记忆
+
+> 跨项目通用经验/约定,注入 user_agent(注入时截断 2000 字符)。
+> 任务完成时也会自动归纳合并新发现到这里。
+
+## 通用约定
+- 
+
+## 常见踩坑
+- 
+
+## 复用经验
+- 
+`
+
+/** 按 文件类型 取对应模板(项目记忆无模板) */
+function templateFor(kind: FileKind): string {
+  if (kind === 'pref') return PREF_TEMPLATE
+  if (kind === 'global') return GLOBAL_TEMPLATE
+  return ''
+}
+
 /** 历史任务侧栏是否折叠 */
 const workspaceCollapsed = ref(true)
 function toggleWorkspace(): void {
@@ -103,6 +152,8 @@ const originals = reactive<Record<string, string>>({})
 const aliasDrafts = reactive<Record<string, string>>({})
 /** 项目 alias 原始值 */
 const originalAlias = reactive<Record<string, string>>({})
+/** 该文件当前显示的是默认模板(DB 为空时预填,键=文件 id;仅 pref/global 会为 true) */
+const isTemplateDefault = reactive<Record<string, boolean>>({})
 
 // ---- 透传存储(不在 UI 编辑,但保存时原样回传,避免数据丢失) ----
 /** 用户偏好的结构化 preferences JSONB(透传) */
@@ -149,15 +200,43 @@ const activeLimit = computed(() => (activeEntry.value ? LIMITS[activeEntry.value
 const activeDraft = computed(() => drafts[activeId.value] ?? '')
 const activeOverLimit = computed(() => activeDraft.value.length > activeLimit.value)
 
-/** 当前文件是否脏(有未保存改动) */
-function isDirty(fileId: string): boolean {
+/** 草稿与原始值是否有任何差异(含 alias;不区分模板,用于判定"可保存") */
+function hasDiff(fileId: string): boolean {
   if ((drafts[fileId] ?? '') !== (originals[fileId] ?? '')) return true
-  if (fileId.startsWith('project:')) {
-    if ((aliasDrafts[fileId] ?? '') !== (originalAlias[fileId] ?? '')) return true
-  }
+  if (fileId.startsWith('project:') && (aliasDrafts[fileId] ?? '') !== (originalAlias[fileId] ?? '')) return true
   return false
 }
-const activeDirty = computed(() => (activeId.value ? isDirty(activeId.value) : false))
+
+/** 当前文件是否脏(有未保存改动;纯模板未改动不计脏,避免空文件初始就显示未保存,但仍可"采用"保存) */
+function isDirty(fileId: string): boolean {
+  if (!hasDiff(fileId)) return false
+  const draft = drafts[fileId] ?? ''
+  const orig = originals[fileId] ?? ''
+  // 纯默认模板预填未改动:草稿===模板且 DB 原本为空 → 不算脏
+  if (isTemplateDefault[fileId] && orig === '' && draft === templateFor(fileKind(fileId))) {
+    return false
+  }
+  return true
+}
+/** 是否可保存:草稿与原始值有差异即可(含"采用默认模板":纯模板时 hasDiff 仍为 true) */
+const activeCanSave = computed(() => hasDiff(activeId.value))
+
+/** 当前文件是否处于"纯默认模板预填"状态(用于显示提示条) */
+const activeIsTemplate = computed(() => {
+  const entry = activeEntry.value
+  if (!entry || entry.kind === 'project') return false
+  return (
+    isTemplateDefault[activeId.value] === true &&
+    (drafts[activeId.value] ?? '') === templateFor(entry.kind)
+  )
+})
+
+/** 按文件 id 取类型(fileList 反查) */
+function fileKind(fileId: string): FileKind {
+  if (fileId === 'pref') return 'pref'
+  if (fileId === 'global') return 'global'
+  return 'project'
+}
 
 /** 任一文件有未保存改动(用于切换/离开提示,此处仅展示) */
 const hasAnyDirty = computed(() => fileList.value.some((f) => isDirty(f.id)))
@@ -187,13 +266,28 @@ async function loadAll(): Promise<void> {
 function hydratePref(data: UserPreferenceOut): void {
   prefPreferencesPassthrough.value = data.preferences || {}
   const md = data.custom_prompt || ''
-  drafts['pref'] = md
-  originals['pref'] = md
+  if (md.trim() === '') {
+    // DB 为空:预填默认模板作为引导(不算"已保存"内容,originals 仍为空)
+    drafts['pref'] = PREF_TEMPLATE
+    originals['pref'] = ''
+    isTemplateDefault['pref'] = true
+  } else {
+    drafts['pref'] = md
+    originals['pref'] = md
+    isTemplateDefault['pref'] = false
+  }
 }
 
 function hydrateGlobal(content: string): void {
-  drafts['global'] = content
-  originals['global'] = content
+  if (content.trim() === '') {
+    drafts['global'] = GLOBAL_TEMPLATE
+    originals['global'] = ''
+    isTemplateDefault['global'] = true
+  } else {
+    drafts['global'] = content
+    originals['global'] = content
+    isTemplateDefault['global'] = false
+  }
 }
 
 function hydrateProjects(list: ProjectOut[]): void {
@@ -223,7 +317,7 @@ function selectFile(id: string): void {
 // ============================================================
 async function handleSave(): Promise<void> {
   const entry = activeEntry.value
-  if (!entry || !activeDirty.value || activeOverLimit.value || saving.value) return
+  if (!entry || !activeCanSave.value || activeOverLimit.value || saving.value) return
   saving.value = true
   actionError.value = ''
   try {
@@ -462,6 +556,16 @@ onMounted(() => {
               </div>
             </header>
 
+            <!-- 模板提示条(当前显示默认模板、未改动时) -->
+            <div v-if="activeIsTemplate" class="template-hint">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="16" x2="12" y2="12" />
+                <line x1="12" y1="8" x2="12.01" y2="8" />
+              </svg>
+              <span>当前显示默认模板 — 保存后才会写入并注入 agent。可按需编辑,或直接点「保存」采用此模板。</span>
+            </div>
+
             <!-- 内容区 -->
             <div class="editor-content">
               <!-- 加载占位 -->
@@ -505,11 +609,11 @@ onMounted(() => {
                 </button>
                 <button
                   class="btn btn-primary"
-                  :disabled="!activeDirty || saving || deleting || activeOverLimit"
+                  :disabled="!activeCanSave || saving || deleting || activeOverLimit"
                   @click="handleSave"
                 >
                   <span v-if="saving" class="btn-spinner" />
-                  {{ saving ? '保存中...' : (activeDirty ? '保存' : '已保存') }}
+                  {{ saving ? '保存中...' : (activeCanSave ? '保存' : '已保存') }}
                 </button>
               </div>
             </footer>
@@ -751,6 +855,25 @@ onMounted(() => {
   padding: var(--space-4) var(--space-5);
   border-bottom: 1px solid var(--color-border);
   background: var(--color-surface);
+}
+
+/* 模板提示条:当前显示默认模板(未改动)时出现 */
+.template-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-5);
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  background: var(--color-surface-alt);
+  border-bottom: 1px solid var(--color-border);
+  line-height: var(--lh-relaxed);
+}
+
+.template-hint svg {
+  color: var(--color-primary);
+  flex-shrink: 0;
+  margin-top: 2px;
 }
 
 .toolbar-left {
