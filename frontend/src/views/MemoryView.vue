@@ -1,20 +1,22 @@
 <script setup lang="ts">
 /**
- * 记忆管理页(三段卡片 + 弹窗)
+ * 记忆管理页(文件列表 + Markdown 编辑器)
  *
- * 用户可编辑三类记忆:
- * - 用户偏好(1:1):结构化字段 + 自由文本,影响 user_agent 评判标准与 checklist 生成
- * - 全局长期记忆(1:1):跨项目通用经验,注入 user_agent
- * - 分项目记忆(1:N):按 repo_url 聚合,注入 react_agent;任务完成时自动归纳
+ * 三类记忆以「文件」隐喻呈现,每份文件即一篇 Markdown:
+ * - 用户偏好(1):custom_prompt Markdown(结构化 preferences JSONB 保留但不在此编辑)
+ * - 全局记忆(1):content Markdown,注入 user_agent
+ * - 项目记忆(N,按 repo_url 聚合):memory_content Markdown,注入 react_agent;任务完成自动归纳
  *
- * 入口:header 齿轮图标下拉 → /memory(账号类入口只由齿轮进入,不入主导航)。
+ * 左侧文件列表,右侧编辑器(编辑/预览切换)。
+ * 预览用 marked 渲染 + DOMPurify 净化(项目记忆可能由 agent 归纳自不可信仓库内容,防存储型 XSS)。
  *
- * 与 SettingsView 风格一致:卡片 + 弹窗 + 顶部居中 toast。
+ * 入口:主导航「记忆管理」项(与模型设置/CLI 设置并列)。
  */
 import { computed, onMounted, reactive, ref } from 'vue'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 
 import AppHeader from '@/components/AppHeader.vue'
-import ProjectMemoryDialog from '@/components/ProjectMemoryDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import {
@@ -27,246 +29,275 @@ import {
   saveProject,
 } from '@/api/memory'
 import { extractErrorMessage } from '@/utils/error'
-import type {
-  ProjectOut,
-  SaveProjectRequest,
-  UserPreferenceOut,
-} from '@/types/memory'
+import type { ProjectOut, UserPreferenceOut } from '@/types/memory'
 
-/** 历史任务侧栏是否折叠(默认折叠) */
+/** 历史任务侧栏是否折叠 */
 const workspaceCollapsed = ref(true)
-
 function toggleWorkspace(): void {
   workspaceCollapsed.value = !workspaceCollapsed.value
 }
 
 // ============================================================
-// Toast(顶部居中,5s 自动消失)
+// Toast
 // ============================================================
 const toast = ref<{ msg: string; type: 'success' | 'error' } | null>(null)
-
 function showToast(msg: string, type: 'success' | 'error'): void {
   toast.value = { msg, type }
   setTimeout(() => {
     toast.value = null
-  }, 5000)
+  }, 4000)
 }
 
 // ============================================================
-// 用户偏好(1:1)
+// 文件模型
 // ============================================================
-/** 结构化偏好草稿(与后端 preferences JSONB 字段约定一致) */
-const prefDraft = reactive({
-  output_language: 'auto' as 'zh' | 'en' | 'auto',
-  focus_areas_text: '', // 逗号分隔文本,保存时转数组
-  style: 'concise' as 'concise' | 'strict' | 'detailed',
-})
-const prefCustomPrompt = ref('')
-const prefLoading = ref(true)
-const prefSaving = ref(false)
-const prefError = ref('')
+type FileKind = 'pref' | 'global' | 'project'
 
-const MAX_CUSTOM_PROMPT = 8000
-const prefOverLimit = computed(() => prefCustomPrompt.value.length > MAX_CUSTOM_PROMPT)
-
-/** 语言/风格选项 */
-const LANG_OPTIONS = [
-  { value: 'auto', label: '跟随输入' },
-  { value: 'zh', label: '中文' },
-  { value: 'en', label: 'English' },
-]
-const STYLE_OPTIONS = [
-  { value: 'concise', label: '简洁' },
-  { value: 'strict', label: '严格' },
-  { value: 'detailed', label: '详细' },
-]
-
-async function loadPreferences(): Promise<void> {
-  prefLoading.value = true
-  try {
-    const data: UserPreferenceOut = await getPreferences()
-    hydratePrefDraft(data)
-  } catch (err) {
-    // 未配置返回空默认值,理论不会失败;失败时静默,草稿保持默认
-    console.warn('加载用户偏好失败:', err)
-  } finally {
-    prefLoading.value = false
-  }
+interface FileEntry {
+  /** 文件 id:pref / global / project:<uuid> */
+  id: string
+  kind: FileKind
+  /** 显示名(项目=alias 或 repo_url,其余=固定名) */
+  label: string
+  /** 副标题(项目=repo_url_raw) */
+  subtitle?: string
+  /** 元信息(项目=上次归纳时间) */
+  meta?: string | null
 }
 
-function hydratePrefDraft(data: UserPreferenceOut): void {
-  const p = data.preferences || {}
-  const lang = p.output_language
-  prefDraft.output_language =
-    lang === 'zh' || lang === 'en' ? lang : 'auto'
-  const style = p.style
-  prefDraft.style =
-    style === 'concise' || style === 'strict' || style === 'detailed'
-      ? style
-      : 'concise'
-  const areas = p.focus_areas
-  prefDraft.focus_areas_text = Array.isArray(areas)
-    ? areas.map(String).join(', ')
-    : ''
-  prefCustomPrompt.value = data.custom_prompt || ''
-}
-
-async function handleSavePreferences(): Promise<void> {
-  if (prefOverLimit.value) return
-  prefError.value = ''
-  prefSaving.value = true
-  try {
-    const focusAreas = prefDraft.focus_areas_text
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-    const data = await savePreferences({
-      preferences: {
-        output_language: prefDraft.output_language,
-        focus_areas: focusAreas,
-        style: prefDraft.style,
-      },
-      custom_prompt: prefCustomPrompt.value,
-    })
-    hydratePrefDraft(data)
-    showToast('用户偏好已保存', 'success')
-  } catch (err) {
-    prefError.value = extractErrorMessage(err)
-  } finally {
-    prefSaving.value = false
-  }
-}
-
-// ============================================================
-// 全局长期记忆(1:1)
-// ============================================================
-const globalContent = ref('')
-const globalLoading = ref(true)
-const globalSaving = ref(false)
-const globalError = ref('')
-
-const MAX_GLOBAL = 20000
-const globalOverLimit = computed(() => globalContent.value.length > MAX_GLOBAL)
-
-async function loadGlobalMemory(): Promise<void> {
-  globalLoading.value = true
-  try {
-    const data = await getGlobalMemory()
-    globalContent.value = data.content || ''
-  } catch (err) {
-    console.warn('加载全局长期记忆失败:', err)
-  } finally {
-    globalLoading.value = false
-  }
-}
-
-async function handleSaveGlobal(): Promise<void> {
-  if (globalOverLimit.value) return
-  globalError.value = ''
-  globalSaving.value = true
-  try {
-    const data = await saveGlobalMemory({ content: globalContent.value })
-    globalContent.value = data.content || ''
-    showToast('全局长期记忆已保存', 'success')
-  } catch (err) {
-    globalError.value = extractErrorMessage(err)
-  } finally {
-    globalSaving.value = false
-  }
-}
-
-// ============================================================
-// 分项目记忆(1:N)
-// ============================================================
+/** 项目原始数据(列表) */
 const projects = ref<ProjectOut[]>([])
-const projectsLoading = ref(true)
-const projectsError = ref('')
 
-/** 当前打开弹窗的项目 id(空串=关闭) */
-const activeProjectId = ref<string>('')
-/** 弹窗内操作的 loading / deleting / error(按项目 id 隔离) */
-const projectDialog = reactive({
-  loading: false,
-  deleting: false,
-  error: '',
+/** 文件列表(计算) */
+const fileList = computed<FileEntry[]>(() => {
+  const list: FileEntry[] = [
+    { id: 'pref', kind: 'pref', label: '用户偏好' },
+    { id: 'global', kind: 'global', label: '全局记忆' },
+  ]
+  for (const p of projects.value) {
+    list.push({
+      id: `project:${p.id}`,
+      kind: 'project',
+      label: p.alias || p.repo_url_raw,
+      subtitle: p.repo_url_raw,
+      meta: p.last_summary_at,
+    })
+  }
+  return list
 })
 
-const MAX_PROJECT_PREVIEW = 120
-
-async function loadProjects(): Promise<void> {
-  projectsLoading.value = true
-  projectsError.value = ''
-  try {
-    const data = await listProjects()
-    projects.value = data.projects || []
-  } catch (err) {
-    projectsError.value = extractErrorMessage(err)
-  } finally {
-    projectsLoading.value = false
-  }
-}
-
-const activeProject = computed<ProjectOut | null>(
-  () => projects.value.find((p) => p.id === activeProjectId.value) ?? null,
+/** 当前选中文件 id */
+const activeId = ref<string>('pref')
+const activeEntry = computed<FileEntry | undefined>(() =>
+  fileList.value.find((f) => f.id === activeId.value),
 )
 
-function openProjectDialog(p: ProjectOut): void {
-  activeProjectId.value = p.id
-  projectDialog.loading = false
-  projectDialog.deleting = false
-  projectDialog.error = ''
-}
+// ============================================================
+// 草稿与原始值(支持多文件切换不丢未保存编辑)
+// ============================================================
+/** 每份文件的 Markdown 草稿(键=文件 id) */
+const drafts = reactive<Record<string, string>>({})
+/** 每份文件的原始 Markdown(脏检查基准) */
+const originals = reactive<Record<string, string>>({})
+/** 项目 alias 草稿(键=project:<uuid>) */
+const aliasDrafts = reactive<Record<string, string>>({})
+/** 项目 alias 原始值 */
+const originalAlias = reactive<Record<string, string>>({})
 
-function closeProjectDialog(): void {
-  if (projectDialog.loading || projectDialog.deleting) return
-  activeProjectId.value = ''
-}
+// ---- 透传存储(不在 UI 编辑,但保存时原样回传,避免数据丢失) ----
+/** 用户偏好的结构化 preferences JSONB(透传) */
+const prefPreferencesPassthrough = ref<Record<string, unknown>>({})
+/** 项目 note(透传,键=project:<uuid>) */
+const projectNotes = reactive<Record<string, string | null>>({})
+/** 文件 id → 项目 uuid */
+const projectIds = reactive<Record<string, string>>({})
 
-async function handleSaveProject(payload: SaveProjectRequest): Promise<void> {
-  const id = activeProjectId.value
-  if (!id) return
-  projectDialog.loading = true
-  projectDialog.error = ''
+// ============================================================
+// 编辑/预览模式
+// ============================================================
+const mode = ref<'edit' | 'preview'>('edit')
+
+/** 预览 HTML(marked 渲染 + DOMPurify 净化) */
+const previewHtml = computed(() => {
+  const md = drafts[activeId.value] ?? ''
+  if (!md.trim()) return ''
+  // marked.parse 在 async:false 下同步返回 string
+  const raw = marked.parse(md, { async: false }) as string
+  return DOMPurify.sanitize(raw)
+})
+
+// ============================================================
+// 加载状态
+// ============================================================
+const loading = ref(true)
+const loadError = ref('')
+
+// 保存/删除状态(作用于当前文件)
+const saving = ref(false)
+const deleting = ref(false)
+const actionError = ref('')
+
+// ============================================================
+// 字符上限(与后端 schema 对齐)
+// ============================================================
+const LIMITS: Record<FileKind, number> = {
+  pref: 8000,
+  global: 20000,
+  project: 20000,
+}
+const activeLimit = computed(() => (activeEntry.value ? LIMITS[activeEntry.value.kind] : 20000))
+const activeDraft = computed(() => drafts[activeId.value] ?? '')
+const activeOverLimit = computed(() => activeDraft.value.length > activeLimit.value)
+
+/** 当前文件是否脏(有未保存改动) */
+function isDirty(fileId: string): boolean {
+  if ((drafts[fileId] ?? '') !== (originals[fileId] ?? '')) return true
+  if (fileId.startsWith('project:')) {
+    if ((aliasDrafts[fileId] ?? '') !== (originalAlias[fileId] ?? '')) return true
+  }
+  return false
+}
+const activeDirty = computed(() => (activeId.value ? isDirty(activeId.value) : false))
+
+/** 任一文件有未保存改动(用于切换/离开提示,此处仅展示) */
+const hasAnyDirty = computed(() => fileList.value.some((f) => isDirty(f.id)))
+
+// ============================================================
+// 加载
+// ============================================================
+async function loadAll(): Promise<void> {
+  loading.value = true
+  loadError.value = ''
   try {
-    const updated = await saveProject(id, payload)
-    // 就地替换列表项
-    const idx = projects.value.findIndex((p) => p.id === id)
-    if (idx >= 0) projects.value[idx] = updated
-    activeProjectId.value = ''
-    showToast('项目记忆已保存', 'success')
+    const [prefData, globalData, projectsData] = await Promise.all([
+      getPreferences(),
+      getGlobalMemory(),
+      listProjects(),
+    ])
+    hydratePref(prefData)
+    hydrateGlobal(globalData.content || '')
+    hydrateProjects(projectsData.projects || [])
   } catch (err) {
-    projectDialog.error = extractErrorMessage(err)
+    loadError.value = extractErrorMessage(err)
   } finally {
-    projectDialog.loading = false
+    loading.value = false
   }
 }
 
-async function handleDeleteProject(): Promise<void> {
-  const id = activeProjectId.value
-  if (!id) return
-  // 二次确认
-  if (!window.confirm('确定删除此项目记忆?该仓库的记忆将被清空,无法恢复。')) return
-  projectDialog.deleting = true
-  projectDialog.error = ''
+function hydratePref(data: UserPreferenceOut): void {
+  prefPreferencesPassthrough.value = data.preferences || {}
+  const md = data.custom_prompt || ''
+  drafts['pref'] = md
+  originals['pref'] = md
+}
+
+function hydrateGlobal(content: string): void {
+  drafts['global'] = content
+  originals['global'] = content
+}
+
+function hydrateProjects(list: ProjectOut[]): void {
+  projects.value = list
+  for (const p of list) {
+    const fid = `project:${p.id}`
+    drafts[fid] = p.memory_content || ''
+    originals[fid] = p.memory_content || ''
+    aliasDrafts[fid] = p.alias || ''
+    originalAlias[fid] = p.alias || ''
+    projectNotes[fid] = p.note ?? null
+    projectIds[fid] = p.id
+  }
+}
+
+// ============================================================
+// 选择文件 / 切换模式
+// ============================================================
+function selectFile(id: string): void {
+  activeId.value = id
+  mode.value = 'edit'
+  actionError.value = ''
+}
+
+// ============================================================
+// 保存当前文件
+// ============================================================
+async function handleSave(): Promise<void> {
+  const entry = activeEntry.value
+  if (!entry || !activeDirty.value || activeOverLimit.value || saving.value) return
+  saving.value = true
+  actionError.value = ''
   try {
-    const data = await deleteProject(id)
+    if (entry.kind === 'pref') {
+      const data = await savePreferences({
+        preferences: prefPreferencesPassthrough.value,
+        custom_prompt: drafts['pref'],
+      })
+      hydratePref(data)
+    } else if (entry.kind === 'global') {
+      const data = await saveGlobalMemory({ content: drafts['global'] })
+      hydrateGlobal(data.content || '')
+    } else {
+      const fid = entry.id
+      const pid = projectIds[fid]
+      const alias = (aliasDrafts[fid] || '').trim()
+      const data = await saveProject(pid, {
+        alias: alias || null,
+        note: projectNotes[fid] ?? null,
+        memory_content: drafts[fid],
+      })
+      // 就地更新项目列表 + 重水化草稿
+      const idx = projects.value.findIndex((p) => p.id === pid)
+      if (idx >= 0) projects.value[idx] = data
+      drafts[fid] = data.memory_content || ''
+      originals[fid] = data.memory_content || ''
+      aliasDrafts[fid] = data.alias || ''
+      originalAlias[fid] = data.alias || ''
+      projectNotes[fid] = data.note ?? null
+    }
+    showToast('已保存', 'success')
+  } catch (err) {
+    actionError.value = extractErrorMessage(err)
+  } finally {
+    saving.value = false
+  }
+}
+
+// ============================================================
+// 删除当前项目文件
+// ============================================================
+async function handleDelete(): Promise<void> {
+  const entry = activeEntry.value
+  if (!entry || entry.kind !== 'project' || deleting.value) return
+  const fid = entry.id
+  const pid = projectIds[fid]
+  if (!pid) return
+  if (!window.confirm('确定删除此项目记忆?该仓库的记忆将被清空,无法恢复。')) return
+  deleting.value = true
+  actionError.value = ''
+  try {
+    const data = await deleteProject(pid)
     projects.value = data.projects || []
-    activeProjectId.value = ''
+    // 清理草稿
+    delete drafts[fid]
+    delete originals[fid]
+    delete aliasDrafts[fid]
+    delete originalAlias[fid]
+    delete projectNotes[fid]
+    delete projectIds[fid]
+    activeId.value = 'pref'
+    mode.value = 'edit'
     showToast('项目记忆已删除', 'success')
   } catch (err) {
-    projectDialog.error = extractErrorMessage(err)
+    actionError.value = extractErrorMessage(err)
   } finally {
-    projectDialog.deleting = false
+    deleting.value = false
   }
 }
 
-function previewContent(content: string): string {
-  const c = content || ''
-  if (c.length <= MAX_PROJECT_PREVIEW) return c
-  return c.slice(0, MAX_PROJECT_PREVIEW) + '…'
-}
-
-function formatTime(iso: string | null): string {
+// ============================================================
+// 工具
+// ============================================================
+function formatTime(iso: string | null | undefined): string {
   if (!iso) return '从未归纳'
   try {
     const d = new Date(iso)
@@ -277,18 +308,8 @@ function formatTime(iso: string | null): string {
   }
 }
 
-function projectTitle(p: ProjectOut): string {
-  return p.alias || p.repo_url_raw
-}
-
-// ============================================================
-// 加载
-// ============================================================
 onMounted(() => {
-  // 三段并行加载,互不阻塞
-  loadPreferences()
-  loadGlobalMemory()
-  loadProjects()
+  loadAll()
 })
 </script>
 
@@ -308,218 +329,199 @@ onMounted(() => {
     <div class="page-body">
       <WorkspaceSidebar v-if="!workspaceCollapsed" />
 
-      <main class="main">
-        <!-- 页头 -->
-        <div class="page-header">
-          <div>
-            <h1>记忆管理</h1>
-            <p class="page-subtitle">
-              用户偏好与全局记忆影响评估代理(user_agent);分项目记忆影响执行代理(react_agent)的审计方向。
-              分项目记忆在任务完成时也会自动归纳。
-            </p>
-          </div>
-        </div>
-
-        <!-- ============ 用户偏好 ============ -->
-        <section class="card">
-          <header class="card-header">
-            <div>
-              <h2>用户偏好</h2>
-              <p class="card-desc">影响 user_agent 的评判标准与 checklist 生成(注入 system prompt)</p>
-            </div>
-            <span v-if="prefLoading" class="status-spinner" aria-label="加载中" />
-          </header>
-
-          <div class="card-body">
-            <div class="grid-2">
-              <div class="field">
-                <label for="pref-lang">输出语言</label>
-                <select
-                  id="pref-lang"
-                  v-model="prefDraft.output_language"
-                  :disabled="prefLoading || prefSaving"
-                >
-                  <option v-for="o in LANG_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
-                </select>
-              </div>
-
-              <div class="field">
-                <label for="pref-style">评判风格</label>
-                <select
-                  id="pref-style"
-                  v-model="prefDraft.style"
-                  :disabled="prefLoading || prefSaving"
-                >
-                  <option v-for="o in STYLE_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
-                </select>
-              </div>
-            </div>
-
-            <div class="field">
-              <label for="pref-areas">重点关注领域</label>
-              <input
-                id="pref-areas"
-                v-model="prefDraft.focus_areas_text"
-                type="text"
-                placeholder="逗号分隔,如:security, performance, 可读性"
-                :disabled="prefLoading || prefSaving"
-              />
-              <span class="field-hint">用逗号分隔多个领域,会引导评估代理重点关注这些方面</span>
-            </div>
-
-            <div class="field">
-              <label for="pref-prompt">
-                自定义补充偏好
-                <span class="char-count" :class="{ over: prefOverLimit }">
-                  {{ prefCustomPrompt.length }} / {{ MAX_CUSTOM_PROMPT }}
-                </span>
-              </label>
-              <textarea
-                id="pref-prompt"
-                v-model="prefCustomPrompt"
-                rows="5"
-                placeholder="大段自定义偏好/评判标准补充(可选)。会作为兜底注入 user_agent。"
-                :class="{ invalid: prefOverLimit }"
-                :disabled="prefLoading || prefSaving"
-              />
-              <span v-if="prefOverLimit" class="field-error">不能超过 {{ MAX_CUSTOM_PROMPT }} 字符</span>
-            </div>
-
-            <div class="card-footer">
-              <span v-if="prefError" class="validation-error">{{ prefError }}</span>
-              <span v-else></span>
-              <button
-                class="btn btn-primary"
-                :disabled="prefLoading || prefSaving || prefOverLimit"
-                @click="handleSavePreferences"
-              >
-                <span v-if="prefSaving" class="btn-spinner" />
-                {{ prefSaving ? '保存中...' : '保存偏好' }}
-              </button>
-            </div>
-          </div>
-        </section>
-
-        <!-- ============ 全局长期记忆 ============ -->
-        <section class="card">
-          <header class="card-header">
-            <div>
-              <h2>全局长期记忆</h2>
-              <p class="card-desc">跨项目通用经验/约定,注入 user_agent(注入时截断 2000 字符)</p>
-            </div>
-            <span v-if="globalLoading" class="status-spinner" aria-label="加载中" />
-          </header>
-
-          <div class="card-body">
-            <div class="field">
-              <label for="global-mem">
-                记忆内容
-                <span class="char-count" :class="{ over: globalOverLimit }">
-                  {{ globalContent.length }} / {{ MAX_GLOBAL }}
-                </span>
-              </label>
-              <textarea
-                id="global-mem"
-                v-model="globalContent"
-                rows="10"
-                placeholder="记录跨任务通用的经验、约定、偏好。任务完成时也会自动归纳合并新发现。"
-                :class="{ invalid: globalOverLimit }"
-                :disabled="globalLoading || globalSaving"
-              />
-              <span v-if="globalOverLimit" class="field-error">不能超过 {{ MAX_GLOBAL }} 字符</span>
-            </div>
-
-            <div class="card-footer">
-              <span v-if="globalError" class="validation-error">{{ globalError }}</span>
-              <span v-else></span>
-              <button
-                class="btn btn-primary"
-                :disabled="globalLoading || globalSaving || globalOverLimit"
-                @click="handleSaveGlobal"
-              >
-                <span v-if="globalSaving" class="btn-spinner" />
-                {{ globalSaving ? '保存中...' : '保存全局记忆' }}
-              </button>
-            </div>
-          </div>
-        </section>
-
-        <!-- ============ 分项目记忆 ============ -->
-        <section class="card">
-          <header class="card-header">
-            <div>
-              <h2>分项目记忆</h2>
-              <p class="card-desc">
-                按 Git 仓库聚合,注入 react_agent 影响审计方向。任务完成后会自动归纳创建/更新。
-              </p>
-            </div>
+      <main class="memory-main">
+        <!-- ============ 左侧文件列表 ============ -->
+        <aside class="file-sidebar">
+          <div class="sidebar-header">
+            <span>记忆文件</span>
             <button
-              v-if="!projectsLoading && projects.length > 0"
-              class="btn-link"
-              @click="loadProjects"
-            >刷新</button>
-          </header>
+              v-if="!loading && !loadError"
+              class="btn-icon"
+              title="刷新"
+              @click="loadAll"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10" />
+                <polyline points="1 20 1 14 7 14" />
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+              </svg>
+            </button>
+          </div>
 
-          <div class="card-body">
-            <!-- 加载中 -->
-            <div v-if="projectsLoading" class="placeholder">
-              <span class="status-spinner" aria-label="加载中" /> 加载中...
-            </div>
-
-            <!-- 加载失败 -->
-            <div v-else-if="projectsError" class="placeholder error-text">
-              加载失败: {{ projectsError }}
-              <button class="btn-link" @click="loadProjects">重试</button>
-            </div>
-
-            <!-- 空状态 -->
-            <div v-else-if="projects.length === 0" class="empty-projects">
-              <p class="empty-title">暂无项目记忆</p>
-              <p class="empty-desc">
-                对某仓库跑一次代码审计任务,完成后会自动归纳生成项目记忆;
-                之后可在此手动编辑补充。
-              </p>
-            </div>
-
-            <!-- 项目列表 -->
-            <ul v-else class="project-list">
-              <li
-                v-for="p in projects"
-                :key="p.id"
-                class="project-row"
-                @click="openProjectDialog(p)"
+          <!-- 加载中 -->
+          <div v-if="loading" class="sidebar-placeholder">
+            <span class="status-spinner" /> 加载中...
+          </div>
+          <!-- 加载失败 -->
+          <div v-else-if="loadError" class="sidebar-placeholder error-text">
+            加载失败: {{ loadError }}
+            <button class="btn-link" @click="loadAll">重试</button>
+          </div>
+          <!-- 文件列表 -->
+          <ul v-else class="file-list">
+            <li>
+              <button
+                class="file-item"
+                :class="{ active: activeId === 'pref' }"
+                @click="selectFile('pref')"
               >
-                <div class="project-main">
-                  <div class="project-title-row">
-                    <span class="project-title">{{ projectTitle(p) }}</span>
-                    <span v-if="p.alias" class="project-url mono" :title="p.repo_url_raw">{{ p.repo_url_raw }}</span>
-                  </div>
-                  <p v-if="p.memory_content" class="project-preview">{{ previewContent(p.memory_content) }}</p>
-                  <p v-else class="project-preview muted">(暂无记忆内容)</p>
-                  <div class="project-meta">
-                    <span class="meta-item">上次归纳: {{ formatTime(p.last_summary_at) }}</span>
-                    <span class="meta-item">更新: {{ formatTime(p.updated_at) }}</span>
-                  </div>
+                <svg class="file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                </svg>
+                <span class="file-label">用户偏好</span>
+                <span v-if="isDirty('pref')" class="dirty-dot" title="有未保存改动" />
+              </button>
+            </li>
+            <li>
+              <button
+                class="file-item"
+                :class="{ active: activeId === 'global' }"
+                @click="selectFile('global')"
+              >
+                <svg class="file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                </svg>
+                <span class="file-label">全局记忆</span>
+                <span v-if="isDirty('global')" class="dirty-dot" title="有未保存改动" />
+              </button>
+            </li>
+
+            <li class="group-label">项目记忆</li>
+            <li v-if="projects.length === 0" class="group-empty">
+              暂无项目记忆,任务完成后自动归纳生成
+            </li>
+            <li v-for="p in projects" :key="p.id">
+              <button
+                class="file-item project"
+                :class="{ active: activeId === `project:${p.id}` }"
+                @click="selectFile(`project:${p.id}`)"
+              >
+                <svg class="file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 3h18v18H3z" />
+                  <path d="M3 9h18M9 21V9" />
+                </svg>
+                <span class="file-label" :title="p.alias || p.repo_url_raw">
+                  {{ p.alias || p.repo_url_raw }}
+                </span>
+                <span v-if="isDirty(`project:${p.id}`)" class="dirty-dot" title="有未保存改动" />
+              </button>
+            </li>
+          </ul>
+
+          <div v-if="hasAnyDirty" class="sidebar-footer-hint">
+            <span class="dirty-dot" /> 有未保存改动
+          </div>
+        </aside>
+
+        <!-- ============ 右侧编辑器 ============ -->
+        <section class="editor-panel">
+          <template v-if="activeEntry">
+            <!-- 工具栏 -->
+            <header class="editor-toolbar">
+              <div class="toolbar-left">
+                <!-- 项目:alias 可编辑标题 -->
+                <input
+                  v-if="activeEntry.kind === 'project'"
+                  v-model="aliasDrafts[activeEntry.id]"
+                  class="title-input"
+                  type="text"
+                  placeholder="项目别名(可选)"
+                  :disabled="saving || deleting"
+                  :maxlength="255"
+                />
+                <h2 v-else class="title-static">{{ activeEntry.label }}</h2>
+
+                <div v-if="activeEntry.kind === 'project'" class="subtitle-row">
+                  <span class="subtitle mono" :title="activeEntry.subtitle">{{ activeEntry.subtitle }}</span>
+                  <span class="meta-sep">·</span>
+                  <span class="subtitle">上次归纳: {{ formatTime(activeEntry.meta) }}</span>
                 </div>
-                <button class="btn-link" @click.stop="openProjectDialog(p)">编辑</button>
-              </li>
-            </ul>
+                <p v-else-if="activeEntry.kind === 'pref'" class="toolbar-desc">
+                  影响 user_agent 评判标准与 checklist 生成,注入其 system prompt
+                </p>
+                <p v-else class="toolbar-desc">
+                  跨项目通用经验,注入 user_agent(注入时截断 2000 字符)
+                </p>
+              </div>
+
+              <div class="toolbar-right">
+                <div class="mode-switch" role="group" aria-label="编辑/预览">
+                  <button
+                    :class="['mode-btn', { active: mode === 'edit' }]"
+                    :disabled="saving || deleting"
+                    @click="mode = 'edit'"
+                  >编辑</button>
+                  <button
+                    :class="['mode-btn', { active: mode === 'preview' }]"
+                    :disabled="saving || deleting"
+                    @click="mode = 'preview'"
+                  >预览</button>
+                </div>
+              </div>
+            </header>
+
+            <!-- 内容区 -->
+            <div class="editor-content">
+              <!-- 加载占位 -->
+              <div v-if="loading" class="content-placeholder">
+                <span class="status-spinner" /> 加载中...
+              </div>
+              <!-- 编辑模式 -->
+              <textarea
+                v-else-if="mode === 'edit'"
+                v-model="drafts[activeEntry.id]"
+                class="md-editor"
+                :class="{ invalid: activeOverLimit }"
+                placeholder="用 Markdown 编写。支持标题、列表、代码块等。"
+                :disabled="saving || deleting"
+                spellcheck="false"
+              />
+              <!-- 预览模式 -->
+              <div v-else class="md-preview">
+                <div v-if="previewHtml" class="markdown-body" v-html="previewHtml" />
+                <div v-else class="preview-empty">暂无内容</div>
+              </div>
+            </div>
+
+            <!-- 底栏 -->
+            <footer class="editor-footer">
+              <div class="footer-left">
+                <span class="char-count" :class="{ over: activeOverLimit }">
+                  {{ activeDraft.length }} / {{ activeLimit }}
+                </span>
+                <span v-if="actionError" class="action-error">{{ actionError }}</span>
+              </div>
+              <div class="footer-right">
+                <button
+                  v-if="activeEntry.kind === 'project'"
+                  class="btn btn-danger"
+                  :disabled="saving || deleting"
+                  @click="handleDelete"
+                >
+                  <span v-if="deleting" class="btn-spinner danger" />
+                  {{ deleting ? '删除中...' : '删除' }}
+                </button>
+                <button
+                  class="btn btn-primary"
+                  :disabled="!activeDirty || saving || deleting || activeOverLimit"
+                  @click="handleSave"
+                >
+                  <span v-if="saving" class="btn-spinner" />
+                  {{ saving ? '保存中...' : (activeDirty ? '保存' : '已保存') }}
+                </button>
+              </div>
+            </footer>
+          </template>
+
+          <!-- 无选中文件兜底 -->
+          <div v-else class="editor-empty">
+            <p>请从左侧选择一份记忆文件</p>
           </div>
         </section>
       </main>
     </div>
-
-    <!-- ============ 项目记忆编辑弹窗 ============ -->
-    <ProjectMemoryDialog
-      :open="activeProjectId !== ''"
-      :project="activeProject"
-      :loading="projectDialog.loading"
-      :deleting="projectDialog.deleting"
-      :error="projectDialog.error"
-      @save="handleSaveProject"
-      @delete="handleDeleteProject"
-      @cancel="closeProjectDialog"
-    />
 
     <!-- ============ 浮动提示弹窗 ============ -->
     <Teleport to="body">
@@ -571,105 +573,484 @@ onMounted(() => {
   overflow: hidden;
 }
 
-.main {
+.memory-main {
   flex: 1;
   min-width: 0;
-  max-width: 820px;
-  margin: 0 auto;
-  overflow-y: auto;
-  padding: var(--space-6) var(--space-5) var(--space-8);
   display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
-}
-
-/* ---- 页头 ---- */
-.page-header {
-  margin-bottom: var(--space-1);
-}
-
-.page-header h1 {
-  font-size: var(--fs-xl);
-  margin: 0 0 var(--space-2);
-}
-
-.page-subtitle {
-  font-size: var(--fs-sm);
-  color: var(--color-text-secondary);
-  margin: 0;
-  line-height: var(--lh-relaxed);
-}
-
-/* ---- 卡片 ---- */
-.card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-sm);
+  align-items: stretch;
   overflow: hidden;
 }
 
-.card-header {
+/* ============ 左侧文件列表 ============ */
+.file-sidebar {
+  width: 248px;
+  flex-shrink: 0;
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--color-text-secondary);
+  letter-spacing: 0.02em;
+}
+
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.btn-icon:hover {
+  color: var(--color-text);
+  background: var(--color-surface-alt);
+}
+
+.sidebar-placeholder {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  font-size: var(--fs-sm);
+  color: var(--color-text-secondary);
+}
+
+.error-text {
+  color: var(--color-danger);
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.file-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--space-2);
+  flex: 1;
+  overflow-y: auto;
+}
+
+.file-list > li {
+  margin: 0;
+}
+
+.group-label {
+  padding: var(--space-3) var(--space-3) var(--space-1);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--color-text-muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.group-empty {
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  line-height: var(--lh-relaxed);
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--fs-sm);
+  color: var(--color-text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  text-align: left;
+  transition: all var(--transition-fast);
+  position: relative;
+}
+
+.file-item:hover {
+  background: var(--color-surface-alt);
+}
+
+.file-item.active {
+  background: var(--color-primary-light);
+  color: var(--color-primary-hover);
+  font-weight: var(--fw-semibold);
+}
+
+.file-item.project {
+  padding-left: var(--space-5);
+}
+
+.file-icon {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.file-item.active .file-icon {
+  color: var(--color-primary);
+}
+
+.file-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dirty-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-warning, #f59e0b);
+  flex-shrink: 0;
+}
+
+.sidebar-footer-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-top: 1px solid var(--color-border);
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+}
+
+/* ============ 右侧编辑器 ============ */
+.editor-panel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--color-bg);
+}
+
+.editor-toolbar {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-4);
   padding: var(--space-4) var(--space-5);
   border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
 }
 
-.card-header h2 {
+.toolbar-left {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.title-static {
   font-size: var(--fs-lg);
   font-weight: var(--fw-semibold);
-  margin: 0 0 var(--space-1);
+  margin: 0;
+  color: var(--color-text);
 }
 
-.card-desc {
+.title-input {
+  width: 100%;
+  max-width: 480px;
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.title-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+
+.title-input:disabled {
+  background: var(--color-surface-alt);
+  cursor: not-allowed;
+}
+
+.subtitle-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.subtitle {
   font-size: var(--fs-xs);
-  color: var(--color-text-secondary);
+  color: var(--color-text-muted);
+}
+
+.subtitle.mono {
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 360px;
+}
+
+.meta-sep {
+  color: var(--color-text-muted);
+}
+
+.toolbar-desc {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
   margin: 0;
   line-height: var(--lh-relaxed);
 }
 
-.card-body {
-  padding: var(--space-5);
+.toolbar-right {
+  flex-shrink: 0;
 }
 
-/* ---- 表单字段 ---- */
-.grid-2 {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-4);
-  margin-bottom: var(--space-4);
+/* 模式切换 */
+.mode-switch {
+  display: inline-flex;
+  background: var(--color-surface-alt);
+  border-radius: var(--radius-md);
+  padding: 2px;
+  gap: 2px;
 }
 
-@media (max-width: 560px) {
-  .grid-2 {
-    grid-template-columns: 1fr;
-  }
+.mode-btn {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
 }
 
-.field {
-  margin-bottom: var(--space-4);
+.mode-btn:hover:not(:disabled):not(.active) {
+  color: var(--color-text);
 }
 
-.field:last-child {
-  margin-bottom: 0;
+.mode-btn.active {
+  background: var(--color-surface);
+  color: var(--color-text);
+  box-shadow: var(--shadow-sm);
 }
 
-.field label {
+.mode-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 内容区 */
+.editor-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: var(--space-4) var(--space-5);
+}
+
+.content-placeholder {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-secondary);
+  font-size: var(--fs-sm);
+}
+
+.md-editor {
+  flex: 1;
+  width: 100%;
+  padding: var(--space-4);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-relaxed);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  resize: none;
+  outline: none;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.md-editor:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+
+.md-editor:disabled {
+  background: var(--color-surface-alt);
+  cursor: not-allowed;
+}
+
+.md-editor.invalid {
+  border-color: var(--color-danger);
+}
+
+.md-editor::placeholder {
+  color: var(--color-text-muted);
+}
+
+/* 预览 */
+.md-preview {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.preview-empty {
+  color: var(--color-text-muted);
+  font-size: var(--fs-sm);
+  text-align: center;
+  padding: var(--space-8) 0;
+}
+
+/* Markdown 渲染样式(作用于 v-html 容器) */
+.markdown-body {
+  font-size: var(--fs-sm);
+  line-height: var(--lh-relaxed);
+  color: var(--color-text);
+  word-break: break-word;
+}
+
+.markdown-body :deep(h1),
+.markdown-body :deep(h2),
+.markdown-body :deep(h3) {
+  margin: var(--space-4) 0 var(--space-2);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-tight);
+}
+
+.markdown-body :deep(h1) { font-size: var(--fs-xl); }
+.markdown-body :deep(h2) { font-size: var(--fs-lg); }
+.markdown-body :deep(h3) { font-size: var(--fs-base); }
+
+.markdown-body :deep(p) {
+  margin: 0 0 var(--space-3);
+}
+
+.markdown-body :deep(ul),
+.markdown-body :deep(ol) {
+  margin: 0 0 var(--space-3);
+  padding-left: var(--space-5);
+}
+
+.markdown-body :deep(li) {
+  margin: var(--space-1) 0;
+}
+
+.markdown-body :deep(code) {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  padding: 2px 6px;
+  background: var(--color-surface-alt);
+  border-radius: var(--radius-sm);
+}
+
+.markdown-body :deep(pre) {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-surface-alt);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+}
+
+.markdown-body :deep(pre code) {
+  padding: 0;
+  background: transparent;
+}
+
+.markdown-body :deep(blockquote) {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  border-left: 3px solid var(--color-primary);
+  background: var(--color-surface-alt);
+  color: var(--color-text-secondary);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.markdown-body :deep(a) {
+  color: var(--color-primary);
+  text-decoration: none;
+}
+
+.markdown-body :deep(a:hover) {
+  text-decoration: underline;
+}
+
+.markdown-body :deep(table) {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 var(--space-3);
+}
+
+.markdown-body :deep(th),
+.markdown-body :deep(td) {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  text-align: left;
+}
+
+.markdown-body :deep(hr) {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: var(--space-4) 0;
+}
+
+/* 底栏 */
+.editor-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
-  margin-bottom: var(--space-2);
-  color: var(--color-text);
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-5);
+  border-top: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.footer-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.footer-right {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
 }
 
 .char-count {
   font-size: var(--fs-xs);
-  font-weight: var(--fw-regular);
+  font-family: var(--font-mono);
   color: var(--color-text-muted);
 }
 
@@ -678,78 +1059,26 @@ onMounted(() => {
   font-weight: var(--fw-medium);
 }
 
-.field input,
-.field select,
-.field textarea {
-  width: 100%;
-  padding: var(--space-2) var(--space-3);
-  font-size: var(--fs-base);
-  font-family: inherit;
-  color: var(--color-text);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
-}
-
-.field textarea {
-  resize: vertical;
-  line-height: var(--lh-relaxed);
-  min-height: 80px;
-}
-
-.field input:focus,
-.field select:focus,
-.field textarea:focus {
-  outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px var(--color-primary-light);
-}
-
-.field input:disabled,
-.field select:disabled,
-.field textarea:disabled {
-  background: var(--color-surface-alt);
-  cursor: not-allowed;
-}
-
-.field input.invalid,
-.field textarea.invalid {
-  border-color: var(--color-danger);
-}
-
-.field-hint {
-  display: block;
-  margin-top: var(--space-1);
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-}
-
-.field-error {
-  display: block;
-  margin-top: var(--space-1);
+.action-error {
   font-size: var(--fs-xs);
   color: var(--color-danger);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* ---- 卡片底部 ---- */
-.card-footer {
+.editor-empty {
+  flex: 1;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-.validation-error {
+  justify-content: center;
+  color: var(--color-text-muted);
   font-size: var(--fs-sm);
-  color: var(--color-danger);
-  flex: 1;
-  word-break: break-word;
 }
 
-/* ---- 按钮 ---- */
+/* ============ 按钮 ============ */
 .btn {
-  height: 38px;
+  height: 36px;
   padding: 0 var(--space-4);
   font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
@@ -776,6 +1105,17 @@ onMounted(() => {
   background: var(--color-primary-hover);
 }
 
+.btn-danger {
+  background: var(--color-surface);
+  color: var(--color-danger);
+  border-color: var(--color-border);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--color-danger-light);
+  border-color: var(--color-danger);
+}
+
 .btn-spinner {
   width: 14px;
   height: 14px;
@@ -783,6 +1123,11 @@ onMounted(() => {
   border-top-color: white;
   border-radius: 50%;
   animation: btn-spin 0.8s linear infinite;
+}
+
+.btn-spinner.danger {
+  border-color: rgba(239, 68, 68, 0.3);
+  border-top-color: var(--color-danger);
 }
 
 @keyframes btn-spin {
@@ -793,140 +1138,18 @@ onMounted(() => {
   background: none;
   border: none;
   padding: 4px 8px;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
   color: var(--color-primary);
   cursor: pointer;
   border-radius: var(--radius-sm);
-  transition: all var(--transition-fast);
-  flex-shrink: 0;
 }
 
 .btn-link:hover {
-  background: var(--color-primary-light);
-  color: var(--color-primary-hover);
+  text-decoration: underline;
 }
 
-/* ---- 占位/空状态 ---- */
-.placeholder {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  color: var(--color-text-secondary);
-  font-size: var(--fs-sm);
-  padding: var(--space-4) 0;
-}
-
-.error-text {
-  color: var(--color-danger);
-}
-
-.empty-projects {
-  padding: var(--space-6) var(--space-4);
-  text-align: center;
-}
-
-.empty-title {
-  font-size: var(--fs-base);
-  font-weight: var(--fw-semibold);
-  color: var(--color-text);
-  margin: 0 0 var(--space-2);
-}
-
-.empty-desc {
-  font-size: var(--fs-sm);
-  color: var(--color-text-muted);
-  margin: 0;
-  line-height: var(--lh-relaxed);
-}
-
-/* ---- 项目列表 ---- */
-.project-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.project-row {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: background var(--transition-fast), border-color var(--transition-fast);
-}
-
-.project-row:hover {
-  background: var(--color-surface-alt);
-  border-color: var(--color-border-strong);
-}
-
-.project-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.project-title-row {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-  min-width: 0;
-}
-
-.project-title {
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-semibold);
-  color: var(--color-text);
-  word-break: break-all;
-}
-
-.project-url {
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.project-preview {
-  font-size: var(--fs-sm);
-  color: var(--color-text-secondary);
-  margin: 0;
-  line-height: var(--lh-relaxed);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.project-preview.muted {
-  color: var(--color-text-muted);
-  font-style: italic;
-}
-
-.project-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-  margin-top: var(--space-1);
-}
-
-.meta-item {
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-}
-
-.mono {
-  font-family: var(--font-mono);
-}
-
-/* ---- spinner ---- */
+/* spinner */
 .status-spinner {
   display: inline-block;
   width: 14px;
@@ -942,7 +1165,7 @@ onMounted(() => {
   to { transform: rotate(360deg); }
 }
 
-/* ---- 浮动提示弹窗 ---- */
+/* ============ Toast ============ */
 .toast-popup {
   position: fixed;
   top: var(--space-5);
@@ -952,8 +1175,8 @@ onMounted(() => {
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
-  min-width: 280px;
-  max-width: 420px;
+  min-width: 240px;
+  max-width: 380px;
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-md);
   font-size: var(--fs-sm);
