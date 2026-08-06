@@ -325,28 +325,30 @@ async function handleTest(type: string): Promise<void> {
             </button>
           </div>
 
-          <!-- ============ 面板列表(每个 agent 独立实例,v-show 切换) ============ -->
-          <div
-            v-for="p in panels"
-            :key="p.meta.agent_type"
-            role="tabpanel"
-          >
-            <AgentConfigPanel
-              v-if="activated.has(p.meta.agent_type)"
-              v-show="activeType === p.meta.agent_type"
-              :meta="p.meta"
-              :detail="p.state.detail"
-              :saving="p.state.saving || p.state.detailLoading"
-              :error="p.state.error"
-              :testing="p.state.testing"
-              :test-result="p.state.testResult"
-              :test-stage="p.state.testStage"
-              :test-thinking="p.state.testThinking"
-              :test-content="p.state.testContent"
-              @save="(creds, active) => handleSave(p.meta.agent_type, creds, active)"
-              @clear="handleClear(p.meta.agent_type)"
-              @test="handleTest(p.meta.agent_type)"
-            />
+          <!-- ============ 面板滚动区(仅此区滚动,header/tab 固定在顶部) ============ -->
+          <div class="panels-scroll">
+            <div
+              v-for="p in panels"
+              :key="p.meta.agent_type"
+              role="tabpanel"
+            >
+              <AgentConfigPanel
+                v-if="activated.has(p.meta.agent_type)"
+                v-show="activeType === p.meta.agent_type"
+                :meta="p.meta"
+                :detail="p.state.detail"
+                :saving="p.state.saving || p.state.detailLoading"
+                :error="p.state.error"
+                :testing="p.state.testing"
+                :test-result="p.state.testResult"
+                :test-stage="p.state.testStage"
+                :test-thinking="p.state.testThinking"
+                :test-content="p.state.testContent"
+                @save="(creds, active) => handleSave(p.meta.agent_type, creds, active)"
+                @clear="handleClear(p.meta.agent_type)"
+                @test="handleTest(p.meta.agent_type)"
+              />
+            </div>
           </div>
         </template>
       </main>
@@ -407,7 +409,9 @@ async function handleTest(type: string): Promise<void> {
   min-width: 0;
   max-width: 1040px;
   margin: 0 auto;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   padding: var(--space-6) var(--space-5) var(--space-8);
 }
 
@@ -415,8 +419,9 @@ async function handleTest(type: string): Promise<void> {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: var(--space-3);
-  padding: var(--space-16);
+  flex: 1;
   color: var(--color-text-secondary);
 }
 
@@ -435,7 +440,12 @@ async function handleTest(type: string): Promise<void> {
 
 /* ---- 空状态 ---- */
 .empty {
-  padding: var(--space-16) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  padding: var(--space-4);
   text-align: center;
 }
 
@@ -452,13 +462,14 @@ async function handleTest(type: string): Promise<void> {
   margin: 0;
 }
 
-/* ---- 页头 ---- */
+/* ---- 页头(固定,不随内容滚动) ---- */
 .page-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-4);
   margin-bottom: var(--space-5);
+  flex-shrink: 0;
 }
 
 .page-header h1 {
@@ -466,12 +477,20 @@ async function handleTest(type: string): Promise<void> {
   margin: 0;
 }
 
-/* ---- 选项卡栏 ---- */
+/* ---- 选项卡栏(固定,不随内容滚动) ---- */
 .tab-bar {
   display: flex;
   gap: var(--space-1);
   border-bottom: 1px solid var(--color-border);
   margin-bottom: var(--space-5);
+  flex-shrink: 0;
+}
+
+/* ---- 面板滚动区(仅此区垂直滚动) ---- */
+.panels-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .tab {
