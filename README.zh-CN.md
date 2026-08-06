@@ -176,6 +176,18 @@ GitHub 和 Gitee 二者均支持,按需配置。留空的平台对应路由会�
 > - Gitee:应用回调地址填后端 `GITEE_OAUTH_REDIRECT_URI` 的值,权限至少勾 `user_info`(登录)+ `projects`(仓库绑定)
 > - 同一个回调地址同时承担「登录」和「绑定」两种场景,按当前登录态分流
 
+**Gitee 权限勾选说明**(创建应用页 https://gitee.com/oauth/applications,过高权限用户可能拒绝授权,只勾实际需要的):
+
+| 权限 | 是否勾选 | 用途 |
+|---|:---:|---|
+| `user_info` | ✅ 必勾 | 登录:获取用户 ID / 用户名 / 头像 / 昵称(对应 `scope_login`) |
+| `projects` | ✅ 必勾 | 仓库绑定:列出用户私有仓库 + HTTPS 克隆鉴权(对应 `scope_bind`) |
+| `emails` | ❌ 不勾 | Gitee 无可验证邮箱端点,登录用 `user_info` 返回的 email 字段即可 |
+| `pull_requests` / `issues` / `notes` | ❌ 不勾 | 本系统只读取/克隆代码,不操作 PR / Issue / 评论 |
+| `keys` / `hook` / `groups` / `gists` / `enterprises` | ❌ 不勾 | 未使用 |
+
+> 权限与代码中 scope 定义一一对应(`user_info` = `scope_login`,`user_info projects` = `scope_bind`),见 [backend/app/git_provider.py](backend/app/git_provider.py) 的 `GiteeProvider`。
+
 #### LLM 配置(开发期默认 provider)
 
 | 变量 | 说明 | 默认值 |

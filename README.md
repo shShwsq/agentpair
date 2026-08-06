@@ -176,6 +176,18 @@ Both GitHub and Gitee are supported; configure as needed. Platforms left empty w
 > - Gitee: set the app callback URL to the value of `GITEE_OAUTH_REDIRECT_URI`; check at least `user_info` (login) + `projects` (repo binding) scopes
 > - The same callback URL serves both "login" and "binding" scenarios, dispatched by current login state
 
+**Gitee scope selection** (app creation page https://gitee.com/oauth/applications — request only what's needed; excessive scopes may cause users to deny authorization):
+
+| Scope | Check? | Purpose |
+|---|:---:|---|
+| `user_info` | ✅ required | Login: fetch user ID / username / avatar / display name (matches `scope_login`) |
+| `projects` | ✅ required | Repo binding: list private repos + HTTPS clone auth (matches `scope_bind`) |
+| `emails` | ❌ skip | Gitee has no verified-email endpoint; the `email` field from `user_info` is enough |
+| `pull_requests` / `issues` / `notes` | ❌ skip | This system only reads/clones code, not PRs / Issues / comments |
+| `keys` / `hook` / `groups` / `gists` / `enterprises` | ❌ skip | Unused |
+
+> Scopes map 1:1 to the code (`user_info` = `scope_login`, `user_info projects` = `scope_bind`) — see `GiteeProvider` in [backend/app/git_provider.py](backend/app/git_provider.py).
+
 #### LLM Config (dev default provider)
 
 | Variable | Description | Default |
