@@ -13,8 +13,9 @@ import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import BrandLogo from '@/components/BrandLogo.vue'
-import { forgotPassword, getGitHubAuthorizeURL } from '@/api/auth'
+import { forgotPassword, getOAuthAuthorizeURL } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
+import type { GitProvider } from '@/types/git_provider'
 import { extractErrorMessage } from '@/utils/error'
 
 type Mode = 'login' | 'register' | 'forgot'
@@ -107,11 +108,11 @@ function switchMode(newMode: Mode): void {
   }
 }
 
-// ---- GitHub OAuth ----
+// ---- Git 平台 OAuth(GitHub / Gitee) ----
 
-function handleGitHub(): void {
-  // 直接跳转到 GitHub 授权页,回调由 OAuthCallbackView 处理
-  window.location.href = getGitHubAuthorizeURL()
+/** 跳转到指定平台授权页,回调由 OAuthCallbackView 处理 */
+function handleOAuth(provider: GitProvider): void {
+  window.location.href = getOAuthAuthorizeURL(provider)
 }
 </script>
 
@@ -249,12 +250,26 @@ function handleGitHub(): void {
         type="button"
         class="btn-github"
         :disabled="loading"
-        @click="handleGitHub"
+        @click="handleOAuth('github')"
       >
         <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
           <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z" />
         </svg>
         使用 GitHub 登录
+      </button>
+
+      <!-- Gitee OAuth -->
+      <button
+        v-if="mode !== 'forgot'"
+        type="button"
+        class="btn-gitee"
+        :disabled="loading"
+        @click="handleOAuth('gitee')"
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M11.983 0H4C1.79 0 0 1.79 0 4v16c0 2.21 1.79 4 4 4h16c2.21 0 4-1.79 4-4v-7.5h-9.5v3.5h5.5v2.5h-8.5v-11h12c0-2.21-1.79-4-4-4h-3.517z" />
+        </svg>
+        使用 Gitee 登录
       </button>
 
       <!-- 返回登录(forgot 模式) -->
@@ -532,6 +547,31 @@ function handleGitHub(): void {
 }
 
 .btn-github:disabled {
+  opacity: 0.6;
+}
+
+/* Gitee 按钮(Gitee 红,与 GitHub 按钮同尺寸) */
+.btn-gitee {
+  width: 100%;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  font-size: var(--fs-base);
+  font-weight: var(--fw-medium);
+  color: white;
+  background: var(--color-gitee);
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast);
+  margin-top: var(--space-3);
+}
+
+.btn-gitee:hover:not(:disabled) {
+  background: var(--color-gitee-hover);
+}
+
+.btn-gitee:disabled {
   opacity: 0.6;
 }
 

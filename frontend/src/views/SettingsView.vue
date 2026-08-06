@@ -13,13 +13,18 @@ import { useRoute, useRouter } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
 import DeleteAccountDialog from '@/components/DeleteAccountDialog.vue'
-import GitHubDialog from '@/components/GitHubDialog.vue'
+import GitProviderDialog from '@/components/GitProviderDialog.vue'
 import PasswordDialog from '@/components/PasswordDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import { changePassword, deleteAccount } from '@/api/auth'
-import { getGitHubBindURL, getGitHubStatus, syncEmail, unbindGitHub } from '@/api/github'
-import type { GitHubStatus } from '@/types/github'
+import {
+  getGitBindURL,
+  getGitProviderStatus,
+  syncGitProviderEmail,
+  unbindGitProvider,
+} from '@/api/git_provider'
+import type { GitProvider, GitProviderStatus } from '@/types/git_provider'
 import { useAuthStore } from '@/stores/auth'
 import { extractErrorMessage } from '@/utils/error'
 
@@ -87,56 +92,94 @@ async function handlePasswordConfirm(payload: {
 }
 
 // ============================================================
-// GitHub 弹窗
+// Git 平台弹窗(GitHub / Gitee 共用,按 activeProvider 分派)
 // ============================================================
-const ghDialogOpen = ref(false)
-const githubStatus = ref<GitHubStatus | null>(null)
-const githubLoading = ref(false)
-const githubAction = ref<'bind' | 'unbind' | ''>('')
-const githubError = ref('')
-const githubSuccess = ref('')
+/** 支持的平台列表(表格行 + 弹窗都按此渲染) */
+const PROVIDERS: GitProvider[] = ['github', 'gitee']
 
-async function refreshGitHubStatus(): Promise<void> {
-  githubLoading.value = true
-  githubError.value = ''
+/** 当前打开弹窗的平台(空串=弹窗关闭) */
+const activeProvider = ref<GitProvider | ''>('')
+
+/** 各平台绑定状态(provider → status) */
+const providerStatus = ref<Record<GitProvider, GitProviderStatus | null>>({
+  github: null,
+  gitee: null,
+})
+/** 各平台状态加载中标记 */
+const providerLoading = ref<Record<GitProvider, boolean>>({
+  github: false,
+  gitee: false,
+})
+/** 各平台操作进行中('bind' | 'unbind' | '') */
+const providerAction = ref<Record<GitProvider, 'bind' | 'unbind' | ''>>({
+  github: '',
+  gitee: '',
+})
+/** 各平台错误信息 */
+const providerError = ref<Record<GitProvider, string>>({
+  github: '',
+  gitee: '',
+})
+/** 各平台成功提示 */
+const providerSuccess = ref<Record<GitProvider, string>>({
+  github: '',
+  gitee: '',
+})
+
+/** 平台显示名(表格 item 列用) */
+function providerDisplayName(p: GitProvider): string {
+  return p === 'gitee' ? 'Gitee' : 'GitHub'
+}
+
+async function refreshProviderStatus(p: GitProvider): Promise<void> {
+  providerLoading.value[p] = true
+  providerError.value[p] = ''
   try {
-    githubStatus.value = await getGitHubStatus()
+    providerStatus.value[p] = await getGitProviderStatus(p)
   } catch (err) {
     // 静默失败,弹窗内会显示失败态
-    console.warn('加载 GitHub 状态失败:', err)
+    console.warn(`加载 ${providerDisplayName(p)} 状态失败:`, err)
   } finally {
-    githubLoading.value = false
+    providerLoading.value[p] = false
   }
 }
 
-function openGitHubDialog(): void {
-  githubError.value = ''
-  githubSuccess.value = ''
-  ghDialogOpen.value = true
-  if (!githubStatus.value) refreshGitHubStatus()
+/** 并行刷新所有平台状态(表格状态列展示用) */
+async function refreshAllProviderStatus(): Promise<void> {
+  await Promise.all(PROVIDERS.map((p) => refreshProviderStatus(p)))
 }
 
-function handleBind(): void {
-  // 跳到 GitHub 授权页,回调后由 OAuthCallbackView 完成绑定
-  githubAction.value = 'bind'
-  window.location.href = getGitHubBindURL()
+function openProviderDialog(p: GitProvider): void {
+  activeProvider.value = p
+  providerError.value[p] = ''
+  providerSuccess.value[p] = ''
+  if (!providerStatus.value[p]) refreshProviderStatus(p)
 }
 
-async function handleUnbind(): Promise<void> {
-  githubAction.value = 'unbind'
-  githubError.value = ''
-  githubSuccess.value = ''
+function handleBind(p: GitProvider): void {
+  // 跳到平台授权页,回调后由 OAuthCallbackView 完成绑定
+  providerAction.value[p] = 'bind'
+  window.location.href = getGitBindURL(p)
+}
+
+async function handleUnbind(p: GitProvider): Promise<void> {
+  providerAction.value[p] = 'unbind'
+  providerError.value[p] = ''
+  providerSuccess.value[p] = ''
   try {
-    githubStatus.value = await unbindGitHub()
-    githubSuccess.value = '已解绑 GitHub'
-    showToast('已解绑 GitHub,任务执行将无法访问你的私有仓库', 'success')
+    providerStatus.value[p] = await unbindGitProvider(p)
+    providerSuccess.value[p] = `已解绑 ${providerDisplayName(p)}`
+    showToast(
+      `已解绑 ${providerDisplayName(p)},任务执行将无法访问你的私有仓库`,
+      'success',
+    )
     setTimeout(() => {
-      githubSuccess.value = ''
+      providerSuccess.value[p] = ''
     }, 5000)
   } catch (err) {
-    githubError.value = extractErrorMessage(err)
+    providerError.value[p] = extractErrorMessage(err)
   } finally {
-    githubAction.value = ''
+    providerAction.value[p] = ''
   }
 }
 
@@ -144,7 +187,7 @@ async function handleUnbind(): Promise<void> {
 // 表格行
 // ============================================================
 interface SettingRow {
-  /** 行唯一 key:password/github/delete 固定 */
+  /** 行唯一 key:password / git:github / git:gitee / delete */
   key: string
   item: string
   desc: string
@@ -165,24 +208,29 @@ const rows = computed<SettingRow[]>(() => {
       actionText: hasPassword.value ? '修改' : '设置',
       loading: false,
     },
-    {
-      key: 'github',
-      item: 'GitHub 账号',
+  ]
+
+  // 各 git provider 一行
+  const gitRows: SettingRow[] = PROVIDERS.map((p) => {
+    const status = providerStatus.value[p]
+    return {
+      key: `git:${p}`,
+      item: `${providerDisplayName(p)} 账号`,
       desc: '绑定后可访问私有仓库',
-      status: githubStatus.value?.bound
-        ? `@${githubStatus.value.github_login || 'unknown'}`
-        : githubStatus.value === null
-          ? ''  // 加载中,由 template 渲染 spinner
+      status: status?.bound
+        ? `@${status.provider_login || 'unknown'}`
+        : status === null
+          ? '' // 加载中,由 template 渲染 spinner
           : '未绑定',
-      statusType: githubStatus.value?.bound
+      statusType: status?.bound
         ? 'ok'
-        : githubStatus.value === null
+        : status === null
           ? 'neutral'
           : 'warn',
-      actionText: githubStatus.value?.bound ? '管理' : '绑定',
-      loading: githubStatus.value === null,
-    },
-  ]
+      actionText: status?.bound ? '管理' : '绑定',
+      loading: status === null,
+    }
+  })
 
   const tail: SettingRow[] = [
     {
@@ -195,13 +243,14 @@ const rows = computed<SettingRow[]>(() => {
     },
   ]
 
-  return [...fixed, ...tail]
+  return [...fixed, ...gitRows, ...tail]
 })
 
 function openRow(row: SettingRow): void {
   if (row.key === 'password') openPasswordDialog()
-  else if (row.key === 'github') openGitHubDialog()
-  else if (row.key === 'delete') openDeleteDialog()
+  else if (row.key.startsWith('git:')) {
+    openProviderDialog(row.key.slice(4) as GitProvider)
+  } else if (row.key === 'delete') openDeleteDialog()
 }
 
 // ============================================================
@@ -235,10 +284,12 @@ async function handleDeleteConfirm(email: string): Promise<void> {
 }
 
 // ============================================================
-// 邮箱同步弹窗(绑定后 GitHub 邮箱与账号邮箱不一致时触发)
+// 邮箱同步弹窗(绑定后平台邮箱与账号邮箱不一致时触发;仅 GitHub 支持)
 // ============================================================
 const syncDialogOpen = ref(false)
-const syncGithubEmail = ref('')
+/** 触发同步的平台(用于调对应 provider 的 sync-email 端点) */
+const syncProvider = ref<GitProvider>('github')
+const syncProviderEmail = ref('')
 const syncCurrentEmail = ref('')
 const syncLoading = ref(false)
 const syncError = ref('')
@@ -247,13 +298,13 @@ async function handleSyncConfirm(): Promise<void> {
   syncError.value = ''
   syncLoading.value = true
   try {
-    await syncEmail()
+    await syncGitProviderEmail(syncProvider.value)
     // 重新拉取用户信息,更新本地 email
     await authStore.fetchMe()
     syncDialogOpen.value = false
-    showToast('邮箱已同步为 GitHub 邮箱', 'success')
-    // 同步后刷新 GitHub 状态(绑定状态不变,但邮箱已更新)
-    refreshGitHubStatus()
+    showToast(`邮箱已同步为 ${providerDisplayName(syncProvider.value)} 邮箱`, 'success')
+    // 同步后刷新该平台状态(绑定状态不变,但邮箱已更新)
+    refreshProviderStatus(syncProvider.value)
   } catch (err) {
     syncError.value = extractErrorMessage(err)
   } finally {
@@ -262,12 +313,14 @@ async function handleSyncConfirm(): Promise<void> {
 }
 
 onMounted(() => {
-  // 预加载 GitHub 状态(用于表格状态列展示)
-  refreshGitHubStatus()
+  // 预加载所有 git provider 状态(用于表格状态列展示)
+  refreshAllProviderStatus()
 
   // 检测 OAuthCallbackView 带来的邮箱不一致 query → 弹窗询问
+  // (仅 GitHub 会触发;Gitee 不支持可验证邮箱,恒为 false)
   if (route.query.email_mismatch === '1') {
-    syncGithubEmail.value = (route.query.github_email as string) || ''
+    syncProvider.value = (route.query.provider as GitProvider) || 'github'
+    syncProviderEmail.value = (route.query.provider_email as string) || ''
     syncCurrentEmail.value = (route.query.current_email as string) || ''
     syncError.value = ''
     syncDialogOpen.value = true
@@ -360,16 +413,20 @@ onMounted(() => {
           @cancel="pwdDialogOpen = false"
         />
 
-        <GitHubDialog
-          :open="ghDialogOpen"
-          :status="githubStatus"
-          :loading="githubLoading"
-          :action="githubAction"
-          :error="githubError"
-          :success="githubSuccess"
-          @bind="handleBind"
-          @unbind="handleUnbind"
-          @cancel="ghDialogOpen = false"
+        <!-- Git 平台弹窗(GitHub / Gitee 共用,按 activeProvider 分派) -->
+        <GitProviderDialog
+          v-for="p in PROVIDERS"
+          :key="p"
+          :provider="p"
+          :open="activeProvider === p"
+          :status="providerStatus[p]"
+          :loading="providerLoading[p]"
+          :action="providerAction[p]"
+          :error="providerError[p]"
+          :success="providerSuccess[p]"
+          @bind="handleBind(p)"
+          @unbind="handleUnbind(p)"
+          @cancel="activeProvider = ''"
         />
 
         <DeleteAccountDialog
@@ -398,7 +455,7 @@ onMounted(() => {
 
                 <div class="dialog-body">
                   <p class="sync-tip">
-                    检测到 GitHub 邮箱与当前账号邮箱不一致,是否将账号邮箱更新为 GitHub 邮箱?
+                    检测到 {{ providerDisplayName(syncProvider) }} 邮箱与当前账号邮箱不一致,是否将账号邮箱更新为 {{ providerDisplayName(syncProvider) }} 邮箱?
                   </p>
                   <div class="email-compare">
                     <div class="email-row">
@@ -406,12 +463,12 @@ onMounted(() => {
                       <span class="email-value">{{ syncCurrentEmail || '—' }}</span>
                     </div>
                     <div class="email-row">
-                      <span class="email-label">GitHub</span>
-                      <span class="email-value">{{ syncGithubEmail || '—' }}</span>
+                      <span class="email-label">{{ providerDisplayName(syncProvider) }}</span>
+                      <span class="email-value">{{ syncProviderEmail || '—' }}</span>
                     </div>
                   </div>
                   <p class="sync-note">
-                    更新后此邮箱将成为登录邮箱;GitHub verified primary email 视为已验证。
+                    更新后此邮箱将成为登录邮箱;{{ providerDisplayName(syncProvider) }} verified primary email 视为已验证。
                   </p>
                 </div>
 
@@ -430,7 +487,7 @@ onMounted(() => {
                       @click="handleSyncConfirm"
                     >
                       <span v-if="syncLoading" class="btn-spinner" />
-                      {{ syncLoading ? '同步中...' : '更新为 GitHub 邮箱' }}
+                      {{ syncLoading ? '同步中...' : `更新为 ${providerDisplayName(syncProvider)} 邮箱` }}
                     </button>
                   </div>
                 </footer>

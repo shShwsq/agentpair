@@ -9,7 +9,8 @@ export interface User {
   id: string
   email: string
   email_verified: boolean
-  github_id: string | null
+  /** 已关联的 git provider id 列表(如 ['github'] / ['github', 'gitee']) */
+  git_providers: string[]
   has_password: boolean
   created_at: string
 }

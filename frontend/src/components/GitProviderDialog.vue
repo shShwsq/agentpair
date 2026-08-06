@@ -1,21 +1,26 @@
 <script setup lang="ts">
 /**
- * GitHub 账号管理 弹窗
+ * Git 平台账号管理 弹窗(统一 GitHub / Gitee)
  *
  * 复用 QuestionDialog / ModelConfigDialog 的视觉语言(mask + card + header/body/footer)。
  * - 已绑定:展示头像 + 用户名,footer 提供「解绑」按钮
- * - 未绑定:展示说明 + 授权范围,footer 提供「绑定 GitHub」按钮
+ * - 未绑定:展示说明 + 授权范围,footer 提供「绑定 {平台}」按钮
  * - 加载中:展示 spinner
  *
+ * 平台差异(标题/说明/品牌色/scope 文案/avatar 占位符)按 provider prop 动态渲染。
  * 实际绑定(跳转授权页)/解绑(调 API)由父组件处理,本组件仅 emit 事件。
  */
-import type { GitHubStatus } from '@/types/github'
+import { computed } from 'vue'
+
+import type { GitProvider, GitProviderStatus } from '@/types/git_provider'
 
 const props = defineProps<{
+  /** 平台 id */
+  provider: GitProvider
   /** 是否显示 */
   open: boolean
-  /** GitHub 绑定状态(父组件加载) */
-  status: GitHubStatus | null
+  /** 该平台绑定状态(父组件加载) */
+  status: GitProviderStatus | null
   /** 状态加载中 */
   loading: boolean
   /** 操作进行中('bind' | 'unbind'),用于禁用按钮 + spinner */
@@ -32,6 +37,30 @@ const emit = defineEmits<{
   (e: 'cancel'): void
 }>()
 
+/** 平台展示元信息(标题/按钮文案/scope 文案/avatar 占位符/品牌色 CSS 变量) */
+const meta = computed(() => {
+  if (props.provider === 'gitee') {
+    return {
+      title: 'Gitee 账号',
+      displayName: 'Gitee',
+      scopeText: '授权范围:user_info(读取用户信息)+ projects(访问私有仓库)',
+      avatarPlaceholder: 'G',
+      /** 品牌色按钮 class(Gitee 红) */
+      btnClass: 'btn-gitee',
+      /** 头像 alt */
+      avatarAlt: 'Gitee 头像',
+    }
+  }
+  return {
+    title: 'GitHub 账号',
+    displayName: 'GitHub',
+    scopeText: '授权范围:user:email(读取邮箱)+ repo(访问私有仓库)',
+    avatarPlaceholder: 'GH',
+    btnClass: 'btn-github',
+    avatarAlt: 'GitHub 头像',
+  }
+})
+
 function handleCancel(): void {
   if (props.action) return // 操作进行中不允许关闭
   emit('cancel')
@@ -44,7 +73,7 @@ function handleCancel(): void {
       <div v-if="open" class="dialog-mask" @click.self="handleCancel">
         <div class="dialog-card" role="dialog" aria-modal="true">
           <header class="dialog-header">
-            <h3>GitHub 账号</h3>
+            <h3>{{ meta.title }}</h3>
             <button
               class="dialog-close"
               :disabled="!!action"
@@ -67,13 +96,13 @@ function handleCancel(): void {
                   <img
                     v-if="status.avatar_url"
                     :src="status.avatar_url"
-                    alt="GitHub 头像"
+                    :alt="meta.avatarAlt"
                     class="avatar"
                   />
-                  <div v-else class="avatar-placeholder">GH</div>
+                  <div v-else class="avatar-placeholder">{{ meta.avatarPlaceholder }}</div>
                 </div>
                 <div class="user-info">
-                  <p class="login">@{{ status.github_login || 'unknown' }}</p>
+                  <p class="login">@{{ status.provider_login || 'unknown' }}</p>
                   <p class="desc">已绑定,任务执行可访问你的私有仓库</p>
                 </div>
               </div>
@@ -85,9 +114,9 @@ function handleCancel(): void {
                     <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
                   </svg>
                 </div>
-                <p class="state-text">未绑定 GitHub 账号</p>
+                <p class="state-text">未绑定 {{ meta.displayName }} 账号</p>
                 <p class="scope-text">
-                  授权范围:user:email(读取邮箱)+ repo(访问私有仓库)<br />
+                  {{ meta.scopeText }}<br />
                   绑定后可在提交任务时选择你的私有仓库
                 </p>
               </div>
@@ -95,7 +124,7 @@ function handleCancel(): void {
 
             <!-- 加载失败 -->
             <div v-else class="state-block">
-              <p class="state-text">加载 GitHub 状态失败</p>
+              <p class="state-text">加载 {{ meta.displayName }} 状态失败</p>
               <button class="btn-text" @click="emit('cancel')">关闭后重试</button>
             </div>
           </div>
@@ -118,17 +147,17 @@ function handleCancel(): void {
                 @click="emit('unbind')"
               >
                 <span v-if="action === 'unbind'" class="btn-spinner danger" />
-                {{ action === 'unbind' ? '解绑中...' : '解绑 GitHub' }}
+                {{ action === 'unbind' ? '解绑中...' : `解绑 ${meta.displayName}` }}
               </button>
               <!-- 未绑定:绑定 -->
               <button
                 v-else-if="status && !status.bound"
-                class="btn btn-github"
+                :class="['btn', meta.btnClass]"
                 :disabled="action === 'bind'"
                 @click="emit('bind')"
               >
                 <span v-if="action === 'bind'" class="btn-spinner" />
-                {{ action === 'bind' ? '跳转中...' : '绑定 GitHub' }}
+                {{ action === 'bind' ? '跳转中...' : `绑定 ${meta.displayName}` }}
               </button>
             </div>
           </footer>
@@ -396,6 +425,16 @@ function handleCancel(): void {
 
 .btn-github:hover:not(:disabled) {
   background: var(--color-github-hover);
+}
+
+/* Gitee 品牌色按钮(红) */
+.btn-gitee {
+  background: var(--color-gitee);
+  color: white;
+}
+
+.btn-gitee:hover:not(:disabled) {
+  background: var(--color-gitee-hover);
 }
 
 .btn-spinner {

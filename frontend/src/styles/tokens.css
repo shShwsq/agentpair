@@ -38,6 +38,10 @@
   --color-github: #24292f;
   --color-github-hover: #1c2128;
 
+  /* ---- Gitee 品牌色 ---- */
+  --color-gitee: #c71d23;
+  --color-gitee-hover: #a3171d;
+
   /* ---- 字体 ---- */
   --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
     'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial,

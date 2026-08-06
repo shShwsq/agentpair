@@ -5,7 +5,7 @@
  * 布局类似常见大模型 Web 聊天输入框:
  * - 顶部:场景(mode)选择 + 使用模型选择
  * - 中部:大尺寸 textarea(用户主输入,提交时作为 user_input 拼到智能体上下文)
- * - 输入框底部:GitHub 仓库选择/输入 + 分支 + 发送按钮
+ * - 输入框底部:Git 仓库选择/输入(GitHub / Gitee)+ 分支 + 发送按钮
  *
  * 字段映射(对齐后端 params):
  * - userInput → user_input(用户主输入)
@@ -26,13 +26,16 @@ import BrandLogo from '@/components/BrandLogo.vue'
 import { createTask, getScenarios } from '@/api/task'
 import { getMyModels } from '@/api/model_configs'
 import { getAgentConfigs } from '@/api/agent_configs'
-import { getGitHubStatus, listGitHubRepos } from '@/api/github'
+import {
+  getGitProviderStatus,
+  listGitProviderRepos,
+} from '@/api/git_provider'
 import { getSkills, type SkillSummary } from '@/api/skill'
 import { extractErrorMessage } from '@/utils/error'
 import type { Scenario } from '@/types/task'
 import type { LLMConfigItemOut } from '@/types/model_configs'
 import type { AgentConfigOut } from '@/types/agent_configs'
-import type { GitHubRepoItem, GitHubStatus } from '@/types/github'
+import type { GitProvider, GitRepoItem } from '@/types/git_provider'
 
 const router = useRouter()
 
@@ -224,20 +227,38 @@ const loading = ref(false)
 const error = ref('')
 
 // ============================================================
-// GitHub 仓库选择(repo_url 字段专用增强)
+// Git 仓库选择(repo_url 字段专用增强,统一 GitHub / Gitee)
 // ============================================================
 
 /**
  * repo_url 字段支持两种输入方式:
  * - 'url':手动输入公开仓库地址(默认,场景无关)
- * - 'select':从已绑定 GitHub 账号的仓库列表中选择(可含私有仓库)
+ * - 'select':从已绑定的 Git 平台账号(GitHub / Gitee)仓库列表中选择(可含私有仓库)
  *
- * 仅当用户已绑定 GitHub 时显示模式切换;未绑定时走普通 url 输入,不阻塞流程。
+ * 仅当用户已绑定任一平台时显示下拉选择;未绑定时走普通 url 输入,不阻塞流程。
+ * 多平台绑定时,两组仓库合并到同一个下拉,选项 label 带 provider 标记。
  */
-const githubStatus = ref<GitHubStatus | null>(null)
-const githubBound = computed(() => githubStatus.value?.bound ?? false)
+/** 支持的平台列表 */
+const PROVIDERS: GitProvider[] = ['github', 'gitee']
 
-const githubRepos = ref<GitHubRepoItem[]>([])
+/** 各平台绑定状态 */
+const providerStatus = ref<Record<GitProvider, { bound: boolean } | null>>({
+  github: null,
+  gitee: null,
+})
+
+/** 是否已绑定任一平台(决定走下拉选择还是纯输入框) */
+const anyProviderBound = computed(() =>
+  PROVIDERS.some((p) => providerStatus.value[p]?.bound),
+)
+
+/** 仓库项(带 provider 标记,用于下拉选项 label 与 default_branch 填充) */
+interface RepoEntry extends GitRepoItem {
+  provider: GitProvider
+}
+
+/** 合并后的所有仓库列表 */
+const allRepos = ref<RepoEntry[]>([])
 const reposLoaded = ref(false)
 const reposLoading = ref(false)
 const reposError = ref('')
@@ -260,16 +281,54 @@ function closeRepoDialog(): void {
   repoDialogOpen.value = false
 }
 
-async function loadGitHubRepos(): Promise<void> {
+/** 平台显示名(label 前缀用) */
+function providerDisplayName(p: GitProvider): string {
+  return p === 'gitee' ? 'Gitee' : 'GitHub'
+}
+
+/**
+ * 并行加载所有已绑定平台的仓库列表,合并到 allRepos。
+ * 任一平台失败不影响其他平台,仅记录到 reposError。
+ */
+async function loadAllRepos(): Promise<void> {
   if (reposLoaded.value || reposLoading.value) return
   reposLoading.value = true
   reposError.value = ''
-  try {
-    const res = await listGitHubRepos()
-    githubRepos.value = res.repos
+
+  const boundProviders = PROVIDERS.filter((p) => providerStatus.value[p]?.bound)
+  if (boundProviders.length === 0) {
     reposLoaded.value = true
-    if (res.repos.length === 0) {
-      showRepoDialog('你的 GitHub 账号下暂无仓库')
+    return
+  }
+
+  try {
+    // 并行拉取所有已绑定平台的仓库;result 与 boundProviders 索引一一对应
+    const results = await Promise.allSettled(
+      boundProviders.map((p) => listGitProviderRepos(p)),
+    )
+
+    const merged: RepoEntry[] = []
+    const errors: string[] = []
+    results.forEach((r, idx) => {
+      const p = boundProviders[idx]
+      if (r.status === 'fulfilled') {
+        for (const repo of r.value.repos) {
+          merged.push({ ...repo, provider: p })
+        }
+      } else {
+        errors.push(
+          `${providerDisplayName(p)} 仓库加载失败: ${extractErrorMessage(r.reason)}`,
+        )
+      }
+    })
+    allRepos.value = merged
+    reposLoaded.value = true
+
+    if (merged.length === 0 && errors.length === 0) {
+      showRepoDialog('你绑定的账号下暂无仓库')
+    } else if (errors.length > 0) {
+      // 部分成功时也提示失败的平台(不阻塞使用已加载的仓库)
+      showRepoDialog(errors.join('\n'))
     }
   } catch (err) {
     reposError.value = extractErrorMessage(err)
@@ -281,19 +340,20 @@ async function loadGitHubRepos(): Promise<void> {
 
 /**
  * 仓库下拉框选项(可输入下拉框)。
- * value=clone_url(选中后写入 repoUrl),label=full_name(私有标记)。
+ * value=clone_url(选中后写入 repoUrl),
+ * label=`[平台] owner/repo (私有)?`(带 provider 标记,多平台时便于区分)。
  */
 const repoComboboxOptions = computed(() =>
-  githubRepos.value.map((r) => ({
+  allRepos.value.map((r) => ({
     value: r.clone_url,
-    label: `${r.full_name}${r.private ? ' (私有)' : ''}`,
+    label: `[${providerDisplayName(r.provider)}] ${r.full_name}${r.private ? ' (私有)' : ''}`,
   })),
 )
 
 /** 从下拉选中仓库时,若分支为空则自动填默认分支 */
 watch(repoUrl, (url) => {
   if (!url) return
-  const repo = githubRepos.value.find((r) => r.clone_url === url)
+  const repo = allRepos.value.find((r) => r.clone_url === url)
   if (repo && !branch.value.trim()) {
     branch.value = repo.default_branch
   }
@@ -443,10 +503,13 @@ const executorOptions = computed(() => [
 
 onMounted(async () => {
   try {
-    const [scenarioList, models, ghStatus, skills, agentCfgs] = await Promise.all([
+    // 并行拉取场景、模型、各 git provider 状态、技能、agent 配置
+    // git provider 状态静默失败:未绑定不影响任务提交
+    const [scenarioList, models, ghStatus, giteeStatus, skills, agentCfgs] = await Promise.all([
       getScenarios(),
       getMyModels().catch(() => null),
-      getGitHubStatus().catch(() => null), // 静默失败,未绑定不影响提交
+      getGitProviderStatus('github').catch(() => null),
+      getGitProviderStatus('gitee').catch(() => null),
       getSkills().catch(() => null as SkillSummary[] | null), // 静默失败,无 skill 不阻塞提交
       getAgentConfigs().catch(() => null), // 静默失败,无 agent 配置不影响提交
     ])
@@ -460,9 +523,11 @@ onMounted(async () => {
       const firstWithKey = models.llm_configs.find((c) => c.has_api_key)
       selectedLlmConfigId.value = (firstWithKey ?? models.llm_configs[0]).id
     }
-    if (ghStatus) githubStatus.value = ghStatus
-    // 已绑定 GitHub:预加载仓库列表,供可输入下拉框选择(失败由弹窗提示)
-    if (ghStatus?.bound) loadGitHubRepos()
+    // 记录各 provider 绑定状态(用于决定走下拉选择还是纯输入框)
+    if (ghStatus) providerStatus.value.github = { bound: ghStatus.bound }
+    if (giteeStatus) providerStatus.value.gitee = { bound: giteeStatus.bound }
+    // 已绑定任一平台:预加载仓库列表合并到下拉(失败由弹窗提示)
+    if (anyProviderBound.value) loadAllRepos()
     // skill 列表加载成功后,默认全选;若已选场景则按推荐重置
     if (skills && skills.length > 0) {
       allSkills.value = skills
@@ -764,18 +829,18 @@ onMounted(async () => {
           <!-- 分隔线 -->
           <div class="chat-divider" />
 
-          <!-- 底部:GitHub 仓库 + 分支 + 提交按钮 -->
+          <!-- 底部:仓库地址 + 分支 + 提交按钮 -->
           <div class="chat-footer">
-            <!-- 仓库输入/选择区:可输入下拉框(已绑定 GitHub 时可从仓库列表选;否则纯输入) -->
+            <!-- 仓库输入/选择区:可输入下拉框(已绑定任一平台时可从仓库列表选;否则纯输入) -->
             <div class="repo-area">
               <div class="repo-input-row">
-                <!-- 已绑定 GitHub:可输入 + 下拉选择仓库 -->
+                <!-- 已绑定任一平台:可输入 + 下拉选择仓库(含 GitHub / Gitee 私有仓库) -->
                 <ModelCombobox
-                  v-if="githubBound"
+                  v-if="anyProviderBound"
                   :model-value="repoUrl"
                   :options="repoComboboxOptions"
                   :disabled="reposLoading"
-                  :placeholder="reposLoading ? '加载仓库列表...' : '选择或输入 GitHub 仓库地址'"
+                  :placeholder="reposLoading ? '加载仓库列表...' : '选择或输入仓库地址(GitHub / Gitee)'"
                   @update:model-value="repoUrl = $event"
                 />
                 <!-- 未绑定:纯输入框 -->
@@ -786,7 +851,7 @@ onMounted(async () => {
                   class="repo-input"
                   :class="{ invalid: repoUrlError }"
                   placeholder="https://github.com/owner/repo"
-                  aria-label="GitHub 仓库地址"
+                  aria-label="仓库地址"
                 />
                 <input
                   v-model.trim="branch"

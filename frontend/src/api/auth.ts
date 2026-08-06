@@ -5,6 +5,8 @@
  * 返回值已解包(取 response.data),调用方直接拿业务数据。
  */
 import client from './client'
+import { getOAuthAuthorizeURL } from '@/api/git_provider'
+import type { GitProvider } from '@/types/git_provider'
 import type {
   ChangePasswordRequest,
   MessageResponse,
@@ -65,24 +67,21 @@ export function deleteAccount(email: string): Promise<MessageResponse> {
   return client.delete('/auth/account', { data: { email } }).then((r) => r.data)
 }
 
-// ---- GitHub OAuth ----
+// ---- Git 平台 OAuth 登录(GitHub / Gitee 统一入口) ----
 
-export function githubOAuth(code: string): Promise<TokenResponse> {
-  return client.post('/auth/oauth/github', { code }).then((r) => r.data)
+/**
+ * Git 平台 OAuth 登录:用 code 换 token + 创建/关联账号
+ *
+ * 对应后端 POST /auth/oauth/{provider},provider ∈ 'github' | 'gitee'。
+ */
+export function oauthLogin(provider: GitProvider, code: string): Promise<TokenResponse> {
+  return client.post(`/auth/oauth/${provider}`, { code }).then((r) => r.data)
 }
 
 /**
- * 拼接 GitHub OAuth 授权链接
+ * 拼接 Git 平台 OAuth 授权链接(登录用,scope 仅用户信息)
  *
- * 前端直接跳转到此 URL,用户授权后 GitHub 回调到 redirect_uri?code=XXX
+ * 已委托给 api/git_provider.ts 的 getOAuthAuthorizeURL,统一 GitHub / Gitee 元信息。
+ * 前端直接跳转到此 URL,用户授权后平台回调到 redirect_uri?code=XXX
  */
-export function getGitHubAuthorizeURL(): string {
-  const clientId = import.meta.env.VITE_GITHUB_OAUTH_CLIENT_ID
-  const redirectUri = import.meta.env.VITE_GITHUB_OAUTH_REDIRECT_URI
-  const params = new URLSearchParams({
-    client_id: clientId,
-    redirect_uri: redirectUri,
-    scope: 'user:email',
-  })
-  return `https://github.com/login/oauth/authorize?${params.toString()}`
-}
+export { getOAuthAuthorizeURL }

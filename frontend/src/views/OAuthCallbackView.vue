@@ -1,18 +1,20 @@
 <script setup lang="ts">
 /**
- * GitHub OAuth 回调处理页
+ * Git 平台 OAuth 回调处理页(统一 GitHub / Gitee)
  *
  * 同一个 redirect_uri 承担两种场景,按当前登录状态分流:
- * - 已登录:用户从设置页"绑定 GitHub"过来 → 调 POST /github/bind 写入 access_token
- * - 未登录:用户从登录页"GitHub 登录"过来 → 调 POST /auth/oauth/github 走登录
+ * - 已登录:用户从设置页"绑定 GitHub/Gitee"过来 → 调 POST /git/{provider}/bind 写入 access_token
+ * - 未登录:用户从登录页"GitHub/Gitee 登录"过来 → 调 POST /auth/oauth/{provider} 走登录
  *
- * 区分依据:authStore.isAuthenticated(页面刷新场景由路由守卫已 fetchMe 恢复)
+ * provider 由路由名识别('github-callback' / 'gitee-callback')。
+ * 区分登录态:authStore.isAuthenticated(页面刷新场景由路由守卫已 fetchMe 恢复)
  */
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { bindGitHub } from '@/api/github'
+import { bindGitProvider } from '@/api/git_provider'
 import { useAuthStore } from '@/stores/auth'
+import type { GitProvider } from '@/types/git_provider'
 import { extractErrorMessage } from '@/utils/error'
 
 const route = useRoute()
@@ -22,14 +24,22 @@ const authStore = useAuthStore()
 const status = ref<'loading' | 'error'>('loading')
 const errorMsg = ref('')
 
+/** 当前回调对应的 provider(由路由名识别) */
+const provider = computed<GitProvider>(() =>
+  route.name === 'gitee-callback' ? 'gitee' : 'github',
+)
+
+/** 平台显示名(加载/错误文案用) */
+const displayName = computed(() => (provider.value === 'gitee' ? 'Gitee' : 'GitHub'))
+
 onMounted(async () => {
   const code = route.query.code as string | undefined
-  const ghError = route.query.error as string | undefined
+  const oauthError = route.query.error as string | undefined
 
   // 用户拒绝授权
-  if (ghError) {
+  if (oauthError) {
     status.value = 'error'
-    errorMsg.value = 'GitHub 授权已取消'
+    errorMsg.value = `${displayName.value} 授权已取消`
     return
   }
 
@@ -42,14 +52,16 @@ onMounted(async () => {
   try {
     if (authStore.isAuthenticated) {
       // 已登录 → 绑定流程:用 code 换 token 并加密落库
-      const res = await bindGitHub({ code })
+      const res = await bindGitProvider(provider.value, { code })
       // 邮箱不一致时带 query 跳设置页,由设置页弹窗询问是否同步
-      if (res.email_mismatch && res.github_email) {
+      // (仅 GitHub 会出现 email_mismatch=true;Gitee 不支持可验证邮箱,恒为 false)
+      if (res.email_mismatch && res.provider_email) {
         await router.push({
           path: '/settings',
           query: {
             email_mismatch: '1',
-            github_email: res.github_email,
+            provider: provider.value,
+            provider_email: res.provider_email,
             current_email: res.current_email ?? '',
           },
         })
@@ -59,7 +71,7 @@ onMounted(async () => {
       }
     } else {
       // 未登录 → 登录流程:用 code 换 token + 创建/关联账号
-      await authStore.handleGitHubCallback(code)
+      await authStore.handleOAuthCallback(provider.value, code)
       await router.push('/')
     }
   } catch (err) {
@@ -74,7 +86,7 @@ onMounted(async () => {
     <!-- 加载中 -->
     <div v-if="status === 'loading'" class="callback-card">
       <div class="spinner-lg" />
-      <p>正在完成 GitHub 登录...</p>
+      <p>正在完成 {{ displayName }} 登录...</p>
     </div>
 
     <!-- 失败 -->

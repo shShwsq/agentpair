@@ -14,6 +14,7 @@ import { computed, ref } from 'vue'
 
 import * as authApi from '@/api/auth'
 import { clearTokens, getAccessToken, setTokens } from '@/api/client'
+import type { GitProvider } from '@/types/git_provider'
 import type { User } from '@/types/auth'
 
 export const useAuthStore = defineStore('auth', () => {
@@ -44,9 +45,9 @@ export const useAuthStore = defineStore('auth', () => {
     return res.message
   }
 
-  /** GitHub OAuth 登录:用 code 换 token → 存 token → 设置 user */
-  async function handleGitHubCallback(code: string): Promise<void> {
-    const res = await authApi.githubOAuth(code)
+  /** Git 平台 OAuth 登录:用 code 换 token → 存 token → 设置 user(支持 GitHub / Gitee) */
+  async function handleOAuthCallback(provider: GitProvider, code: string): Promise<void> {
+    const res = await authApi.oauthLogin(provider, code)
     setTokens(res.access_token, res.refresh_token)
     user.value = res.user
     hasToken.value = true
@@ -81,7 +82,7 @@ export const useAuthStore = defineStore('auth', () => {
     // actions
     login,
     register,
-    handleGitHubCallback,
+    handleOAuthCallback,
     fetchMe,
     logout,
   }

@@ -63,6 +63,11 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/OAuthCallbackView.vue'),
   },
   {
+    path: '/auth/gitee/callback',
+    name: 'gitee-callback',
+    component: () => import('@/views/OAuthCallbackView.vue'),
+  },
+  {
     path: '/auth/verify-email',
     name: 'verify-email',
     component: () => import('@/views/VerifyEmailView.vue'),
