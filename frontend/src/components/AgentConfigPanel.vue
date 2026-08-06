@@ -188,21 +188,45 @@ watch(
 )
 
 // ============================================================
-// 帮助气泡:圆圈问号按钮,点击显示 description,点击外部关闭
+// 帮助气泡:圆圈问号按钮,点击显示说明,点击外部关闭
+//
+// 两类帮助气泡共用一套"点击外部关闭"逻辑:
+// - 顶部 agent 说明气泡(showHelp):展示 meta.description
+// - 字段级帮助气泡(openHelpKey):展示 field.help_text / help_url,
+//   同一时刻只展开一个字段气泡,点开新字段时旧的自动收起
 // ============================================================
 const showHelp = ref(false)
 const helpWrapRef = ref<HTMLElement | null>(null)
+
+/** 当前展开帮助气泡的字段 key(null=无展开) */
+const openHelpKey = ref<string | null>(null)
+/** 字段帮助气泡容器 DOM(按 field.key 索引,用于点击外部判断) */
+const fieldHelpRefs = new Map<string, HTMLElement>()
 
 function toggleHelp(): void {
   showHelp.value = !showHelp.value
 }
 
-/** 点击帮助容器外部时关闭气泡 */
+/** 切换某字段帮助气泡:已展开则收起,未展开则展开(同时收起其他字段) */
+function toggleFieldHelp(key: string): void {
+  openHelpKey.value = openHelpKey.value === key ? null : key
+}
+
+/** 点击帮助容器外部时关闭对应气泡(顶部 agent 气泡 + 字段气泡) */
 function onDocClick(e: MouseEvent): void {
-  if (!showHelp.value) return
-  const el = helpWrapRef.value
-  if (el && !el.contains(e.target as Node)) {
-    showHelp.value = false
+  // 顶部 agent 说明气泡
+  if (showHelp.value) {
+    const el = helpWrapRef.value
+    if (!el || !el.contains(e.target as Node)) {
+      showHelp.value = false
+    }
+  }
+  // 字段级帮助气泡
+  if (openHelpKey.value) {
+    const el = fieldHelpRefs.get(openHelpKey.value)
+    if (!el || !el.contains(e.target as Node)) {
+      openHelpKey.value = null
+    }
   }
 }
 
@@ -314,10 +338,43 @@ onUnmounted(() => {
             :key="field.key"
             :class="['field', { 'field-full': field.type === 'secret' }]"
           >
-            <label :for="`agent-field-${field.key}`">
-              {{ field.label }}
-              <span v-if="field.required" class="required-mark">*</span>
-            </label>
+            <div class="field-head">
+              <label :for="`agent-field-${field.key}`">
+                {{ field.label }}
+                <span v-if="field.required" class="required-mark">*</span>
+              </label>
+              <!-- 字段级帮助按钮:有 help_text/help_url 时显示问号,点击展开气泡 -->
+              <div
+                v-if="field.help_text || field.help_url"
+                :ref="(el) => { if (el) fieldHelpRefs.set(field.key, el as HTMLElement); else fieldHelpRefs.delete(field.key) }"
+                class="field-help-wrap"
+              >
+                <button
+                  type="button"
+                  class="field-help-btn"
+                  :aria-label="`查看 ${field.label} 说明`"
+                  @click.stop="toggleFieldHelp(field.key)"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="10" />
+                    <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+                    <line x1="12" y1="17" x2="12.01" y2="17" />
+                  </svg>
+                </button>
+                <Transition name="help-fade">
+                  <div v-if="openHelpKey === field.key" class="field-help-popover" role="tooltip">
+                    <span v-if="field.help_text" class="field-help-text">{{ field.help_text }}</span>
+                    <a
+                      v-if="field.help_url"
+                      :href="field.help_url"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="field-help-link"
+                    >如何获取? →</a>
+                  </div>
+                </Transition>
+              </div>
+            </div>
 
             <!-- secret 类型:password 输入 + 眼睛切换显隐 -->
             <div v-if="field.type === 'secret'" class="input-wrapper">
@@ -376,16 +433,6 @@ onUnmounted(() => {
               </option>
             </select>
 
-            <div v-if="field.help_text || field.help_url" class="field-aux">
-              <span v-if="field.help_text" class="field-help">{{ field.help_text }}</span>
-              <a
-                v-if="field.help_url"
-                :href="field.help_url"
-                target="_blank"
-                rel="noopener noreferrer"
-                class="field-help-link"
-              >如何获取? →</a>
-            </div>
             <span v-if="fieldError(field)" class="field-error">{{ fieldError(field) }}</span>
           </div>
         </div>
@@ -602,11 +649,17 @@ onUnmounted(() => {
   grid-column: 1 / -1;
 }
 
-.field label {
-  display: block;
+/* ---- 字段头部:标签 + 帮助按钮(问号) ---- */
+.field-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-bottom: var(--space-1);
+}
+
+.field-head label {
   font-size: var(--fs-sm);
   font-weight: var(--fw-semibold);
-  margin-bottom: var(--space-1);
   color: var(--color-text);
 }
 
@@ -682,23 +735,67 @@ onUnmounted(() => {
   color: var(--color-text);
 }
 
-.field-aux {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-top: var(--space-1);
-  flex-wrap: wrap;
+/* ---- 字段级帮助按钮(问号)+ 说明气泡 ---- */
+.field-help-wrap {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
 }
 
-.field-help {
-  font-size: var(--fs-xs);
+.field-help-btn {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--color-text-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: color var(--transition-fast);
+}
+
+.field-help-btn:hover {
+  color: var(--color-primary);
+}
+
+.field-help-btn svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.field-help-popover {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  left: 0;
+  z-index: 20;
+  width: 300px;
+  max-width: 80vw;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: var(--space-3);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-relaxed);
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+}
+
+.field-help-text {
+  display: block;
+  word-break: break-word;
 }
 
 .field-help-link {
-  font-size: var(--fs-xs);
+  display: inline-block;
+  margin-top: var(--space-2);
   color: var(--color-primary);
   text-decoration: none;
+  font-size: var(--fs-xs);
 }
 
 .field-help-link:hover {
