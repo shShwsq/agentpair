@@ -200,7 +200,7 @@ if [ "$NEED_REGEN" -eq 1 ]; then
 # @kimi-cli:__KIMI_CLI_MARKER__
 # @hermes-cli:__HERMES_CLI_MARKER__
 # @codex-cli:__CODEX_CLI_MARKER__
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 # 避免 tzdata 等交互式安装卡住
 ENV DEBIAN_FRONTEND=noninteractive
@@ -287,7 +287,9 @@ EOF
 # ---- Hermes CLI(开源 https://github.com/NousResearch/hermes-agent)----
 # 注意:hermes-agent 未发布到 PyPI,`pip install hermes-agent` 会失败;改用官方 install.sh(同 README)。
 # 脚本自动:装 uv + Python 3.11 → clone 源码 → 建 venv → 装依赖 → 符号链接 hermes 命令。
-# 需 Python >=3.11(Ubuntu 22.04 自带 3.10 过低,由 uv 管理 3.11)。bin 名 hermes(hermes acp 启动 ACP)。
+# 需 Python >=3.11:基础镜像 24.04 自带系统 python3 = 3.12(供 apt + 智能体脚本用);
+# install.sh 通用路径仍用 uv 装隔离的 3.11 给 Hermes venv(两者均 >=3.11,互不冲突)。
+# bin 名 hermes(hermes acp 启动 ACP)。
 #
 # root 安装走 FHS 布局:代码 /usr/local/lib/hermes-agent,命令 /usr/local/bin/hermes(全用户 PATH 可达),
 # uv 管理的 Python 放 /usr/local/share(世界可读,避免 venv 解释器符号链接被困在 /root,非 root user 无权访问)。
