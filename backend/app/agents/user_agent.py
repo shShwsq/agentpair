@@ -201,6 +201,7 @@ def run_user_agent(
     ask_round: int = 0,
     repo_context: str | None = None,
     task_checklist: list[dict[str, Any]] | None = None,
+    user_id: UUID | None = None,
 ) -> dict[str, Any]:
     """执行一次 user_agent 评估
 
@@ -236,6 +237,14 @@ def run_user_agent(
     # 场景降级后:用通用 prompt,checklist 从 task_checklist 注入
     checklist_text = _format_checklist_for_prompt(task_checklist)
     system_prompt = USER_AGENT_SYSTEM_PROMPT.replace("{checklist_section}", checklist_text)
+
+    # 长期记忆注入:用户偏好 + 全局记忆(仅当有内容时,追加到 system prompt 末尾)
+    # user_id 为 None(匿名任务)或无配置时 build_*_section 返回空串,不影响原 prompt
+    if db is not None and user_id is not None:
+        from app.services.memory_injection import build_user_agent_memory_section
+        _memory_section = build_user_agent_memory_section(db, user_id)
+        if _memory_section:
+            system_prompt = system_prompt + "\n\n" + _memory_section
 
     # 构造 user 消息:包含用户意图 + react_agent 之前的所有摘要
     if not react_agent_summaries:

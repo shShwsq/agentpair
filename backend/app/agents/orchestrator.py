@@ -328,6 +328,13 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             ),
         )
 
+        # 任务成功完成:自动归纳写入长期记忆(失败兜底,不影响任务完成)
+        try:
+            from app.services.memory_summarize import summarize_and_save_memory
+            summarize_and_save_memory(task, db, llm_client)
+        except Exception as mem_err:
+            logger.warning(f"[task={task.id}] 归纳写入记忆失败(忽略): {mem_err}")
+
     except Exception as e:
         logger.exception(f"[task={task.id}] 双智能体协作失败")
         task.status = TaskStatus.FAILED
@@ -869,6 +876,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
             scenario_id=task.scenario, client=llm_client,
             ask_round=MAX_ASKS,  # 重启不允许提问
             task_checklist=task_checklist,
+            user_id=task.user_id,
         )
         _record_user_agent(db, task, start_round_idx, ua_result)
 
@@ -983,6 +991,13 @@ def _finish_resume(
             f"user_agent 最终评估: {ua_result.get('reasoning', '')}"
         ),
     )
+
+    # 重启完成:自动归纳写入长期记忆(失败兜底,不影响;client 用默认,归纳是简单任务)
+    try:
+        from app.services.memory_summarize import summarize_and_save_memory
+        summarize_and_save_memory(task, db, None)
+    except Exception as mem_err:
+        logger.warning(f"[task={task.id}] 归纳写入记忆失败(忽略): {mem_err}")
 
 
 def _load_react_summaries(db: Session, task_id) -> list[dict]:

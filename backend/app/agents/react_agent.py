@@ -152,6 +152,18 @@ def run_react_agent(
     system_prompt = REACT_AGENT_SYSTEM_PROMPT
     tools = get_all_tools()
 
+    # 分项目记忆注入:基于 task.params.repo_url 查 Project.memory_content,
+    # 追加到 system prompt 末尾,影响审计方向(优先检查已知问题)。
+    # user_id 为 None(匿名任务)或无对应项目记忆时返回空串,不影响原 prompt。
+    _project_repo_url = (task.params or {}).get("repo_url")
+    if _project_repo_url and task.user_id is not None:
+        from app.services.memory_injection import build_react_agent_memory_section
+        _project_mem = build_react_agent_memory_section(
+            db, task.user_id, _project_repo_url,
+        )
+        if _project_mem:
+            system_prompt = system_prompt + "\n\n" + _project_mem
+
     # 构造初始 user 消息
     if followup_query is None:
         # 第一轮:用 task.user_input
