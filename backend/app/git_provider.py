@@ -257,12 +257,14 @@ class GitHubProvider(GitProvider):
         repos = []
         for item in r.json():
             repos.append({
-                "full_name": item.get("full_name", ""),
-                "name": item.get("name", ""),
+                # 用 `or` 兜底:GitHub 空仓库 default_branch 也为 null,
+                # dict.get 的 None 陷阱会导致下游 GitRepoItem Pydantic 校验失败 → 500
+                "full_name": item.get("full_name") or "",
+                "name": item.get("name") or "",
                 "private": bool(item.get("private", False)),
-                "html_url": item.get("html_url", ""),
-                "clone_url": item.get("clone_url", ""),
-                "default_branch": item.get("default_branch", "main"),
+                "html_url": item.get("html_url") or "",
+                "clone_url": item.get("clone_url") or "",
+                "default_branch": item.get("default_branch") or "main",
             })
         return repos
 
@@ -361,12 +363,15 @@ class GiteeProvider(GitProvider):
             # Gitee repos 接口无 clone_url,由 full_name 构造 HTTPS 克隆地址
             clone_url = f"https://{self.host}/{full_name}.git" if full_name else ""
             repos.append({
-                "full_name": full_name,
-                "name": item.get("name", ""),
+                # 用 `or` 兜底:Gitee 空仓库 default_branch 为 null,
+                # dict.get(key, default) 在 key 存在但值为 None 时返回 None 而非 default,
+                # 会导致下游 GitRepoItem(default_branch: str) Pydantic 校验失败 → 500
+                "full_name": full_name or "",
+                "name": item.get("name") or "",
                 "private": bool(item.get("private", False)),
-                "html_url": item.get("html_url", ""),
-                "clone_url": clone_url,
-                "default_branch": item.get("default_branch", "master"),
+                "html_url": item.get("html_url") or "",
+                "clone_url": clone_url or "",
+                "default_branch": item.get("default_branch") or "master",
             })
         return repos
 
