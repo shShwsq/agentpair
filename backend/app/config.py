@@ -106,5 +106,11 @@ class Settings(BaseSettings):
     # 推荐在镜像中预装 hermes,避免每次任务都拉 pip 包(依赖较多)
     HERMES_CLI_INSTALL_CMD: str = "pip install hermes-agent"
 
+    # Codex CLI 配置(codex_cli executor 用,开源 https://github.com/openai/codex,Apache-2.0)
+    # codex 可执行文件名/路径(沙箱内 PATH 查找或绝对路径)
+    CODEX_CLI_BIN: str = "codex"
+    # codex 安装命令(沙箱内未检测到 codex 时执行,需沙箱镜像有 Node.js >= 16)
+    CODEX_CLI_INSTALL_CMD: str = "npm install -g @openai/codex"
+
 
 settings = Settings()

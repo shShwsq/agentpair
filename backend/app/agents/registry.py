@@ -265,6 +265,90 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
         "executor_module": "app.agents.hermes_cli_agent",
         "executor_func": "run_hermes_cli_agent",
     },
+
+    # ========================================================
+    # Codex CLI(OpenAI 官方,Apache-2.0 开源)
+    # 不原生支持 ACP,通过 codex_bridge.py 翻译 codex exec --json JSONL → ACP
+    # 支持 codex exec resume 实现多轮会话恢复
+    # 模型/provider 经 ~/.codex/config.toml 配置,API Key 经 CODEX_API_KEY 环境变量注入
+    # ========================================================
+    "codex_cli": {
+        "display_name": "Codex CLI",
+        "description": (
+            "OpenAI Codex CLI(Apache-2.0 开源)。\n"
+            "支持自定义 OpenAI 兼容端点(base_url + wire_api),\n"
+            "通过 codex exec --json + resume 实现多轮对话。\n"
+            "需 Node.js >= 16,npm install -g @openai/codex。"
+        ),
+        "credential_fields": [
+            {
+                "key": "api_key",
+                "label": "API Key",
+                "type": "secret",
+                "required": True,
+                "placeholder": "sk-...",
+                "help_url": "https://platform.openai.com/api-keys",
+                "description": "OpenAI API Key 或自定义端点的 API Key",
+            },
+            {
+                "key": "base_url",
+                "label": "API Base URL",
+                "type": "text",
+                "required": False,
+                "placeholder": "https://api.openai.com/v1(留空用默认)",
+                "description": (
+                    "自定义 API 端点(OpenAI 兼容)。\n"
+                    "留空 = OpenAI 官方;填入 = 第三方中转/Ollama/vLLM 等。\n"
+                    "必须含 /v1 后缀。"
+                ),
+            },
+            {
+                "key": "model",
+                "label": "Model",
+                "type": "text",
+                "required": False,
+                "placeholder": "gpt-5(留空用默认)",
+                "description": "模型名(如 gpt-5、o4-mini 等)",
+            },
+            {
+                "key": "wire_api",
+                "label": "Wire API",
+                "type": "select",
+                "required": False,
+                "default": "responses",
+                "options": [
+                    {"value": "responses", "label": "Responses API(OpenAI 官方,Codex 默认)"},
+                    {"value": "chat", "label": "Chat Completions(兼容性更好,第三方端点推荐)"},
+                ],
+                "description": (
+                    "通信协议:\n"
+                    "responses = OpenAI Responses API(Codex 0.81.0+ 默认,GPT-5/o 系列推荐)\n"
+                    "chat = Chat Completions API(大多数第三方/本地模型支持)"
+                ),
+            },
+        ],
+        "sandbox": {
+            "bin_config_key": "CODEX_CLI_BIN",
+            "bin_default": "codex",
+            "install_cmd_config_key": "CODEX_CLI_INSTALL_CMD",
+            "install_cmd_default": "npm install -g @openai/codex",
+            # codex_bridge.py 自己加 --json,这里只传额外参数
+            # --dangerously-bypass-approvals-and-sandbox:跳过审批 + 关闭 Codex 内部沙箱(我们用 OpenSandbox)
+            # --skip-git-repo-check:允许在非 git 目录运行
+            "acp_args": [
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--skip-git-repo-check",
+            ],
+            # API Key 经 CODEX_API_KEY 环境变量注入(config.toml 的 env_key 指向它)
+            "credential_env": {"api_key": "CODEX_API_KEY"},
+            # 使用 Codex 专用 bridge(非默认的 acp_bridge)
+            "bridge_script": "codex_bridge",
+            # codex_bridge 不需要 inject_cli_model_args(模型经 config.toml 配置)
+            "inject_cli_model_args": False,
+        },
+        "executor_module": "app.agents.codex_cli_agent",
+        "executor_func": "run_codex_cli_agent",
+    },
 }
 
 

@@ -68,8 +68,14 @@ BRIDGE_HEALTH_INTERVAL = 1.0
 # "The current stable ACP protocol version is 1.")
 ACP_PROTOCOL_VERSION = 1
 
-# 本地 acp_bridge.py 源文件路径(用于写入沙箱)
-_BRIDGE_SOURCE = Path(__file__).parent / "acp_bridge.py"
+# 本地 bridge 源文件路径(用于写入沙箱)
+# 支持 per-agent 自定义 bridge:registry sandbox.bridge_script 指定使用哪个
+_BRIDGE_SOURCES = {
+    "acp_bridge": Path(__file__).parent / "acp_bridge.py",  # 通用 ACP stdio 桥接(hermes/kimi/qoder)
+    "codex_bridge": Path(__file__).parent / "codex_bridge.py",  # Codex 专用(codex exec --json → ACP 翻译)
+}
+# 默认 bridge(acp_bridge.py,通用 ACP stdio 桥接)
+_DEFAULT_BRIDGE = "acp_bridge"
 
 # 默认 ACP 日志目录:backend/logs/acp/
 _ACP_LOG_DIR = Path(__file__).resolve().parents[2] / "logs" / "acp"
@@ -471,11 +477,21 @@ def _get_acp_args(
     return args
 
 
-def _write_bridge_script(session) -> None:
-    """将 acp_bridge.py 写入沙箱(从本地源文件读取)"""
-    if not _BRIDGE_SOURCE.exists():
-        raise RuntimeError(f"acp_bridge.py 源文件不存在: {_BRIDGE_SOURCE}")
-    content = _BRIDGE_SOURCE.read_text(encoding="utf-8")
+def _write_bridge_script(session, agent_type: str = "") -> None:
+    """将 bridge 脚本写入沙箱(从本地源文件读取)
+
+    agent_type 决定使用哪个 bridge(从 registry sandbox.bridge_script 读取):
+    - "acp_bridge"(默认):通用 ACP stdio 桥接,适用于原生支持 ACP 的 CLI(hermes/kimi/qoder)
+    - "codex_bridge":Codex 专用,将 codex exec --json JSONL 翻译为 ACP 通知
+    """
+    sandbox_cfg = get_sandbox_config(agent_type) or {}
+    bridge_name = sandbox_cfg.get("bridge_script", _DEFAULT_BRIDGE)
+    source = _BRIDGE_SOURCES.get(bridge_name)
+    if source is None:
+        raise RuntimeError(f"未知 bridge 脚本: {bridge_name}")
+    if not source.exists():
+        raise RuntimeError(f"bridge 源文件不存在: {source}")
+    content = source.read_text(encoding="utf-8")
     session.write_file(BRIDGE_SCRIPT_PATH, content)
 
 
@@ -489,8 +505,8 @@ def _ensure_cli_env(session, agent_type: str) -> None:
     # 创建脚本目录
     session.run_command(f"mkdir -p {Path(BRIDGE_SCRIPT_PATH).parent.as_posix()}")
 
-    # 写入 bridge 脚本
-    _write_bridge_script(session)
+    # 写入 bridge 脚本(per-agent,默认 acp_bridge.py)
+    _write_bridge_script(session, agent_type)
 
     # 检查 CLI 是否可用
     cli_bin = _get_bin(agent_type)
@@ -1608,7 +1624,7 @@ def test_credential_streaming(
             return
 
         # 清理可能残留的旧登录态
-        session.run_command("rm -rf ~/.qoder ~/.qoder-cn ~/.kimi-code ~/.hermes 2>/dev/null", timeout=5)
+        session.run_command("rm -rf ~/.qoder ~/.qoder-cn ~/.kimi-code ~/.hermes ~/.codex 2>/dev/null", timeout=5)
 
         # ---- wrapper 层钩子:bridge 启动前的沙箱文件准备 ----
         # hermes 用此回调写入 ~/.hermes/config.yaml(模型/provider/base_url 配置)
