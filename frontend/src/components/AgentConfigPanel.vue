@@ -25,7 +25,7 @@
  * POST /agents/configs/{type}/test(SSE 流式)启动临时沙箱验证 PAT 有效性,
  * 流式推送阶段进度/模型思考/模型回答,结果通过 testResult prop 回传展示。
  */
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import type {
   AgentConfigDetailOut,
   AgentTestResult,
@@ -186,6 +186,33 @@ watch(
     })
   },
 )
+
+// ============================================================
+// 帮助气泡:圆圈问号按钮,点击显示 description,点击外部关闭
+// ============================================================
+const showHelp = ref(false)
+const helpWrapRef = ref<HTMLElement | null>(null)
+
+function toggleHelp(): void {
+  showHelp.value = !showHelp.value
+}
+
+/** 点击帮助容器外部时关闭气泡 */
+function onDocClick(e: MouseEvent): void {
+  if (!showHelp.value) return
+  const el = helpWrapRef.value
+  if (el && !el.contains(e.target as Node)) {
+    showHelp.value = false
+  }
+}
+
+onMounted(() => {
+  document.addEventListener('click', onDocClick)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', onDocClick)
+})
 </script>
 
 <template>
@@ -198,13 +225,36 @@ watch(
 
     <template v-else>
       <div class="panel-body">
-        <!-- 顶部操作栏:状态 + 测试连接按钮(测试按钮上移,便于操作) -->
+        <!-- 顶部操作栏:状态 + 帮助按钮 + 测试连接按钮 -->
         <div class="panel-topbar">
-          <div :class="['status-row', hasCredentials ? 'status-ok' : 'status-warn']">
-            <span class="status-dot" />
-            <span class="status-text">
-              {{ hasCredentials ? '当前已配置凭据' : '尚未配置凭据' }}
-            </span>
+          <div class="status-group">
+            <div :class="['status-row', hasCredentials ? 'status-ok' : 'status-warn']">
+              <span class="status-dot" />
+              <span class="status-text">
+                {{ hasCredentials ? '当前已配置凭据' : '尚未配置凭据' }}
+              </span>
+            </div>
+            <!-- 帮助按钮:圆圈问号,点击显示说明气泡 -->
+            <div ref="helpWrapRef" class="help-wrap">
+              <button
+                type="button"
+                class="help-btn"
+                aria-label="查看说明"
+                @click.stop="toggleHelp"
+              >?</button>
+              <Transition name="help-fade">
+                <div v-if="showHelp" class="help-popover" role="tooltip">
+                  {{ meta.description }}
+                  <a
+                    v-if="meta.help_url"
+                    :href="meta.help_url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="help-link"
+                  >获取帮助 →</a>
+                </div>
+              </Transition>
+            </div>
           </div>
           <button
             v-if="hasCredentials"
@@ -250,18 +300,6 @@ watch(
             <span class="test-message">{{ testResult.message }}</span>
           </div>
         </div>
-
-        <!-- 描述提示 -->
-        <p class="dialog-tip">
-          {{ meta.description }}
-          <a
-            v-if="meta.help_url"
-            :href="meta.help_url"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="tip-link"
-          >获取帮助 →</a>
-        </p>
 
         <!-- 动态凭据字段(grid 并排,secret 占整行) -->
         <div class="fields-grid">
@@ -418,7 +456,7 @@ watch(
   padding: 0;
 }
 
-/* ---- 顶部操作栏:状态 + 测试连接按钮 ---- */
+/* ---- 顶部操作栏:状态 + 帮助按钮 + 测试连接按钮 ---- */
 .panel-topbar {
   display: flex;
   align-items: center;
@@ -427,25 +465,83 @@ watch(
   margin-bottom: var(--space-3);
 }
 
-.dialog-tip {
-  font-size: var(--fs-sm);
-  color: var(--color-text-secondary);
-  background: var(--color-surface-alt);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-md);
-  border-left: 3px solid var(--color-primary);
-  margin: 0 0 var(--space-3);
-  line-height: var(--lh-relaxed);
+.status-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
 }
 
-.tip-link {
+/* ---- 帮助按钮(圆圈问号)+ 说明气泡 ---- */
+.help-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.help-btn {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+  line-height: 1;
+  color: var(--color-text-muted);
+  background: transparent;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.help-btn:hover {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+.help-popover {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  left: 0;
+  z-index: 20;
+  width: 320px;
+  max-width: 90vw;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: var(--space-3);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-relaxed);
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+}
+
+.help-link {
+  display: inline-block;
+  margin-top: var(--space-2);
   color: var(--color-primary);
   text-decoration: none;
-  margin-left: var(--space-1);
+  font-size: var(--fs-xs);
 }
 
-.tip-link:hover {
+.help-link:hover {
   text-decoration: underline;
+}
+
+/* 帮助气泡出现/消失动画 */
+.help-fade-enter-active,
+.help-fade-leave-active {
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+}
+
+.help-fade-enter-from,
+.help-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
 }
 
 /* ---- 状态行 ---- */
