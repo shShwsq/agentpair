@@ -771,8 +771,9 @@ onUnmounted(() => {
   top: calc(100% + var(--space-1));
   left: 0;
   z-index: 20;
-  width: 300px;
-  max-width: 80vw;
+  width: max-content;
+  min-width: 2em;
+  max-width: min(300px, 80vw);
   max-height: 240px;
   overflow-y: auto;
   padding: var(--space-3);
