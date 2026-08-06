@@ -390,15 +390,6 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- 启用开关 -->
-        <label class="active-toggle">
-          <input
-            v-model="draft.is_active"
-            type="checkbox"
-            :disabled="saving || testing"
-          />
-          <span>启用此执行器(任务提交页可选)</span>
-        </label>
       </div>
 
       <footer class="panel-footer">
@@ -414,6 +405,16 @@ onUnmounted(() => {
           >
             <span v-if="saving" class="btn-spinner danger" />
             清除配置
+          </button>
+          <!-- 启用/禁用切换(草稿状态,随保存生效) -->
+          <button
+            type="button"
+            class="btn btn-toggle"
+            :class="{ 'is-on': draft.is_active }"
+            :disabled="saving || testing"
+            @click="draft.is_active = !draft.is_active"
+          >
+            {{ draft.is_active ? '启用中' : '已禁用' }}
           </button>
           <button
             class="btn btn-primary"
@@ -709,22 +710,26 @@ onUnmounted(() => {
   color: var(--color-danger);
 }
 
-/* ---- 启用开关 ---- */
-.active-toggle {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: var(--fs-sm);
-  color: var(--color-text);
-  cursor: pointer;
-  padding: var(--space-2) 0 0;
-  margin-top: var(--space-2);
+/* ---- 启用/禁用切换按钮 ---- */
+.btn-toggle {
+  color: var(--color-text-muted);
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
 }
 
-.active-toggle input {
-  cursor: pointer;
-  width: auto;
-  height: auto;
+.btn-toggle:hover:not(:disabled) {
+  color: var(--color-text-secondary);
+  border-color: var(--color-border-strong);
+}
+
+.btn-toggle.is-on {
+  color: var(--color-success);
+  background: var(--color-success-light);
+  border-color: var(--color-success);
+}
+
+.btn-toggle.is-on:hover:not(:disabled) {
+  filter: brightness(0.96);
 }
 
 /* ---- footer ---- */
