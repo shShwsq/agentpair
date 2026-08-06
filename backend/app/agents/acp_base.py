@@ -1737,11 +1737,6 @@ def test_credential_streaming(
                     yield done(False, f"模型响应测试失败: {err_msg}")
                 return
 
-            # MiniMax 等厂商 thinking=only 时,模型回复全部在 reasoning_content,
-            # 不会发 agent_message_chunk。此时把 thinking 内容作为回复返回,
-            # 让前端能看到模型实际输出,而不是误报"模型未响应"。
-            reply_source = "content"
-
             # 自动拆分 <think>...</think>:某些模型/端点(Kimi CLI openai provider
             # 转发的 MiniMax、DeepSeek-R1 开源版等)把思考内嵌在 content 里,
             # 而非 reasoning_content 字段。Kimi CLI 不解析该标签,原样转发为
@@ -1760,10 +1755,27 @@ def test_credential_streaming(
             else:
                 reply = content_joined.strip()
 
-            if not reply and reasoning_full:
-                reply = "".join(reasoning_full).strip()
-                reply_source = "reasoning"
-            if not reply:
+            reasoning_text = "".join(reasoning_full).strip()
+
+            if reply:
+                # 有正式回复:正常成功
+                preview = reply[:80] + ("..." if len(reply) > 80 else "")
+                logger.info(f"[{agent_type}_test] 模型响应: {preview}")
+                yield done(
+                    True,
+                    f"连接成功(ACP 协议版本 {protocol_version}),模型响应: {preview}",
+                )
+            elif reasoning_text:
+                # 无正式回复但有思考内容:模型确实响应了(思考已在流式过程展示),
+                # 判为成功,但 reply 为空,不把思考混入回复。
+                logger.info(f"[{agent_type}_test] 模型仅返回思考内容(reply 为空)")
+                yield done(
+                    True,
+                    f"连接成功(ACP 协议版本 {protocol_version}),模型仅返回思考内容,"
+                    "未给出正式回复(思考过程已在上方展示)。",
+                )
+            else:
+                # 既无回复也无思考:真正未响应
                 # Kimi CLI 默认用 kimi provider 类型(Moonshot 专用协议,发送顶层 thinking 参数),
                 # 非 Moonshot 端点(MiniMax/DeepSeek/DashScope 等)可能不识别该参数而拒绝或静默无响应。
                 # 提示用户在「智能体配置」中将「供应商协议类型」改为 openai 后重试。
@@ -1773,15 +1785,6 @@ def test_credential_streaming(
                     "若使用 MiniMax/DeepSeek/阿里云等非 Moonshot 端点,"
                     "请在「智能体配置」中将「供应商协议类型」改为 openai 后重试。"
                 )
-                return
-
-            preview = reply[:80] + ("..." if len(reply) > 80 else "")
-            logger.info(f"[{agent_type}_test] 模型响应({reply_source}): {preview}")
-            suffix = "(模型仅返回思考内容)" if reply_source == "reasoning" else ""
-            yield done(
-                True,
-                f"连接成功(ACP 协议版本 {protocol_version}),模型响应{suffix}: {preview}",
-            )
 
         except RuntimeError as e:
             err_msg = str(e)
