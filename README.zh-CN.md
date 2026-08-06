@@ -9,7 +9,7 @@ AgentPair 的核心创新是 **user_agent 模拟用户追问** 的交互模式 �
 ## 核心特性
 
 - **双智能体协作**:`user_agent`(意图对齐 + 结果审视)+ `react_agent`(执行)多轮迭代,自动补齐覆盖盲区
-- **执行器抽象层**:内置 ReAct 智能体 / Qoder CLI / Kimi Code CLI 等可插拔执行器,通过 ACP 协议统一通信
+- **执行器抽象层**:内置 ReAct 智能体 / Qoder CLI / Kimi Code CLI / Hermes CLI 等可插拔执行器,通过 ACP 协议统一通信
 - **场景模板化**:安全审计、代码审查等场景作为快捷模板(预设提示词 + 推荐 skill),checklist 由 LLM 动态生成 + 用户编辑确认
 - **沙箱隔离**:基于 [OpenSandbox](https://github.com/opensandbox/opensandbox) 的容器化执行,工具调用在隔离环境完成
 - **多 Git 平台**:统一抽象层支持 GitHub / Gitee,OAuth 登录 + 私有仓库绑定 + 自动克隆
@@ -235,6 +235,15 @@ GitHub 和 Gitee 二者均支持,按需配置。留空的平台对应路由会�
 | `KIMI_CLI_INSTALL_CMD` | `npm install -g @moonshot-ai/kimi-code` |
 
 > Kimi Code 凭证由用户在「智能体配置」页面填写 `api_key` / `base_url` / `model`,后端经 `KIMI_MODEL_*` 环境变量族注入到 bridge 进程,无需 `config.toml`。默认 `KIMI_MODEL_NAME=kimi-for-coding`、`KIMI_MODEL_PROVIDER_TYPE=kimi`(由 registry 注入)。
+
+**Hermes CLI** —— `task.executor=hermes_cli`
+
+| 变量 | 默认值 |
+|---|---|
+| `HERMES_CLI_BIN` | `hermes` |
+| `HERMES_CLI_INSTALL_CMD` | `pip install hermes-agent` |
+
+> Hermes CLI 是纯 Python 包(不需要 Node.js)。凭证(`provider` / `api_key` / `base_url` / `model`)在「智能体配置」页面填写。后端通过 `credential_env_builder` 按 provider 动态映射 API Key 环境变量名(`OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` 等),通过 `pre_bridge_hook` 写入 `~/.hermes/config.yaml`(模型/provider/base_url)。权限绕过:`HERMES_YOLO_MODE=1` 自动注入(等价 `--yolo`)。支持 7 种供应商:OpenRouter / Anthropic / OpenAI / z.ai / Kimi / MiniMax / Gemini。
 
 ### 前端环境变量(`frontend/.env`)
 

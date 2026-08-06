@@ -149,28 +149,35 @@ AgentPair 在沙箱里执行 `git` / `rg`(ripgrep)/ `python3` / `awk` / `find` �
 
 ```bash
 # 在服务器上,进入 AgentPair 仓库根目录
-# 默认同时预装 Qoder CLI 国际版 + 国内版
+# 默认同时预装四款 CLI:Qoder 国际版 + 国内版 + Kimi Code + Hermes
 bash scripts/build-sandbox-image.sh
 
-# 只装国内版(零依赖二进制,镜像更小)
-bash scripts/build-sandbox-image.sh --no-qoder-cli
+# 只装国内版 + Hermes(零 Node 依赖,镜像更小)
+bash scripts/build-sandbox-image.sh --no-qoder-cli --no-kimi-cli
 
-# 只装国际版
-bash scripts/build-sandbox-image.sh --no-qoder-cli-cn
+# 只装 Hermes(纯 Python,不需要 Node.js)
+bash scripts/build-sandbox-image.sh --no-qoder-cli --no-qoder-cli-cn --no-kimi-cli
 
-# 仅基础工具(不装任何 Qoder CLI)
-bash scripts/build-sandbox-image.sh --no-qoder-cli --no-qoder-cli-cn
+# 不装 Hermes
+bash scripts/build-sandbox-image.sh --no-hermes-cli
+
+# 仅基础工具(不装任何 CLI)
+bash scripts/build-sandbox-image.sh --no-qoder-cli --no-qoder-cli-cn --no-kimi-cli --no-hermes-cli
 ```
 
 脚本会:
 1. 检查 docker 可用(含 daemon 是否运行、当前用户是否在 docker 组)
 2. 按参数生成 `Dockerfile.sandbox`(已存在且配置一致则跳过;配置变更会备份原文件后重新生成)
 3. `docker build -t agentpair-sandbox:latest`
-4. 逐个验证镜像内 `git` / `rg` / `python3` / `awk` / `find` / `curl` 及所选 Qoder CLI 都能找到
+4. 逐个验证镜像内 `git` / `rg` / `python3` / `awk` / `find` / `curl` 及所选 CLI 都能找到
 
-两版 CLI 的差异:
+四款 CLI 的差异:
 - **Qoder CLI 国际版**(`qodercli`):npm 包,需 Node.js >= 20.0.0,账号在 qoder.com
 - **Qoder CN CLI 国内版**(`qoderclicn`,原通义灵码):零依赖二进制,仅需 curl 拉安装脚本,账号在 qoder.cn
+- **Kimi Code CLI**(`kimi`):npm 包,需 Node.js >= 22.19,账号为任意 OpenAI 兼容端点
+- **Hermes CLI**(`hermes`):Python pip 包,不需要 Node.js,支持 7 种 LLM 供应商
+
+> Node 版本策略:qodercli 要求 >= 20.0.0,kimi 要求 >= 22.19。只要 qoder_cli 或 kimi_cli 任一启用,统一装 Node 22.x(两者都兼容)。Hermes 是纯 Python 包,不影响 Node 决策。
 
 完成后在 AgentPair 的 `.env` 里设 `SANDBOX_IMAGE=agentpair-sandbox:latest`。
 
@@ -343,6 +350,83 @@ Kimi Code 不从 shell 读取 `KIMI_API_KEY` 等密钥,而是通过 `KIMI_MODEL_
 两种典型场景:
 - **Moonshot 官方 API**:申请 API Key 填入,base_url 和模型名留空(用默认)
 - **自部署 LLM 端点**(vLLM / Xinference / Ollama 等 OpenAI 兼容端点):三个字段都填,base_url 含 `/v1` 后缀。沙箱需能访问该端点
+
+### 2.5 可选:Hermes CLI 执行器依赖
+
+AgentPair 还支持开源的 [Hermes CLI](https://github.com/NousResearch/hermes-agent) 作为执行器(`task.executor=hermes_cli`),通过 ACP 协议通信,支持多种 LLM 供应商。
+
+| 执行器 | task.executor | CLI 命令 | 账号 | 依赖 | 凭证注入方式 |
+|--------|---------------|----------|------|------|--------------|
+| Hermes | `hermes_cli` | `hermes acp` | 任意 LLM 供应商(OpenRouter/Anthropic/OpenAI/GLM/Kimi/MiniMax/Gemini) | Python 3.10+ + pip | 环境变量(API Key)+ config.yaml(模型/provider) |
+
+与 Qoder/Kimi 的关键差异:
+- **ACP 启动命令**:`hermes acp` 子命令(与 Kimi 相同,非 `--acp` 标志)
+- **权限绕过**:无 `--yolo` 启动参数,通过 `HERMES_YOLO_MODE=1` 环境变量绕过(模块导入时读取并冻结,由 [hermes_cli_agent.py](../backend/app/agents/hermes_cli_agent.py) 自动注入)
+- **模型配置**:`LLM_MODEL` 环境变量已废弃,模型名/provider/base_url 必须写入 `~/.hermes/config.yaml`(由 `pre_bridge_hook` 在 bridge 启动前自动写入)
+- **API Key 动态映射**:Hermes 按 provider 读取不同的环境变量名(如 `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY`),由 `credential_env_builder` 回调动态构建,无法用 registry 的静态 `credential_env` 映射
+- **凭证字段**:不是 PAT,而是 `provider`(选择)+ `api_key` + `base_url`(可选)+ `model`(可选)四字段
+- **运行时依赖**:纯 Python 包,不需要 Node.js(镜像已含 python3 + pip)
+
+安装方式二选一:
+
+#### 方式 A:镜像预装(推荐,启动快、无网络依赖)
+
+```dockerfile
+# Hermes CLI 是纯 Python 包,镜像已含 python3 + pip,不需要 Node.js
+# --no-cache-dir 减小镜像体积
+USER root
+RUN pip3 install --no-cache-dir hermes-agent \
+    && hermes --version
+```
+
+构建后验证:
+
+```bash
+docker run --rm agentpair-sandbox:latest hermes --version
+```
+
+#### 方式 B:运行时自动安装(首次启动慢,需沙箱能访问外网)
+
+不在镜像里预装,让 [hermes_cli_agent.py](../backend/app/agents/hermes_cli_agent.py) 在首次启动时执行 `HERMES_CLI_INSTALL_CMD` 安装。前提是镜像已含 Python 3.10+ 和 pip。对应 `.env` 配置(默认值已可用):
+
+```bash
+HERMES_CLI_BIN=hermes
+HERMES_CLI_INSTALL_CMD=pip install hermes-agent
+```
+
+> 注意:[BRIDGE_STARTUP_TIMEOUT 默认 30 秒](../backend/app/agents/acp_base.py),首次自动安装 `hermes-agent` 含较多 Python 依赖,可能超时。生产环境建议用方式 A 预装。
+
+#### 凭证配置
+
+Hermes 不从单一环境变量读取 API Key,而是按 provider 读取对应的 `<PROVIDER>_API_KEY`。用户在「智能体配置」→ Hermes CLI 中填写四个字段,后端按 [registry.py](../backend/app/agents/registry.py) 的 `credential_fields` 动态渲染表单:
+
+| 用户填写字段 | 注入方式 | 必填 | 说明 |
+|--------------|----------|------|------|
+| LLM 供应商 | 按 provider 映射环境变量名 | 是 | openrouter / anthropic / openai / zai / kimi-coding / minimax / gemini |
+| API Key | `<PROVIDER>_API_KEY` 环境变量 | 是 | 所选供应商对应的 API Key |
+| API Base URL | config.yaml `model.base_url` | 否 | 留空用供应商官方端点;自部署填完整 URL |
+| 模型名 | config.yaml `model.default` | 否 | 留空用供应商默认模型 |
+
+后端注入流程(由 [hermes_cli_agent.py](../backend/app/agents/hermes_cli_agent.py) 自动完成):
+1. **`credential_env_builder`**:按 provider 选择注入 `HERMES_YOLO_MODE=1` + `<PROVIDER>_API_KEY`(如 `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / `GLM_API_KEY` 等)
+2. **`pre_bridge_hook`**:向沙箱写入 `~/.hermes/config.yaml`,含 `model.default`(模型名)+ `model.provider`(供应商)+ `model.base_url`(端点)
+
+各供应商的环境变量映射:
+
+| 供应商 | config.yaml provider | API Key 环境变量 | 默认 base_url | 默认模型 |
+|--------|----------------------|-------------------|---------------|----------|
+| OpenRouter(推荐) | `openrouter` | `OPENROUTER_API_KEY` | https://openrouter.ai/api/v1 | anthropic/claude-opus-4.6 |
+| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | (Hermes 内置) | claude-opus-4.6 |
+| OpenAI | `custom` | `OPENAI_API_KEY` | https://api.openai.com/v1 | gpt-4o |
+| z.ai / ZhipuAI | `zai` | `GLM_API_KEY` | https://api.z.ai/api/paas/v4 | glm-4-plus |
+| Kimi / Moonshot | `kimi-coding` | `KIMI_API_KEY` | https://api.kimi.com/coding/v1 | kimi-k2.5 |
+| MiniMax | `minimax` | `MINIMAX_API_KEY` | https://api.minimax.io/v1 | MiniMax-M2 |
+| Google Gemini | `gemini` | `GOOGLE_API_KEY` | https://generativelanguage.googleapis.com/v1beta/openai | gemini-3-flash-preview |
+
+典型场景:
+- **OpenRouter(推荐入门)**:在 [openrouter.ai/keys](https://openrouter.ai/keys) 申请 API Key,选 OpenRouter 供应商,模型用 `anthropic/claude-opus-4.6` 等 OpenRouter 聚合格式
+- **Anthropic 直连**:在 [console.anthropic.com](https://console.anthropic.com) 申请 API Key,选 Anthropic 供应商,模型用 `claude-opus-4.6`
+- **自部署 LLM 端点**:选对应的供应商(如 OpenAI 兼容端点选 OpenAI),base_url 填完整 URL(含 `/v1` 后缀),沙箱需能访问该端点
 
 ## 三、配置 SSH Key(给沙箱用,可选)
 
