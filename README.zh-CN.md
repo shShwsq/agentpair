@@ -9,7 +9,7 @@ AgentPair 的核心创新是 **user_agent 模拟用户追问** 的交互模式 �
 ## 核心特性
 
 - **双智能体协作**:`user_agent`(意图对齐 + 结果审视)+ `react_agent`(执行)多轮迭代,自动补齐覆盖盲区
-- **执行器抽象层**:内置 ReAct 智能体 / Qoder CLI / Kimi Code CLI / Hermes CLI 等可插拔执行器,通过 ACP 协议统一通信
+- **执行器抽象层**:内置 ReAct 智能体 / Qoder CLI / Kimi Code CLI / Hermes CLI / Codex CLI 等可插拔执行器,通过 ACP 协议统一通信
 - **场景模板化**:安全审计、代码审查等场景作为快捷模板(预设提示词 + 推荐 skill),checklist 由 LLM 动态生成 + 用户编辑确认
 - **沙箱隔离**:基于 [OpenSandbox](https://github.com/opensandbox/opensandbox) 的容器化执行,工具调用在隔离环境完成
 - **多 Git 平台**:统一抽象层支持 GitHub / Gitee,OAuth 登录 + 私有仓库绑定 + 自动克隆
@@ -244,6 +244,15 @@ GitHub 和 Gitee 二者均支持,按需配置。留空的平台对应路由会�
 | `HERMES_CLI_INSTALL_CMD` | `pip install hermes-agent` |
 
 > Hermes CLI 是纯 Python 包(不需要 Node.js)。凭证(`provider` / `api_key` / `base_url` / `model`)在「智能体配置」页面填写。后端通过 `credential_env_builder` 按 provider 动态映射 API Key 环境变量名(`OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` 等),通过 `pre_bridge_hook` 写入 `~/.hermes/config.yaml`(模型/provider/base_url)。权限绕过:`HERMES_YOLO_MODE=1` 自动注入(等价 `--yolo`)。支持 7 种供应商:OpenRouter / Anthropic / OpenAI / z.ai / Kimi / MiniMax / Gemini。
+
+**Codex CLI** —— `task.executor=codex_cli`
+
+| 变量 | 默认值 |
+|---|---|
+| `CODEX_CLI_BIN` | `codex` |
+| `CODEX_CLI_INSTALL_CMD` | `npm install -g @openai/codex` |
+
+> Codex CLI 是 OpenAI 官方编码 CLI(Apache-2.0 开源,需 Node.js >= 16)。与 Hermes/Kimi/Qoder 原生支持 ACP 不同,Codex 通过 `codex exec --json`(JSONL 事件流)经 `codex_bridge.py` 翻译为 ACP 协议。凭证(`api_key` / `base_url` / `model` / `wire_api`)在「智能体配置」页面填写。后端经 `CODEX_API_KEY` 环境变量注入 API Key(registry 静态 `credential_env` 映射),通过 `pre_bridge_hook` 写入 `~/.codex/config.toml`(模型/provider/base_url/wire_api + `approval_policy=full-auto` + `sandbox_mode=danger-full-access`)。默认值:模型 `gpt-5`,wire_api `responses`(Responses API)。支持自定义 OpenAI 兼容端点(vLLM / Ollama 等,建议 `wire_api=chat`)。
 
 ### 前端环境变量(`frontend/.env`)
 

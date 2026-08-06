@@ -149,20 +149,23 @@ AgentPair 在沙箱里执行 `git` / `rg`(ripgrep)/ `python3` / `awk` / `find` �
 
 ```bash
 # 在服务器上,进入 AgentPair 仓库根目录
-# 默认同时预装四款 CLI:Qoder 国际版 + 国内版 + Kimi Code + Hermes
+# 默认同时预装五款 CLI:Qoder 国际版 + 国内版 + Kimi Code + Hermes + Codex
 bash scripts/build-sandbox-image.sh
 
-# 只装国内版 + Hermes(零 Node 依赖,镜像更小)
+# 只装国内版 + Hermes + Codex(零 Node 依赖的国内版 + 不需 Node 的 Hermes + 需 Node 的 Codex)
 bash scripts/build-sandbox-image.sh --no-qoder-cli --no-kimi-cli
 
 # 只装 Hermes(纯 Python,不需要 Node.js)
-bash scripts/build-sandbox-image.sh --no-qoder-cli --no-qoder-cli-cn --no-kimi-cli
+bash scripts/build-sandbox-image.sh --no-qoder-cli --no-qoder-cli-cn --no-kimi-cli --no-codex-cli
 
 # 不装 Hermes
 bash scripts/build-sandbox-image.sh --no-hermes-cli
 
+# 不装 Codex
+bash scripts/build-sandbox-image.sh --no-codex-cli
+
 # 仅基础工具(不装任何 CLI)
-bash scripts/build-sandbox-image.sh --no-qoder-cli --no-qoder-cli-cn --no-kimi-cli --no-hermes-cli
+bash scripts/build-sandbox-image.sh --no-qoder-cli --no-qoder-cli-cn --no-kimi-cli --no-hermes-cli --no-codex-cli
 ```
 
 脚本会:
@@ -171,13 +174,14 @@ bash scripts/build-sandbox-image.sh --no-qoder-cli --no-qoder-cli-cn --no-kimi-c
 3. `docker build -t agentpair-sandbox:latest`
 4. 逐个验证镜像内 `git` / `rg` / `python3` / `awk` / `find` / `curl` 及所选 CLI 都能找到
 
-四款 CLI 的差异:
+五款 CLI 的差异:
 - **Qoder CLI 国际版**(`qodercli`):npm 包,需 Node.js >= 20.0.0,账号在 qoder.com
 - **Qoder CN CLI 国内版**(`qoderclicn`,原通义灵码):零依赖二进制,仅需 curl 拉安装脚本,账号在 qoder.cn
 - **Kimi Code CLI**(`kimi`):npm 包,需 Node.js >= 22.19,账号为任意 OpenAI 兼容端点
 - **Hermes CLI**(`hermes`):Python pip 包,不需要 Node.js,支持 7 种 LLM 供应商
+- **Codex CLI**(`codex`):npm 包,需 Node.js >= 16,OpenAI 官方,支持自定义 OpenAI 兼容端点
 
-> Node 版本策略:qodercli 要求 >= 20.0.0,kimi 要求 >= 22.19。只要 qoder_cli 或 kimi_cli 任一启用,统一装 Node 22.x(两者都兼容)。Hermes 是纯 Python 包,不影响 Node 决策。
+> Node 版本策略:qodercli 要求 >= 20.0.0,kimi 要求 >= 22.19,codex 要求 >= 16。只要 qoder_cli / kimi_cli / codex_cli 任一启用,统一装 Node 22.x(三者都兼容)。Hermes 是纯 Python 包,不影响 Node 决策。
 
 完成后在 AgentPair 的 `.env` 里设 `SANDBOX_IMAGE=agentpair-sandbox:latest`。
 
@@ -427,6 +431,86 @@ Hermes 不从单一环境变量读取 API Key,而是按 provider 读取对应的
 - **OpenRouter(推荐入门)**:在 [openrouter.ai/keys](https://openrouter.ai/keys) 申请 API Key,选 OpenRouter 供应商,模型用 `anthropic/claude-opus-4.6` 等 OpenRouter 聚合格式
 - **Anthropic 直连**:在 [console.anthropic.com](https://console.anthropic.com) 申请 API Key,选 Anthropic 供应商,模型用 `claude-opus-4.6`
 - **自部署 LLM 端点**:选对应的供应商(如 OpenAI 兼容端点选 OpenAI),base_url 填完整 URL(含 `/v1` 后缀),沙箱需能访问该端点
+
+### 2.6 可选:Codex CLI 执行器依赖
+
+AgentPair 还支持 [OpenAI Codex CLI](https://github.com/openai/codex)(Apache-2.0 开源)作为执行器(`task.executor=codex_cli`)。与 Hermes/Kimi/Qoder 不同,Codex **不原生支持 ACP 协议**,而是通过 [codex_bridge.py](../backend/app/agents/codex_bridge.py) 翻译 `codex exec --json` 的 JSONL 事件流为 ACP 协议。
+
+| 执行器 | task.executor | CLI 命令 | 账号 | 依赖 | 凭证注入方式 |
+|--------|---------------|----------|------|------|--------------|
+| Codex | `codex_cli` | `codex exec --json`(经 codex_bridge.py 翻译为 ACP) | OpenAI 或任意 OpenAI 兼容端点 | Node.js >= 16 + npm | 环境变量(`CODEX_API_KEY`)+ config.toml(模型/provider/wire_api) |
+
+与 Hermes/Kimi/Qoder 的关键差异:
+- **不原生支持 ACP**:其他三款 CLI 都内置 `acp` 子命令(Hermes/Kimi)或 ACP 协议(Qoder),Codex 没有,改用 `codex exec --json` 非交互模式输出 JSONL 事件,由 [codex_bridge.py](../backend/app/agents/codex_bridge.py) 翻译为 ACP 通知
+- **多轮会话**:Codex 用 `codex exec resume <thread_id>` 恢复之前的会话(首次调用提取 thread_id,后续轮次复用),而非 ACP 的 `session/load`
+- **配置文件**:用 `~/.codex/config.toml`(TOML 格式),不是 Hermes 的 `~/.hermes/config.yaml`(YAML)或 Kimi 的环境变量合成
+- **审批策略**:`approval_policy = "full-auto"` 跳过所有审批(非交互模式必须)
+- **沙箱模式**:`sandbox_mode = "danger-full-access"` 关闭 Codex 内部沙箱(我们用 OpenSandbox 隔离)
+- **通信协议**:支持 `wire_api` 选择(Responses API / Chat Completions API),第三方端点推荐 `chat`
+- **凭证字段**:`api_key` + `base_url`(可选)+ `model`(可选)+ `wire_api`(可选)四字段
+- **运行时依赖**:Node.js >= 16(不是 Python pip,与 Kimi/Qoder 国际版同属 Node 类 CLI)
+
+安装方式二选一:
+
+#### 方式 A:镜像预装(推荐,启动快、无网络依赖)
+
+```dockerfile
+# Codex CLI 是 Node.js 包,需先装 Node.js >= 16(与 qodercli / kimi 共享 Node 22.x 运行时)
+# 见 2.3 / 2.4 的 Node.js 安装块,统一用 setup_22.x(codex 要求 >= 16,Node 22 兼容)
+USER root
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# 全局安装 Codex CLI(官方 npm 包 @openai/codex,bin 名 codex)
+RUN npm install -g @openai/codex \
+    && codex --version
+```
+
+构建后验证:
+
+```bash
+docker run --rm agentpair-sandbox:latest codex --version
+```
+
+#### 方式 B:运行时自动安装(首次启动慢,需沙箱能访问外网)
+
+不在镜像里预装,让 [codex_cli_agent.py](../backend/app/agents/codex_cli_agent.py) 在首次启动时执行 `CODEX_CLI_INSTALL_CMD` 安装。前提是镜像已含 Node.js >= 16。对应 `.env` 配置(默认值已可用):
+
+```bash
+CODEX_CLI_BIN=codex
+CODEX_CLI_INSTALL_CMD=npm install -g @openai/codex
+```
+
+> 注意:[BRIDGE_STARTUP_TIMEOUT 默认 30 秒](../backend/app/agents/acp_base.py),首次自动安装 `@openai/codex` 可能超时。生产环境建议用方式 A 预装。
+
+#### 凭证配置
+
+Codex 从 `~/.codex/config.toml` 读取模型/provider 配置,API Key 经 `CODEX_API_KEY` 环境变量注入(config.toml 的 `env_key` 指向它)。用户在「智能体配置」→ Codex CLI 中填写四个字段,后端按 [registry.py](../backend/app/agents/registry.py) 的 `credential_fields` 动态渲染表单:
+
+| 用户填写字段 | 注入方式 | 必填 | 默认值 |
+|--------------|----------|------|--------|
+| API Key | `CODEX_API_KEY` 环境变量 | 是 | — |
+| API Base URL | config.toml `model_providers.agentpair.base_url` | 否 | 留空用 OpenAI 官方端点 |
+| 模型名 | config.toml `model` | 否 | `gpt-5` |
+| Wire API | config.toml `model_providers.agentpair.wire_api` | 否 | `responses`(Responses API) |
+
+后端注入流程(由 [codex_cli_agent.py](../backend/app/agents/codex_cli_agent.py) 的 `pre_bridge_hook` 自动完成):
+1. **`credential_env`**(registry 静态映射):`api_key` → `CODEX_API_KEY` 环境变量
+2. **`pre_bridge_hook`**:向沙箱写入 `~/.codex/config.toml`,含:
+   - `model`(模型名)
+   - `approval_policy = "full-auto"`(跳过审批)
+   - `sandbox_mode = "danger-full-access"`(关闭 Codex 内部沙箱)
+   - 若填了 `base_url`:额外写 `[model_providers.agentpair]` 表(base_url + wire_api + env_key),并设 `model_provider = "agentpair"`
+   - 若 `base_url` 留空:不写自定义 provider,Codex 用默认 OpenAI provider
+
+`wire_api` 两种取值:
+- `responses`(默认):OpenAI Responses API,Codex 0.81.0+ 默认,GPT-5/o 系列推荐
+- `chat`:Chat Completions API,大多数第三方/本地模型支持(自部署端点推荐)
+
+典型场景:
+- **OpenAI 官方 API**:在 [platform.openai.com/api-keys](https://platform.openai.com/api-keys) 申请 API Key,base_url 留空,模型用 `gpt-5` 或 `o4-mini`,wire_api 用默认 `responses`
+- **自部署 LLM 端点**(vLLM / Xinference / Ollama 等 OpenAI 兼容端点):三个字段都填,base_url 含 `/v1` 后缀,wire_api 选 `chat`(兼容性更好),沙箱需能访问该端点
 
 ## 三、配置 SSH Key(给沙箱用,可选)
 
