@@ -225,15 +225,15 @@ onUnmounted(() => {
 
     <template v-else>
       <div class="panel-body">
-        <!-- 顶部操作栏:状态 + 帮助按钮 + 测试连接按钮 -->
+        <!-- 顶部操作栏:状态(左) + 帮助按钮 + 测试连接按钮(右) -->
         <div class="panel-topbar">
-          <div class="status-group">
-            <div :class="['status-row', hasCredentials ? 'status-ok' : 'status-warn']">
-              <span class="status-dot" />
-              <span class="status-text">
-                {{ hasCredentials ? '当前已配置凭据' : '尚未配置凭据' }}
-              </span>
-            </div>
+          <div :class="['status-row', hasCredentials ? 'status-ok' : 'status-warn']">
+            <span class="status-dot" />
+            <span class="status-text">
+              {{ hasCredentials ? '当前已配置凭据' : '尚未配置凭据' }}
+            </span>
+          </div>
+          <div class="topbar-actions">
             <!-- 帮助按钮:圆圈问号,点击显示说明气泡 -->
             <div ref="helpWrapRef" class="help-wrap">
               <button
@@ -255,16 +255,16 @@ onUnmounted(() => {
                 </div>
               </Transition>
             </div>
+            <button
+              v-if="hasCredentials"
+              class="btn btn-test"
+              :disabled="saving || testing"
+              @click="handleTest"
+            >
+              <span v-if="testing" class="btn-spinner test-spinner" />
+              {{ testing ? '测试中...' : '测试连接' }}
+            </button>
           </div>
-          <button
-            v-if="hasCredentials"
-            class="btn btn-test"
-            :disabled="saving || testing"
-            @click="handleTest"
-          >
-            <span v-if="testing" class="btn-spinner test-spinner" />
-            {{ testing ? '测试中...' : '测试连接' }}
-          </button>
         </div>
 
         <!-- 测试反馈区(紧跟顶部,测试中/有结果时显示,无需滚动即可看到) -->
@@ -465,11 +465,11 @@ onUnmounted(() => {
   margin-bottom: var(--space-3);
 }
 
-.status-group {
+.topbar-actions {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  min-width: 0;
+  flex-shrink: 0;
 }
 
 /* ---- 帮助按钮(圆圈问号)+ 说明气泡 ---- */
@@ -504,7 +504,7 @@ onUnmounted(() => {
 .help-popover {
   position: absolute;
   top: calc(100% + var(--space-2));
-  left: 0;
+  right: 0;
   z-index: 20;
   width: 320px;
   max-width: 90vw;
@@ -576,11 +576,11 @@ onUnmounted(() => {
   font-weight: var(--fw-medium);
 }
 
-/* ---- 字段网格(并排,secret 占整行) ---- */
+/* ---- 字段网格(单列,一行一个) ---- */
 .fields-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: var(--space-3) var(--space-4);
+  grid-template-columns: 1fr;
+  gap: var(--space-3);
 }
 
 .field {

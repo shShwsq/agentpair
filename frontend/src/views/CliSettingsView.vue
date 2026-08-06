@@ -407,7 +407,7 @@ async function handleTest(type: string): Promise<void> {
 .main {
   flex: 1;
   min-width: 0;
-  max-width: 1040px;
+  max-width: 680px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
