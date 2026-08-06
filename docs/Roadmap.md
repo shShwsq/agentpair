@@ -24,8 +24,9 @@
 以下功能在迭代过程中自发产生,已落地到代码中:
 
 - **执行器抽象层(ExecutorAgent)**:把"执行智能体"抽象为统一接口,支持 builtin(内置 react_agent)和外部 CLI(通过 ACP 协议通信)两种 provider。新增 agent 类型只需在 registry 注册,无需改核心代码。
-- **ACP Bridge**:HTTP ↔ stdio 桥接服务,运行在沙箱内,让外部智能体 CLI(如 Qoder CLI / Qoder CN CLI)通过 ACP 协议接入。
+- **ACP Bridge**:HTTP ↔ stdio 桥接服务,运行在沙箱内,让外部智能体 CLI(如 Qoder CLI / Qoder CN CLI / Kimi Code CLI)通过 ACP 协议接入。
 - **Qoder CLI Agent**:通过 ACP 协议调用 Qoder CLI(国际版 + 国内版)作为 react 角色,模型由 CLI 账号配额管理,不走后端 LLM 配置。
+- **Kimi Code CLI Agent**:通过 ACP 协议调用开源 Kimi Code CLI 作为 react 角色,模型经 `KIMI_MODEL_*` 环境变量注入(支持自部署 LLM 端点),凭证由用户在智能体配置页填写。
 - **场景降级**:checklist 不再从场景固定读取,改为 user_agent 第 0 轮动态生成 + 用户编辑确认。prompt 通用化,工具全部开放,结果结构通用化。
 - **任务暂停/恢复**:用户可暂停运行中的任务,后台线程在检查点(迭代边界/工具调用前)阻塞,恢复后继续。
 - **用户补充消息**:任务运行中/完成后,用户可追加消息触发新一轮协作(resume_audit_with_message)。
@@ -33,7 +34,7 @@
 - **循环检测**:滑动窗口检测重复工具调用(连续相同 + 交替循环),打破死循环。
 - **Plan 状态管理**:react_agent 在思考中输出 `<plan>` 清单,代码维护状态,跨轮续接避免重复规划。
 - **工作区浏览**:前端可浏览 react_agent clone 的工作区文件结构和内容(任务完成后保留 1 小时)。
-- **GitHub 私有仓库**:用户绑定 GitHub OAuth 后,clone 时用 access_token 访问私有仓库。
+- **Git 平台抽象层(GitHub / Gitee)**:统一 `GitProvider` 抽象层,支持 GitHub + Gitee 双平台 OAuth 登录与仓库绑定。同一用户可同时绑定两平台,clone 时按仓库 URL 主机自动选用对应 token。取代旧的 `User.github_id` 字段,改为 `UserGitBinding` 表(含一次性数据迁移)。
 - **思考链流式推送**:LLM 的 reasoning_content 通过 SSE thinking_delta 事件实时推给前端(打字机效果)。
 - **删除账号**:硬删除 + 级联清理(任务/配置/token)。
 - **多厂商 LLM 支持**:DashScope(通义千问)/ DeepSeek / 智谱 / Kimi / 豆包 / MiniMax 等,通过 models_catalog.json 统一管理差异。
@@ -215,13 +216,13 @@ uvicorn app.main:app --reload
 
 **实际实现(超出原规划)**:
 - 邮箱密码注册/登录 + 邮箱验证 + 重置密码 + **修改密码**(spec 原设计禁止修改密码,实际实现为允许,见 spec 8.5 更新说明)
-- GitHub OAuth 登录(自动注册/关联已有账号)
-- GitHub 绑定:用于私有仓库 clone(repo scope)
-- 删除账号(硬删除 + 级联清理)
+- Git 平台 OAuth 登录(自动注册/关联已有账号):GitHub + Gitee 双平台,统一 `GitProvider` 抽象层
+- Git 平台绑定:用于私有仓库 clone(repo / projects scope),同一用户可同时绑定 GitHub + Gitee
+- 删除账号(硬删除 + 级联清理,含 UserGitBinding)
 - 用户 LLM 配置(UserLLMConfig):列表式配置,每个配置含 provider/api_key/model/enable_thinking/base_url
-- 用户 Agent 配置(UserAgentConfig):存储外部 CLI agent 的凭证(如 Qoder CLI PAT)
+- 用户 Agent 配置(UserAgentConfig):存储外部 CLI agent 的凭证(如 Qoder CLI PAT / Kimi Code API Key)
 - 任务级模型选择:`llm_config_id`(user_agent 用)+ `react_llm_config_id`(react_agent 用,空时回退)
-- 任务级执行器选择:`executor` 字段(builtin / qoder_cli / qoder_cli_cn)
+- 任务级执行器选择:`executor` 字段(builtin / qoder_cli / qoder_cli_cn / kimi_cli)
 
 ---
 
@@ -257,7 +258,9 @@ uvicorn app.main:app --reload
 - 暂停/恢复按钮 + 用户消息输入框(UserMessageInput)
 - 报告导出:Markdown 下载 + HTML 打印为 PDF
 - 模型配置:ModelConfigDialog + ModelCombobox + AgentConfigDialog
-- GitHub 绑定:GitHubDialog
+- Git 平台绑定:GitProviderDialog(统一 GitHub / Gitee,按 provider 动态渲染标题/品牌色/scope 文案)
+- 多平台仓库选择:TaskCreateView 并行加载已绑定平台仓库,合并到带 `[GitHub]`/`[Gitee]` 标记的统一下拉
+- 登录页:GitHub + Gitee 双 OAuth 登录按钮
 - 全文搜索:任务列表支持按标题/输入/对话内容/结果内容搜索
 
 ---

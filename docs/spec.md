@@ -36,7 +36,8 @@
 
 **执行器抽象层(ExecutorAgent)**:把"执行智能体"抽象为统一接口,支持多种实现:
 - `builtin`:系统内置 ReAct 智能体(基于 react_agent.py),使用后端配置的 LLM
-- `qoder_cli` / `qoder_cli_cn`:沙箱内运行 Qoder CLI,通过 ACP 协议通信,模型由 CLI 账号配额管理
+- `qoder_cli` / `qoder_cli_cn`:沙箱内运行 Qoder CLI(国际版 / 国内版),通过 ACP 协议通信,模型由 CLI 账号配额管理
+- `kimi_cli`:沙箱内运行 Kimi Code CLI(开源),通过 ACP 协议通信,模型经 `KIMI_MODEL_*` 环境变量注入(支持自部署 LLM 端点)
 - 扩展性:新增 agent 类型只需在 registry 注册,无需改核心代码
 
 ### 1.3 双端策略
@@ -254,8 +255,10 @@ Result(任务结果项,通用)
 
 ### 7.1 仓库访问
 - 支持公开仓库(默认)
-- 私有仓库已支持(用户绑定 GitHub OAuth 后,clone 时用 access_token 访问)
+- 私有仓库已支持(用户绑定 GitHub / Gitee OAuth 后,clone 时用对应平台的 access_token 访问)
+- **多平台抽象**:统一 `GitProvider` 抽象层(GitHub / Gitee),按仓库 URL 主机自动识别平台并选用对应 token
 - clone 协议回退:HTTPS+token → SSH → HTTPS 匿名
+- token 注入格式按平台差异:GitHub 用 `x-access-token:{token}@github.com`,Gitee 用 `oauth2:{token}@gitee.com`
 
 ### 7.2 微信内容安全
 - 审计报告中可能含敏感词(如 "漏洞"、代码片段中的关键字)
@@ -295,14 +298,14 @@ Result(任务结果项,通用)
 - **任务级选择**:任务提交时选 `llm_config_id`(user_agent 用)+ `react_llm_config_id`(react_agent 用,空=回退到 llm_config_id)
 - **分离配置**:user_agent 与 react_agent 可选不同模型(react_agent 工具调用重,倾向更强模型;user_agent 偏评估与追问,可用较小模型降本)
 - **思考链**:支持 DeepSeek-R1 / Qwen-QwQ / Kimi-k2.6 等模型的 reasoning_content,通过 SSE 实时推送给前端
-- **外部 CLI 执行器**:Qoder CLI / Qoder CN CLI 的模型由 CLI 账号配额管理,不走后端 LLM 配置
+- **外部 CLI 执行器**:Qoder CLI / Qoder CN CLI 的模型由 CLI 账号配额管理;Kimi Code CLI 的模型经 `KIMI_MODEL_*` 环境变量注入(支持自部署 LLM 端点)。均不走后端 LLM 配置
 
 ### 8.4 react_agent 工具集(已决策)
 **首版工具集范围(全部已实现):**
 
 | 工具 | 用途 | 实现 |
 |------|------|------|
-| clone_repo | 克隆 GitHub 仓库到沙箱(支持 HTTPS+token / SSH / 匿名) | ✓ |
+| clone_repo | 克隆 Git 仓库到沙箱(支持 GitHub / Gitee,HTTPS+token / SSH / 匿名) | ✓ |
 | list_files | 列出目录结构(单层,跳过 .git/node_modules 等噪声目录) | ✓ |
 | find_files | 按文件名 glob 模式递归查找文件(如 **/*.py) | ✓ |
 | read_file | 读取文件内容(带行号,支持 offset 翻页) | ✓ |
@@ -316,11 +319,12 @@ Result(任务结果项,通用)
 **场景降级后**:工具全部开放,不再按场景过滤。用户创建任务时可通过 `allowed_skills` 选择允许调用的 skill。
 
 ### 8.5 用户账户体系(已决策)
-**方案:邮箱密码注册登录 + GitHub OAuth 登录,均已实现。**
+**方案:邮箱密码注册登录 + Git 平台 OAuth 登录(GitHub / Gitee),均已实现。**
 
 - **登录方式**:
   - 邮箱 + 密码(需先验证邮箱)
   - GitHub OAuth 登录(自动注册/关联/登录)
+  - Gitee OAuth 登录(自动注册/关联/登录)
 - **注册流程**:邮箱 + 密码 + 邮箱验证(验证后才激活账号)
 - **两端统一账户**:同一套账户体系,网站和小程序共用
 
@@ -334,19 +338,22 @@ Result(任务结果项,通用)
 3. 用户点击链接验证 token 后,设置新密码
 4. 新密码生效,旧密码失效
 
-**GitHub OAuth 登录(已实现)**:
-- 作为独立登录方式(与邮箱密码并列),前端有 GitHub 登录按钮 + OAuth 回调页
-- 登录逻辑:
-  - github_id 已绑定 → 直接登录
-  - github_id 未绑定但 email 已注册 → 关联 github_id 后登录
-  - 完全新用户 → 自动创建账号(无密码,GitHub 邮箱隐含验证)
-- **私有仓库访问**:绑定 GitHub 后,clone 私有仓库时用 access_token 访问
-- User 模型含 `github_id` / `github_access_token` 字段(token 加密存储)
+**Git 平台 OAuth 登录(已实现,GitHub / Gitee)**:
+- 作为独立登录方式(与邮箱密码并列),前端有 GitHub / Gitee 登录按钮 + 各自 OAuth 回调页
+- 登录逻辑(两平台一致):
+  - 该平台已绑定 → 直接登录
+  - 该平台未绑定但 email 已注册 → 关联该平台后登录
+  - 完全新用户 → 自动创建账号(无密码,平台邮箱隐含验证;仅 GitHub 支持可验证邮箱同步)
+- **统一抽象层**:`GitProvider` ABC(`GitHubProvider` / `GiteeProvider`),封装各平台 OAuth 端点、token 交换、用户信息、仓库列表、URL 转换差异
+- **多平台绑定**:同一用户可同时绑定 GitHub + Gitee,任务克隆时按仓库 URL 主机自动选用对应平台 token
+- **私有仓库访问**:绑定平台后,clone 私有仓库时用对应平台 access_token 访问(token 注入格式按平台差异:GitHub `x-access-token:{token}@`,Gitee `oauth2:{token}@`)
+- **数据模型**:`UserGitBinding` 表(provider / provider_user_id / 加密的 access_token),取代旧的 `User.github_id` / `github_access_token` 字段;启动时一次性迁移旧数据
+- **邮箱同步**:仅 GitHub 支持(verified primary email 视为已验证);Gitee 不支持可验证邮箱,绑定时不触发邮箱同步弹窗
 
 **删除账号(已实现)**:
 - 用户在设置页发起删除,需输入完整邮箱二次确认
-- 硬删除:连带删除 task / Conversation / Result / UserLLMConfig / EmailToken
-- GitHub 关联解除(github_id 释放,可被其他账号绑定)
+- 硬删除:连带删除 task / Conversation / Result / UserLLMConfig / EmailToken / UserGitBinding(均 `ondelete=CASCADE`)
+- Git 平台关联解除(provider_user_id 释放,可被其他账号绑定)
 
 **安全考虑**:
 - 密码存储:bcrypt 加盐哈希
@@ -463,7 +470,7 @@ Result(任务结果项,通用)
 - **BuiltinReactAgent**:系统内置 ReAct 智能体,委托 `react_agent.run_react_agent`,使用后端配置的 LLM
 - **ExternalCLIAgent**:基于外部智能体 CLI 的通用包装,通过 registry 声明的 `executor_module` / `executor_func` 延迟加载
 - **工厂模式**:`get_executor(task)` 根据 `task.executor` 字段返回对应实例,未知值回退 builtin
-- **注册表**(registry):`AGENT_REGISTRY` 含 `qoder_cli` 和 `qoder_cli_cn`,声明 agent 类型、沙箱镜像、executor 位置等
+- **注册表**(registry):`AGENT_REGISTRY` 含 `qoder_cli`、`qoder_cli_cn`、`kimi_cli`,声明 agent 类型、沙箱镜像、executor 位置等
 - 新增 agent 类型只需在 registry 注册,无需改核心代码
 
 ### 9.2 ACP Bridge(HTTP ↔ stdio 桥接)
@@ -531,9 +538,10 @@ react_agent 维护跨轮 plan 状态:
 | `/tasks/new` | TaskCreateView | 创建新任务(选场景/仓库/skill/模型) |
 | `/tasks/:id` | TaskDetailView | 任务详情(SSE 实时流 + 对话 + 报告) |
 | `/models` | ModelSettingsView | LLM 模型配置(多厂商列表式管理) |
-| `/settings` | SettingsView | 用户设置(改密码/GitHub 绑定/删除账号) |
-| `/login` | LoginView | 登录(邮箱密码 + GitHub OAuth) |
-| `/auth/github/callback` | OAuthCallbackView | GitHub OAuth 回调 |
+| `/settings` | SettingsView | 用户设置(改密码/Git 平台绑定 GitHub+Gitee/删除账号) |
+| `/login` | LoginView | 登录(邮箱密码 + GitHub / Gitee OAuth) |
+| `/auth/github/callback` | OAuthCallbackView | GitHub OAuth 回调(登录/绑定共用) |
+| `/auth/gitee/callback` | OAuthCallbackView | Gitee OAuth 回调(登录/绑定共用) |
 | `/auth/verify-email` | VerifyEmailView | 邮箱验证 |
 | `/auth/password/reset` | ResetPasswordView | 重置密码 |
 
