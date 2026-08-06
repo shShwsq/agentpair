@@ -295,4 +295,4 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ## License
 
-(待补充)
+[MIT License](./LICENSE) © 2026 shShwsq

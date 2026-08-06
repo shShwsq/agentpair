@@ -295,4 +295,4 @@ For production, consider `gunicorn -k uvicorn.workers.UvicornWorker` (Linux) or 
 
 ## License
 
-(TBD)
+[MIT License](./LICENSE) © 2026 shShwsq
