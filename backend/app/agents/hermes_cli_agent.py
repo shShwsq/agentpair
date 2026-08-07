@@ -227,45 +227,22 @@ def _hermes_pre_bridge_hook(session, credentials: dict[str, str], agent_type: st
     session.write_file(HERMES_CONFIG_PATH, config_content)
 
     # 确保 anthropic_messages 模式的 provider 有 anthropic 包
-    # install.sh 默认不装 [anthropic] extra;旧镜像需运行时补装(仅首次,后续 import 通过即跳过)
+    # install.sh 默认不装 [anthropic] extra;需在 Dockerfile 构建时预装(见 build-sandbox-image.sh)
+    # 运行时无法补装:venv 目录 root 所有,沙箱以 user 身份运行,写入会 Permission denied
     if provider in _PROVIDERS_NEEDING_ANTHROPIC_PKG:
         venv_python = "/usr/local/lib/hermes-agent/venv/bin/python"
-
-        # 1. 快速检查是否已安装
         verify = session.run_command(
             f"{venv_python} -c 'import anthropic; print(anthropic.__version__)'",
             timeout=10, check=False,
         )
         if verify and verify.strip():
-            logger.info(f"[hermes_cli] anthropic 包已就绪: v{verify.strip()}")
+            logger.info(f"[hermes_cli] anthropic 包就绪: v{verify.strip()}")
         else:
-            # 2. uv venv 默认不含 pip;用 ensurepip(标准库)引导 pip,
-            #    失败则用 get-pip.py 兜底(需网络)
-            bootstrap = session.run_command(
-                f"{venv_python} -m ensurepip 2>&1 "
-                f"|| (curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py 2>&1 "
-                f"&& {venv_python} /tmp/get-pip.py 2>&1)",
-                timeout=60, check=False,
+            raise RuntimeError(
+                f"沙箱镜像缺少 anthropic Python 包(provider={provider} 需要 anthropic_messages 模式)。\n"
+                f"请重建沙箱镜像:bash scripts/build-sandbox-image.sh\n"
+                f"(构建时会自动执行 ensurepip + pip install anthropic)"
             )
-            # 3. 安装 anthropic
-            install_result = session.run_command(
-                f"{venv_python} -m pip install 'anthropic==0.87.0' 2>&1",
-                timeout=120, check=False,
-            )
-            # 4. 验证
-            verify = session.run_command(
-                f"{venv_python} -c 'import anthropic; print(anthropic.__version__)'",
-                timeout=10, check=False,
-            )
-            if verify and verify.strip():
-                logger.info(f"[hermes_cli] anthropic 包安装成功: v{verify.strip()}")
-            else:
-                raise RuntimeError(
-                    f"anthropic 包安装失败(provider={provider} 需要 anthropic_messages 模式)。\n"
-                    f"ensurepip 输出: {(bootstrap or '')[:300]}\n"
-                    f"pip install 输出: {(install_result or '')[:300]}\n"
-                    f"请重建沙箱镜像(bash scripts/build-sandbox-image.sh)"
-                )
     logger.info(
         f"[hermes_cli] 已写入 {HERMES_CONFIG_PATH}: "
         f"provider={cfg['config_provider']}, model={model}, "
