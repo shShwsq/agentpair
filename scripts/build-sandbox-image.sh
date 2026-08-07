@@ -25,7 +25,7 @@
 #   bash scripts/build-sandbox-image.sh --no-qoder-cli --no-qoder-cli-cn --no-kimi-cli --no-codex-cli  # 仅 hermes
 #
 # 国内镜像加速(服务器在国内时推荐,避免 docker.io 拉取超时):
-#   bash scripts/build-sandbox-image.sh --cn-mirror                           # 一键国内源(Docker+apt+npm)
+#   bash scripts/build-sandbox-image.sh --cn-mirror                           # 一键国内源(Docker+apt+npm+PyPI)
 #   bash scripts/build-sandbox-image.sh --registry docker.m.daocloud.io       # 仅换 Docker 基础镜像源
 #
 # 构建 agentpair-sandbox:latest 后,在 AgentPair backend/.env 设:
@@ -53,9 +53,11 @@ WITH_CODEX_CLI=1
 # - REGISTRY:Docker 基础镜像源前缀,如 docker.m.daocloud.io(非空时 FROM $REGISTRY/ubuntu:24.04)
 # - APT_MIRROR:apt 源,目前支持 aliyun(空 = 不换)
 # - NPM_MIRROR:npm 源,目前支持 npmmirror(空 = 不换)
+# - PYPI_MIRROR:PyPI 源(uv/pip),目前支持 aliyun(空 = 不换;Hermes install.sh 用 uv 拉 Python 依赖时生效)
 REGISTRY=""
 APT_MIRROR=""
 NPM_MIRROR=""
+PYPI_MIRROR=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -109,10 +111,11 @@ while [ $# -gt 0 ]; do
             shift 2
             ;;
         --cn-mirror)
-            # 一键国内加速:Docker 用 DaoCloud 镜像 + apt 阿里云 + npm npmmirror
+            # 一键国内加速:Docker 用 DaoCloud 镜像 + apt 阿里云 + npm npmmirror + PyPI 阿里云
             REGISTRY="docker.m.daocloud.io"
             APT_MIRROR="aliyun"
             NPM_MIRROR="npmmirror"
+            PYPI_MIRROR="aliyun"
             shift
             ;;
         -h|--help)
@@ -131,7 +134,7 @@ while [ $# -gt 0 ]; do
             echo "  --no-codex-cli         不装 codex"
             echo ""
             echo "镜像源(服务器在国内时推荐,避免 docker.io 拉取超时):"
-            echo "  --cn-mirror            一键国内加速(Docker 用 DaoCloud + apt 阿里云 + npm npmmirror)"
+            echo "  --cn-mirror            一键国内加速(Docker DaoCloud + apt 阿里云 + npm npmmirror + PyPI 阿里云)"
             echo "  --registry <prefix>    仅换 Docker 基础镜像源前缀(如 docker.m.daocloud.io)"
             echo "                         非空时 FROM <prefix>/ubuntu:24.04;阿里云需带 library/ 前缀"
             echo ""
@@ -175,6 +178,8 @@ else
 fi
 # registry marker(检测配置变更用),空 = default
 expect_registry_marker="${REGISTRY:-default}"
+# pypi mirror marker(检测配置变更用),空 = default
+expect_pypi_mirror_marker="${PYPI_MIRROR:-default}"
 
 # ---------- 生成 Dockerfile(若不存在或配置不符) ----------
 # 检测:Dockerfile 现状与本次期望的 CLI 组合是否一致,不一致则备份重生成。
@@ -204,9 +209,13 @@ else
     cur_hermes_cli=$(grep -E "^# @hermes-cli:" "$DOCKERFILE" | head -1 | sed 's/.*://' || echo "")
     cur_codex_cli=$(grep -E "^# @codex-cli:" "$DOCKERFILE" | head -1 | sed 's/.*://' || echo "")
     cur_registry=$(grep -E "^# @registry:" "$DOCKERFILE" | head -1 | sed 's/^# @registry://' || echo "")
+    cur_pypi_mirror=$(grep -E "^# @pypi-mirror:" "$DOCKERFILE" | head -1 | sed 's/^# @pypi-mirror://' || echo "")
     if [ "$cur_registry" != "$expect_registry_marker" ]; then
         NEED_REGEN=1
         REGEN_REASON="镜像源变更($cur_registry → $expect_registry_marker)"
+    elif [ "$cur_pypi_mirror" != "$expect_pypi_mirror_marker" ]; then
+        NEED_REGEN=1
+        REGEN_REASON="PyPI 镜像源变更($cur_pypi_mirror → $expect_pypi_mirror_marker)"
     elif [ "$cur_qoder_cli" != "$expect_qoder_cli_marker" ]; then
         NEED_REGEN=1
         REGEN_REASON="国际版配置变更($cur_qoder_cli → $expect_qoder_cli_marker)"
@@ -258,6 +267,7 @@ if [ "$NEED_REGEN" -eq 1 ]; then
 # @hermes-cli:__HERMES_CLI_MARKER__
 # @codex-cli:__CODEX_CLI_MARKER__
 # @registry:__REGISTRY_MARKER__
+# @pypi-mirror:__PYPI_MIRROR_MARKER__
 FROM __BASE_IMAGE__
 
 # 避免 tzdata 等交互式安装卡住
@@ -383,7 +393,23 @@ EOF
 # --skip-browser    跳过 Playwright/Node 浏览器依赖(hermes acp 不需要,减小镜像体积)
 # --non-interactive 非 tty 下防止任何提示卡住(curl|bash 风格管道时尤其重要)
 # 两步「先下载再执行」比 curl|bash 更安全、可审计(避免 pipefail 缺失掩盖 curl 失败)。
+EOF
+        if [ "$PYPI_MIRROR" = "aliyun" ]; then
+            cat >> "$DOCKERFILE" <<'EOF'
+# PyPI 国内源加速(--cn-mirror 时启用):Hermes install.sh 用 uv 拉 Python 依赖,
+# 默认走 pypi.org 国内极慢(尤其 uv 解析 [all] extras + 下载大包如 playwright)。
+# 设 UV_INDEX_URL + PIP_INDEX_URL,让 uv 和子进程 pip 都走阿里云 PyPI 镜像。
 USER root
+ENV UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+    PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+EOF
+        else
+            cat >> "$DOCKERFILE" <<'EOF'
+USER root
+EOF
+        fi
+        cat >> "$DOCKERFILE" <<'EOF'
 RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh \
     && bash /tmp/hermes-install.sh --skip-setup --skip-browser --non-interactive \
     && rm -f /tmp/hermes-install.sh \
@@ -422,6 +448,7 @@ EOF
         -e "s/__HERMES_CLI_MARKER__/$expect_hermes_cli_marker/" \
         -e "s/__CODEX_CLI_MARKER__/$expect_codex_cli_marker/" \
         -e "s/__REGISTRY_MARKER__/$expect_registry_marker/" \
+        -e "s/__PYPI_MIRROR_MARKER__/$expect_pypi_mirror_marker/" \
         -e "s#__BASE_IMAGE__#$BASE_IMAGE#" \
         "$DOCKERFILE"
 
@@ -431,7 +458,7 @@ EOF
     echo "     Kimi(kimi):$([ "$WITH_KIMI_CLI" -eq 1 ] && echo '装' || echo '不装')"
     echo "     Hermes(hermes):$([ "$WITH_HERMES_CLI" -eq 1 ] && echo '装' || echo '不装')"
     echo "     Codex(codex):$([ "$WITH_CODEX_CLI" -eq 1 ] && echo '装' || echo '不装')"
-    echo "     镜像源:${REGISTRY:-默认(docker.io)}${APT_MIRROR:+ / apt=$APT_MIRROR}${NPM_MIRROR:+ / npm=$NPM_MIRROR}"
+    echo "     镜像源:${REGISTRY:-默认(docker.io)}${APT_MIRROR:+ / apt=$APT_MIRROR}${NPM_MIRROR:+ / npm=$NPM_MIRROR}${PYPI_MIRROR:+ / pypi=$PYPI_MIRROR}"
 else
     echo "[INFO] $DOCKERFILE 已存在且符合要求,直接使用(如需重新生成请先删除)"
 fi
@@ -443,7 +470,7 @@ echo "       国内版(qoderclicn):$([ "$WITH_QODER_CLI_CN" -eq 1 ] && echo '含
 echo "       Kimi(kimi):$([ "$WITH_KIMI_CLI" -eq 1 ] && echo '含' || echo '不含')"
 echo "       Hermes(hermes):$([ "$WITH_HERMES_CLI" -eq 1 ] && echo '含' || echo '不含')"
 echo "       Codex(codex):$([ "$WITH_CODEX_CLI" -eq 1 ] && echo '含' || echo '不含')"
-echo "       镜像源:${REGISTRY:-默认(docker.io)}${APT_MIRROR:+ / apt=$APT_MIRROR}${NPM_MIRROR:+ / npm=$NPM_MIRROR}"
+echo "       镜像源:${REGISTRY:-默认(docker.io)}${APT_MIRROR:+ / apt=$APT_MIRROR}${NPM_MIRROR:+ / npm=$NPM_MIRROR}${PYPI_MIRROR:+ / pypi=$PYPI_MIRROR}"
 docker build -f "$DOCKERFILE" -t "$IMAGE_NAME:$IMAGE_TAG" .
 echo "[OK] 镜像构建完成"
 
