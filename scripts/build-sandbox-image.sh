@@ -413,7 +413,10 @@ EOF
 RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh \
     && bash /tmp/hermes-install.sh --skip-setup --skip-browser --non-interactive \
     && rm -f /tmp/hermes-install.sh \
-    && hermes --version
+    && hermes --version \
+    # install.sh 默认不装 [anthropic] extra;anthropic_messages 模式的 provider
+    # (anthropic/minimax)需要 anthropic Python 包,这里补装(版本与 pyproject.toml 对齐)
+    && /usr/local/lib/hermes-agent/venv/bin/python -m pip install 'anthropic==0.87.0'
 EOF
     fi
 

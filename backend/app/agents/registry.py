@@ -254,7 +254,10 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
             "install_cmd_default": (
                 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh '
                 '&& bash /tmp/hermes-install.sh --skip-setup --skip-browser --non-interactive '
-                '&& rm -f /tmp/hermes-install.sh'
+                '&& rm -f /tmp/hermes-install.sh '
+                # install.sh 不装 [anthropic] extra;anthropic_messages 模式的 provider
+                # (anthropic/minimax)需要 anthropic 包,这里一并补装
+                '&& /usr/local/lib/hermes-agent/venv/bin/python -m pip install "anthropic==0.87.0"'
             ),
             # ACP 启动参数:hermes 用 `hermes acp` 子命令(非 --acp 标志)
             "acp_args": ["acp"],

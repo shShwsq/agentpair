@@ -102,7 +102,10 @@ _PROVIDER_CONFIG: dict[str, dict[str, str]] = {
     "minimax": {
         "api_key_env": "MINIMAX_API_KEY",
         "base_url_env": "MINIMAX_BASE_URL",
-        "default_base_url": "https://api.minimax.io/v1",
+        # MiniMax 在 Hermes 中用 api_mode=anthropic_messages(Anthropic 兼容端点),
+        # 内置 base_url 为 https://api.minimax.io/anthropic;留空让 Hermes 用内置默认。
+        # 切勿填 /v1(OpenAI 兼容端点)——那需要 chat_completions 模式,与 profile 冲突。
+        "default_base_url": "",
         "default_model": "MiniMax-M2",
         "config_provider": "minimax",
     },
@@ -118,6 +121,10 @@ _PROVIDER_CONFIG: dict[str, dict[str, str]] = {
 
 # 默认 provider(用户未选择时)
 _DEFAULT_PROVIDER = "openrouter"
+
+# 使用 api_mode=anthropic_messages 的 provider(Hermes 的 anthropic/minimax profile)
+# 这些 provider 需要 anthropic Python 包,但 install.sh 默认不装 [anthropic] extra
+_PROVIDERS_NEEDING_ANTHROPIC_PKG = {"anthropic", "minimax"}
 
 
 # ============================================================
@@ -218,6 +225,20 @@ def _hermes_pre_bridge_hook(session, credentials: dict[str, str], agent_type: st
 
     # 写入 config.yaml
     session.write_file(HERMES_CONFIG_PATH, config_content)
+
+    # 确保 anthropic_messages 模式的 provider 有 anthropic 包
+    # install.sh 默认不装 [anthropic] extra;旧镜像需运行时补装(仅首次,后续 import 通过即跳过)
+    if provider in _PROVIDERS_NEEDING_ANTHROPIC_PKG:
+        check_and_install = (
+            "/usr/local/lib/hermes-agent/venv/bin/python -c 'import anthropic' 2>/dev/null "
+            "|| /usr/local/lib/hermes-agent/venv/bin/python -m pip install "
+            "'anthropic==0.87.0' 2>&1"
+        )
+        install_result = session.run_command(check_and_install, timeout=120, check=False)
+        if install_result and "Successfully installed" in install_result:
+            logger.info(f"[hermes_cli] 已补装 anthropic 包(provider={provider})")
+        elif install_result and install_result.strip() and "already satisfied" not in install_result.lower():
+            logger.warning(f"[hermes_cli] anthropic 包安装结果: {install_result[:300]}")
     logger.info(
         f"[hermes_cli] 已写入 {HERMES_CONFIG_PATH}: "
         f"provider={cfg['config_provider']}, model={model}, "
