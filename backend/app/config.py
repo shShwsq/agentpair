@@ -114,6 +114,8 @@ class Settings(BaseSettings):
         '&& rm -f /tmp/hermes-install.sh '
         # install.sh 不装 [anthropic] extra;anthropic_messages 模式的 provider
         # (anthropic/minimax)需要 anthropic 包,这里一并补装
+        # uv venv 默认不含 pip,先 ensurepip 引导
+        '&& /usr/local/lib/hermes-agent/venv/bin/python -m ensurepip '
         '&& /usr/local/lib/hermes-agent/venv/bin/python -m pip install "anthropic==0.87.0"'
     )
 

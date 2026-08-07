@@ -230,30 +230,42 @@ def _hermes_pre_bridge_hook(session, credentials: dict[str, str], agent_type: st
     # install.sh 默认不装 [anthropic] extra;旧镜像需运行时补装(仅首次,后续 import 通过即跳过)
     if provider in _PROVIDERS_NEEDING_ANTHROPIC_PKG:
         venv_python = "/usr/local/lib/hermes-agent/venv/bin/python"
-        # install.sh 用 uv 管理依赖,uv 创建的 venv 默认不含 pip;
-        # 优先用 uv pip install,fallback 到 python -m pip(部分 venv 有 pip)
-        install_cmd = (
-            f"{venv_python} -c 'import anthropic' 2>/dev/null "
-            f"|| uv pip install --python {venv_python} 'anthropic==0.87.0' 2>&1 "
-            f"|| /usr/local/bin/uv pip install --python {venv_python} 'anthropic==0.87.0' 2>&1 "
-            f"|| {venv_python} -m pip install 'anthropic==0.87.0' 2>&1"
-        )
-        install_result = session.run_command(install_cmd, timeout=120, check=False)
-        # 验证:import anthropic 并打印版本(成功说明安装到位)
+
+        # 1. 快速检查是否已安装
         verify = session.run_command(
             f"{venv_python} -c 'import anthropic; print(anthropic.__version__)'",
             timeout=10, check=False,
         )
         if verify and verify.strip():
-            logger.info(f"[hermes_cli] anthropic 包就绪: v{verify.strip()}")
+            logger.info(f"[hermes_cli] anthropic 包已就绪: v{verify.strip()}")
         else:
-            # 安装失败 — 抛异常让 test_credential_streaming 捕获并展示给用户
-            raise RuntimeError(
-                f"anthropic 包安装失败(provider={provider} 需要 anthropic_messages 模式)。\n"
-                f"安装命令输出: {(install_result or '(empty)')[:500]}\n"
-                f"请重建沙箱镜像(bash scripts/build-sandbox-image.sh),"
-                f"或在沙箱内手动执行: {venv_python} -m pip install 'anthropic>=0.39.0'"
+            # 2. uv venv 默认不含 pip;用 ensurepip(标准库)引导 pip,
+            #    失败则用 get-pip.py 兜底(需网络)
+            bootstrap = session.run_command(
+                f"{venv_python} -m ensurepip 2>&1 "
+                f"|| (curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py 2>&1 "
+                f"&& {venv_python} /tmp/get-pip.py 2>&1)",
+                timeout=60, check=False,
             )
+            # 3. 安装 anthropic
+            install_result = session.run_command(
+                f"{venv_python} -m pip install 'anthropic==0.87.0' 2>&1",
+                timeout=120, check=False,
+            )
+            # 4. 验证
+            verify = session.run_command(
+                f"{venv_python} -c 'import anthropic; print(anthropic.__version__)'",
+                timeout=10, check=False,
+            )
+            if verify and verify.strip():
+                logger.info(f"[hermes_cli] anthropic 包安装成功: v{verify.strip()}")
+            else:
+                raise RuntimeError(
+                    f"anthropic 包安装失败(provider={provider} 需要 anthropic_messages 模式)。\n"
+                    f"ensurepip 输出: {(bootstrap or '')[:300]}\n"
+                    f"pip install 输出: {(install_result or '')[:300]}\n"
+                    f"请重建沙箱镜像(bash scripts/build-sandbox-image.sh)"
+                )
     logger.info(
         f"[hermes_cli] 已写入 {HERMES_CONFIG_PATH}: "
         f"provider={cfg['config_provider']}, model={model}, "
