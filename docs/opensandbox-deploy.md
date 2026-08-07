@@ -166,6 +166,12 @@ bash scripts/build-sandbox-image.sh --no-codex-cli
 
 # 仅基础工具(不装任何 CLI)
 bash scripts/build-sandbox-image.sh --no-qoder-cli --no-qoder-cli-cn --no-kimi-cli --no-hermes-cli --no-codex-cli
+
+# 服务器在国内时加 --cn-mirror 一键国内加速(避免 docker.io 拉取 ubuntu 超时)
+bash scripts/build-sandbox-image.sh --cn-mirror
+
+# 或仅换 Docker 基础镜像源(apt/npm 仍用官方源)
+bash scripts/build-sandbox-image.sh --registry docker.m.daocloud.io
 ```
 
 脚本会:
@@ -173,6 +179,13 @@ bash scripts/build-sandbox-image.sh --no-qoder-cli --no-qoder-cli-cn --no-kimi-c
 2. 按参数生成 `Dockerfile.sandbox`(已存在且配置一致则跳过;配置变更会备份原文件后重新生成)
 3. `docker build -t agentpair-sandbox:latest`
 4. 逐个验证镜像内 `git` / `rg` / `python3` / `awk` / `find` / `curl` 及所选 CLI 都能找到
+
+**国内镜像加速**(服务器在国内时推荐):`--cn-mirror` 一键启用三项国内源:
+- Docker 基础镜像:`docker.m.daocloud.io/ubuntu:24.04`(DaoCloud 镜像,路径与 Docker Hub 一致)
+- apt 源:阿里云 `mirrors.aliyun.com`(ubuntu 24.04 DEB822 格式 + 旧 sources.list 兼容)
+- npm 源:`registry.npmmirror.com`(加速 qodercli/kimi/codex 的 `npm install -g`)
+
+若只换 Docker 基础镜像源(apt/npm 保持官方),用 `--registry <prefix>`,如 `--registry docker.m.daocloud.io`。注意阿里云容器镜像服务需带 `library/` 前缀,如 `--registry registry.cn-hangzhou.aliyuncs.com/library`。镜像源变更会触发 Dockerfile 重新生成(检测 `# @registry:` 标记)。
 
 五款 CLI 的差异:
 - **Qoder CLI 国际版**(`qodercli`):npm 包,需 Node.js >= 20.0.0,账号在 qoder.com

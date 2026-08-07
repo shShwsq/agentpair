@@ -24,6 +24,10 @@
 #   bash scripts/build-sandbox-image.sh --no-qoder-cli --no-kimi-cli          # 仅国内版 + hermes + codex
 #   bash scripts/build-sandbox-image.sh --no-qoder-cli --no-qoder-cli-cn --no-kimi-cli --no-codex-cli  # 仅 hermes
 #
+# 国内镜像加速(服务器在国内时推荐,避免 docker.io 拉取超时):
+#   bash scripts/build-sandbox-image.sh --cn-mirror                           # 一键国内源(Docker+apt+npm)
+#   bash scripts/build-sandbox-image.sh --registry docker.m.daocloud.io       # 仅换 Docker 基础镜像源
+#
 # 构建 agentpair-sandbox:latest 后,在 AgentPair backend/.env 设:
 #   SANDBOX_IMAGE=agentpair-sandbox:latest
 
@@ -45,42 +49,76 @@ WITH_QODER_CLI_CN=1
 WITH_KIMI_CLI=1
 WITH_HERMES_CLI=1
 WITH_CODEX_CLI=1
-for arg in "$@"; do
-    case "$arg" in
+# 镜像源(国内加速),默认空 = 用官方源
+# - REGISTRY:Docker 基础镜像源前缀,如 docker.m.daocloud.io(非空时 FROM $REGISTRY/ubuntu:24.04)
+# - APT_MIRROR:apt 源,目前支持 aliyun(空 = 不换)
+# - NPM_MIRROR:npm 源,目前支持 npmmirror(空 = 不换)
+REGISTRY=""
+APT_MIRROR=""
+NPM_MIRROR=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
         --with-qoder-cli)
             WITH_QODER_CLI=1
+            shift
             ;;
         --no-qoder-cli)
             WITH_QODER_CLI=0
+            shift
             ;;
         --with-qoder-cli-cn)
             WITH_QODER_CLI_CN=1
+            shift
             ;;
         --no-qoder-cli-cn)
             WITH_QODER_CLI_CN=0
+            shift
             ;;
         --with-kimi-cli)
             WITH_KIMI_CLI=1
+            shift
             ;;
         --no-kimi-cli)
             WITH_KIMI_CLI=0
+            shift
             ;;
         --with-hermes-cli)
             WITH_HERMES_CLI=1
+            shift
             ;;
         --no-hermes-cli)
             WITH_HERMES_CLI=0
+            shift
             ;;
         --with-codex-cli)
             WITH_CODEX_CLI=1
+            shift
             ;;
         --no-codex-cli)
             WITH_CODEX_CLI=0
+            shift
+            ;;
+        --registry)
+            # 下一个参数为镜像源前缀
+            if [ $# -lt 2 ]; then
+                echo "[FAIL] --registry 需要一个参数(如 --registry docker.m.daocloud.io)"
+                exit 1
+            fi
+            REGISTRY="$2"
+            shift 2
+            ;;
+        --cn-mirror)
+            # 一键国内加速:Docker 用 DaoCloud 镜像 + apt 阿里云 + npm npmmirror
+            REGISTRY="docker.m.daocloud.io"
+            APT_MIRROR="aliyun"
+            NPM_MIRROR="npmmirror"
+            shift
             ;;
         -h|--help)
-            echo "用法:bash $0 [--with-qoder-cli|--no-qoder-cli] [--with-qoder-cli-cn|--no-qoder-cli-cn] [--with-kimi-cli|--no-kimi-cli] [--with-hermes-cli|--no-hermes-cli] [--with-codex-cli|--no-codex-cli]"
+            echo "用法:bash $0 [选项](均可组合,默认全部启用)"
             echo ""
-            echo "选项(均可组合,默认全部启用):"
+            echo "CLI 开关(默认全装):"
             echo "  --with-qoder-cli       预装 Qoder CLI 国际版(Node.js + npm,需 qoder.com 账号)"
             echo "  --no-qoder-cli         不装国际版"
             echo "  --with-qoder-cli-cn    预装 Qoder CN CLI 国内版(零依赖二进制,需 qoder.cn 账号)"
@@ -92,13 +130,18 @@ for arg in "$@"; do
             echo "  --with-codex-cli       预装 Codex CLI(Node.js + npm,OpenAI 官方,需 LLM API Key)"
             echo "  --no-codex-cli         不装 codex"
             echo ""
+            echo "镜像源(服务器在国内时推荐,避免 docker.io 拉取超时):"
+            echo "  --cn-mirror            一键国内加速(Docker 用 DaoCloud + apt 阿里云 + npm npmmirror)"
+            echo "  --registry <prefix>    仅换 Docker 基础镜像源前缀(如 docker.m.daocloud.io)"
+            echo "                         非空时 FROM <prefix>/ubuntu:24.04;阿里云需带 library/ 前缀"
+            echo ""
             echo "基础工具(git/rg/python3/awk/find/curl)始终预装。"
             echo "Node.js 版本:只要 qoder_cli / kimi_cli / codex_cli 任一启用,统一装 Node 22.x(三者都兼容)。"
             echo "Hermes CLI 是 Python 包(未发布 PyPI,官方 install.sh 装 uv+Python 3.11+源码),不需要 Node.js。"
             exit 0
             ;;
         *)
-            echo "[FAIL] 未知参数: $arg(用 -h 查看帮助)"
+            echo "[FAIL] 未知参数: $1(用 -h 查看帮助)"
             exit 1
             ;;
     esac
@@ -122,6 +165,16 @@ NEED_NODE=0
 if [ "$WITH_QODER_CLI" -eq 1 ] || [ "$WITH_KIMI_CLI" -eq 1 ] || [ "$WITH_CODEX_CLI" -eq 1 ]; then
     NEED_NODE=1
 fi
+
+# ---------- 基础镜像源 ----------
+# REGISTRY 非空时用 $REGISTRY/ubuntu:24.04,否则用官方 ubuntu:24.04
+if [ -n "$REGISTRY" ]; then
+    BASE_IMAGE="$REGISTRY/ubuntu:24.04"
+else
+    BASE_IMAGE="ubuntu:24.04"
+fi
+# registry marker(检测配置变更用),空 = default
+expect_registry_marker="${REGISTRY:-default}"
 
 # ---------- 生成 Dockerfile(若不存在或配置不符) ----------
 # 检测:Dockerfile 现状与本次期望的 CLI 组合是否一致,不一致则备份重生成。
@@ -150,7 +203,11 @@ else
     cur_kimi_cli=$(grep -E "^# @kimi-cli:" "$DOCKERFILE" | head -1 | sed 's/.*://' || echo "")
     cur_hermes_cli=$(grep -E "^# @hermes-cli:" "$DOCKERFILE" | head -1 | sed 's/.*://' || echo "")
     cur_codex_cli=$(grep -E "^# @codex-cli:" "$DOCKERFILE" | head -1 | sed 's/.*://' || echo "")
-    if [ "$cur_qoder_cli" != "$expect_qoder_cli_marker" ]; then
+    cur_registry=$(grep -E "^# @registry:" "$DOCKERFILE" | head -1 | sed 's/^# @registry://' || echo "")
+    if [ "$cur_registry" != "$expect_registry_marker" ]; then
+        NEED_REGEN=1
+        REGEN_REASON="镜像源变更($cur_registry → $expect_registry_marker)"
+    elif [ "$cur_qoder_cli" != "$expect_qoder_cli_marker" ]; then
         NEED_REGEN=1
         REGEN_REASON="国际版配置变更($cur_qoder_cli → $expect_qoder_cli_marker)"
     elif [ "$cur_qoder_cli_cn" != "$expect_qoder_cli_cn_marker" ]; then
@@ -200,11 +257,26 @@ if [ "$NEED_REGEN" -eq 1 ]; then
 # @kimi-cli:__KIMI_CLI_MARKER__
 # @hermes-cli:__HERMES_CLI_MARKER__
 # @codex-cli:__CODEX_CLI_MARKER__
-FROM ubuntu:24.04
+# @registry:__REGISTRY_MARKER__
+FROM __BASE_IMAGE__
 
 # 避免 tzdata 等交互式安装卡住
 ENV DEBIAN_FRONTEND=noninteractive
+EOF
 
+    # ---- 国内 apt 源(可选,--cn-mirror 时启用)----
+    if [ "$APT_MIRROR" = "aliyun" ]; then
+        cat >> "$DOCKERFILE" <<'EOF'
+# 国内 apt 源加速(阿里云;ubuntu 24.04 DEB822 格式 + 旧 sources.list 兼容)
+RUN sed -i 's@//.*archive.ubuntu.com@//mirrors.aliyun.com@g; s@//.*security.ubuntu.com@//mirrors.aliyun.com@g' \
+        /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true \
+    && sed -i 's@//.*archive.ubuntu.com@//mirrors.aliyun.com@g; s@//.*security.ubuntu.com@//mirrors.aliyun.com@g' \
+        /etc/apt/sources.list 2>/dev/null || true
+EOF
+    fi
+
+    # ---- 基础工具 ----
+    cat >> "$DOCKERFILE" <<'EOF'
 # 基础工具:git / ripgrep / python3 / awk / find / curl
 # curl 用于:NodeSource 安装脚本(国际版/kimi)+ qoder.cn/install(国内版)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -225,7 +297,19 @@ EOF
     # ---- 追加 Node.js(若任一 Node 类 CLI 启用)----
     # 统一装 Node 22.x:qodercli 要求 >= 20.0.0,kimi 要求 >= 22.19,22.x 两者都兼容
     if [ "$NEED_NODE" -eq 1 ]; then
-        cat >> "$DOCKERFILE" <<'EOF'
+        if [ "$NPM_MIRROR" = "npmmirror" ]; then
+            cat >> "$DOCKERFILE" <<'EOF'
+
+# ---- Node.js 22.x(qodercli 要求 >= 20.0.0,kimi 要求 >= 22.19,统一用 22.x)----
+# npm 全局源换成 npmmirror(国内加速 qodercli/kimi/codex 的 npm install -g)
+USER root
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm config set registry https://registry.npmmirror.com
+EOF
+        else
+            cat >> "$DOCKERFILE" <<'EOF'
 
 # ---- Node.js 22.x(qodercli 要求 >= 20.0.0,kimi 要求 >= 22.19,统一用 22.x)----
 USER root
@@ -233,6 +317,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 EOF
+        fi
     fi
 
     # ---- 追加国际版 Qoder CLI ----
@@ -329,13 +414,15 @@ USER user
 WORKDIR /home/user
 EOF
 
-    # 替换标记占位符为实际值
+    # 替换标记占位符为实际值(BASE_IMAGE 含 /,用 # 作 sed 分隔符)
     sed -i \
         -e "s/__QODER_CLI_MARKER__/$expect_qoder_cli_marker/" \
         -e "s/__QODER_CLI_CN_MARKER__/$expect_qoder_cli_cn_marker/" \
         -e "s/__KIMI_CLI_MARKER__/$expect_kimi_cli_marker/" \
         -e "s/__HERMES_CLI_MARKER__/$expect_hermes_cli_marker/" \
         -e "s/__CODEX_CLI_MARKER__/$expect_codex_cli_marker/" \
+        -e "s/__REGISTRY_MARKER__/$expect_registry_marker/" \
+        -e "s#__BASE_IMAGE__#$BASE_IMAGE#" \
         "$DOCKERFILE"
 
     echo "[OK] 已生成 $DOCKERFILE($REGEN_REASON)"
@@ -344,6 +431,7 @@ EOF
     echo "     Kimi(kimi):$([ "$WITH_KIMI_CLI" -eq 1 ] && echo '装' || echo '不装')"
     echo "     Hermes(hermes):$([ "$WITH_HERMES_CLI" -eq 1 ] && echo '装' || echo '不装')"
     echo "     Codex(codex):$([ "$WITH_CODEX_CLI" -eq 1 ] && echo '装' || echo '不装')"
+    echo "     镜像源:${REGISTRY:-默认(docker.io)}${APT_MIRROR:+ / apt=$APT_MIRROR}${NPM_MIRROR:+ / npm=$NPM_MIRROR}"
 else
     echo "[INFO] $DOCKERFILE 已存在且符合要求,直接使用(如需重新生成请先删除)"
 fi
@@ -355,6 +443,7 @@ echo "       国内版(qoderclicn):$([ "$WITH_QODER_CLI_CN" -eq 1 ] && echo '含
 echo "       Kimi(kimi):$([ "$WITH_KIMI_CLI" -eq 1 ] && echo '含' || echo '不含')"
 echo "       Hermes(hermes):$([ "$WITH_HERMES_CLI" -eq 1 ] && echo '含' || echo '不含')"
 echo "       Codex(codex):$([ "$WITH_CODEX_CLI" -eq 1 ] && echo '含' || echo '不含')"
+echo "       镜像源:${REGISTRY:-默认(docker.io)}${APT_MIRROR:+ / apt=$APT_MIRROR}${NPM_MIRROR:+ / npm=$NPM_MIRROR}"
 docker build -f "$DOCKERFILE" -t "$IMAGE_NAME:$IMAGE_TAG" .
 echo "[OK] 镜像构建完成"
 
