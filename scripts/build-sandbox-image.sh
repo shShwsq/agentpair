@@ -400,8 +400,8 @@ EOF
 # 默认走 pypi.org 国内极慢(尤其 uv 解析 [all] extras + 下载大包如 playwright)。
 # 设 UV_INDEX_URL + PIP_INDEX_URL,让 uv 和子进程 pip 都走阿里云 PyPI 镜像。
 USER root
-ENV UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
-    PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ENV UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+    PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 EOF
         else
