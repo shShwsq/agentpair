@@ -193,9 +193,16 @@ class ACPClient:
                 # 错误响应(JSON-RPC error)
                 if "error" in msg and msg.get("id") == request_id:
                     err = msg["error"]
-                    raise RuntimeError(
-                        f"ACP 错误 {err.get('code')}: {err.get('message')}"
-                    )
+                    code = err.get("code")
+                    message = err.get("message", "")
+                    data = err.get("data")
+                    # data 字段可能含详细错误信息(如 acp 库的 -32603 Internal error
+                    # 会在 data 里附带原始异常 traceback 字符串)
+                    parts = [f"ACP 错误 {code}: {message}"]
+                    if data:
+                        data_str = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
+                        parts.append(f"详情: {data_str}")
+                    raise RuntimeError("\n".join(parts))
 
                 # 最终响应(id 匹配)
                 if msg.get("id") == request_id:
@@ -640,6 +647,58 @@ def _stop_acp_bridge(session, execution_id: str, agent_type: str = "") -> None:
         logger.info(f"[{agent_type}] ACP bridge 已停止: {execution_id}")
     except Exception as e:
         logger.warning(f"[{agent_type}] 停止 bridge 失败(忽略): {e}")
+
+
+def _extract_bridge_error(session, execution_id: str, agent_type: str = "") -> str:
+    """从 bridge 后台日志中提取 CLI 的错误/异常信息(CLI stderr 经 bridge 转发)
+
+    bridge 的 _pump_stderr 把 CLI 的 stderr 每行加 "[cli stderr] " 前缀后
+    输出到 bridge stderr,这些被沙箱后台进程日志捕获。本函数扫描日志中的
+    Python traceback / Error / Exception 行,返回最后一段 traceback。
+
+    用于 ACP -32603 Internal error 时获取真实异常(否则只有泛化的 "Internal error")。
+    """
+    try:
+        logs, _ = session.get_background_logs(execution_id)
+    except Exception:
+        return ""
+    if not logs:
+        return ""
+
+    lines = logs.splitlines()
+    # 收集 traceback 相关行:Python 异常 traceback、Error/Exception 关键词行
+    # 以及 bridge 转发的 [cli stderr] 行
+    error_patterns = (
+        "Traceback (most recent call last)",
+        "Error:",
+        "Exception:",
+        "AuthError:",
+        "ValueError:",
+        "ImportError:",
+        "ModuleNotFoundError:",
+        "raise ",
+        "[cli stderr]",
+    )
+    relevant: list[str] = []
+    last_traceback_start = -1
+    for i, line in enumerate(lines):
+        if "Traceback (most recent call last)" in line:
+            last_traceback_start = i
+        if any(p in line for p in error_patterns):
+            relevant.append(line)
+
+    # 优先返回最后一个完整 traceback(从 Traceback 行到末尾)
+    if last_traceback_start >= 0:
+        tb_lines = lines[last_traceback_start:]
+        # 限制长度,避免过长
+        tb_text = "\n".join(tb_lines[:50])
+        return tb_text
+
+    # 回退:返回最后 20 行包含错误关键词的行
+    if relevant:
+        return "\n".join(relevant[-20:])
+
+    return ""
 
 
 # ============================================================
@@ -1474,7 +1533,18 @@ def run_acp_agent(
 
             # 创建会话(cwd 设为仓库路径)
             cwd = repo_path or BRIDGE_WORK_DIR
-            acp_session_id = client.new_session(cwd=cwd)
+            try:
+                acp_session_id = client.new_session(cwd=cwd)
+            except RuntimeError as e:
+                # session/new 失败时提取 bridge 日志中的 CLI stderr(含 Python traceback),
+                # -32603 Internal error 时 JSON-RPC 响应只有泛化消息,
+                # 真实异常在 CLI 的 stderr 里(经 bridge _pump_stderr 转发)
+                bridge_detail = _extract_bridge_error(
+                    session, bridge_exec_id, agent_type
+                )
+                if bridge_detail:
+                    raise RuntimeError(f"{e}\n\n[CLI 日志]\n{bridge_detail}") from e
+                raise
 
             # ---- wrapper 层钩子:session/new 后的自定义设置 ----
             # kimi 在此调 set_config_option(mode=yolo) 等
@@ -1686,6 +1756,17 @@ def test_credential_streaming(
             except RuntimeError as e:
                 err_msg = str(e)
                 low = err_msg.lower()
+                # 提取 bridge 日志中的 CLI stderr(含 Python traceback),
+                # -32603 Internal error 时 JSON-RPC 响应只有泛化消息,
+                # 真实异常在 CLI 的 stderr 里(经 bridge _pump_stderr 转发)
+                bridge_detail = ""
+                if bridge_exec_id:
+                    bridge_detail = _extract_bridge_error(
+                        session, bridge_exec_id, agent_type
+                    )
+                if bridge_detail:
+                    err_msg = f"{err_msg}\n\n[CLI 日志]\n{bridge_detail}"
+
                 if "auth" in low or "authentication required" in low:
                     yield done(False, f"session/new 失败:CLI 要求 authenticate 但不支持非交互式认证。错误: {err_msg}")
                 elif any(kw in low for kw in ("unauthorized", "token", "401")):
