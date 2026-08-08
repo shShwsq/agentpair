@@ -519,31 +519,31 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 },
                 "id": request_id,
             }
-            self._send_json(200, json.dumps(response))
+            self._send_sse(response)
             return
 
         if method == "authenticate":
             # 凭证经 config.toml + 环境变量注入,无需显式认证
             response = {"jsonrpc": "2.0", "result": {}, "id": request_id}
-            self._send_json(200, json.dumps(response))
+            self._send_sse(response)
             return
 
         if method == "session/new":
             session_id = f"codex-{uuid.uuid4().hex[:8]}"
             response = {"jsonrpc": "2.0", "result": {"sessionId": session_id}, "id": request_id}
-            self._send_json(200, json.dumps(response))
+            self._send_sse(response)
             return
 
         if method == "session/cancel":
             _codex.cancel()
             response = {"jsonrpc": "2.0", "result": {}, "id": request_id}
-            self._send_json(200, json.dumps(response))
+            self._send_sse(response)
             return
 
         # session/set_config_option:忽略(Codex 经 config.toml 配置)
         if method == "session/set_config_option":
             response = {"jsonrpc": "2.0", "result": {}, "id": request_id}
-            self._send_json(200, json.dumps(response))
+            self._send_sse(response)
             return
 
         # session/prompt:流式返回 SSE
@@ -557,7 +557,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "error": {"code": -32601, "message": f"method not found: {method}"},
             "id": request_id,
         }
-        self._send_json(200, json.dumps(response))
+        self._send_sse(response)
 
     def _handle_prompt(self, request: dict, request_id):
         """处理 session/prompt:启动 codex exec,流式返回 ACP 事件"""
@@ -618,12 +618,32 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 pass
 
     def _send_json(self, status_code: int, body: str) -> None:
-        """发送 JSON 响应"""
+        """发送 JSON 响应(用于 GET /health 等非 /rpc 端点)"""
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body.encode("utf-8"))))
         self.end_headers()
         self.wfile.write(body.encode("utf-8"))
+
+    def _send_sse(self, response: dict) -> None:
+        """以 SSE 流格式发送单条 ACP 响应(POST /rpc 专用)
+
+        ACPClient._rpc 对所有 POST /rpc 响应按 SSE 解析(只认 'data:' 开头的行),
+        因此快速方法(initialize/authenticate/session/new/cancel/set_config_option)
+        也必须用 SSE 格式,不能用 _send_json 返回普通 JSON——否则客户端解析不到
+        任何 data 行,final_result 为 None,session/new 等会因 sessionId 为空失败。
+        """
+        data = json.dumps(response, ensure_ascii=False)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        try:
+            self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
+            self.wfile.flush()
+        except BrokenPipeError:
+            pass
 
 
 # ============================================================
