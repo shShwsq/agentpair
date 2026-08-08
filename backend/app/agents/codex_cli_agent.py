@@ -74,8 +74,9 @@ def _codex_pre_bridge_hook(session, credentials: dict[str, str], agent_type: str
 model = "{model}"
 model_provider = "agentpair"
 
-# 审批策略:full-auto = 跳过所有审批(非交互模式必须)
-approval_policy = "full-auto"
+# 审批策略:never = 从不审批(非交互模式必须)
+# 合法值:untrusted / on-failure / on-request / granular / never
+approval_policy = "never"
 
 # 沙箱模式:关闭 Codex 内部沙箱(我们用 OpenSandbox 隔离)
 sandbox_mode = "danger-full-access"
@@ -93,8 +94,9 @@ env_key = "CODEX_API_KEY"
 # 模型配置
 model = "{model}"
 
-# 审批策略:full-auto = 跳过所有审批(非交互模式必须)
-approval_policy = "full-auto"
+# 审批策略:never = 从不审批(非交互模式必须)
+# 合法值:untrusted / on-failure / on-request / granular / never
+approval_policy = "never"
 
 # 沙箱模式:关闭 Codex 内部沙箱(我们用 OpenSandbox 隔离)
 sandbox_mode = "danger-full-access"
