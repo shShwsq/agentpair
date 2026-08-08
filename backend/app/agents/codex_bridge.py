@@ -394,11 +394,17 @@ class CodexExecSession:
                         entries=entries,
                     ))
 
-        # error item:翻译为 error
+        # error item(codex exec 把 Warning/ConfigWarning/Deprecation/ModelRerouted
+        # 等非致命提示都包装成 ErrorItem,见 exec event_processor_with_jsonl_output.rs
+        # collect_warning —— status 始终 Running)。致命错误走 turn.failed / 顶层
+        # error 事件(已由 on_final 终止处理)。翻译为 thought_chunk 通知而非 error
+        # 通知,否则 test_credential_streaming 收到 error 通知会立即判失败终止(如
+        # "Model metadata for ... not found" 实为 warning,codex 会用 fallback
+        # metadata 继续运行)。thought_chunk 让用户仍能看到提示文本但不终止测试。
         elif item_type == "error":
             msg = item.get("message", "未知错误")
             on_event(self._make_acp_notification(
-                session_id, "error",
+                session_id, "thought_chunk",
                 content={"type": "text", "text": msg},
             ))
 
