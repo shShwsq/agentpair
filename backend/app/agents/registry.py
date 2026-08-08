@@ -326,13 +326,14 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
                 "required": False,
                 "default": "responses",
                 "options": [
-                    {"value": "responses", "label": "Responses API(OpenAI 官方,Codex 默认)"},
-                    {"value": "chat", "label": "Chat Completions(兼容性更好,第三方端点推荐)"},
+                    {"value": "responses", "label": "Responses API(Codex 唯一支持)"},
                 ],
                 "description": (
-                    "通信协议:\n"
-                    "responses = OpenAI Responses API(Codex 0.81.0+ 默认,GPT-5/o 系列推荐)\n"
-                    "chat = Chat Completions API(大多数第三方/本地模型支持)"
+                    "通信协议(固定 Responses API)。\n"
+                    "Codex 已彻底移除 Chat Completions 支持(WireApi enum 仅 Responses),"
+                    "端点必须实现 /v1/responses 接口。\n"
+                    "仅支持 /v1/chat/completions 的第三方中转/Ollama/vLLM 等无法使用 Codex,"
+                    "需换支持 Responses API 的端点或加协议转换层。"
                 ),
             },
         ],

@@ -15,7 +15,7 @@ Codex CLI 不原生支持 ACP 协议,但提供:
 - api_key(secret):API Key(注入到 CODEX_API_KEY 环境变量)
 - base_url(text,可选):自定义 API 端点(留空用 OpenAI 官方)
 - model(text,可选):模型名(留空用 gpt-5)
-- wire_api(select):通信协议(responses=Responses API / chat=Chat Completions API)
+- wire_api(select):通信协议(固定 Responses API,chat 已被 codex 移除)
 """
 from __future__ import annotations
 
@@ -40,8 +40,9 @@ logger = logging.getLogger(__name__)
 # 默认模型(留空时使用)
 _DEFAULT_MODEL = "gpt-5"
 
-# 默认 wire_api(Responses API,Codex 0.81.0+ 默认)
-_DEFAULT_WIRE_API = "responses"
+# wire_api 固定为 responses:Codex 已彻底移除 chat 支持
+# (WireApi enum 仅 Responses 一个 variant,"chat" 会导致 config.toml 加载失败)
+# 用户端点必须支持 /v1/responses(OpenAI Responses API)
 
 
 def _codex_pre_bridge_hook(session, credentials: dict[str, str], agent_type: str) -> None:
@@ -53,17 +54,20 @@ def _codex_pre_bridge_hook(session, credentials: dict[str, str], agent_type: str
     config.toml 关键字段:
     - model:模型名(如 gpt-5)
     - model_provider:使用的 provider 名(默认 "agentpair")
-    - approval_policy:审批策略("full-auto" = 跳过所有审批)
+    - approval_policy:审批策略("never" = 从不审批,非交互模式必须)
     - sandbox_mode:沙箱模式("danger-full-access" = 关闭 Codex 内部沙箱,我们用 OpenSandbox)
     - [model_providers.agentpair]:自定义 provider 配置
-      - base_url:API 端点
-      - wire_api:通信协议("responses" 或 "chat")
+      - base_url:API 端点(必须支持 /v1/responses)
+      - wire_api:通信协议(固定 "responses",chat 已被 codex 移除)
       - env_key:读取哪个环境变量的 API Key
     """
     api_key = credentials.get("api_key", "")
     base_url = (credentials.get("base_url") or "").strip()
     model = (credentials.get("model") or "").strip() or _DEFAULT_MODEL
-    wire_api = (credentials.get("wire_api") or "").strip() or _DEFAULT_WIRE_API
+    # wire_api 固定 responses(不读用户配置):codex 已移除 chat 支持(WireApi enum
+    # 仅 Responses 一个 variant),用户凭证里若存了旧的 "chat" 会导致 config.toml
+    # 加载失败。端点必须支持 /v1/responses(OpenAI Responses API)。
+    wire_api = "responses"
 
     # 构建 config.toml
     # 注意:base_url 留空时不写 model_provider,让 Codex 用默认 OpenAI provider
