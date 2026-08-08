@@ -67,6 +67,10 @@ class CodexExecSession:
         self.thread_id: str | None = None  # 从 thread.started 事件提取
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
+        # 累积 codex exec 的 stderr:进程异常退出时拼进 ACP error message,
+        # 让真实错误原因(auth/配额/参数/配置等)传回前端,而非只有"退出码 1"
+        self._stderr_buf: list[str] = []
+        self._stderr_thread = None
 
     def run_prompt(
         self,
@@ -80,6 +84,9 @@ class CodexExecSession:
         on_event: 每翻译出一个 ACP 通知就调用(中间事件)
         on_final: 翻译完成或出错时调用一次(最终响应,含匹配的 id)
         """
+        # 清空上次的 stderr(每次 prompt 独立,避免累积)
+        self._stderr_buf.clear()
+
         # 构建命令
         cmd = [self.bin_name, "exec"]
         if self.thread_id:
@@ -104,8 +111,9 @@ class CodexExecSession:
         self._proc.stdin.write(prompt_text)
         self._proc.stdin.close()
 
-        # stderr 监控线程
-        threading.Thread(target=self._pump_stderr, daemon=True).start()
+        # stderr 监控线程(累积到 _stderr_buf + 转发到 bridge stderr)
+        self._stderr_thread = threading.Thread(target=self._pump_stderr, daemon=True)
+        self._stderr_thread.start()
 
         # 逐行读取 JSONL 事件
         item_texts: dict[str, str] = {}  # item_id → 上次的 text(用于增量 delta)
@@ -141,12 +149,21 @@ class CodexExecSession:
 
         # 进程结束但未收到 turn.completed(可能正常结束或异常退出)
         exit_code = self._proc.wait() if self._proc else -1
+        # 等 stderr 线程 drain 完(codex 的真实错误原因在 stderr 里,
+        # 不等就拼进 error message 可能截断)
+        if self._stderr_thread:
+            self._stderr_thread.join(timeout=2.0)
         if exit_code != 0:
+            stderr_text = "".join(self._stderr_buf).strip()
+            msg = f"codex exec 退出码 {exit_code}"
+            if stderr_text:
+                # 限制长度(避免超长 traceback 撑爆 JSON-RPC message)
+                msg += f"\n[codex stderr]\n{stderr_text[-2000:]}"
             on_final({
                 "jsonrpc": "2.0",
                 "error": {
                     "code": -32603,
-                    "message": f"codex exec 退出码 {exit_code}",
+                    "message": msg,
                 },
                 "id": request_id,
             })
@@ -426,10 +443,15 @@ class CodexExecSession:
         }
 
     def _pump_stderr(self) -> None:
-        """把 codex exec 的 stderr 输出到 bridge 的 stderr(调试用)"""
+        """把 codex exec 的 stderr 累积到 _stderr_buf + 转发到 bridge stderr
+
+        累积的目的是:codex exec 异常退出时,run_prompt 把 stderr 拼进 ACP error
+        message,让真实错误原因(auth/配额/参数/配置等)传回前端。
+        """
         if not self._proc or not self._proc.stderr:
             return
         for line in self._proc.stderr:
+            self._stderr_buf.append(line)
             print(f"[codex stderr] {line.rstrip()}", file=sys.stderr, flush=True)
 
     def cancel(self) -> None:
