@@ -239,7 +239,7 @@ def run_user_agent(
     checklist_text = _format_checklist_for_prompt(task_checklist)
     system_prompt = USER_AGENT_SYSTEM_PROMPT.replace("{checklist_section}", checklist_text)
 
-    # 长期记忆注入:用户偏好 + 全局记忆 + 项目记忆精简版
+    # 长期记忆注入:User Profile + 全局记忆 + 项目记忆精简版
     # (仅当有内容时,追加到 system prompt 末尾)
     # user_id 为 None(匿名任务)或无配置时 build_*_section 返回空串,不影响原 prompt
     if db is not None and user_id is not None:

@@ -2,7 +2,7 @@
  * 长期记忆管理相关类型定义
  *
  * 对应后端 /memory 系列 API(app/routers/memory.py):
- * - 用户偏好(1:1,结构化字段 + 自由文本):影响 user_agent 评判标准与 checklist 生成
+ * - User Profile (1:1,结构化字段 + 自由文本):影响 user_agent 评判标准与 checklist 生成
  * - 全局长期记忆(1:1,自由文本):跨项目通用经验,注入 user_agent
  * - 分项目记忆(1:N,按 repo_url 聚合):注入 react_agent,影响审计方向
  *
@@ -10,7 +10,7 @@
  */
 
 /**
- * 用户偏好(1:1)
+ * User Profile (1:1)
  *
  * preferences 为结构化偏好,后端以 JSONB 存储,约定字段:
  * - output_language?: 'zh' | 'en' | ...        输出语言

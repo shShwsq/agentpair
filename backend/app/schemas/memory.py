@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 
 class UserPreferenceOut(BaseModel):
-    """用户偏好响应(GET /memory/preferences)"""
+    """User Profile 响应(GET /memory/preferences)"""
 
     # 结构化偏好,如 {"output_language":"zh","focus_areas":["security"],"style":"concise"}
     preferences: dict = Field(default_factory=dict)

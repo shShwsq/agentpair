@@ -2,8 +2,8 @@
  * 长期记忆管理 API 模块
  *
  * 对应后端 app/routers/memory.py 的端点(全部鉴权):
- * - GET    /memory/preferences         用户偏好(未配置返回空默认值)
- * - PUT    /memory/preferences         保存用户偏好(get_or_create)
+ * - GET    /memory/preferences         User Profile (未配置返回空默认值)
+ * - PUT    /memory/preferences         保存 User Profile (get_or_create)
  * - GET    /memory/global              全局长期记忆(未配置返回空)
  * - PUT    /memory/global              保存全局长期记忆(get_or_create)
  * - GET    /memory/projects            项目记忆列表(按 updated_at 倒序)
@@ -25,10 +25,10 @@ import type {
 } from '@/types/memory'
 
 // ============================================================
-// 用户偏好(1:1)
+// User Profile (1:1)
 // ============================================================
 
-/** 获取当前用户偏好(未配置返回空默认值) */
+/** 获取当前 User Profile (未配置返回空默认值) */
 export function getPreferences(): Promise<UserPreferenceOut> {
   return client.get('/memory/preferences').then((r) => r.data)
 }

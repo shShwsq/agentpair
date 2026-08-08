@@ -6,7 +6,7 @@
 - 分项目记忆(1:N,按 repo_url 聚合):注入 react_agent,影响审计方向
 
 端点:
-- GET/PUT /memory/preferences       用户偏好
+- GET/PUT /memory/preferences       User Profile
 - GET/PUT /memory/global            全局长期记忆
 - GET    /memory/projects           项目列表
 - GET/PUT/DELETE /memory/projects/{project_id}  单个分项目记忆
@@ -45,7 +45,7 @@ router = APIRouter(prefix="/memory", tags=["memory"])
 
 
 # ============================================================
-# 用户偏好(1:1)
+# User Profile (1:1)
 # ============================================================
 
 
