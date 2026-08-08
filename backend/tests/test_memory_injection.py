@@ -172,13 +172,16 @@ def test_global_section_returns_content_with_header():
 
 
 def test_global_section_truncates_long_content():
-    """超长全局记忆截断到注入上限(不调 LLM,直接截断)。"""
+    """超长全局记忆截断到注入上限 + 尾部截断标记(不调 LLM,直接截断)。"""
     from app.services.memory_injection import MAX_GLOBAL_MEM_CHARS
 
     mem = MagicMock()
     mem.content = "X" * (MAX_GLOBAL_MEM_CHARS + 500)
     db = _mock_db(first_result=mem)
     result = build_global_memory_section(db, 1)
-    # header 后接截断内容,总长 ≈ header + MAX_GLOBAL_MEM_CHARS
+    # header 后接截断内容
     body = result.split("\n", 1)[1]
-    assert len(body) <= MAX_GLOBAL_MEM_CHARS
+    # 截断保留头部内容 + 加截断标记,整体比原文短
+    assert body.startswith("X" * 100)
+    assert "[...已截断...]" in body
+    assert len(body) < len(mem.content)

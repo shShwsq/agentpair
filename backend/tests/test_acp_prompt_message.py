@@ -75,7 +75,7 @@ def test_followup_round_also_includes_memories():
 def test_previous_plan_and_memories_coexist():
     """跨轮 plan 提醒 + 记忆段可共存,互不干扰。"""
     task = _mk_task()
-    previous_plan = [{"action": "检查鉴权", "status": "done"}]
+    previous_plan = [{"text": "检查鉴权", "status": "done"}]
     msg = _build_prompt_message(
         task, 2, "继续检查", None, "/home/user/repos/r", previous_plan,
         memory_summary="PROJECT_MEM", global_memory="GLOBAL_MEM",
