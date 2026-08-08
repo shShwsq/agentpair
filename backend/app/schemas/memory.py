@@ -6,7 +6,7 @@
 - ProjectOut/SaveProjectRequest/ProjectListResponse:分项目记忆(1:N)
 
 大小校验在 schema 层做第一道防线(写入时):
-- user_profile ≤ 8000
+- user_profile ≤ 2000
 - content(全局记忆) ≤ 20000
 - memory_content(项目记忆) ≤ 20000
 
@@ -31,7 +31,7 @@ class UserPreferenceOut(BaseModel):
 class SaveUserPreferenceRequest(BaseModel):
     """保存 User Profile 请求(PUT /memory/preferences)"""
 
-    user_profile: str = Field(default="", max_length=8000)
+    user_profile: str = Field(default="", max_length=2000)
 
 
 class UserMemoryOut(BaseModel):

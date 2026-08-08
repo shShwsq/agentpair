@@ -13,10 +13,10 @@
  * User Profile (1:1)
  *
  * user_profile 为自由文本 Markdown(用户在记忆管理页编辑),注入 user_agent,
- * 影响评判标准与 checklist 生成(≤ 8000 字符)。
+ * 影响评判标准与 checklist 生成(≤ 2000 字符)。
  */
 export interface UserPreferenceOut {
-  /** 自由文本 Markdown(≤ 8000 字符) */
+  /** 自由文本 Markdown(≤ 2000 字符) */
   user_profile: string
   /** 最后更新时间(ISO 字符串,未配置时为 null) */
   updated_at: string | null

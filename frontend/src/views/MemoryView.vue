@@ -189,7 +189,7 @@ const actionError = ref('')
 // 字符上限(与后端 schema 对齐)
 // ============================================================
 const LIMITS: Record<FileKind, number> = {
-  pref: 8000,
+  pref: 2000,
   global: 20000,
   project: 20000,
 }
