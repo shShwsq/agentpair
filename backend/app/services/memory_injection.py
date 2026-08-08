@@ -67,11 +67,11 @@ def build_user_agent_memory_section(db: Session, user_id) -> str:
                 + _truncate("\n".join(pref_lines), MAX_PREF_CHARS)
             )
 
-    # 全局长期记忆
+    # 全局长期记忆(内容已含 ## 类别 + - 条目结构,用引导语作外层避免层级冲突)
     mem = db.query(UserMemory).filter(UserMemory.user_id == user_id).first()
     if mem and mem.content and mem.content.strip():
         parts.append(
-            "## 全局长期记忆(用户跨任务的通用经验/约定)\n"
+            "以下是跨任务积累的长期记忆,按类别组织(在生成 checklist 和评估时遵循):\n"
             + _truncate(mem.content.strip(), MAX_GLOBAL_MEM_CHARS)
         )
 
@@ -106,7 +106,10 @@ def build_react_agent_memory_section(
     if not proj or not proj.memory_content or not proj.memory_content.strip():
         return ""
 
-    header = "## 该项目的已知问题与历史记忆(优先检查这些方向)"
+    header = (
+        "以下是你对该项目的已知问题与历史记忆,按类别组织,"
+        "优先检查 Hard Constraints 和 Known Issues 方向:"
+    )
     if proj.alias:
         header += f"\n项目别名: {proj.alias}"
     return header + "\n" + _truncate(
