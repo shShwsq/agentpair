@@ -21,6 +21,7 @@ import { changePassword, deleteAccount } from '@/api/auth'
 import {
   getGitBindURL,
   getGitProviderStatus,
+  refreshGitProviderToken,
   syncGitProviderEmail,
   unbindGitProvider,
 } from '@/api/git_provider'
@@ -110,8 +111,8 @@ const providerLoading = ref<Record<GitProvider, boolean>>({
   github: false,
   gitee: false,
 })
-/** 各平台操作进行中('bind' | 'unbind' | '') */
-const providerAction = ref<Record<GitProvider, 'bind' | 'unbind' | ''>>({
+/** 各平台操作进行中('bind' | 'unbind' | 'refresh' | '') */
+const providerAction = ref<Record<GitProvider, 'bind' | 'unbind' | 'refresh' | ''>>({
   github: '',
   gitee: '',
 })
@@ -173,6 +174,24 @@ async function handleUnbind(p: GitProvider): Promise<void> {
       `已解绑 ${providerDisplayName(p)},任务执行将无法访问你的私有仓库`,
       'success',
     )
+    setTimeout(() => {
+      providerSuccess.value[p] = ''
+    }, 5000)
+  } catch (err) {
+    providerError.value[p] = extractErrorMessage(err)
+  } finally {
+    providerAction.value[p] = ''
+  }
+}
+
+async function handleRefresh(p: GitProvider): Promise<void> {
+  providerAction.value[p] = 'refresh'
+  providerError.value[p] = ''
+  providerSuccess.value[p] = ''
+  try {
+    providerStatus.value[p] = await refreshGitProviderToken(p)
+    providerSuccess.value[p] = `${providerDisplayName(p)} token 已刷新`
+    showToast(`${providerDisplayName(p)} token 已刷新`, 'success')
     setTimeout(() => {
       providerSuccess.value[p] = ''
     }, 5000)
@@ -420,6 +439,7 @@ onMounted(() => {
           :success="providerSuccess[p]"
           @bind="handleBind(p)"
           @unbind="handleUnbind(p)"
+          @refresh="handleRefresh(p)"
           @cancel="activeProvider = ''"
         />
 

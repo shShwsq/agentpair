@@ -23,8 +23,8 @@ const props = defineProps<{
   status: GitProviderStatus | null
   /** 状态加载中 */
   loading: boolean
-  /** 操作进行中('bind' | 'unbind'),用于禁用按钮 + spinner */
-  action: 'bind' | 'unbind' | ''
+  /** 操作进行中('bind' | 'unbind' | 'refresh'),用于禁用按钮 + spinner */
+  action: 'bind' | 'unbind' | 'refresh' | ''
   /** 错误信息 */
   error?: string
   /** 成功提示(解绑后) */
@@ -34,6 +34,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'bind'): void
   (e: 'unbind'): void
+  (e: 'refresh'): void
   (e: 'cancel'): void
 }>()
 
@@ -104,6 +105,12 @@ function handleCancel(): void {
                 <div class="user-info">
                   <p class="login">@{{ status.provider_login || 'unknown' }}</p>
                   <p class="desc">已绑定,任务执行可访问你的私有仓库</p>
+                  <p
+                    v-if="status.token_expired && status.token_refreshable"
+                    class="token-warn"
+                  >
+                    ⚠ Token 已过期,请点击「刷新 token」或重新绑定
+                  </p>
                 </div>
               </div>
 
@@ -139,11 +146,21 @@ function handleCancel(): void {
                 :disabled="!!action"
                 @click="handleCancel"
               >关闭</button>
+              <!-- 已绑定且支持刷新:刷新 token(仅 Gitee) -->
+              <button
+                v-if="status && status.bound && status.token_refreshable"
+                :class="['btn', status.token_expired ? 'btn-primary' : 'btn-secondary']"
+                :disabled="!!action"
+                @click="emit('refresh')"
+              >
+                <span v-if="action === 'refresh'" class="btn-spinner" />
+                {{ action === 'refresh' ? '刷新中...' : '刷新 token' }}
+              </button>
               <!-- 已绑定:解绑 -->
               <button
                 v-if="status && status.bound"
                 class="btn btn-danger"
-                :disabled="action === 'unbind'"
+                :disabled="!!action"
                 @click="emit('unbind')"
               >
                 <span v-if="action === 'unbind'" class="btn-spinner danger" />
@@ -316,6 +333,13 @@ function handleCancel(): void {
   font-size: var(--fs-sm);
   color: var(--color-text-secondary);
   margin: 0;
+}
+
+.token-warn {
+  margin: var(--space-2) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--color-danger);
+  font-weight: var(--fw-medium);
 }
 
 /* ---- 未绑定卡片 ---- */

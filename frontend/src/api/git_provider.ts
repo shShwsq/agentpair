@@ -7,6 +7,7 @@
  * - DELETE /git/{provider}/bind        解绑(清除 token)
  * - GET    /git/{provider}/repos       列出当前用户仓库(含私有)
  * - PATCH  /git/{provider}/sync-email  同步平台邮箱(仅支持可验证邮箱的平台)
+ * - POST   /git/{provider}/refresh     用 refresh_token 刷新 access_token(仅 Gitee 支持)
  *
  * 绑定流程:
  * - 前端跳到平台授权页(scope 含仓库访问)
@@ -72,6 +73,16 @@ export function getGitProviderStatus(provider: GitProvider): Promise<GitProvider
 /** 解绑某平台(清除 access_token,保留 provider_user_id 关联) */
 export function unbindGitProvider(provider: GitProvider): Promise<GitProviderStatus> {
   return client.delete(`/git/${provider}/bind`).then((r) => r.data)
+}
+
+/**
+ * 用 refresh_token 刷新 access_token(仅 Gitee 支持,GitHub 返回 400)
+ *
+ * 用于设置页「刷新 token」按钮:token 过期或用户主动续期时调用。
+ * 成功后后端已更新 access_token / refresh_token / expires_at,前端刷新 status 即可。
+ */
+export function refreshGitProviderToken(provider: GitProvider): Promise<GitProviderStatus> {
+  return client.post(`/git/${provider}/refresh`).then((r) => r.data)
 }
 
 /** 同步邮箱:将账号邮箱更新为平台可验证邮箱(仅 GitHub 支持,Gitee 返回 400) */

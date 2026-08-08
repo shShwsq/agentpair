@@ -26,6 +26,12 @@ export interface GitProviderStatus {
   provider_email?: string | null
   /** 账号当前邮箱(不一致时用于弹窗展示) */
   current_email?: string | null
+  /** access_token 过期时间(ISO 字符串);null=不过期(GitHub)/老数据未记录 */
+  token_expires_at?: string | null
+  /** access_token 是否已过期(后端基于 expires_at 判断) */
+  token_expired?: boolean
+  /** 是否支持手动刷新(有 refresh_token,仅 Gitee 为 true) */
+  token_refreshable?: boolean
 }
 
 /** 邮箱同步结果(PATCH /git/{provider}/sync-email) */

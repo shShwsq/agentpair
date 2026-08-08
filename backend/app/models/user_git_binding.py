@@ -50,6 +50,14 @@ class UserGitBinding(Base):
     access_token: Mapped[str] = mapped_column(
         String(2048), nullable=False, server_default=""
     )
+    # refresh_token 加密密文(Fernet base64);空串表示不支持刷新(GitHub)或老数据
+    refresh_token: Mapped[str] = mapped_column(
+        String(2048), nullable=False, server_default=""
+    )
+    # access_token 过期时间;None 表示不过期(GitHub)或老数据未记录
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -124,3 +132,44 @@ def migrate_legacy_github_bindings() -> None:
             )
         conn.commit()
         log.info("迁移完成: %d 条旧 GitHub 绑定搬到 user_git_bindings", len(rows))
+
+
+def add_refresh_token_columns() -> None:
+    """幂等给 user_git_bindings 加 refresh_token / expires_at 两列
+
+    背景:项目用 Base.metadata.create_all(无 Alembic),已存在的表不会自动加新列。
+    启动时检查缺失列并 ALTER TABLE ADD COLUMN,保证老库平滑升级。
+    全新库(create_all 已建好新列)或已迁过 → 直接返回。
+
+    老数据 refresh_token="" / expires_at=NULL,退化为「不刷新」,
+    行为与改动前一致(下游 _ensure_valid_token 遇到 None/空串直接返回原 token)。
+    """
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    from app.database import engine
+
+    log = logging.getLogger(__name__)
+
+    with engine.connect() as conn:
+        insp = inspect(conn)
+        if not insp.has_table("user_git_bindings"):
+            return  # 全新库,create_all 会建好新列
+        cols = {c["name"] for c in insp.get_columns("user_git_bindings")}
+        add_clauses = []
+        if "refresh_token" not in cols:
+            add_clauses.append(
+                "ADD COLUMN refresh_token VARCHAR(2048) NOT NULL DEFAULT ''"
+            )
+        if "expires_at" not in cols:
+            add_clauses.append(
+                "ADD COLUMN expires_at TIMESTAMP WITH TIME ZONE NULL"
+            )
+        if not add_clauses:
+            return  # 已迁过
+        conn.execute(
+            text(f"ALTER TABLE user_git_bindings {' '.join(add_clauses)}")
+        )
+        conn.commit()
+        log.info("user_git_bindings 加列: %s", ", ".join(add_clauses))

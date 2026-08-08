@@ -42,6 +42,20 @@ class ProviderUserInfo:
     avatar_url: str | None
 
 
+@dataclass
+class OAuthTokenSet:
+    """OAuth 换 token 的完整结果
+
+    - GitHub:token 默认不过期,无 refresh_token → refresh_token=None, expires_in=None
+    - Gitee:access_token 有有效期(expires_in 秒),refresh_token 用于续期;
+      刷新接口会旋转 refresh_token,必须用响应里的新值覆盖。
+    """
+
+    access_token: str
+    refresh_token: str | None = None  # None=平台不支持刷新(GitHub)
+    expires_in: int | None = None  # 秒;None=不过期(GitHub)或响应未带
+
+
 class GitProvider(ABC):
     """Git 托管平台抽象基类
 
@@ -64,8 +78,20 @@ class GitProvider(ABC):
     # ---- OAuth / API(子类实现) ----
 
     @abstractmethod
-    def exchange_code_for_token(self, code: str) -> str:
-        """用授权码换 access_token,失败抛 GitProviderError"""
+    def exchange_code_for_token(self, code: str) -> OAuthTokenSet:
+        """用授权码换 token,失败抛 GitProviderError
+
+        返回 OAuthTokenSet(access_token + refresh_token + expires_in)。
+        不支持刷新的平台(GitHub)refresh_token / expires_in 为 None。
+        """
+
+    @abstractmethod
+    def refresh_access_token(self, refresh_token: str) -> OAuthTokenSet:
+        """用 refresh_token 换新的 access_token,失败抛 GitProviderError
+
+        不支持刷新的平台(GitHub)直接抛 GitProviderError。
+        支持的平台(Gitee)返回新的 OAuthTokenSet(refresh_token 可能被旋转)。
+        """
 
     @abstractmethod
     def get_user_info(self, access_token: str) -> ProviderUserInfo:
@@ -86,19 +112,27 @@ class GitProvider(ABC):
     def supports_verified_email(self) -> bool:
         """是否支持可验证邮箱(决定能否做邮箱同步)"""
 
+    @property
+    def supports_token_refresh(self) -> bool:
+        """是否支持用 refresh_token 续期 access_token
+
+        默认 False(GitHub token 不过期,无需刷新);Gitee 重写为 True。
+        """
+        return False
+
     # ---- 通用流程 ----
 
     def oauth_login(self, code: str) -> ProviderUserInfo:
         """完整 OAuth 登录流程:code → access_token → /user,并补充邮箱
 
-        失败抛 GitProviderError。
+        失败抛 GitProviderError。登录流程不落库 token,仅用 access_token 拉用户信息。
         """
-        access_token = self.exchange_code_for_token(code)
-        info = self.get_user_info(access_token)
+        token_set = self.exchange_code_for_token(code)
+        info = self.get_user_info(token_set.access_token)
 
         # 若公开 email 为空,尝试拿可验证邮箱
         if not info.email:
-            emails = self.get_user_emails(access_token)
+            emails = self.get_user_emails(token_set.access_token)
             if emails:
                 info.email = emails[0]
 
@@ -166,7 +200,7 @@ class GitHubProvider(GitProvider):
     def supports_verified_email(self) -> bool:
         return True
 
-    def exchange_code_for_token(self, code: str) -> str:
+    def exchange_code_for_token(self, code: str) -> OAuthTokenSet:
         if not settings.GITHUB_OAUTH_CLIENT_ID or not settings.GITHUB_OAUTH_CLIENT_SECRET:
             raise GitProviderError(
                 "GitHub OAuth 未配置:请在 .env 设置 GITHUB_OAUTH_CLIENT_ID 和 GITHUB_OAUTH_CLIENT_SECRET"
@@ -190,7 +224,12 @@ class GitHubProvider(GitProvider):
         if not access_token:
             err = data.get("error_description") or data.get("error") or "未知错误"
             raise GitProviderError(f"换取 access_token 失败: {err}")
-        return access_token
+        # GitHub OAuth token 默认不过期,无 refresh_token
+        return OAuthTokenSet(access_token=access_token)
+
+    def refresh_access_token(self, refresh_token: str) -> OAuthTokenSet:
+        """GitHub token 不支持刷新(默认不过期,无需续期)"""
+        raise GitProviderError("GitHub token 不支持刷新")
 
     def get_user_info(self, access_token: str) -> ProviderUserInfo:
         headers = {
@@ -290,7 +329,11 @@ class GiteeProvider(GitProvider):
     def supports_verified_email(self) -> bool:
         return False  # Gitee 无 GitHub 式 verified-emails 端点,不支持邮箱同步
 
-    def exchange_code_for_token(self, code: str) -> str:
+    @property
+    def supports_token_refresh(self) -> bool:
+        return True  # Gitee access_token 有有效期,支持用 refresh_token 续期
+
+    def exchange_code_for_token(self, code: str) -> OAuthTokenSet:
         if not settings.GITEE_OAUTH_CLIENT_ID or not settings.GITEE_OAUTH_CLIENT_SECRET:
             raise GitProviderError(
                 "Gitee OAuth 未配置:请在 .env 设置 GITEE_OAUTH_CLIENT_ID 和 GITEE_OAUTH_CLIENT_SECRET"
@@ -315,7 +358,56 @@ class GiteeProvider(GitProvider):
         if not access_token:
             err = data.get("error_description") or data.get("error") or "未知错误"
             raise GitProviderError(f"换取 access_token 失败: {err}")
-        return access_token
+        # Gitee 返回 refresh_token + expires_in,用于续期
+        refresh_token = data.get("refresh_token") or None
+        expires_in = data.get("expires_in")
+        try:
+            expires_in = int(expires_in) if expires_in is not None else None
+        except (TypeError, ValueError):
+            expires_in = None
+        return OAuthTokenSet(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_in=expires_in,
+        )
+
+    def refresh_access_token(self, refresh_token: str) -> OAuthTokenSet:
+        """用 refresh_token 换新的 access_token
+
+        Gitee 刷新接口会旋转 refresh_token,必须用响应里的新值覆盖落库。
+        """
+        if not settings.GITEE_OAUTH_CLIENT_ID or not settings.GITEE_OAUTH_CLIENT_SECRET:
+            raise GitProviderError(
+                "Gitee OAuth 未配置:请在 .env 设置 GITEE_OAUTH_CLIENT_ID 和 GITEE_OAUTH_CLIENT_SECRET"
+            )
+        payload = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }
+        headers = {"Accept": "application/json"}
+        try:
+            with httpx.Client(timeout=10) as client:
+                r = client.post(self.token_url, data=payload, headers=headers)
+                r.raise_for_status()
+        except httpx.HTTPError as e:
+            raise GitProviderError(f"刷新 access_token 失败: {e}") from e
+
+        data = r.json()
+        new_access_token = data.get("access_token")
+        if not new_access_token:
+            err = data.get("error_description") or data.get("error") or "未知错误"
+            raise GitProviderError(f"刷新 access_token 失败: {err}")
+        new_refresh_token = data.get("refresh_token") or None
+        expires_in = data.get("expires_in")
+        try:
+            expires_in = int(expires_in) if expires_in is not None else None
+        except (TypeError, ValueError):
+            expires_in = None
+        return OAuthTokenSet(
+            access_token=new_access_token,
+            refresh_token=new_refresh_token,
+            expires_in=expires_in,
+        )
 
     def get_user_info(self, access_token: str) -> ProviderUserInfo:
         try:

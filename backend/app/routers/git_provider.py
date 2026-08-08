@@ -9,9 +9,10 @@
 - DELETE /git/{provider}/bind        解绑(清 token,保留 provider_user_id 关联)
 - GET    /git/{provider}/repos       列出当前用户该平台仓库(含私有)
 - PATCH  /git/{provider}/sync-email  将账号邮箱同步为平台邮箱(仅支持可验证邮箱的平台)
+- POST   /git/{provider}/refresh     用 refresh_token 刷新 access_token(仅 Gitee 支持)
 """
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -51,6 +52,10 @@ class GitProviderStatusResponse(BaseModel):
     email_mismatch: bool = False
     provider_email: str | None = None  # 平台可验证邮箱(不一致时用于弹窗展示)
     current_email: str | None = None  # 账号当前邮箱
+    # token 有效期信息(refresh 机制用)
+    token_expires_at: datetime | None = None  # None=不过期(GitHub)/老数据未记录
+    token_expired: bool = False  # 是否已过期(后端基于 expires_at 判断)
+    token_refreshable: bool = False  # 是否支持手动刷新(有 refresh_token)
 
 
 class GitRepoItem(BaseModel):
@@ -101,6 +106,52 @@ def _get_binding(db: Session, user_id, provider: str) -> UserGitBinding | None:
     )
 
 
+# token 临近过期提前刷新的提前量(秒),避免请求途中边界过期
+REFRESH_LEAD_SECONDS = 300
+
+
+def _ensure_valid_token(db: Session, binding: UserGitBinding, p) -> str:
+    """返回有效 access_token 明文;临近过期则用 refresh_token 刷新并落库
+
+    - 不支持刷新(GitHub)或无 expires_at(老数据)→ 直接返回当前 token
+    - 未临近过期(> REFRESH_LEAD_SECONDS)→ 直接返回当前 token
+    - 临近过期/已过期且有 refresh_token → 刷新并更新 binding(access/refresh/expires_at)
+    - 刷新失败 → 抛 GitProviderError(让上层走 "token 失效" 提示)
+
+    db.commit() 由本函数负责(刷新成功时);刷新失败时不提交,保持原 token 不变。
+    """
+    token = decrypt_secret(binding.access_token)
+    if not p.supports_token_refresh or not binding.expires_at:
+        return token
+    if binding.expires_at > datetime.now(timezone.utc) + timedelta(
+        seconds=REFRESH_LEAD_SECONDS
+    ):
+        return token
+    if not binding.refresh_token:
+        return token  # 无 refresh_token,退化为返回当前 token(让被动 401 处理)
+    try:
+        new_set = p.refresh_access_token(decrypt_secret(binding.refresh_token))
+    except GitProviderError as e:
+        logger.warning(
+            "user %s 刷新 %s token 失败: %s",
+            binding.user_id, p.display_name, e,
+        )
+        raise
+    binding.access_token = encrypt_secret(new_set.access_token)
+    binding.refresh_token = (
+        encrypt_secret(new_set.refresh_token) if new_set.refresh_token else ""
+    )
+    binding.expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=new_set.expires_in)
+        if new_set.expires_in else None
+    )
+    db.commit()
+    logger.info(
+        "user %s 的 %s token 已自动刷新", binding.user_id, p.display_name
+    )
+    return new_set.access_token
+
+
 # ============================================================
 # 端点
 # ============================================================
@@ -122,8 +173,8 @@ def bind_provider(
     p = _resolve_provider(provider)
 
     try:
-        access_token = p.exchange_code_for_token(req.code)
-        info = p.get_user_info(access_token)
+        token_set = p.exchange_code_for_token(req.code)
+        info = p.get_user_info(token_set.access_token)
     except GitProviderError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
@@ -152,13 +203,18 @@ def bind_provider(
         binding = UserGitBinding(
             user_id=current_user.id,
             provider=provider,
-            provider_user_id=info.provider_user_id,
-            access_token=encrypt_secret(access_token),
         )
         db.add(binding)
-    else:
-        binding.provider_user_id = info.provider_user_id
-        binding.access_token = encrypt_secret(access_token)
+    # 统一更新 provider_user_id + token 三件套
+    binding.provider_user_id = info.provider_user_id
+    binding.access_token = encrypt_secret(token_set.access_token)
+    binding.refresh_token = (
+        encrypt_secret(token_set.refresh_token) if token_set.refresh_token else ""
+    )
+    binding.expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=token_set.expires_in)
+        if token_set.expires_in else None
+    )
     db.commit()
     db.refresh(binding)
 
@@ -173,7 +229,7 @@ def bind_provider(
     provider_email = info.email
     if not provider_email and p.supports_verified_email:
         try:
-            emails = p.get_user_emails(access_token)
+            emails = p.get_user_emails(token_set.access_token)
             if emails:
                 provider_email = emails[0]
         except GitProviderError:
@@ -191,6 +247,8 @@ def bind_provider(
         email_mismatch=email_mismatch,
         provider_email=provider_email,
         current_email=current_user.email,
+        token_expires_at=binding.expires_at,
+        token_refreshable=bool(binding.refresh_token),
     )
 
 
@@ -216,7 +274,7 @@ def get_provider_status(
     # 若已绑定,实时查一次 /user 拿 login + avatar
     if bound:
         try:
-            token = decrypt_secret(binding.access_token)  # type: ignore[arg-type]
+            token = _ensure_valid_token(db, binding, p)
             info = p.get_user_info(token)
             provider_login = info.login
             avatar_url = info.avatar_url
@@ -235,6 +293,13 @@ def get_provider_status(
         provider_user_id=binding.provider_user_id if binding else None,
         provider_login=provider_login,
         avatar_url=avatar_url,
+        token_expires_at=binding.expires_at if binding else None,
+        token_expired=bool(
+            binding
+            and binding.expires_at
+            and binding.expires_at <= datetime.now(timezone.utc)
+        ),
+        token_refreshable=bool(binding and binding.refresh_token),
     )
 
 
@@ -297,7 +362,7 @@ def sync_email(
         )
 
     try:
-        token = decrypt_secret(binding.access_token)
+        token = _ensure_valid_token(db, binding, p)
         info = p.get_user_info(token)
     except (GitProviderError, ValueError) as e:
         raise HTTPException(
@@ -382,7 +447,7 @@ def list_repos(
         )
 
     try:
-        token = decrypt_secret(binding.access_token)
+        token = _ensure_valid_token(db, binding, p)
         raw = p.list_repos(token)
     except GitProviderError as e:
         # token 可能已失效,提示用户重新绑定
@@ -399,3 +464,69 @@ def list_repos(
 
     repos = [GitRepoItem(**item) for item in raw]
     return GitReposResponse(repos=repos)
+
+
+@router.post("/{provider}/refresh", response_model=GitProviderStatusResponse)
+def refresh_provider_token(
+    provider: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> GitProviderStatusResponse:
+    """手动用 refresh_token 刷新 access_token
+
+    仅支持 supports_token_refresh 的平台(Gitee);GitHub 返回 400。
+    用于设置页「刷新 token」按钮:token 过期或用户主动续期时调用。
+    """
+    p = _resolve_provider(provider)
+    if not p.supports_token_refresh:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{p.display_name} token 不支持刷新",
+        )
+
+    binding = _get_binding(db, current_user.id, provider)
+    if not binding or not binding.access_token:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"尚未绑定 {p.display_name}",
+        )
+    if not binding.refresh_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="无 refresh_token,请重新绑定",
+        )
+
+    try:
+        new_set = p.refresh_access_token(decrypt_secret(binding.refresh_token))
+    except GitProviderError as e:
+        logger.warning(
+            "user %s 手动刷新 %s token 失败: %s",
+            current_user.id, p.display_name, e,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"刷新失败,请重新绑定: {e}",
+        ) from e
+
+    binding.access_token = encrypt_secret(new_set.access_token)
+    binding.refresh_token = (
+        encrypt_secret(new_set.refresh_token) if new_set.refresh_token else ""
+    )
+    binding.expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=new_set.expires_in)
+        if new_set.expires_in else None
+    )
+    db.commit()
+    db.refresh(binding)
+    logger.info(
+        "user %s 手动刷新 %s token 成功", current_user.id, p.display_name
+    )
+
+    return GitProviderStatusResponse(
+        provider=provider,
+        bound=True,
+        provider_user_id=binding.provider_user_id,
+        token_expires_at=binding.expires_at,
+        token_expired=False,
+        token_refreshable=bool(binding.refresh_token),
+    )
