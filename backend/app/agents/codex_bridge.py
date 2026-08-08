@@ -36,6 +36,7 @@ Codex JSONL 事件 → ACP 通知映射:
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -663,11 +664,11 @@ def main():
     _codex = CodexExecSession(bin_name=args.bin, extra_args=extra_args)
 
     # 检查 codex 是否可用
-    check = subprocess.run(
-        ["command", "-v", args.bin],
-        capture_output=True, text=True, timeout=10,
-    )
-    if not check.stdout.strip():
+    # 用 shutil.which 查找,而非 subprocess.run(["command","-v",bin]):
+    # `command` 是 shell builtin,非独立可执行文件,subprocess.run 默认 shell=False
+    # 会在 PATH 中找名为 "command" 的可执行文件,精简容器镜像(如 OpenSandbox)无此文件,
+    # 抛 FileNotFoundError 导致 bridge 进程直接退出、HTTP 服务从未启动。
+    if not shutil.which(args.bin):
         print(f"[codex_bridge] 警告: {args.bin} 未在 PATH 中找到", file=sys.stderr, flush=True)
 
     # 启动 HTTP 服务器
