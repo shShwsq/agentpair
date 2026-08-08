@@ -141,6 +141,61 @@ def test_user_agent_section_both_pref_and_memory():
     assert "## Tech Stack\n- PostgreSQL" in result
 
 
+def test_user_agent_section_with_project_memory():
+    """repo_url 非空 + 有 Project.memory_summary → 追加项目记忆精简版段。"""
+    proj = MagicMock()
+    proj.memory_summary = "## Hard Constraints\n- wire_api 必须 responses"
+    proj.memory_content = "完整记忆不应被使用"
+    # 无 pref,无 global mem,有 project(三次查询:Pref / UserMemory / Project)
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.side_effect = [None, None, proj]
+    result = build_user_agent_memory_section(db, 1, "https://github.com/a/b")
+    assert "以下是对该项目的已知问题与历史记忆摘要" in result
+    assert "## Hard Constraints\n- wire_api 必须 responses" in result
+    assert "完整记忆不应被使用" not in result  # 用 summary 不用 content
+
+
+def test_user_agent_section_project_falls_back_to_content():
+    """memory_summary 为空 → 回退用 memory_content 截断(兼容旧数据)。"""
+    proj = MagicMock()
+    proj.memory_summary = ""
+    proj.memory_content = "## Known Issues\n- issue X"
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.side_effect = [None, None, proj]
+    result = build_user_agent_memory_section(db, 1, "https://github.com/a/b")
+    assert "## Known Issues\n- issue X" in result
+
+
+def test_user_agent_section_no_project_when_no_repo_url():
+    """repo_url 为 None → 不查 Project,无项目记忆段(向后兼容)。"""
+    mem = MagicMock()
+    mem.content = "## Tech Stack\n- PG"
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.side_effect = [None, mem]
+    result = build_user_agent_memory_section(db, 1)  # 不传 repo_url
+    assert "以下是跨任务积累的长期记忆" in result
+    assert "项目记忆" not in result
+
+
+def test_user_agent_section_pref_global_and_project_combined():
+    """三段共存:用户偏好 + 全局记忆 + 项目记忆精简版。"""
+    pref = MagicMock()
+    pref.preferences = {"output_language": "中文"}
+    pref.custom_prompt = ""
+    mem = MagicMock()
+    mem.content = "## Tech Stack\n- PG"
+    proj = MagicMock()
+    proj.memory_summary = "## Hard Constraints\n- rule A"
+    proj.memory_content = ""
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.side_effect = [pref, mem, proj]
+    result = build_user_agent_memory_section(db, 1, "https://github.com/a/b")
+    assert "## 用户偏好" in result
+    assert "以下是跨任务积累的长期记忆" in result
+    assert "以下是对该项目的已知问题与历史记忆摘要" in result
+    assert "## Hard Constraints\n- rule A" in result
+
+
 # ---------- build_global_memory_section ----------
 
 def test_global_section_empty_when_no_user():

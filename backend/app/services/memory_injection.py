@@ -29,11 +29,17 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[:max_chars] + "\n[...已截断...]"
 
 
-def build_user_agent_memory_section(db: Session, user_id) -> str:
-    """构造 user_agent 的"用户偏好 + 全局长期记忆"段。
+def build_user_agent_memory_section(
+    db: Session, user_id, repo_url: str | None = None,
+) -> str:
+    """构造 user_agent 的"用户偏好 + 全局长期记忆 + 项目记忆精简版"段。
 
     user_id 为 None(匿名任务)或无任何配置 → 返回空串(不注入)。
+    repo_url 非空时追加当前项目的记忆精简版(影响 checklist 生成与评估覆盖度)。
     注入到 user_agent system prompt 末尾,影响评判标准与 checklist 生成。
+
+    user_agent 不在沙箱,无法 read_file 查阅完整记忆,故只注入精简版
+    (memory_summary;为空回退 memory_content 截断)。
     """
     if user_id is None:
         return ""
@@ -74,6 +80,30 @@ def build_user_agent_memory_section(db: Session, user_id) -> str:
             "以下是跨任务积累的长期记忆,按类别组织(在生成 checklist 和评估时遵循):\n"
             + _truncate(mem.content.strip(), MAX_GLOBAL_MEM_CHARS)
         )
+
+    # 项目记忆精简版(影响 checklist 生成与评估覆盖度;user_agent 不在沙箱,只注入精简版)
+    if repo_url:
+        norm = normalize_repo_url(repo_url)
+        if norm:
+            proj = (
+                db.query(Project)
+                .filter(
+                    Project.user_id == user_id,
+                    Project.repo_url_normalized == norm,
+                )
+                .first()
+            )
+            if proj:
+                summary = (proj.memory_summary or "").strip()
+                if not summary:  # 兼容未生成 summary 的旧数据
+                    summary = _truncate(
+                        (proj.memory_content or "").strip(), MAX_PROJECT_MEM_CHARS
+                    )
+                if summary:
+                    parts.append(
+                        "以下是对该项目的已知问题与历史记忆摘要,按类别组织"
+                        "(生成 checklist 与评估覆盖度时参考):\n" + summary
+                    )
 
     if not parts:
         return ""

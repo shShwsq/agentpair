@@ -136,6 +136,8 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 client=llm_client,
                 ask_round=ask_round,
                 repo_context=repo_context,  # 修复 9:仅 round 0 注入,不膨胀 effective_intent
+                user_id=task.user_id,
+                repo_url=(task.params or {}).get("repo_url"),
             )
 
             # user_agent 没请求提问 → 提问循环结束,进入协作阶段
@@ -270,6 +272,8 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 client=llm_client,
                 ask_round=MAX_ASKS,  # 协作循环阶段不允许再提问
                 task_checklist=task_checklist,  # 场景降级后:传已确认的 checklist
+                user_id=task.user_id,
+                repo_url=(task.params or {}).get("repo_url"),
             )
             _record_user_agent(db, task, round_idx, ua_result)
 
@@ -924,6 +928,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
             ask_round=MAX_ASKS,  # 重启不允许提问
             task_checklist=task_checklist,
             user_id=task.user_id,
+            repo_url=(task.params or {}).get("repo_url"),
         )
         _record_user_agent(db, task, start_round_idx, ua_result)
 
@@ -966,6 +971,8 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
                 scenario_id=task.scenario, client=llm_client,
                 ask_round=MAX_ASKS,
                 task_checklist=task_checklist,
+                user_id=task.user_id,
+                repo_url=(task.params or {}).get("repo_url"),
             )
             _record_user_agent(db, task, round_idx, ua_result)
 
