@@ -100,12 +100,10 @@ _PROVIDER_CONFIG: dict[str, dict[str, str]] = {
         "config_provider": "kimi-coding",
     },
     "minimax": {
+        # MiniMax 在 Hermes 中用 api_mode=anthropic_messages(Anthropic 兼容端点)
         "api_key_env": "MINIMAX_API_KEY",
         "base_url_env": "MINIMAX_BASE_URL",
-        # MiniMax 在 Hermes 中用 api_mode=anthropic_messages(Anthropic 兼容端点),
-        # 内置 base_url 为 https://api.minimax.io/anthropic;留空让 Hermes 用内置默认。
-        # 切勿填 /v1(OpenAI 兼容端点)——那需要 chat_completions 模式,与 profile 冲突。
-        "default_base_url": "",
+        "default_base_url": "https://api.minimaxi.com/anthropic",
         "default_model": "MiniMax-M2",
         "config_provider": "minimax",
     },
