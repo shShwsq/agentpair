@@ -1409,6 +1409,230 @@ def git_blame(
 
 
 # ============================================================
+# 工具:run_command / str_replace_editor(向 CLI 看齐:跑 shell + 精准编辑)
+# ============================================================
+
+
+def run_command(command: str, repo_path: str = "", timeout: int = 60, task_id: str = "") -> dict:
+    """在沙箱里执行任意 shell 命令(与 CLI 的 bash 工具对齐)
+
+    用于跑构建/测试/脚本等,如 ./build.sh、pytest -x、npm test、pip show pkg。
+    命令在沙箱内执行,沙箱即隔离边界(与 run_python_code 同等风险面);
+    网络访问依赖沙箱配置(默认禁外网)。
+
+    参数:
+        command: shell 命令字符串(agent 自拟,非用户输入插值,无注入问题)
+        repo_path: 可选,clone_repo 返回的 path。提供则在仓库目录下执行(cd repo && command)
+        timeout: 超时秒,默认 60,上限 300(构建/测试可能较久)
+
+    返回:{"output": str, "exit_code": int, "truncated": bool}
+    """
+    timeout = max(1, min(int(timeout or 60), 300))
+    ctx = _get_or_create_session(task_id)
+    mode = ctx["mode"]
+    output = ""
+    exit_code = 0
+    truncated = False
+
+    if mode == "mock":
+        # mock 模式:本地 subprocess(shell=True)。用 cwd 而非命令里 cd,避开 Windows 盘符问题
+        try:
+            result = subprocess.run(
+                command, shell=True, cwd=repo_path or None,
+                capture_output=True, text=True, timeout=timeout,
+            )
+            output = result.stdout
+            exit_code = result.returncode
+            if exit_code != 0 and result.stderr:
+                output = (output + ("\n" if output else "") + result.stderr).strip()
+        except subprocess.TimeoutExpired as e:
+            out = e.stdout if isinstance(e.stdout, str) else ""
+            err = e.stderr if isinstance(e.stderr, str) else ""
+            output = (out + ("\n" if out and err else "") + err).strip()
+            output = (output + ("\n" if output else "") + f"[命令执行超时({timeout}s)]").strip()
+            exit_code = -1
+    else:
+        # sandbox 模式:session.run_command(单通道),2>&1 合并 + 末尾 echo exit code
+        session: SandboxSession = ctx["session"]
+        full = command if not repo_path else f"cd {shlex.quote(repo_path)} && {command}"
+        cmd = f"{full} 2>&1; " f'echo "EXIT_CODE:$?"'
+        try:
+            combined = session.run_command(cmd, timeout=timeout + 5)
+            output = combined
+            # 从末尾解析 EXIT_CODE 行(防命令本身输出过这个串)
+            m = None
+            for line in reversed(combined.splitlines()):
+                if line.startswith("EXIT_CODE:"):
+                    m = line
+                    break
+            if m:
+                code_str = m[len("EXIT_CODE:"):].strip()
+                exit_code = int(code_str) if code_str.lstrip("-").isdigit() else -1
+                output = combined.rsplit(m, 1)[0].rstrip("\n")
+        except Exception as e:
+            output = f"[沙箱执行命令失败: {e}]"
+            exit_code = -1
+
+    # 输出截断(复用 run_python_code 的上限,保留尾部——错误信息常在尾部)
+    if len(output) > _RUN_CODE_OUTPUT_LIMIT:
+        output = "[...输出过长,已截断头部...]\n" + output[-_RUN_CODE_OUTPUT_LIMIT:]
+        truncated = True
+
+    return {"output": output, "exit_code": exit_code, "truncated": truncated}
+
+
+def _resolve_repo_file(repo_path: str, file_path: str, mode: str) -> str:
+    """解析仓库内文件为绝对路径,防路径穿越(禁止 .. / 绝对路径)
+
+    供 str_replace_editor 共用。mock 模式额外用 Path.resolve().is_relative_to 复核
+    (同 _read_file_mock);sandbox 模式靠 .. 组件检查(主机无法 resolve 容器路径)。
+    返回 "repo_path/normalized" 字符串(mock 下亦是本地路径)。
+    """
+    if not file_path:
+        raise ValueError("file_path 不能为空")
+    normalized = file_path.replace("\\", "/").lstrip("/")
+    if ".." in normalized.split("/"):
+        raise ValueError("file_path 不能含 .. (防止路径穿越)")
+    if Path(normalized).is_absolute():
+        raise ValueError("file_path 必须是相对路径(相对仓库根)")
+    abs_path = f"{repo_path.rstrip('/')}/{normalized}"
+    if mode == "mock":
+        # 复核:解析后不得逃出仓库根(同 _read_file_mock)
+        if not Path(abs_path).resolve().is_relative_to(Path(repo_path).resolve()):
+            raise ValueError("非法路径:不能超出仓库根目录")
+    return abs_path
+
+
+def str_replace_editor(
+    command: str,
+    repo_path: str,
+    file_path: str,
+    file_text: str = "",
+    old_str: str = "",
+    new_str: str = "",
+    insert_line: int = 0,
+    replace_all: bool = False,
+    task_id: str = "",
+) -> dict:
+    """对仓库文件做外科手术式编辑(对齐 CLI 的 str_replace_editor)
+
+    与 write_file(全量覆写工作区)互补:本工具就地编辑仓库代码,精准、省 token、
+    不需重写整文件。可逆性由完整克隆+git 保证(git diff 回看、git checkout 回退)。
+
+    command:
+        - create: 创建新文件(file_text 为完整内容);文件必须不存在
+        - str_replace: 精确替换(old_str 必须唯一匹配,或 replace_all=True 全换)
+        - insert: 在 insert_line 行之后插入 new_str(0=末尾追加)
+
+    返回:{"command": str, "path": str, "abs_path": str, "lines": int, "snippet": str}
+      snippet 为编辑后该区域带行号的预览(便于 agent 确认结果)
+    """
+    if command not in ("create", "str_replace", "insert"):
+        raise ValueError(f"command 必须是 create/str_replace/insert,收到: {command}")
+    ctx = _get_or_create_session(task_id)
+    mode = ctx["mode"]
+    abs_path = _resolve_repo_file(repo_path, file_path, mode)
+
+    # ---- 读写原语(双模式)----
+    def _exists() -> bool:
+        if mode == "mock":
+            return Path(abs_path).is_file()
+        session: SandboxSession = ctx["session"]
+        return "OK" in session.run_command(
+            f"test -f {shlex.quote(abs_path)} && echo OK || echo MISSING"
+        )
+
+    def _read() -> str:
+        if mode == "mock":
+            return Path(abs_path).read_text(encoding="utf-8")
+        session: SandboxSession = ctx["session"]
+        return session.read_file(abs_path)
+
+    def _mkdir_parent() -> None:
+        if mode == "mock":
+            Path(abs_path).parent.mkdir(parents=True, exist_ok=True)
+        else:
+            # sandbox:用字符串 rsplit 保 Linux 分隔符(避免 Windows Path 把 / 转 \)
+            parent = abs_path.rsplit("/", 1)[0]
+            session: SandboxSession = ctx["session"]
+            session.run_command(f"mkdir -p {shlex.quote(parent)}")
+
+    def _write(content: str) -> None:
+        if mode == "mock":
+            Path(abs_path).write_text(content, encoding="utf-8")
+        else:
+            session: SandboxSession = ctx["session"]
+            session.write_file(abs_path, content)
+
+    # ---- 三命令逻辑(read-modify-write)----
+    if command == "create":
+        if not file_text:
+            raise ValueError("create 需要 file_text(新文件完整内容)")
+        if _exists():
+            raise FileExistsError(f"文件已存在,create 拒绝覆盖: {file_path}")
+        _mkdir_parent()
+        _write(file_text)
+        new_content = file_text
+        anchor_line = 1
+
+    elif command == "str_replace":
+        if not old_str:
+            raise ValueError("str_replace 需要 old_str(被替换的精确字符串)")
+        if old_str == new_str:
+            raise ValueError("old_str 与 new_str 相同,无需替换")
+        if not _exists():
+            raise FileNotFoundError(f"文件不存在: {file_path}")
+        content = _read()
+        occurrences = content.count(old_str)
+        if occurrences == 0:
+            raise ValueError(f"old_str 在文件中未找到,请先用 read_file 核对内容: {file_path}")
+        if occurrences > 1 and not replace_all:
+            raise ValueError(
+                f"old_str 匹配 {occurrences} 处,需提供更长上下文以唯一匹配,或设 replace_all=True"
+            )
+        new_content = content.replace(old_str, new_str) if replace_all else content.replace(old_str, new_str, 1)
+        _write(new_content)
+        # snippet 锚点:首个替换处附近(new_str 为空即删除,锚点取文件头)
+        anchor_line = new_content[: new_content.find(new_str)].count("\n") + 1 if new_str else 1
+
+    else:  # insert
+        if not new_str:
+            raise ValueError("insert 需要 new_str(要插入的文本)")
+        if not _exists():
+            raise FileNotFoundError(f"文件不存在: {file_path}")
+        content = _read()
+        lines = content.splitlines(keepends=True)
+        total = len(lines)
+        if insert_line < 0:
+            raise ValueError("insert_line 不能为负(0=末尾追加,正数=在该行之后插入)")
+        # clamp:0 或 > total 都按末尾追加
+        pos = insert_line if 0 < insert_line <= total else total
+        chunk = new_str if new_str.endswith("\n") else new_str + "\n"
+        lines.insert(pos, chunk)
+        new_content = "".join(lines)
+        _write(new_content)
+        anchor_line = pos + 1
+
+    # ---- snippet:编辑区域带行号预览 ----
+    all_lines = new_content.splitlines()
+    total_lines = len(all_lines)
+    sn_start = max(1, anchor_line - 10)
+    sn_end = min(total_lines, anchor_line + 10)
+    snippet_lines = all_lines[sn_start - 1 : sn_end]
+    snippet = _format_numbered_lines(snippet_lines, sn_start)
+    if total_lines > sn_end:
+        snippet += f"\n...(共 {total_lines} 行,已显示 {sn_start}-{sn_end})"
+
+    return {
+        "command": command,
+        "path": file_path,
+        "abs_path": abs_path,
+        "lines": total_lines,
+        "snippet": snippet,
+    }
+
+
+# ============================================================
 # 辅助:URL 转换(委托给 git_provider 抽象,按主机识别平台)
 # ============================================================
 

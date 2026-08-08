@@ -66,6 +66,8 @@ TOOL_FUNCTIONS: dict[str, Any] = {
     "run_python_code": sandbox_tools.run_python_code,
     "git_log": sandbox_tools.git_log,
     "git_blame": sandbox_tools.git_blame,
+    "run_command": sandbox_tools.run_command,
+    "str_replace_editor": sandbox_tools.str_replace_editor,
     "query_cve": query_cve,
     "list_skills": list_available_skills,
     "skill": run_skill,
@@ -351,6 +353,70 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["repo_path", "file_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": (
+                "在沙箱里执行任意 shell 命令(与 CLI 的 bash 工具对齐)。"
+                "用于跑构建/测试/脚本,如 ./build.sh、pytest -x、npm test、pip show pkg。"
+                "沙箱内执行,网络按沙箱配置(默认禁外网)。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "shell 命令字符串"},
+                    "repo_path": {
+                        "type": "string",
+                        "description": "可选,clone_repo 返回的 path。提供则在仓库目录下执行",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "超时秒,默认 60,上限 300",
+                    },
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "str_replace_editor",
+            "description": (
+                "对仓库文件做外科手术式编辑(对齐 CLI 的 str_replace_editor),就地改仓库代码。"
+                "可逆:git diff 回看、git checkout 回退。create=建新文件(不可覆盖已有),"
+                "str_replace=精确替换(old_str 须唯一匹配或 replace_all),insert=在指定行后插入。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "enum": ["create", "str_replace", "insert"],
+                        "description": "编辑命令",
+                    },
+                    "repo_path": {"type": "string", "description": "clone_repo 返回的 path"},
+                    "file_path": {"type": "string", "description": "仓库内相对路径"},
+                    "file_text": {"type": "string", "description": "create: 新文件完整内容"},
+                    "old_str": {"type": "string", "description": "str_replace: 被替换的精确字符串"},
+                    "new_str": {
+                        "type": "string",
+                        "description": "str_replace: 替换为 / insert: 要插入的文本",
+                    },
+                    "insert_line": {
+                        "type": "integer",
+                        "description": "insert: 在此行(1-based)之后插入;0=末尾追加",
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "str_replace: True=替换所有匹配(默认 False,须唯一匹配)",
+                    },
+                },
+                "required": ["command", "repo_path", "file_path"],
             },
         },
     },
