@@ -89,7 +89,13 @@ class Task(Base):
 
     # 关联
     conversations: Mapped[list["Conversation"]] = relationship(
-        back_populates="task", cascade="all, delete-orphan"
+        back_populates="task", cascade="all, delete-orphan",
+        # 显式排序:按轮次 + 创建时间升序,保证刷新页面/任务完成后重载时
+        # 对话顺序与 SSE 实时推送顺序一致。
+        # 否则 PostgreSQL 在无 ORDER BY 时返回顺序未定义,会导致后写入的
+        # user_agent 总结等记录错位显示在 react_agent 工具调用之前。
+        # 与后端内部查询(orchestrator/react_agent/user_agent)的排序口径统一。
+        order_by="Conversation.round_idx, Conversation.created_at",
     )
     results: Mapped[list["Result"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
