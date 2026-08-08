@@ -117,7 +117,7 @@ const projects = ref<ProjectOut[]>([])
 /** 文件列表(计算) */
 const fileList = computed<FileEntry[]>(() => {
   const list: FileEntry[] = [
-    { id: 'pref', kind: 'pref', label: 'User Profile' },
+    { id: 'pref', kind: 'pref', label: '用户偏好' },
     { id: 'global', kind: 'global', label: '全局记忆' },
   ]
   for (const p of projects.value) {
@@ -526,7 +526,7 @@ onMounted(() => {
                   <polyline points="14 2 14 8 20 8" />
                 </svg>
                 <span class="file-text">
-                  <span class="file-label">User Profile</span>
+                  <span class="file-label">用户偏好</span>
                   <span class="file-meta">{{ formatRelative(updatedAt['pref']) }}</span>
                 </span>
                 <span v-if="isDirty('pref')" class="dirty-dot" title="有未保存改动" />
