@@ -1413,6 +1413,23 @@ def _load_project_memory_summary(db: Session, task: Task) -> str:
         return ""
 
 
+def _load_global_memory(db: Session, task: Task) -> str:
+    """加载全局长期记忆段(跨项目通用经验,注入 CLI prompt)。
+
+    委托 build_global_memory_section(与 react_agent 共用同一注入逻辑)。
+    匿名任务 / 无全局记忆 / 查询异常 → 返回 ""(不注入)。
+    """
+    try:
+        if task.user_id is None:
+            return ""
+        from app.services.memory_injection import build_global_memory_section
+
+        return build_global_memory_section(db, task.user_id)
+    except Exception as e:
+        logger.warning(f"[task={task.id}] 加载全局记忆失败(忽略): {e}")
+        return ""
+
+
 # ============================================================
 # Prompt 消息构造
 # ============================================================
@@ -1426,12 +1443,14 @@ def _build_prompt_message(
     repo_path: str,
     previous_plan: list[dict] | None,
     memory_summary: str = "",
+    global_memory: str = "",
 ) -> str:
     """构造发给 CLI 的 prompt 消息
 
     - 第 1 轮:task.user_input + 仓库信息 + repo_context(已 clone 提示)
     - 追问轮:基于已有仓库继续,注入跨轮记忆(plan 续接)
     - 每轮末尾追加项目记忆精简版 + 完整记忆文件路径提示(供 CLI read_file 查阅)
+    - 再追加全局长期记忆段(跨项目通用经验,影响执行方式)
     """
     if followup_query is None:
         msg = task.user_input
@@ -1470,6 +1489,11 @@ def _build_prompt_message(
             + summary
             + "\n\n完整项目记忆可 read_file /home/user/.agent_memory/project_memory.md 查阅"
         )
+
+    # 全局长期记忆(跨项目通用经验,影响执行方式;与 react_agent system prompt 行为一致)
+    gmem = (global_memory or "").strip()
+    if gmem:
+        msg += "\n\n" + gmem
 
     return msg
 
@@ -1549,6 +1573,8 @@ def run_acp_agent(
 
     # ---- 加载项目记忆精简版(注入 CLI prompt,完整记忆已在沙箱文件中) ----
     memory_summary = _load_project_memory_summary(db, task)
+    # ---- 加载全局长期记忆(跨项目通用经验,影响执行方式) ----
+    global_memory = _load_global_memory(db, task)
 
     # ---- 准备 CLI 环境 ----
     _ensure_cli_env(session, agent_type)
@@ -1608,7 +1634,7 @@ def run_acp_agent(
             # ---- 构造 prompt 消息 ----
             user_msg = _build_prompt_message(
                 task, round_idx, followup_query, repo_context, repo_path, previous_plan,
-                memory_summary=memory_summary,
+                memory_summary=memory_summary, global_memory=global_memory,
             )
 
             _add_conversation(

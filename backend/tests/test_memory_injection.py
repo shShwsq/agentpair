@@ -1,10 +1,12 @@
 """memory_injection 单元测试(用 MagicMock 模拟 DB Session,不连真实 DB)。
 
-覆盖 build_react_agent_memory_section / build_user_agent_memory_section。
+覆盖 build_react_agent_memory_section / build_user_agent_memory_section /
+build_global_memory_section。
 """
 from unittest.mock import MagicMock
 
 from app.services.memory_injection import (
+    build_global_memory_section,
     build_react_agent_memory_section,
     build_user_agent_memory_section,
 )
@@ -137,3 +139,46 @@ def test_user_agent_section_both_pref_and_memory():
     assert "## 用户偏好" in result
     assert "以下是跨任务积累的长期记忆" in result
     assert "## Tech Stack\n- PostgreSQL" in result
+
+
+# ---------- build_global_memory_section ----------
+
+def test_global_section_empty_when_no_user():
+    db = _mock_db(first_result=MagicMock())
+    assert build_global_memory_section(db, None) == ""
+
+
+def test_global_section_empty_when_no_memory():
+    db = _mock_db(first_result=None)  # UserMemory 查不到
+    assert build_global_memory_section(db, 1) == ""
+
+
+def test_global_section_empty_when_blank_content():
+    mem = MagicMock()
+    mem.content = "   \n  "
+    db = _mock_db(first_result=mem)
+    assert build_global_memory_section(db, 1) == ""
+
+
+def test_global_section_returns_content_with_header():
+    mem = MagicMock()
+    mem.content = "## Hard Constraints\n- wire_api 必须 responses\n\n## Lessons Learned\n- codex bridge 必须 SSE"
+    db = _mock_db(first_result=mem)
+    result = build_global_memory_section(db, 1)
+    # 执行侧 header(区别于 user_agent 的"长期记忆"措辞)
+    assert result.startswith("以下是跨任务积累的通用经验,按类别组织(执行时遵循):")
+    assert "## Hard Constraints\n- wire_api 必须 responses" in result
+    assert "## Lessons Learned\n- codex bridge 必须 SSE" in result
+
+
+def test_global_section_truncates_long_content():
+    """超长全局记忆截断到注入上限(不调 LLM,直接截断)。"""
+    from app.services.memory_injection import MAX_GLOBAL_MEM_CHARS
+
+    mem = MagicMock()
+    mem.content = "X" * (MAX_GLOBAL_MEM_CHARS + 500)
+    db = _mock_db(first_result=mem)
+    result = build_global_memory_section(db, 1)
+    # header 后接截断内容,总长 ≈ header + MAX_GLOBAL_MEM_CHARS
+    body = result.split("\n", 1)[1]
+    assert len(body) <= MAX_GLOBAL_MEM_CHARS

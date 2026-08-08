@@ -130,3 +130,25 @@ def build_react_agent_memory_section(
     # 完整记忆已写入沙箱文件,提示 agent 可 read_file 查阅突破字数限制
     memory_text += "\n\n完整记忆可 read_file /home/user/.agent_memory/project_memory.md 查阅"
     return header + "\n" + memory_text
+
+
+def build_global_memory_section(db: Session, user_id) -> str:
+    """构造全局长期记忆段(注入 react_agent / CLI 执行侧)。
+
+    跨项目通用经验(Hard Constraints / Tech Stack / Lessons Learned 等),
+    影响执行方式。执行侧(react_agent / CLI)在沙箱里干活,这类"怎么做"的知识
+    直接影响执行正确性,故注入执行侧而非仅 user_agent。
+
+    user_id 为 None(匿名任务)或无全局记忆 → 返回空串(不注入)。
+    截断到 MAX_GLOBAL_MEM_CHARS(与 user_agent 一致),不写沙箱文件
+    (全局记忆通常不超长,且无需跨字数限制查阅)。
+    """
+    if user_id is None:
+        return ""
+    mem = db.query(UserMemory).filter(UserMemory.user_id == user_id).first()
+    if not mem or not mem.content or not mem.content.strip():
+        return ""
+    return (
+        "以下是跨任务积累的通用经验,按类别组织(执行时遵循):\n"
+        + _truncate(mem.content.strip(), MAX_GLOBAL_MEM_CHARS)
+    )

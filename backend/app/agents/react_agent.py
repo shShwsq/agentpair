@@ -168,6 +168,15 @@ def run_react_agent(
         if _project_mem:
             system_prompt = system_prompt + "\n\n" + _project_mem
 
+    # 全局长期记忆注入:跨项目通用经验(Hard Constraints / Tech Stack / Lessons
+    # Learned),影响执行方式。执行侧在沙箱里干活,这类"怎么做"的知识直接影响
+    # 执行正确性。user_id 为 None 或无全局记忆时返回空串。
+    if task.user_id is not None:
+        from app.services.memory_injection import build_global_memory_section
+        _global_mem = build_global_memory_section(db, task.user_id)
+        if _global_mem:
+            system_prompt = system_prompt + "\n\n" + _global_mem
+
     # 构造初始 user 消息
     if followup_query is None:
         # 第一轮:用 task.user_input
