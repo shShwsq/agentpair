@@ -59,7 +59,7 @@ REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行�
 1. **思考**:分析当前状态,决定下一步该做什么
 2. **行动**:调用工具(clone_repo / list_files / find_files / read_file /
    search_code / run_semgrep / query_cve / write_file / run_python_code /
-   list_skills / skill 等)
+   git_log / git_blame / list_skills / skill 等)
 3. **观察**:查看工具返回的结果
 4. 重复以上步骤,直到完成分析
 
@@ -73,6 +73,8 @@ REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行�
 - query_cve:查询指定包+版本的已知 CVE 漏洞(OSV API,按依赖逐个查)
 - write_file:在工作区写文件(PoC 脚本、补丁、报告等),不影响原仓库
 - run_python_code:在沙箱执行 Python 代码,验证 PoC / 跑分析脚本 / 执行测试
+- git_log:查看仓库提交历史(默认 --oneline),理解代码演化、定位改动何时引入(需完整克隆,默认即完整)
+- git_blame:追溯某文件每行的最后修改提交/作者,定位"这行是谁/哪次提交改的"(需完整克隆)
 - list_skills / skill:查看并加载专家技能(获取 SKILL.md 指令后按其指引执行)
 
 ## 工作原则
@@ -721,6 +723,12 @@ def _build_tool_intent(fn_name: str, fn_args: dict) -> str:
         intent = "执行 Python 代码"
     elif fn_name == "run_semgrep":
         intent = "运行 Semgrep 静态分析"
+    elif fn_name == "git_log":
+        fp = fn_args.get("file_path")
+        intent = f"查看提交历史{f': {fp}' if fp else ''}"
+    elif fn_name == "git_blame":
+        fp = fn_args.get("file_path", "?")
+        intent = f"追溯文件来源: {fp}"
     elif fn_name == "list_skills":
         intent = "查看可用技能列表"
     elif fn_name == "skill":
@@ -855,6 +863,8 @@ _TOOL_STEP_KEYWORDS: dict[str, list[str]] = {
     "search_code":     ["注入", "密钥", "反序列化", "ssrf", "路径", "认证", "授权",
                          "审计", "代码审计", "search"],
     "run_semgrep":     ["semgrep", "sast", "静态分析"],
+    "git_log":         ["历史", "提交", "log", "演进"],
+    "git_blame":       ["追溯", "blame", "来源", "谁改"],
     "list_skills":     ["skill", "技能"],
     "skill":           ["skill", "技能"],
 }

@@ -51,7 +51,7 @@ def clone_repo(repo_url: str, branch: str | None = None) -> dict:
 
     target_dir = clone_root / f"{repo_name}_{int(time.time())}"
 
-    cmd = ["git", "clone", "--depth", "1"]  # 浅克隆,加速
+    cmd = ["git", "clone"] + (["--depth", str(settings.REPO_CLONE_DEPTH)] if settings.REPO_CLONE_DEPTH > 0 else [])
     if branch:
         cmd.extend(["--branch", branch])
     cmd.extend([clone_url, str(target_dir)])
@@ -60,7 +60,7 @@ def clone_repo(repo_url: str, branch: str | None = None) -> dict:
         cmd,
         capture_output=True,
         text=True,
-        timeout=120,  # 2 分钟超时
+        timeout=settings.REPO_CLONE_TIMEOUT,
     )
     if result.returncode != 0:
         raise RuntimeError(f"git clone 失败: {result.stderr[:500]}")

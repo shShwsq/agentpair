@@ -177,18 +177,27 @@ def clone_repo(repo_url: str, branch: str | None = None, task_id: str = "", git_
     return clone_repo_with_fallback(repo_url, branch, task_id, git_tokens or {})
 
 
+def _clone_depth_args() -> list[str]:
+    """克隆深度参数(据 settings.REPO_CLONE_DEPTH:0=不限制完整克隆,>0=--depth N)
+
+    供 _clone_repo_mock / _clone_repo_sandbox 共用,集中管理避免硬编码分歧。
+    """
+    depth = settings.REPO_CLONE_DEPTH
+    return ["--depth", str(depth)] if depth > 0 else []
+
+
 def _clone_repo_mock(ctx: dict, clone_url: str, repo_name: str, branch: str | None) -> dict:
     """mock 模式:本地 git clone"""
     mock_dir: Path = ctx["mock_dir"]
     repo_dir = mock_dir / repo_name
 
-    cmd = ["git", "clone", "--depth", "1"]
+    cmd = ["git", "clone"] + _clone_depth_args()
     if branch:
         cmd.extend(["--branch", branch])
     cmd.extend([clone_url, str(repo_dir)])
 
     logger.info(f"[mock] git clone: {clone_url}")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=settings.REPO_CLONE_TIMEOUT)
     if result.returncode != 0:
         raise RuntimeError(f"git clone 失败: {result.stderr[:500]}")
 
@@ -207,13 +216,13 @@ def _clone_repo_sandbox(ctx: dict, clone_url: str, repo_name: str, branch: str |
     repo_dir = f"/home/user/repos/{repo_name}"
     session.run_command(f"mkdir -p {shlex.quote(repo_dir)}")
 
-    cmd = "git clone --depth 1"
+    cmd = "git clone " + " ".join(_clone_depth_args())
     if branch:
         cmd += f" --branch {shlex.quote(branch)}"
     cmd += f" {shlex.quote(clone_url)} {shlex.quote(repo_dir)}"
 
     logger.info(f"[sandbox] git clone: {clone_url}")
-    session.run_command(cmd, timeout=120, check=True)
+    session.run_command(cmd, timeout=settings.REPO_CLONE_TIMEOUT, check=True)
 
     count_cmd = f"find {shlex.quote(repo_dir)} -type f -not -path '*/.git/*' | wc -l"
     files_count = int(session.run_command(count_cmd).strip() or "0")
@@ -1257,6 +1266,146 @@ def run_python_code(
         "truncated": truncated,
         "timed_out": timed_out,
     }
+
+
+# ============================================================
+# 工具:git_log / git_blame(让 agent 直达 git 历史)
+# ============================================================
+
+# git 只读子命令(log/blame)的执行超时(本地操作,给 60s 足够)
+_GIT_CMD_TIMEOUT = 60
+
+
+def _run_git(repo_path: str, args: list[str], task_id: str = "") -> dict:
+    """在仓库目录里运行 git 只读子命令(mock 本地 subprocess / sandbox session.run_command)
+
+    供 git_log / git_blame 共用。所有参数以列表形式传递,repo_path 用 -C 指定,
+    文件路径参数由调用方以 "--" 元素分隔(防选项注入),sandbox 模式再逐个 shlex.quote。
+
+    返回:{
+        "output": str,      # git 输出(stdout + 必要时 stderr,截断到 _RUN_CODE_OUTPUT_LIMIT)
+        "exit_code": int,   # 0 表示成功
+        "truncated": bool,  # 输出是否被截断
+    }
+    """
+    ctx = _get_or_create_session(task_id)
+    mode = ctx["mode"]
+    output = ""
+    exit_code = 0
+    truncated = False
+
+    if mode == "mock":
+        # mock 模式:本地 subprocess,列表形式无需 shell,无注入风险
+        cmd = ["git", "-C", repo_path] + args
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=_GIT_CMD_TIMEOUT,
+            )
+            output = result.stdout
+            exit_code = result.returncode
+            # 失败时附上 stderr 便于排查(如非 git 仓库、文件不存在)
+            if exit_code != 0 and result.stderr:
+                output = (output + ("\n" if output else "") + result.stderr).strip()
+        except subprocess.TimeoutExpired:
+            output = f"[git 执行超时({_GIT_CMD_TIMEOUT}s)]"
+            exit_code = -1
+        except FileNotFoundError:
+            output = "[宿主机未安装 git,mock 模式无法运行 git 子命令]"
+            exit_code = -1
+    else:
+        # sandbox 模式:session.run_command(单通道),2>&1 合并 + 末尾 echo exit code
+        session: SandboxSession = ctx["session"]
+        quoted_args = " ".join(shlex.quote(a) for a in args)
+        cmd = (
+            f"git -C {shlex.quote(repo_path)} {quoted_args} 2>&1; "
+            f'echo "EXIT_CODE:$?"'
+        )
+        try:
+            combined = session.run_command(cmd, timeout=_GIT_CMD_TIMEOUT + 5)
+            output = combined
+            # 从末尾解析 EXIT_CODE 行(防代码本身输出过这个串)
+            m = None
+            for line in reversed(combined.splitlines()):
+                if line.startswith("EXIT_CODE:"):
+                    m = line
+                    break
+            if m:
+                code_str = m[len("EXIT_CODE:"):].strip()
+                exit_code = int(code_str) if code_str.lstrip("-").isdigit() else -1
+                output = combined.rsplit(m, 1)[0].rstrip("\n")
+        except Exception as e:
+            output = f"[沙箱执行 git 失败: {e}]"
+            exit_code = -1
+
+    # 输出截断(复用 run_python_code 的上限,保留尾部——错误信息常在尾部)
+    if len(output) > _RUN_CODE_OUTPUT_LIMIT:
+        output = "[...输出过长,已截断头部...]\n" + output[-_RUN_CODE_OUTPUT_LIMIT:]
+        truncated = True
+
+    return {"output": output, "exit_code": exit_code, "truncated": truncated}
+
+
+def git_log(
+    repo_path: str,
+    max_count: int = 20,
+    file_path: str | None = None,
+    oneline: bool = True,
+    task_id: str = "",
+) -> dict:
+    """查看仓库提交历史(默认 --oneline 紧凑输出)
+
+    完整克隆(默认)可见全部历史;浅克隆(--depth 1)仅 1 条 commit。
+
+    参数:
+        repo_path: clone_repo 返回的 path
+        max_count: 最多返回提交数,默认 20,上限 200
+        file_path: 可选,只看某文件的历史(仓库内相对路径)
+        oneline: True=--oneline 紧凑输出(默认,一行一提交);False=含作者/日期/正文
+
+    返回:{"output": str, "exit_code": int, "truncated": bool}
+    """
+    max_count = max(1, min(int(max_count or 20), 200))
+    args: list[str] = ["log"]
+    if oneline:
+        args.append("--oneline")
+    args += ["-n", str(max_count)]
+    if file_path:
+        # "--" 分隔,防止 file_path 被解析为选项(选项注入)
+        args += ["--", file_path]
+    return _run_git(repo_path, args, task_id)
+
+
+def git_blame(
+    repo_path: str,
+    file_path: str,
+    start_line: int | None = None,
+    end_line: int | None = None,
+    task_id: str = "",
+) -> dict:
+    """追溯某文件(可指定行区间)每行的最后修改提交/作者/时间
+
+    完整克隆(默认)可见完整 blame;浅克隆下 blame 信息受限(无历史可追溯)。
+
+    参数:
+        repo_path: clone_repo 返回的 path
+        file_path: 仓库内相对路径(必填)
+        start_line: 起始行号(1-based,可选)
+        end_line: 结束行号(1-based,可选)。只传一个行号时按单行区间处理
+
+    返回:{"output": str, "exit_code": int, "truncated": bool}
+    """
+    args: list[str] = ["blame"]
+    if start_line is not None and end_line is not None:
+        s = max(1, int(start_line))
+        e = max(s, int(end_line))
+        args += ["-L", f"{s},{e}"]
+    elif start_line is not None or end_line is not None:
+        ln = max(1, int(start_line if start_line is not None else end_line))
+        args += ["-L", f"{ln},{ln}"]
+    # "--" 分隔,防止 file_path 被解析为选项
+    args += ["--", file_path]
+    return _run_git(repo_path, args, task_id)
 
 
 # ============================================================

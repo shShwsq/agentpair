@@ -64,6 +64,8 @@ TOOL_FUNCTIONS: dict[str, Any] = {
     "find_files": sandbox_tools.find_files,
     "write_file": sandbox_tools.write_file,
     "run_python_code": sandbox_tools.run_python_code,
+    "git_log": sandbox_tools.git_log,
+    "git_blame": sandbox_tools.git_blame,
     "query_cve": query_cve,
     "list_skills": list_available_skills,
     "skill": run_skill,
@@ -290,6 +292,65 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_log",
+            "description": (
+                "查看仓库提交历史(默认 --oneline 一行一提交)。"
+                "用于理解代码演化、定位某次改动何时引入、结合 git_blame 追溯责任提交。"
+                "需要完整克隆(默认即完整克隆);浅克隆下仅 1 条 commit。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string", "description": "clone_repo 返回的 path"},
+                    "max_count": {
+                        "type": "integer",
+                        "description": "最多返回提交数,默认 20,上限 200",
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "可选,只看某文件的历史(仓库内相对路径)",
+                    },
+                    "oneline": {
+                        "type": "boolean",
+                        "description": "True=--oneline 紧凑输出(默认);False=含作者/日期/正文",
+                    },
+                },
+                "required": ["repo_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_blame",
+            "description": (
+                "追溯某文件每行的最后修改提交/作者/时间,定位'这行代码是谁/哪次提交改的'。"
+                "需要完整克隆(默认即完整克隆);浅克隆下 blame 信息受限。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string", "description": "clone_repo 返回的 path"},
+                    "file_path": {
+                        "type": "string",
+                        "description": "仓库内相对路径(必填)",
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "起始行号(1-based,可选)",
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "结束行号(1-based,可选;只传一个行号时按单行区间处理)",
+                    },
+                },
+                "required": ["repo_path", "file_path"],
             },
         },
     },

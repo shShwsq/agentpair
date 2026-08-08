@@ -55,6 +55,10 @@ class Settings(BaseSettings):
 
     # 仓库克隆临时目录
     REPO_CLONE_DIR: str = "./_repos"
+    # 仓库克隆深度:0=完整克隆(默认,保留 git 历史供 agent 追溯);>0=浅克隆 --depth N(超大仓库可设 1/50 加速)
+    REPO_CLONE_DEPTH: int = 0
+    # 仓库克隆超时(秒)。完整克隆比浅克隆慢,默认 600s;超大仓库可调大
+    REPO_CLONE_TIMEOUT: int = 600
 
     # 沙箱配置(阶段 2 起)
     # mode: mock(本地未部署 Server)/ sandbox(连真实 OpenSandbox Server)
