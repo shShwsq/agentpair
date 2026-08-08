@@ -168,8 +168,9 @@ def add_refresh_token_columns() -> None:
             )
         if not add_clauses:
             return  # 已迁过
+        # PG 要求多个 ALTER 动作用逗号分隔:ADD COLUMN ..., ADD COLUMN ...
         conn.execute(
-            text(f"ALTER TABLE user_git_bindings {' '.join(add_clauses)}")
+            text(f"ALTER TABLE user_git_bindings {', '.join(add_clauses)}")
         )
         conn.commit()
         log.info("user_git_bindings 加列: %s", ", ".join(add_clauses))
