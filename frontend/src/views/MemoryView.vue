@@ -3,7 +3,7 @@
  * 记忆管理页(文件列表 + Markdown 编辑器)
  *
  * 三类记忆以「文件」隐喻呈现,每份文件即一篇 Markdown:
- * - User Profile(1):custom_prompt Markdown(结构化 preferences JSONB 保留但不在此编辑)
+ * - User Profile(1):user_profile Markdown,注入 user_agent
  * - 全局记忆(1):content Markdown,注入 user_agent
  * - 项目记忆(N,按 repo_url 聚合):memory_content Markdown,注入 react_agent;任务完成自动归纳
  *
@@ -36,7 +36,7 @@ import type { ProjectOut, UserPreferenceOut } from '@/types/memory'
 // 保存后才会真正写入 DB 并注入 agent;纯模板未改动不计为"未保存"
 // ============================================================
 
-/** User Profile 默认模板(写入 custom_prompt,注入 user_agent) */
+/** User Profile 默认模板(写入 user_profile,注入 user_agent) */
 const PREF_TEMPLATE = `# User Profile
 
 ## Academic Background
@@ -261,7 +261,7 @@ async function loadAll(): Promise<void> {
 }
 
 function hydratePref(data: UserPreferenceOut): void {
-  const md = data.custom_prompt || ''
+  const md = data.user_profile || ''
   if (md.trim() === '') {
     // DB 为空:预填默认模板作为引导(不算"已保存"内容,originals 仍为空)
     drafts['pref'] = PREF_TEMPLATE
@@ -328,7 +328,7 @@ async function handleSave(): Promise<void> {
   try {
     if (entry.kind === 'pref') {
       const data = await savePreferences({
-        custom_prompt: drafts['pref'],
+        user_profile: drafts['pref'],
       })
       hydratePref(data)
     } else if (entry.kind === 'global') {

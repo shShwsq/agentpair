@@ -80,11 +80,11 @@ def save_preferences(
     if row is None:
         row = UserPreference(
             user_id=current_user.id,
-            custom_prompt=req.custom_prompt,
+            user_profile=req.user_profile,
         )
         db.add(row)
     else:
-        row.custom_prompt = req.custom_prompt
+        row.user_profile = req.user_profile
     db.commit()
     db.refresh(row)
     logger.info("用户 %s 更新了偏好", current_user.id)

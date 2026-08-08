@@ -6,7 +6,7 @@
 - ProjectOut/SaveProjectRequest/ProjectListResponse:分项目记忆(1:N)
 
 大小校验在 schema 层做第一道防线(写入时):
-- custom_prompt ≤ 8000
+- user_profile ≤ 8000
 - content(全局记忆) ≤ 20000
 - memory_content(项目记忆) ≤ 20000
 
@@ -21,7 +21,7 @@ class UserPreferenceOut(BaseModel):
     """User Profile 响应(GET /memory/preferences)"""
 
     # 自由文本 Markdown(用户在记忆管理页编辑,注入 user_agent)
-    custom_prompt: str = ""
+    user_profile: str = ""
     # 最后更新时间(可空 — 未配置时为 None;FastAPI 序列化为 ISO 字符串)
     updated_at: datetime | None = None
 
@@ -31,7 +31,7 @@ class UserPreferenceOut(BaseModel):
 class SaveUserPreferenceRequest(BaseModel):
     """保存 User Profile 请求(PUT /memory/preferences)"""
 
-    custom_prompt: str = Field(default="", max_length=8000)
+    user_profile: str = Field(default="", max_length=8000)
 
 
 class UserMemoryOut(BaseModel):

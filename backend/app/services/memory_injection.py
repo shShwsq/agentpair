@@ -46,16 +46,16 @@ def build_user_agent_memory_section(
 
     parts: list[str] = []
 
-    # User Profile(自由文本 custom_prompt,由用户在记忆管理页编辑后整段注入)
+    # User Profile(自由文本 user_profile,由用户在记忆管理页编辑后整段注入)
     pref = (
         db.query(UserPreference)
         .filter(UserPreference.user_id == user_id)
         .first()
     )
-    if pref and pref.custom_prompt and pref.custom_prompt.strip():
+    if pref and pref.user_profile and pref.user_profile.strip():
         parts.append(
             "## User Profile (follow when generating checklist and evaluation)\n"
-            + _truncate(pref.custom_prompt.strip(), MAX_PREF_CHARS)
+            + _truncate(pref.user_profile.strip(), MAX_PREF_CHARS)
         )
 
     # 全局长期记忆(内容已含 ## 类别 + - 条目结构,用引导语作外层避免层级冲突)

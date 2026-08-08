@@ -62,6 +62,10 @@ async def lifespan(app: FastAPI):
     from app.models.project import migrate_project_memory_summary
 
     migrate_project_memory_summary()
+    # 迁移 user_preferences:删遗留 preferences 列,custom_prompt 改名 user_profile
+    from app.models.user_preference import migrate_user_preference_columns
+
+    migrate_user_preference_columns()
     yield
 
 

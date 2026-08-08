@@ -94,9 +94,9 @@ def test_user_agent_section_empty_when_no_pref_no_memory():
 
 
 def test_user_agent_section_pref_only():
-    """User Profile 段直接注入 custom_prompt 自由文本(不再读结构化 preferences)。"""
+    """User Profile 段直接注入 user_profile 自由文本(不再读结构化 preferences)。"""
     pref = MagicMock()
-    pref.custom_prompt = (
+    pref.user_profile = (
         "# User Profile\n\n## Output Language\n中文\n\n"
         "## Focus Areas\n- security\n- perf\n\n## Evaluation Style\nstrict"
     )
@@ -105,7 +105,7 @@ def test_user_agent_section_pref_only():
     db.query.return_value.filter.return_value.first.side_effect = [pref, None]
     result = build_user_agent_memory_section(db, 1)
     assert "## User Profile" in result
-    # custom_prompt 原样整段注入(含其内部 Markdown 内容)
+    # user_profile 原样整段注入(含其内部 Markdown 内容)
     assert "## Output Language" in result
     assert "中文" in result
     assert "security" in result
@@ -114,13 +114,13 @@ def test_user_agent_section_pref_only():
     assert "long-term memory" not in result
 
 
-def test_user_agent_section_pref_empty_custom_prompt_not_injected():
-    """pref 存在但 custom_prompt 为空白 → 不注入 User Profile 段。
+def test_user_agent_section_pref_empty_user_profile_not_injected():
+    """pref 存在但 user_profile 为空白 → 不注入 User Profile 段。
 
-    行为变化:不再读结构化 preferences 凑内容;custom_prompt 是唯一来源,空则不注入。
+    行为变化:不再读结构化 preferences 凑内容;user_profile 是唯一来源,空则不注入。
     """
     pref = MagicMock()
-    pref.custom_prompt = "   "  # 空白
+    pref.user_profile = "   "  # 空白
     mem = MagicMock()
     mem.content = "## Tech Stack\n- PG"
     db = MagicMock()
@@ -143,9 +143,9 @@ def test_user_agent_section_global_memory_with_categories():
 
 
 def test_user_agent_section_both_pref_and_memory():
-    """User Profile(custom_prompt 非空)+ 全局记忆两段共存。"""
+    """User Profile(user_profile 非空)+ 全局记忆两段共存。"""
     pref = MagicMock()
-    pref.custom_prompt = "# User Profile\nEnglish output"
+    pref.user_profile = "# User Profile\nEnglish output"
     mem = MagicMock()
     mem.content = "## Tech Stack\n- PostgreSQL"
     db = MagicMock()
@@ -197,7 +197,7 @@ def test_user_agent_section_no_project_when_no_repo_url():
 def test_user_agent_section_pref_global_and_project_combined():
     """三段共存:User Profile + 全局记忆 + 项目记忆精简版。"""
     pref = MagicMock()
-    pref.custom_prompt = "# User Profile\n中文输出"
+    pref.user_profile = "# User Profile\n中文输出"
     mem = MagicMock()
     mem.content = "## Tech Stack\n- PG"
     proj = MagicMock()
