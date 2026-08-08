@@ -1490,7 +1490,9 @@ def _resolve_repo_file(repo_path: str, file_path: str, mode: str) -> str:
     """
     if not file_path:
         raise ValueError("file_path 不能为空")
-    normalized = file_path.replace("\\", "/").lstrip("/")
+    normalized = file_path.replace("\\", "/")
+    if normalized.startswith("/"):
+        raise ValueError("file_path 必须是相对路径(不能以 / 开头)")
     if ".." in normalized.split("/"):
         raise ValueError("file_path 不能含 .. (防止路径穿越)")
     if Path(normalized).is_absolute():
