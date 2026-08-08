@@ -155,8 +155,6 @@ const isTemplateDefault = reactive<Record<string, boolean>>({})
 const updatedAt = reactive<Record<string, string | null>>({})
 
 // ---- 透传存储(不在 UI 编辑,但保存时原样回传,避免数据丢失) ----
-/** User Profile 的结构化 preferences JSONB(透传) */
-const prefPreferencesPassthrough = ref<Record<string, unknown>>({})
 /** 项目 note(透传,键=project:<uuid>) */
 const projectNotes = reactive<Record<string, string | null>>({})
 /** 文件 id → 项目 uuid */
@@ -263,7 +261,6 @@ async function loadAll(): Promise<void> {
 }
 
 function hydratePref(data: UserPreferenceOut): void {
-  prefPreferencesPassthrough.value = data.preferences || {}
   const md = data.custom_prompt || ''
   if (md.trim() === '') {
     // DB 为空:预填默认模板作为引导(不算"已保存"内容,originals 仍为空)
@@ -331,7 +328,6 @@ async function handleSave(): Promise<void> {
   try {
     if (entry.kind === 'pref') {
       const data = await savePreferences({
-        preferences: prefPreferencesPassthrough.value,
         custom_prompt: drafts['pref'],
       })
       hydratePref(data)

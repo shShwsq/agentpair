@@ -5,8 +5,8 @@
 
 设计:
 - 1:1 表(user_id unique),用户首次保存时 get_or_create
-- preferences: 结构化 JSONB(易扩展),如 {"output_language":"zh","focus_areas":["security"],"style":"concise"}
-- custom_prompt: 自由文本兜底(用户大段自定义偏好/评判标准补充),单独列便于校验与截断
+- custom_prompt: 自由文本 Markdown(用户在记忆管理页编辑),注入 user_agent
+- preferences: 遗留 JSONB 列(DB 保留避免迁移风险),代码不再读写;功能已由 custom_prompt 完全覆盖
 """
 import uuid
 from datetime import datetime
@@ -30,8 +30,7 @@ class UserPreference(Base):
         unique=True,  # 1:1
         nullable=False,
     )
-    # 结构化偏好(易扩展):
-    # {"output_language": "zh", "focus_areas": ["security","perf"], "style": "concise"}
+    # 遗留结构化偏好列(DB 保留避免迁移风险,代码不再读写;功能由 custom_prompt 覆盖)
     preferences: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default="{}", default=dict
     )

@@ -12,17 +12,11 @@
 /**
  * User Profile (1:1)
  *
- * preferences 为结构化偏好,后端以 JSONB 存储,约定字段:
- * - output_language?: 'zh' | 'en' | ...        输出语言
- * - focus_areas?: string[]                       重点关注领域,如 ['security','performance']
- * - style?: string                                评判风格,如 'concise' | 'strict'
- *
- * custom_prompt 为自由文本兜底,用户大段自定义偏好/评判标准补充(≤ 8000 字符)。
+ * custom_prompt 为自由文本 Markdown(用户在记忆管理页编辑),注入 user_agent,
+ * 影响评判标准与 checklist 生成(≤ 8000 字符)。
  */
 export interface UserPreferenceOut {
-  /** 结构化偏好(JSONB,字段约定见上) */
-  preferences: Record<string, unknown>
-  /** 自由文本兜底(≤ 8000 字符) */
+  /** 自由文本 Markdown(≤ 8000 字符) */
   custom_prompt: string
   /** 最后更新时间(ISO 字符串,未配置时为 null) */
   updated_at: string | null
@@ -30,7 +24,6 @@ export interface UserPreferenceOut {
 
 /** 保存 User Profile 请求(PUT /memory/preferences body) */
 export interface SaveUserPreferenceRequest {
-  preferences: Record<string, unknown>
   custom_prompt: string
 }
 

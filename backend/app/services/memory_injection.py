@@ -46,32 +46,17 @@ def build_user_agent_memory_section(
 
     parts: list[str] = []
 
-    # User Profile
+    # User Profile(自由文本 custom_prompt,由用户在记忆管理页编辑后整段注入)
     pref = (
         db.query(UserPreference)
         .filter(UserPreference.user_id == user_id)
         .first()
     )
-    if pref:
-        pref_lines: list[str] = []
-        p = pref.preferences or {}
-        if p.get("output_language"):
-            pref_lines.append(f"- Output language: {p['output_language']}")
-        if p.get("focus_areas"):
-            areas = p["focus_areas"]
-            if isinstance(areas, list) and areas:
-                pref_lines.append(
-                    f"- Focus areas: {', '.join(str(a) for a in areas)}"
-                )
-        if p.get("style"):
-            pref_lines.append(f"- Evaluation style: {p['style']}")
-        if pref.custom_prompt and pref.custom_prompt.strip():
-            pref_lines.append(f"- Additional notes: {pref.custom_prompt.strip()}")
-        if pref_lines:
-            parts.append(
-                "## User Profile (follow when generating checklist and evaluation)\n"
-                + _truncate("\n".join(pref_lines), MAX_PREF_CHARS)
-            )
+    if pref and pref.custom_prompt and pref.custom_prompt.strip():
+        parts.append(
+            "## User Profile (follow when generating checklist and evaluation)\n"
+            + _truncate(pref.custom_prompt.strip(), MAX_PREF_CHARS)
+        )
 
     # 全局长期记忆(内容已含 ## 类别 + - 条目结构,用引导语作外层避免层级冲突)
     mem = db.query(UserMemory).filter(UserMemory.user_id == user_id).first()

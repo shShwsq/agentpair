@@ -20,9 +20,7 @@ from pydantic import BaseModel, Field
 class UserPreferenceOut(BaseModel):
     """User Profile 响应(GET /memory/preferences)"""
 
-    # 结构化偏好,如 {"output_language":"zh","focus_areas":["security"],"style":"concise"}
-    preferences: dict = Field(default_factory=dict)
-    # 自由文本兜底(用户大段自定义偏好/评判标准补充)
+    # 自由文本 Markdown(用户在记忆管理页编辑,注入 user_agent)
     custom_prompt: str = ""
     # 最后更新时间(可空 — 未配置时为 None;FastAPI 序列化为 ISO 字符串)
     updated_at: datetime | None = None
@@ -33,7 +31,6 @@ class UserPreferenceOut(BaseModel):
 class SaveUserPreferenceRequest(BaseModel):
     """保存 User Profile 请求(PUT /memory/preferences)"""
 
-    preferences: dict = Field(default_factory=dict)
     custom_prompt: str = Field(default="", max_length=8000)
 
 
