@@ -19,7 +19,6 @@ def test_merge_structured_new_category_empty_existing():
         {"category": "Hard Constraints", "item": "wire_api must be responses"},
     ]
     result = _merge_structured("", new_items, PROJECT_CATEGORIES, 8000)
-    # Hard Constraints 应在 Known Issues 之前(固定顺序)
     assert "## Hard Constraints\n- wire_api must be responses" in result
     assert "## Known Issues\n- codex exec needs bypass flag" in result
     assert result.index("## Hard Constraints") < result.index("## Known Issues")
@@ -37,34 +36,43 @@ def test_merge_structured_dedup_same_category():
     assert "approval_policy must be never" in result
 
 
-def test_merge_structured_legacy_compat_old_format():
-    """旧 \\n---\\n 格式 existing → 整体归入 ## Legacy Notes,分隔符清理,新条目并入。"""
-    existing = "旧的中文记忆块1\n---\n旧的中文记忆块2"
+def test_merge_structured_preserves_free_text_no_headers():
+    """无标题的 existing(用户自由笔记/旧格式残留)→ 作为 preamble 原样保留,新条目并入已知类别。"""
+    existing = "用户手写的自由笔记,无标题\n第二行"
     new_items = [
         {"category": "Tech Stack", "item": "PostgreSQL"},
     ]
     result = _merge_structured(existing, new_items, PROJECT_CATEGORIES, 8000)
-    assert "## Legacy Notes" in result
-    assert "旧的中文记忆块1" in result
-    assert "旧的中文记忆块2" in result
-    assert "\n---\n" not in result  # 旧分隔符已清理
+    assert result.startswith("用户手写的自由笔记,无标题\n第二行")
     assert "## Tech Stack\n- PostgreSQL" in result
-    # Legacy 块在最末
-    assert result.index("## Tech Stack") < result.index("## Legacy Notes")
+    assert "## Legacy Notes" not in result  # 不再为旧格式专门建块
 
 
-def test_merge_structured_legacy_block_preserved_when_new_format():
-    """已含 Legacy 块的新格式 existing → Legacy 块原样保留,新条目并入对应类别。"""
+def test_merge_structured_preserves_unknown_category():
+    """用户自定义的未知类别块 → 原样保留,新条目并入已知类别。"""
     existing = (
         "## Tech Stack\n- PostgreSQL\n\n"
-        "## Legacy Notes\n旧记忆原样保留"
+        "## My Custom Notes\n用户自定义内容\n保留原样"
     )
     new_items = [
         {"category": "Tech Stack", "item": "Redis"},
     ]
     result = _merge_structured(existing, new_items, PROJECT_CATEGORIES, 8000)
     assert "## Tech Stack\n- PostgreSQL\n- Redis" in result
-    assert "## Legacy Notes\n旧记忆原样保留" in result
+    assert "## My Custom Notes\n用户自定义内容\n保留原样" in result
+    assert result.index("## Tech Stack") < result.index("## My Custom Notes")
+
+
+def test_merge_structured_preserves_non_list_lines_in_category():
+    """已知类别块内用户写的非列表行 → 原样保留,新条目追加到块末尾。"""
+    existing = "## Hard Constraints\n这是用户写的说明段落\n- rule A"
+    new_items = [
+        {"category": "Hard Constraints", "item": "rule B"},
+    ]
+    result = _merge_structured(existing, new_items, PROJECT_CATEGORIES, 8000)
+    assert "这是用户写的说明段落" in result
+    assert "- rule A" in result
+    assert "- rule B" in result
 
 
 def test_merge_structured_invalid_category_fallback():
@@ -76,16 +84,15 @@ def test_merge_structured_invalid_category_fallback():
     assert "## Lessons Learned\n- some lesson" in result
 
 
-def test_merge_structured_truncate_drops_legacy_first():
-    """超长时先删 Legacy 块以腾出空间。"""
-    big_legacy = "X" * 5000
-    existing = f"## Legacy Notes\n{big_legacy}"
+def test_merge_structured_truncate_drops_preamble_first():
+    """超长时先删 preamble(游离文本相对最旧),保留类别块。"""
+    big_preamble = "X" * 5000
+    existing = big_preamble  # 无标题,整体作为 preamble
     new_items = [
         {"category": "Tech Stack", "item": "PostgreSQL"},
     ]
     result = _merge_structured(existing, new_items, PROJECT_CATEGORIES, 1000)
-    # Legacy 块应被删除
-    assert "## Legacy Notes" not in result
+    assert "XXXX" not in result
     assert "## Tech Stack\n- PostgreSQL" in result
 
 
@@ -98,7 +105,7 @@ def test_merge_structured_no_change_when_all_dup():
 
 
 def test_merge_structured_only_outputs_nonempty_categories():
-    """空类别不输出,避免空 ## 标题。"""
+    """空类别不输出,避免空标题。"""
     new_items = [
         {"category": "Tech Stack", "item": "PostgreSQL"},
     ]

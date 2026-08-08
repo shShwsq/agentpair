@@ -5,10 +5,11 @@
 
 写入策略:
 - 项目记忆:按 repo_url 归一化找到/创建 Project,把 LLM 归纳的 project_memory_update
-  (结构化 list[{category,item}])按类别去重合并到 memory_content(## 类别 + - 条目格式,
-  超长先删 Legacy Notes 块再尾部截断)
+  (结构化 list[{category,item}])按类别去重合并到 memory_content(## 类别 + - 条目格式)
 - 全局记忆:同理把 global_memory_update 合并到 UserMemory.content
-- 旧格式(\n---\n 分隔的纯文本)读取时整体归入 ## Legacy Notes 块,零迁移兼容。
+- 合并鲁棒:用户可经 /memory API 手改记忆(整体覆盖,自由文本),_merge_structured
+  解析时保留所有内容——已知类别块去重合并新条目(块内非列表行原样保留),未知类别块
+  与游离文本原样保留,不丢用户手写内容。超长先删 preamble 再尾部截断。
 
 并发兜底:Project 表 UNIQUE(user_id, repo_url_normalized) 约束,并发 INSERT 抛
 IntegrityError,catch 后 rollback 回查已建行。
@@ -350,46 +351,39 @@ def _get_or_create_project(
         )
 
 
-def _has_category_headers(text: str) -> bool:
-    """判断文本是否已是新格式(含 ## 类别 标题行)。"""
-    for line in text.splitlines():
-        if line.startswith("## "):
-            return True
-    return False
+def _parse_structured(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """解析 ## 类别 格式,保留所有内容(容忍用户手改)。
 
-
-def _parse_structured(text: str) -> tuple[dict[str, list[str]], str | None]:
-    """解析新格式 ## 类别 + - 条目。
-
-    返回 (blocks, legacy_raw):
-    - blocks: {category: [item_text, ...]}(不含 Legacy Notes 块)
-    - legacy_raw: ## Legacy Notes 块的原始内容(原样保留),无则 None
+    返回 (preamble, segments):
+    - preamble: 第一个 ## 标题前的游离文本(strip 后,可能为 "")。无 ## 标题时
+      整个文本作为 preamble(用户自由笔记/旧格式残留都原样保留,不丢)。
+    - segments: [(category_name, body_text), ...],body_text 为标题下到下一标题
+      间的原文(含 - 条目和用户写的任何其它行,已 strip)。
     """
-    blocks: dict[str, list[str]] = {}
-    legacy_raw: str | None = None
+    lines = text.splitlines()
+    preamble_lines: list[str] = []
+    segments: list[tuple[str, str]] = []
+    current_name: str | None = None
+    current_body: list[str] = []
+    seen_header = False
 
-    current_cat: str | None = None
-    legacy_lines: list[str] = []
-
-    for line in text.splitlines():
+    for line in lines:
         if line.startswith("## "):
-            # 收尾上一个 Legacy 块
-            if current_cat == "Legacy Notes" and legacy_lines:
-                legacy_raw = "\n".join(legacy_lines).strip()
-            current_cat = line[3:].strip()
-            legacy_lines = []
-            if current_cat != "Legacy Notes":
-                blocks.setdefault(current_cat, [])
-        elif current_cat == "Legacy Notes":
-            legacy_lines.append(line)
-        elif line.startswith("- ") and current_cat and current_cat != "Legacy Notes":
-            blocks[current_cat].append(line[2:].strip())
-        # 其它行(空行等)忽略
+            if current_name is not None:
+                segments.append((current_name, "\n".join(current_body)))
+            current_name = line[3:].strip()
+            current_body = []
+            seen_header = True
+        elif seen_header:
+            current_body.append(line)
+        else:
+            preamble_lines.append(line)
 
-    if current_cat == "Legacy Notes" and legacy_lines:
-        legacy_raw = "\n".join(legacy_lines).strip()
+    if current_name is not None:
+        segments.append((current_name, "\n".join(current_body)))
 
-    return blocks, legacy_raw
+    preamble = "\n".join(preamble_lines).strip()
+    return preamble, segments
 
 
 def _merge_structured(
@@ -398,60 +392,81 @@ def _merge_structured(
     categories: list[str],
     max_chars: int,
 ) -> str:
-    """按类别合并结构化记忆条目。
+    """按类别合并结构化记忆条目(鲁棒:保留用户手改的所有内容,不丢)。
 
     解析 existing:
-    - 新格式(含 ## 类别)→ 按类别分块解析 - 条目;## Legacy Notes 块原样保留。
-    - 旧格式(无 ## 标题)→ 整体归入 Legacy Notes 块(\n---\n 替换为 \n\n 清理)。
+    - ## 类别 块:已知类别提取 - 条目与新条目去重合并,块内用户写的非列表行原样保留;
+      未知类别(用户自定义)块整体原样保留。
+    - 无 ## 标题的游离文本(用户自由笔记/旧格式残留)作为 preamble 原样保留。
 
-    合并 new_items:按 category 归入对应块(非法 category 兜底归入 Lessons Learned),
-    同块内相同 item 精确去重。按固定类别顺序重写输出,Legacy Notes 块放最末。
-
-    超长处理:先删 Legacy Notes 块;若仍超长,尾部截断并加标记。
+    新条目按 category 归入对应已知类别块(非法 category 兜底归入 Lessons Learned)。
+    重写顺序: preamble → 已知类别(按枚举顺序)→ 未知类别(按原顺序)。
+    超长处理:先删 preamble(相对最旧),再尾部截断保留尾部新内容。
     """
     existing_stripped = (existing or "").strip()
+    preamble, segments = (
+        _parse_structured(existing_stripped) if existing_stripped else ("", [])
+    )
 
-    blocks: dict[str, list[str]] = {}
-    legacy_raw: str | None = None
+    # 已知类别 -> 首次出现的 segment 索引(用户重复写的同名块取第一个)
+    seg_index: dict[str, int] = {}
+    for i, (name, _) in enumerate(segments):
+        if name not in seg_index:
+            seg_index[name] = i
 
-    if existing_stripped:
-        if _has_category_headers(existing_stripped):
-            blocks, legacy_raw = _parse_structured(existing_stripped)
-        else:
-            # 旧格式:整体归入 Legacy,清理 \n---\n 分隔符
-            legacy_raw = existing_stripped.replace("\n---\n", "\n\n").strip()
-
-    # 合并新条目(去重 + category 兜底)
+    # 合并新条目到已知类别块(同块内 - 条目精确去重,非列表行不动)
     for it in new_items:
         cat = it["category"]
-        text = it["item"]
         if cat not in categories:
             cat = "Lessons Learned"
-        blocks.setdefault(cat, [])
-        if text not in blocks[cat]:
-            blocks[cat].append(text)
+        item_text = it["item"]
+        if cat in seg_index:
+            idx = seg_index[cat]
+            name, body_text = segments[idx]
+            # strip 去掉块首尾空行(块间空行归入前块 body 的副作用),保留块内中间结构
+            body_lines = body_text.strip().split("\n") if body_text.strip() else []
+            existing_items = {
+                ln[2:].strip() for ln in body_lines if ln.startswith("- ")
+            }
+            if item_text not in existing_items:
+                body_lines.append(f"- {item_text}")
+                segments[idx] = (name, "\n".join(body_lines))
+        else:
+            segments.append((cat, f"- {item_text}"))
+            seg_index[cat] = len(segments) - 1
 
-    # 按固定类别顺序重写
+    # 重写:preamble → 已知类别(枚举顺序)→ 未知类别(原顺序)
     parts: list[str] = []
+    if preamble:
+        parts.append(preamble)
+
+    written: set[str] = set()
     for cat in categories:
-        items = blocks.get(cat)
-        if items:
-            parts.append(f"## {cat}\n" + "\n".join(f"- {it}" for it in items))
-    # Legacy 块放最末
-    if legacy_raw:
-        parts.append(f"## Legacy Notes\n{legacy_raw}")
+        if cat in seg_index:
+            _, body_text = segments[seg_index[cat]]
+            body_text = body_text.strip()
+            if body_text:
+                parts.append(f"## {cat}\n{body_text}")
+            written.add(cat)
+
+    for name, body_text in segments:
+        if name in written:
+            continue
+        body_text = body_text.strip()
+        if body_text:
+            parts.append(f"## {name}\n{body_text}")
+        written.add(name)
 
     merged = "\n\n".join(parts)
     if len(merged) <= max_chars:
         return merged
 
-    # 超长:先删 Legacy 块重试
-    if legacy_raw:
-        parts_no_legacy = [p for p in parts if not p.startswith("## Legacy Notes")]
-        merged_no_legacy = "\n\n".join(parts_no_legacy)
-        if len(merged_no_legacy) <= max_chars:
-            return merged_no_legacy
-        merged = merged_no_legacy
+    # 超长:先删 preamble(游离文本相对最旧)
+    if preamble and len(parts) > 1:
+        candidate = "\n\n".join(parts[1:])
+        if len(candidate) <= max_chars:
+            return candidate
+        merged = candidate
 
-    # 仍超长:尾部截断(新内容更重要,保留尾部)
+    # 仍超长:尾部截断(保留尾部新内容)
     return "[...truncated...]\n" + merged[-(max_chars - 30):]
