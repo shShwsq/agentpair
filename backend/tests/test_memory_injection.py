@@ -38,23 +38,44 @@ def test_react_section_empty_when_no_project():
 def test_react_section_empty_when_no_memory_content():
     proj = MagicMock()
     proj.memory_content = ""
+    proj.memory_summary = ""
     proj.alias = None
     db = _mock_db(first_result=proj)
     assert build_react_agent_memory_section(db, 1, "https://github.com/a/b") == ""
 
 
-def test_react_section_structure_with_memory():
+def test_react_section_uses_memory_summary():
+    """memory_summary 非空 → 注入精简版(非 memory_content)+ 路径提示。"""
     proj = MagicMock()
-    proj.memory_content = "## Hard Constraints\n- rule A\n\n## Known Issues\n- issue B"
+    proj.memory_content = "## Hard Constraints\n- 这是很长的完整记忆不应出现"
+    proj.memory_summary = "## Hard Constraints\n- 精简版摘要"
     proj.alias = "my-repo"
     db = _mock_db(first_result=proj)
     result = build_react_agent_memory_section(db, 1, "https://github.com/a/b")
     # 引导语开头(非 ## 标题,避免与内层 ## 类别层级冲突)
     assert result.startswith("以下是你对该项目的已知问题与历史记忆")
     assert "项目别名: my-repo" in result
-    # 内层 ## 类别结构原样保留
+    # 注入的是精简版,不是完整 memory_content
+    assert "## Hard Constraints\n- 精简版摘要" in result
+    assert "这是很长的完整记忆不应出现" not in result
+    # 末尾有完整记忆文件路径提示
+    assert "/home/user/.agent_memory/project_memory.md" in result
+
+
+def test_react_section_summary_empty_falls_back_to_content():
+    """memory_summary 为空 → 回退用 memory_content(截断)+ 路径提示(兼容旧数据)。"""
+    proj = MagicMock()
+    proj.memory_content = "## Hard Constraints\n- rule A\n\n## Known Issues\n- issue B"
+    proj.memory_summary = ""
+    proj.alias = None
+    db = _mock_db(first_result=proj)
+    result = build_react_agent_memory_section(db, 1, "https://github.com/a/b")
+    assert result.startswith("以下是你对该项目的已知问题与历史记忆")
+    # 回退用完整 memory_content
     assert "## Hard Constraints\n- rule A" in result
     assert "## Known Issues\n- issue B" in result
+    # 末尾有路径提示
+    assert "/home/user/.agent_memory/project_memory.md" in result
 
 
 # ---------- build_user_agent_memory_section ----------

@@ -181,6 +181,9 @@ def save_project(
 
     不更新 repo_url(归一化值是项目身份,不可改);
     不更新 last_summary_at(那是自动归纳的时间戳,手动编辑不改它)。
+
+    memory_content 改动后同步重新生成 memory_summary(精简版,注入 system prompt 用):
+    ≤2000 即时无 LLM;>2000 走 LLM(env 默认配置),失败兜底硬截断,不阻塞请求。
     """
     row = _find_project(db, current_user.id, project_id)
     if row is None:
@@ -188,6 +191,8 @@ def save_project(
     row.alias = req.alias
     row.note = req.note
     row.memory_content = req.memory_content
+    # 重新生成精简版(用户手改 memory_content 后,旧 summary 可能失效)
+    row.memory_summary = _regen_memory_summary(req.memory_content)
     db.commit()
     db.refresh(row)
     logger.info("用户 %s 手动更新了项目记忆 %s", current_user.id, project_id)
@@ -249,7 +254,30 @@ def _project_to_out(row: Project) -> ProjectOut:
         alias=row.alias,
         note=row.note,
         memory_content=row.memory_content,
+        memory_summary=row.memory_summary,
         last_summary_at=row.last_summary_at.isoformat() if row.last_summary_at else None,
         created_at=row.created_at.isoformat() if row.created_at else None,
         updated_at=row.updated_at.isoformat() if row.updated_at else None,
     )
+
+
+def _regen_memory_summary(memory_content: str) -> str:
+    """重新生成精简版项目记忆(PUT 编辑后调用)。
+
+    尝试用 env 默认 LLM 生成(>2000 时);LLM 不可用或失败 → generate_memory_summary
+    内部兜底硬截断。任何异常都不影响请求,最差返回硬截断串。
+    """
+    try:
+        from app.llm.client import LLMClient
+        from app.services.memory_summarize import generate_memory_summary
+
+        try:
+            llm = LLMClient()  # env 默认配置
+        except Exception:
+            llm = None  # 未配置 env LLM → 走硬截断兜底
+        return generate_memory_summary(memory_content, llm)
+    except Exception as e:
+        logger.warning("重新生成精简记忆失败,回退硬截断: %s", e)
+        # 兜底:直接硬截断
+        content = (memory_content or "").strip()
+        return content[:2000] if len(content) > 2000 else content

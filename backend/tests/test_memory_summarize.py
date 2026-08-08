@@ -1,13 +1,44 @@
 """memory_summarize 纯函数单元测试(不依赖 DB)。
 
-覆盖 _merge_structured / _clean_items / _parse_summary_json。
+覆盖 _merge_structured / _clean_items / _parse_summary_json / generate_memory_summary。
 """
 from app.services.memory_summarize import (
+    MAX_PROJECT_MEM_INJECT,
+    MAX_PROJECT_MEM_STORE,
     PROJECT_CATEGORIES,
     _clean_items,
     _merge_structured,
     _parse_summary_json,
+    generate_memory_summary,
 )
+
+
+# ============================================================
+# generate_memory_summary 用到的 LLM mock
+# ============================================================
+
+
+class _MockChunk:
+    """模拟 LLMClient.chat_stream 产出的 chunk"""
+
+    def __init__(self, content_delta="", finish_reason=None):
+        self.content_delta = content_delta
+        self.finish_reason = finish_reason
+
+
+class _MockLLM:
+    """模拟 LLMClient:按预设 chunks 产出;fail=True 时 chat_stream 抛异常"""
+
+    def __init__(self, chunks=None, fail=False):
+        self._chunks = chunks or []
+        self._fail = fail
+        self.enable_thinking = True  # generate_memory_summary 会改它
+
+    def chat_stream(self, messages, max_tokens=2048):
+        if self._fail:
+            raise RuntimeError("LLM 调用失败(模拟)")
+        for c in self._chunks:
+            yield c
 
 
 # ---------- _merge_structured ----------
@@ -166,3 +197,74 @@ def test_parse_summary_json_invalid_returns_none():
     assert _parse_summary_json("") is None
     assert _parse_summary_json("not json at all") is None
     assert _parse_summary_json("[]") is None  # 非 dict
+
+
+# ---------- generate_memory_summary ----------
+
+def test_max_project_mem_store_is_50000():
+    """存储上限放宽到 50000(完整记忆写入沙箱文件,无字数限制)。"""
+    assert MAX_PROJECT_MEM_STORE == 50000
+    assert MAX_PROJECT_MEM_INJECT == 2000
+
+
+def test_generate_memory_summary_empty_returns_empty():
+    """空 memory_content → 返回空串(不调 LLM)。"""
+    assert generate_memory_summary("", _MockLLM()) == ""
+    assert generate_memory_summary("   \n  ", _MockLLM()) == ""
+
+
+def test_generate_memory_summary_short_returns_as_is():
+    """memory_content ≤ 注入上限 → 直接用完整内容,零成本不调 LLM。"""
+    content = "## Hard Constraints\n- rule A\n- rule B"
+    llm = _MockLLM(chunks=[_MockChunk("SHOULD NOT BE USED", "stop")])
+    result = generate_memory_summary(content, llm)
+    assert result == content  # 原样返回
+    assert "SHOULD NOT BE USED" not in result  # LLM 未被调用
+
+
+def test_generate_memory_summary_long_calls_llm():
+    """memory_content > 注入上限 → 调 LLM 精简,返回 LLM 输出。"""
+    content = "X" * (MAX_PROJECT_MEM_INJECT + 500)
+    condensed = "## Hard Constraints\n- condensed rule"
+    llm = _MockLLM(chunks=[
+        _MockChunk("## Hard Constraints\n- condensed rule", "stop"),
+    ])
+    result = generate_memory_summary(content, llm)
+    assert result == condensed
+    # 精简过程会关 thinking(简单任务加速),结束后恢复
+    assert llm.enable_thinking is True
+
+
+def test_generate_memory_summary_llm_output_truncated_if_too_long():
+    """LLM 返回超长 → 兜底截断到注入上限。"""
+    content = "X" * (MAX_PROJECT_MEM_INJECT + 100)
+    too_long = "Y" * (MAX_PROJECT_MEM_INJECT + 200)
+    llm = _MockLLM(chunks=[_MockChunk(too_long, "stop")])
+    result = generate_memory_summary(content, llm)
+    assert len(result) == MAX_PROJECT_MEM_INJECT
+    assert result == too_long[:MAX_PROJECT_MEM_INJECT]
+
+
+def test_generate_memory_summary_llm_failure_fallback_truncate():
+    """LLM 调用抛异常 → 兜底硬截断 memory_content 头部。"""
+    content = "Z" * (MAX_PROJECT_MEM_INJECT + 100)
+    llm = _MockLLM(fail=True)
+    result = generate_memory_summary(content, llm)
+    assert len(result) == MAX_PROJECT_MEM_INJECT
+    assert result == content[:MAX_PROJECT_MEM_INJECT]
+
+
+def test_generate_memory_summary_llm_empty_output_fallback_truncate():
+    """LLM 返回空 → 兜底硬截断。"""
+    content = "Z" * (MAX_PROJECT_MEM_INJECT + 100)
+    llm = _MockLLM(chunks=[_MockChunk("", "stop")])
+    result = generate_memory_summary(content, llm)
+    assert result == content[:MAX_PROJECT_MEM_INJECT]
+
+
+def test_generate_memory_summary_none_llm_truncates():
+    """llm=None(如 PUT 路由未加载 LLM)→ 直接硬截断,不调 LLM。"""
+    content = "Q" * (MAX_PROJECT_MEM_INJECT + 50)
+    result = generate_memory_summary(content, None)
+    assert len(result) == MAX_PROJECT_MEM_INJECT
+    assert result == content[:MAX_PROJECT_MEM_INJECT]

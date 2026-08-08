@@ -44,6 +44,7 @@ async def lifespan(app: FastAPI):
     from app.models import user_agent_config  # noqa: F401
     from app.models import user_git_binding  # noqa: F401
     from app.models import user_llm_config  # noqa: F401
+    from app.models import project  # noqa: F401
 
     if settings.DB_REBUILD_ON_START:
         Base.metadata.drop_all(bind=engine)
@@ -57,6 +58,10 @@ async def lifespan(app: FastAPI):
     migrate_legacy_github_bindings()
     # 加 refresh_token / expires_at 列(Gitee access_token 刷新机制)
     add_refresh_token_columns()
+    # 加 projects.memory_summary 列(精简版记忆,注入 system prompt 用)
+    from app.models.project import migrate_project_memory_summary
+
+    migrate_project_memory_summary()
     yield
 
 

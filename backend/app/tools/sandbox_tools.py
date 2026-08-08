@@ -36,6 +36,11 @@ _sessions: dict[str, dict[str, Any]] = {}
 # 任务完成后保留 session 的时间(秒),超时后自动清理
 _SESSION_TTL_AFTER_COMPLETE = 3600  # 1 小时
 
+# 项目记忆文件固定路径(沙箱内绝对路径,不分 project_id;每任务启动时覆盖为当前项目记忆)
+# 智能体不知道 project_id,固定路径降低认知负担;"分项目"靠每任务只写当前项目记忆实现。
+_MEMORY_DIR_SANDBOX = "/home/user/.agent_memory"
+_MEMORY_FILE = "project_memory.md"
+
 
 def _get_or_create_session(task_id: str) -> dict[str, Any]:
     """获取或创建任务的沙箱上下文"""
@@ -376,6 +381,66 @@ def _list_files_sandbox(
 
 
 # ============================================================
+# 项目记忆文件写入(orchestrator 在 clone 后调用,供 react_agent / CLI 随时 read_file 查阅)
+# ============================================================
+
+
+def write_project_memory_file(task_id: str, content: str) -> None:
+    """把完整项目记忆写入沙箱固定路径,供 react_agent / CLI 智能体随时 read_file 查阅。
+
+    固定路径 /home/user/.agent_memory/project_memory.md(不分 project_id,每任务启动时
+    覆盖为当前项目记忆)。content 为空也写(清空旧文件,避免看到上一个项目的记忆)。
+
+    mock 模式:写 ctx["mock_dir"]/.agent_memory/project_memory.md(Python 直接写)。
+    sandbox 模式:mkdir -p 记忆目录 + session.write_file 写绝对路径。
+    """
+    ctx = _get_or_create_session(task_id)
+    mode = ctx["mode"]
+    if mode == "mock":
+        mem_dir = Path(ctx["mock_dir"]) / ".agent_memory"
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        (mem_dir / _MEMORY_FILE).write_text(content, encoding="utf-8")
+    else:
+        session: SandboxSession = ctx["session"]
+        session.run_command(f"mkdir -p {shlex.quote(_MEMORY_DIR_SANDBOX)}")
+        session.write_file(f"{_MEMORY_DIR_SANDBOX}/{_MEMORY_FILE}", content)
+
+
+def _is_memory_file_path(file_path: str) -> bool:
+    """file_path 是否指向记忆目录(白名单绝对路径,不受 repo_path 限制)
+
+    仅放行 /home/user/.agent_memory/ 开头的绝对路径,其余路径维持原仓库内校验。
+    """
+    return file_path.startswith(_MEMORY_DIR_SANDBOX + "/")
+
+
+def _read_memory_file(
+    ctx: dict, file_path: str, max_lines: int, offset: int,
+) -> dict:
+    """读取记忆目录文件(白名单绝对路径,不受 repo_path 限制)
+
+    复用 _read_file_mock / _read_file_sandbox:把"记忆目录"当作虚拟 repo_path,
+    file_path 取记忆目录下的相对 basename。仍带行号 + 分页,与仓库 read_file 一致体验。
+
+    mock 模式:映射到 mock_dir/.agent_memory/<basename>(write_project_memory_file 写入处)。
+    sandbox 模式:直接读沙箱内绝对路径 /home/user/.agent_memory/<basename>。
+    """
+    # 去掉目录前缀得到 basename,并防穿越(basename 不应含 .. 或绝对路径成分)
+    basename = file_path[len(_MEMORY_DIR_SANDBOX) + 1:].lstrip("/")
+    if not basename or ".." in Path(basename).parts or Path(basename).is_absolute():
+        raise ValueError(f"非法记忆文件路径: {file_path}")
+
+    mode = ctx["mode"]
+    if mode == "mock":
+        # 虚拟 repo_path = 本地 mock 记忆目录
+        repo_path = str(Path(ctx["mock_dir"]) / ".agent_memory")
+        return _read_file_mock(repo_path, basename, max_lines, offset)
+    else:
+        # 虚拟 repo_path = 沙箱记忆目录绝对路径
+        return _read_file_sandbox(ctx, _MEMORY_DIR_SANDBOX, basename, max_lines, offset)
+
+
+# ============================================================
 # 工具 3:read_file(参考 Claude Code / TRAE Read:带行号 + offset 分页)
 # ============================================================
 
@@ -408,9 +473,16 @@ def read_file(
         "total_lines": int,    # 文件总行数
         "truncated": bool      # 是否还有更多未读(本次未读到文件尾)
     }
+
+    特例:file_path 以 /home/user/.agent_memory/ 开头(记忆文件白名单)时,
+    不受 repo_path 限制,直接读记忆目录文件(供查阅完整项目记忆)。
     """
     ctx = _get_or_create_session(task_id)
     mode = ctx["mode"]
+
+    # 记忆文件白名单:绝对路径 /home/user/.agent_memory/* 不受 repo_path 限制
+    if _is_memory_file_path(file_path):
+        return _read_memory_file(ctx, file_path, max_lines, offset)
 
     if mode == "mock":
         return _read_file_mock(repo_path, file_path, max_lines, offset)

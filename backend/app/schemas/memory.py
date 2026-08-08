@@ -62,6 +62,8 @@ class ProjectOut(BaseModel):
     alias: str | None = None
     note: str | None = None
     memory_content: str = ""
+    # 精简版记忆(系统生成,注入 system prompt 用;前端可查看)
+    memory_summary: str = ""
     # 上次自动归纳时间(ISO 字符串,可空)
     last_summary_at: str | None = None
     created_at: str | None = None

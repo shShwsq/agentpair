@@ -1374,6 +1374,46 @@ def _format_plan_reminder(plan_steps: list[dict]) -> str:
 
 
 # ============================================================
+# 项目记忆精简版加载(注入 CLI prompt)
+# ============================================================
+
+
+def _load_project_memory_summary(db: Session, task: Task) -> str:
+    """按 task.user_id + repo_url 查 Project,返回 memory_summary(精简版,注入 prompt 用)。
+
+    无 Project / 无 repo_url / 匿名任务 / 查询异常 → 返回 ""(不注入)。
+    完整记忆已由 orchestrator 在 clone 后写入沙箱文件,这里只取精简版注入 prompt。
+    """
+    try:
+        if task.user_id is None:
+            return ""
+        params = task.params or {}
+        repo_url = params.get("repo_url")
+        if not repo_url:
+            return ""
+        from app.models.project import Project
+        from app.services.repo_url import normalize_repo_url
+
+        norm = normalize_repo_url(repo_url)
+        if not norm:
+            return ""
+        proj = (
+            db.query(Project)
+            .filter(
+                Project.user_id == task.user_id,
+                Project.repo_url_normalized == norm,
+            )
+            .first()
+        )
+        if proj is None:
+            return ""
+        return proj.memory_summary or ""
+    except Exception as e:
+        logger.warning(f"[task={task.id}] 加载项目记忆精简版失败(忽略): {e}")
+        return ""
+
+
+# ============================================================
 # Prompt 消息构造
 # ============================================================
 
@@ -1385,11 +1425,13 @@ def _build_prompt_message(
     repo_context: str | None,
     repo_path: str,
     previous_plan: list[dict] | None,
+    memory_summary: str = "",
 ) -> str:
     """构造发给 CLI 的 prompt 消息
 
     - 第 1 轮:task.user_input + 仓库信息 + repo_context(已 clone 提示)
     - 追问轮:基于已有仓库继续,注入跨轮记忆(plan 续接)
+    - 每轮末尾追加项目记忆精简版 + 完整记忆文件路径提示(供 CLI read_file 查阅)
     """
     if followup_query is None:
         msg = task.user_input
@@ -1419,6 +1461,15 @@ def _build_prompt_message(
         reminder = _format_plan_reminder(previous_plan)
         if reminder:
             msg += f"\n\n{reminder}"
+
+    # 项目记忆精简版 + 完整记忆文件路径提示(每轮注入,与 react_agent system prompt 行为一致)
+    summary = (memory_summary or "").strip()
+    if summary:
+        msg += (
+            "\n\n[项目记忆摘要]\n"
+            + summary
+            + "\n\n完整项目记忆可 read_file /home/user/.agent_memory/project_memory.md 查阅"
+        )
 
     return msg
 
@@ -1496,6 +1547,9 @@ def run_acp_agent(
     session = ctx["session"]
     repo_path = ctx.get("repo_path", "")
 
+    # ---- 加载项目记忆精简版(注入 CLI prompt,完整记忆已在沙箱文件中) ----
+    memory_summary = _load_project_memory_summary(db, task)
+
     # ---- 准备 CLI 环境 ----
     _ensure_cli_env(session, agent_type)
 
@@ -1553,7 +1607,8 @@ def run_acp_agent(
 
             # ---- 构造 prompt 消息 ----
             user_msg = _build_prompt_message(
-                task, round_idx, followup_query, repo_context, repo_path, previous_plan
+                task, round_idx, followup_query, repo_context, repo_path, previous_plan,
+                memory_summary=memory_summary,
             )
 
             _add_conversation(

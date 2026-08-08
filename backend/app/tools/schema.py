@@ -104,6 +104,8 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "读取仓库内文件内容,返回带行号的内容(cat -n 格式),支持分页。"
                 "首次读前 200 行,需要看后续内容时用 offset 翻页。"
                 "行号可用于在结果中精确引用位置。"
+                "也可读取完整项目记忆:file_path 传 /home/user/.agent_memory/project_memory.md"
+                "(绝对路径,不受 repo_path 限制)。"
             ),
             "parameters": {
                 "type": "object",
@@ -114,7 +116,7 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     },
                     "file_path": {
                         "type": "string",
-                        "description": "仓库内相对路径",
+                        "description": "仓库内相对路径;或记忆文件绝对路径 /home/user/.agent_memory/project_memory.md",
                     },
                     "max_lines": {
                         "type": "integer",

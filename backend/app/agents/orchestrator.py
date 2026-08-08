@@ -768,6 +768,11 @@ def _prepare_repo_context(
         f"files_count={clone_result.get('files_count')}"
     )
 
+    # clone 成功后,把当前项目的完整记忆写入沙箱固定路径
+    # (供 react_agent / CLI 智能体随时 read_file 查阅,突破注入字数限制)
+    # 无 Project/无记忆则写空串(清空上一个项目残留)。失败不阻塞任务。
+    _write_project_memory_for_task(task, db, task_id_str, repo_url)
+
     # 主动 list_files(根目录),把结构拼进上下文
     task.current_stage = "正在读取仓库根目录结构..."
     db.commit()
@@ -782,6 +787,41 @@ def _prepare_repo_context(
 
     repo_context = _format_repo_context(repo_url, repo_path, files_result)
     return repo_path, repo_context
+
+
+def _write_project_memory_for_task(
+    task: Task, db: Session, task_id_str: str, repo_url: str,
+) -> None:
+    """把当前项目的完整记忆写入沙箱固定路径(供 react_agent / CLI 随时 read_file 查阅)
+
+    按 task.user_id + repo_url 归一化查 Project,取 memory_content 写入。
+    无 Project/无记忆则写空串(清空上一个项目残留,避免看到无关记忆)。
+    任何异常都 catch + log,不阻塞任务启动。
+    """
+    try:
+        from app.models.project import Project
+        from app.services.repo_url import normalize_repo_url
+
+        memory_content = ""
+        norm = normalize_repo_url(repo_url)
+        if norm and task.user_id is not None:
+            proj = (
+                db.query(Project)
+                .filter(
+                    Project.user_id == task.user_id,
+                    Project.repo_url_normalized == norm,
+                )
+                .first()
+            )
+            if proj:
+                memory_content = proj.memory_content or ""
+        sandbox_tools.write_project_memory_file(task_id_str, memory_content)
+        logger.info(
+            f"[task={task.id}] 已写入项目记忆文件 "
+            f"(/home/user/.agent_memory/project_memory.md, {len(memory_content)} 字符)"
+        )
+    except Exception as e:
+        logger.warning(f"[task={task.id}] 写入项目记忆文件失败(忽略): {e}")
 
 
 def _format_repo_context(

@@ -30,8 +30,12 @@ from app.services.repo_url import normalize_repo_url
 logger = logging.getLogger(__name__)
 
 # 记忆合并后的存储上限(超长先删 Legacy 块,再尾部截断保留新内容)
-MAX_PROJECT_MEM_STORE = 8000
+# 项目记忆完整版写入沙箱文件供 agent 随时 read_file 查阅(无字数限制),故放宽到 50000
+MAX_PROJECT_MEM_STORE = 50000
 MAX_GLOBAL_MEM_STORE = 10000
+
+# 精简版记忆注入 system prompt 的字符上限(超出调 LLM 精简,失败兜底硬截断)
+MAX_PROJECT_MEM_INJECT = 2000
 
 # 记忆类别固定枚举(按此顺序输出)
 PROJECT_CATEGORIES = [
@@ -148,6 +152,8 @@ def summarize_and_save_memory(
                 )
                 if merged != existing:  # 有变化才写(完全去重则跳过)
                     proj.memory_content = merged
+                    # 同步重新生成精简版(注入 system prompt 用)
+                    proj.memory_summary = generate_memory_summary(merged, llm)
                     proj.last_summary_at = datetime.now(timezone.utc)
                     db.commit()
                     logger.info(
@@ -179,6 +185,80 @@ def summarize_and_save_memory(
         logger.warning(
             f"[task={task.id}] 归纳写入记忆失败(忽略,不影响任务完成): {e}"
         )
+
+
+# ============================================================
+# 精简版记忆生成(注入 system prompt 用)
+# ============================================================
+
+
+# 精简注入 prompt:把完整项目记忆压缩到 ≤MAX_PROJECT_MEM_INJECT 字符
+_SUMMARIZE_INJECT_PROMPT = """You are condensing a project memory file for injection into an agent's system prompt (max {max_chars} chars).
+
+[Full project memory]
+{memory_content}
+
+Rules:
+- Write in English. Preserve language-specific Chinese terms, user quotes, and UI strings verbatim (do NOT translate them).
+- Output ONLY the condensed memory as a flat list grouped by ## category headers, each item a single line starting with "- ".
+- Use these categories in this order (skip empty ones): Hard Constraints, Known Issues, Audit Directions, Tech Stack, Lessons Learned.
+- PRIORITIZE Hard Constraints and Known Issues (these most affect audit direction). Drop lower-priority / redundant items first to fit the limit.
+- No preamble, no commentary, no markdown fences — only the condensed memory.
+"""
+
+
+def generate_memory_summary(
+    memory_content: str, llm: LLMClient | None,
+) -> str:
+    """生成精简版项目记忆(注入 system prompt 用,≤MAX_PROJECT_MEM_INJECT 字符)。
+
+    策略(兼顾质量与成本):
+    - memory_content 为空 → 返回 ""
+    - len ≤ MAX_PROJECT_MEM_INJECT → 直接用完整内容(零成本,无需 LLM)
+    - 否则调 LLM 精简(关 thinking 加速),保留 Hard Constraints/Known Issues 优先
+    - LLM 不可用 / 调用失败 / 返回空 → 兜底硬截断 memory_content[:MAX_PROJECT_MEM_INJECT]
+
+    llm 为 None 时(如 PUT 路由未加载用户 LLM)直接走硬截断兜底。
+    """
+    content = (memory_content or "").strip()
+    if not content:
+        return ""
+    if len(content) <= MAX_PROJECT_MEM_INJECT:
+        return content
+    if llm is None:
+        # 无 LLM 可用,直接硬截断(保尾部新内容相对更重要,但这里取头部:
+        # 完整记忆按类别排序,Hard Constraints 在头部,故保留头部更合理)
+        return content[:MAX_PROJECT_MEM_INJECT]
+
+    try:
+        original_thinking = llm.enable_thinking
+        llm.enable_thinking = False  # 精简是简单任务,关思考加速
+        try:
+            prompt = _SUMMARIZE_INJECT_PROMPT.format(
+                max_chars=MAX_PROJECT_MEM_INJECT,
+                memory_content=content,
+            )
+            collected: list[str] = []
+            for chunk in llm.chat_stream(
+                [{"role": "user", "content": prompt}], max_tokens=2048,
+            ):
+                if chunk.content_delta:
+                    collected.append(chunk.content_delta)
+                if chunk.finish_reason in ("stop", "length"):
+                    break
+            summary = "".join(collected).strip()
+        finally:
+            llm.enable_thinking = original_thinking
+
+        if not summary:
+            return content[:MAX_PROJECT_MEM_INJECT]
+        # LLM 可能超长,兜底截断
+        if len(summary) > MAX_PROJECT_MEM_INJECT:
+            summary = summary[:MAX_PROJECT_MEM_INJECT]
+        return summary
+    except Exception as e:
+        logger.warning(f"LLM 生成精简记忆失败,回退硬截断: {e}")
+        return content[:MAX_PROJECT_MEM_INJECT]
 
 
 # ============================================================

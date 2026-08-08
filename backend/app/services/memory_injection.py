@@ -85,7 +85,11 @@ def build_react_agent_memory_section(
 ) -> str:
     """构造 react_agent 的"分项目记忆"段。
 
-    user_id 为 None / repo_url 为空 / 无对应 Project / memory_content 为空 → 返回空串。
+    优先注入精简版 memory_summary(LLM 生成,≤注入上限);为空时回退 memory_content 截断
+    (兼容未生成 summary 的旧数据)。末尾附完整记忆文件路径提示,引导 agent 用 read_file
+    查阅突破字数限制的完整记忆。
+
+    user_id 为 None / repo_url 为空 / 无对应 Project / 记忆为空 → 返回空串。
     注入到 react_agent system prompt 末尾,影响审计方向(优先检查已知问题)。
     """
     if user_id is None or not repo_url:
@@ -103,7 +107,18 @@ def build_react_agent_memory_section(
         )
         .first()
     )
-    if not proj or not proj.memory_content or not proj.memory_content.strip():
+    if not proj:
+        return ""
+
+    # 优先用精简版(已 ≤ MAX_PROJECT_MEM_CHARS,无需截断);为空回退完整内容截断
+    summary = (proj.memory_summary or "").strip()
+    if summary:
+        memory_text = summary
+    else:
+        memory_text = _truncate(
+            (proj.memory_content or "").strip(), MAX_PROJECT_MEM_CHARS
+        )
+    if not memory_text:
         return ""
 
     header = (
@@ -112,6 +127,6 @@ def build_react_agent_memory_section(
     )
     if proj.alias:
         header += f"\n项目别名: {proj.alias}"
-    return header + "\n" + _truncate(
-        proj.memory_content.strip(), MAX_PROJECT_MEM_CHARS
-    )
+    # 完整记忆已写入沙箱文件,提示 agent 可 read_file 查阅突破字数限制
+    memory_text += "\n\n完整记忆可 read_file /home/user/.agent_memory/project_memory.md 查阅"
+    return header + "\n" + memory_text
