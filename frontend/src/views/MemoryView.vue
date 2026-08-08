@@ -3,7 +3,7 @@
  * 记忆管理页(文件列表 + Markdown 编辑器)
  *
  * 三类记忆以「文件」隐喻呈现,每份文件即一篇 Markdown:
- * - 用户偏好(1):custom_prompt Markdown(结构化 preferences JSONB 保留但不在此编辑)
+ * - User Profile(1):custom_prompt Markdown(结构化 preferences JSONB 保留但不在此编辑)
  * - 全局记忆(1):content Markdown,注入 user_agent
  * - 项目记忆(N,按 repo_url 聚合):memory_content Markdown,注入 react_agent;任务完成自动归纳
  *
@@ -36,34 +36,37 @@ import type { ProjectOut, UserPreferenceOut } from '@/types/memory'
 // 保存后才会真正写入 DB 并注入 agent;纯模板未改动不计为"未保存"
 // ============================================================
 
-/** 用户偏好默认模板(写入 custom_prompt,注入 user_agent) */
-const PREF_TEMPLATE = `# 用户偏好
+/** User Profile 默认模板(写入 custom_prompt,注入 user_agent) */
+const PREF_TEMPLATE = `# User Profile
 
-## 输出语言
-中文
+## Academic Background
+- 
 
-## 评判风格
-严格,安全与最佳实践优先于简洁;对关键问题必须给出复现步骤与修复示例。
+## Current Focus Areas
+- Security: hardcoded secrets, injection, privilege escalation, SSRF
+- Performance: query optimization, caching, resource leaks
+- Code quality: readability, separation of responsibilities
 
-## 重点关注领域
-- 安全:硬编码密钥、注入、权限提升、SSRF
-- 性能与资源泄漏
-- 可读性与职责划分
+## Output Language
+English
 
-## 补充要求
+## Evaluation Style
+Thorough; prioritize security and best practices over brevity. For critical issues, provide reproduction steps and fix examples.
+
+## Additional Requirements
 - 
 `
 
 /** 全局长期记忆默认模板(写入 content,注入 user_agent) */
-const GLOBAL_TEMPLATE = `# 全局长期记忆
+const GLOBAL_TEMPLATE = `# Global Memory
 
-## 通用约定
+## General Conventions
 - 
 
-## 常见踩坑
+## Common Pitfalls
 - 
 
-## 复用经验
+## Reusable Lessons
 - 
 `
 
@@ -114,7 +117,7 @@ const projects = ref<ProjectOut[]>([])
 /** 文件列表(计算) */
 const fileList = computed<FileEntry[]>(() => {
   const list: FileEntry[] = [
-    { id: 'pref', kind: 'pref', label: '用户偏好' },
+    { id: 'pref', kind: 'pref', label: 'User Profile' },
     { id: 'global', kind: 'global', label: '全局记忆' },
   ]
   for (const p of projects.value) {
@@ -523,7 +526,7 @@ onMounted(() => {
                   <polyline points="14 2 14 8 20 8" />
                 </svg>
                 <span class="file-text">
-                  <span class="file-label">用户偏好</span>
+                  <span class="file-label">User Profile</span>
                   <span class="file-meta">{{ formatRelative(updatedAt['pref']) }}</span>
                 </span>
                 <span v-if="isDirty('pref')" class="dirty-dot" title="有未保存改动" />

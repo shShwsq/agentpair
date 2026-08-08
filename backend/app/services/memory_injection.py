@@ -4,7 +4,7 @@
 无状态函数,每次调用现查 DB。token 受控(各段上限 2000 字符,超出尾部截断)。
 
 注入策略:
-- user_agent:用户偏好 + 全局长期记忆(影响评判标准与 checklist 生成)
+- user_agent:User Profile + 全局长期记忆(影响评判标准与 checklist 生成)
 - react_agent:分项目记忆(影响审计方向,优先检查已知问题)
 
 user_id 为 None(匿名任务)或无配置 → 返回空串(不注入),保证匿名任务不受影响。
@@ -26,13 +26,13 @@ def _truncate(text: str, max_chars: int) -> str:
     """超长截断,尾部加截断标记"""
     if len(text) <= max_chars:
         return text
-    return text[:max_chars] + "\n[...已截断...]"
+    return text[:max_chars] + "\n[...truncated...]"
 
 
 def build_user_agent_memory_section(
     db: Session, user_id, repo_url: str | None = None,
 ) -> str:
-    """构造 user_agent 的"用户偏好 + 全局长期记忆 + 项目记忆精简版"段。
+    """构造 user_agent 的"User Profile + 全局长期记忆 + 项目记忆精简版"段。
 
     user_id 为 None(匿名任务)或无任何配置 → 返回空串(不注入)。
     repo_url 非空时追加当前项目的记忆精简版(影响 checklist 生成与评估覆盖度)。
@@ -46,7 +46,7 @@ def build_user_agent_memory_section(
 
     parts: list[str] = []
 
-    # 用户偏好
+    # User Profile
     pref = (
         db.query(UserPreference)
         .filter(UserPreference.user_id == user_id)
@@ -56,20 +56,20 @@ def build_user_agent_memory_section(
         pref_lines: list[str] = []
         p = pref.preferences or {}
         if p.get("output_language"):
-            pref_lines.append(f"- 输出语言: {p['output_language']}")
+            pref_lines.append(f"- Output language: {p['output_language']}")
         if p.get("focus_areas"):
             areas = p["focus_areas"]
             if isinstance(areas, list) and areas:
                 pref_lines.append(
-                    f"- 重点关注领域: {', '.join(str(a) for a in areas)}"
+                    f"- Focus areas: {', '.join(str(a) for a in areas)}"
                 )
         if p.get("style"):
-            pref_lines.append(f"- 评判风格: {p['style']}")
+            pref_lines.append(f"- Evaluation style: {p['style']}")
         if pref.custom_prompt and pref.custom_prompt.strip():
-            pref_lines.append(f"- 自定义补充: {pref.custom_prompt.strip()}")
+            pref_lines.append(f"- Additional notes: {pref.custom_prompt.strip()}")
         if pref_lines:
             parts.append(
-                "## 用户偏好(请在生成 checklist 和评估时遵循)\n"
+                "## User Profile (follow when generating checklist and evaluation)\n"
                 + _truncate("\n".join(pref_lines), MAX_PREF_CHARS)
             )
 
@@ -77,7 +77,8 @@ def build_user_agent_memory_section(
     mem = db.query(UserMemory).filter(UserMemory.user_id == user_id).first()
     if mem and mem.content and mem.content.strip():
         parts.append(
-            "以下是跨任务积累的长期记忆,按类别组织(在生成 checklist 和评估时遵循):\n"
+            "The following is long-term memory accumulated across tasks, "
+            "organized by category (follow when generating checklist and evaluation):\n"
             + _truncate(mem.content.strip(), MAX_GLOBAL_MEM_CHARS)
         )
 
@@ -101,8 +102,10 @@ def build_user_agent_memory_section(
                     )
                 if summary:
                     parts.append(
-                        "以下是对该项目的已知问题与历史记忆摘要,按类别组织"
-                        "(生成 checklist 与评估覆盖度时参考):\n" + summary
+                        "The following is a summary of known issues and historical "
+                        "memory for this project, organized by category "
+                        "(reference when generating checklist and evaluation coverage):\n"
+                        + summary
                     )
 
     if not parts:
@@ -152,13 +155,16 @@ def build_react_agent_memory_section(
         return ""
 
     header = (
-        "以下是你对该项目的已知问题与历史记忆,按类别组织,"
-        "优先检查 Hard Constraints 和 Known Issues 方向:"
+        "The following is your known issues and historical memory for this project, "
+        "organized by category. Prioritize checking Hard Constraints and Known Issues:"
     )
     if proj.alias:
-        header += f"\n项目别名: {proj.alias}"
+        header += f"\nProject alias: {proj.alias}"
     # 完整记忆已写入沙箱文件,提示 agent 可 read_file 查阅突破字数限制
-    memory_text += "\n\n完整记忆可 read_file /home/user/.agent_memory/project_memory.md 查阅"
+    memory_text += (
+        "\n\nFull memory available via read_file "
+        "/home/user/.agent_memory/project_memory.md"
+    )
     return header + "\n" + memory_text
 
 
@@ -179,6 +185,7 @@ def build_global_memory_section(db: Session, user_id) -> str:
     if not mem or not mem.content or not mem.content.strip():
         return ""
     return (
-        "以下是跨任务积累的通用经验,按类别组织(执行时遵循):\n"
+        "The following is general experience accumulated across tasks, "
+        "organized by category (follow during execution):\n"
         + _truncate(mem.content.strip(), MAX_GLOBAL_MEM_CHARS)
     )

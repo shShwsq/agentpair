@@ -1,4 +1,4 @@
-"""用户偏好(per-user, 1:1)
+"""User Profile (per-user, 1:1)
 
 用户级的稳定倾向(输出语言/关注领域/评判风格 + 自由文本兜底),
 注入 user_agent 的 system prompt,影响评判标准与 checklist 生成。

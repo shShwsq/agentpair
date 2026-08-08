@@ -28,7 +28,7 @@ export interface UserPreferenceOut {
   updated_at: string | null
 }
 
-/** 保存用户偏好请求(PUT /memory/preferences body) */
+/** 保存 User Profile 请求(PUT /memory/preferences body) */
 export interface SaveUserPreferenceRequest {
   preferences: Record<string, unknown>
   custom_prompt: string

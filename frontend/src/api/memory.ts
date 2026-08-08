@@ -33,7 +33,7 @@ export function getPreferences(): Promise<UserPreferenceOut> {
   return client.get('/memory/preferences').then((r) => r.data)
 }
 
-/** 保存/更新用户偏好(get_or_create) */
+/** 保存/更新 User Profile (get_or_create) */
 export function savePreferences(body: SaveUserPreferenceRequest): Promise<UserPreferenceOut> {
   return client.put('/memory/preferences', body).then((r) => r.data)
 }

@@ -1,7 +1,7 @@
 """长期记忆管理相关的 Pydantic schema
 
 对应 /memory 系列 API:
-- UserPreferenceOut/SaveUserPreferenceRequest:用户偏好(1:1)
+- UserPreferenceOut/SaveUserPreferenceRequest:User Profile (1:1)
 - UserMemoryOut/SaveUserMemoryRequest:全局长期记忆(1:1)
 - ProjectOut/SaveProjectRequest/ProjectListResponse:分项目记忆(1:N)
 
@@ -31,7 +31,7 @@ class UserPreferenceOut(BaseModel):
 
 
 class SaveUserPreferenceRequest(BaseModel):
-    """保存用户偏好请求(PUT /memory/preferences)"""
+    """保存 User Profile 请求(PUT /memory/preferences)"""
 
     preferences: dict = Field(default_factory=dict)
     custom_prompt: str = Field(default="", max_length=8000)

@@ -30,9 +30,9 @@ def test_first_round_includes_global_memory():
     task = _mk_task()
     msg = _build_prompt_message(
         task, 1, None, "[repo context]", "/home/user/repos/r", None,
-        global_memory="以下是跨任务积累的通用经验,按类别组织(执行时遵循):\n## Tech Stack\n- PG",
+        global_memory="The following is general experience accumulated across tasks, organized by category (follow during execution):\n## Tech Stack\n- PG",
     )
-    assert "以下是跨任务积累的通用经验" in msg
+    assert "The following is general experience accumulated across tasks" in msg
     assert "## Tech Stack\n- PG" in msg
 
 

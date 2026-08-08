@@ -55,8 +55,8 @@ def test_react_section_uses_memory_summary():
     db = _mock_db(first_result=proj)
     result = build_react_agent_memory_section(db, 1, "https://github.com/a/b")
     # 引导语开头(非 ## 标题,避免与内层 ## 类别层级冲突)
-    assert result.startswith("以下是你对该项目的已知问题与历史记忆")
-    assert "项目别名: my-repo" in result
+    assert result.startswith("The following is your known issues and historical memory")
+    assert "Project alias: my-repo" in result
     # 注入的是精简版,不是完整 memory_content
     assert "## Hard Constraints\n- 精简版摘要" in result
     assert "这是很长的完整记忆不应出现" not in result
@@ -72,7 +72,7 @@ def test_react_section_summary_empty_falls_back_to_content():
     proj.alias = None
     db = _mock_db(first_result=proj)
     result = build_react_agent_memory_section(db, 1, "https://github.com/a/b")
-    assert result.startswith("以下是你对该项目的已知问题与历史记忆")
+    assert result.startswith("The following is your known issues and historical memory")
     # 回退用完整 memory_content
     assert "## Hard Constraints\n- rule A" in result
     assert "## Known Issues\n- issue B" in result
@@ -105,13 +105,13 @@ def test_user_agent_section_pref_only():
     db = MagicMock()
     db.query.return_value.filter.return_value.first.side_effect = [pref, None]
     result = build_user_agent_memory_section(db, 1)
-    assert "## 用户偏好" in result
-    assert "输出语言: 中文" in result
-    assert "重点关注领域: security, perf" in result
-    assert "评判风格: strict" in result
-    assert "自定义补充: be thorough" in result
+    assert "## User Profile" in result
+    assert "Output language: 中文" in result
+    assert "Focus areas: security, perf" in result
+    assert "Evaluation style: strict" in result
+    assert "Additional notes: be thorough" in result
     # 无全局记忆段
-    assert "长期记忆" not in result
+    assert "long-term memory" not in result
 
 
 def test_user_agent_section_global_memory_with_categories():
@@ -121,7 +121,7 @@ def test_user_agent_section_global_memory_with_categories():
     db = MagicMock()
     db.query.return_value.filter.return_value.first.side_effect = [None, mem]
     result = build_user_agent_memory_section(db, 1)
-    assert "以下是跨任务积累的长期记忆" in result
+    assert "long-term memory accumulated across tasks" in result
     assert "## Hard Constraints\n- rule A" in result
     assert "## Preferences\n- prefers English" in result
 
@@ -136,8 +136,8 @@ def test_user_agent_section_both_pref_and_memory():
     db.query.return_value.filter.return_value.first.side_effect = [pref, mem]
     result = build_user_agent_memory_section(db, 1)
     # 两段都有,用 \n\n 拼接
-    assert "## 用户偏好" in result
-    assert "以下是跨任务积累的长期记忆" in result
+    assert "## User Profile" in result
+    assert "long-term memory accumulated across tasks" in result
     assert "## Tech Stack\n- PostgreSQL" in result
 
 
@@ -150,7 +150,7 @@ def test_user_agent_section_with_project_memory():
     db = MagicMock()
     db.query.return_value.filter.return_value.first.side_effect = [None, None, proj]
     result = build_user_agent_memory_section(db, 1, "https://github.com/a/b")
-    assert "以下是对该项目的已知问题与历史记忆摘要" in result
+    assert "summary of known issues and historical memory" in result
     assert "## Hard Constraints\n- wire_api 必须 responses" in result
     assert "完整记忆不应被使用" not in result  # 用 summary 不用 content
 
@@ -173,12 +173,12 @@ def test_user_agent_section_no_project_when_no_repo_url():
     db = MagicMock()
     db.query.return_value.filter.return_value.first.side_effect = [None, mem]
     result = build_user_agent_memory_section(db, 1)  # 不传 repo_url
-    assert "以下是跨任务积累的长期记忆" in result
-    assert "项目记忆" not in result
+    assert "long-term memory accumulated across tasks" in result
+    assert "summary of known issues and historical memory" not in result
 
 
 def test_user_agent_section_pref_global_and_project_combined():
-    """三段共存:用户偏好 + 全局记忆 + 项目记忆精简版。"""
+    """三段共存:User Profile + 全局记忆 + 项目记忆精简版。"""
     pref = MagicMock()
     pref.preferences = {"output_language": "中文"}
     pref.custom_prompt = ""
@@ -190,9 +190,9 @@ def test_user_agent_section_pref_global_and_project_combined():
     db = MagicMock()
     db.query.return_value.filter.return_value.first.side_effect = [pref, mem, proj]
     result = build_user_agent_memory_section(db, 1, "https://github.com/a/b")
-    assert "## 用户偏好" in result
-    assert "以下是跨任务积累的长期记忆" in result
-    assert "以下是对该项目的已知问题与历史记忆摘要" in result
+    assert "## User Profile" in result
+    assert "long-term memory accumulated across tasks" in result
+    assert "summary of known issues and historical memory" in result
     assert "## Hard Constraints\n- rule A" in result
 
 
@@ -221,7 +221,7 @@ def test_global_section_returns_content_with_header():
     db = _mock_db(first_result=mem)
     result = build_global_memory_section(db, 1)
     # 执行侧 header(区别于 user_agent 的"长期记忆"措辞)
-    assert result.startswith("以下是跨任务积累的通用经验,按类别组织(执行时遵循):")
+    assert result.startswith("The following is general experience accumulated across tasks, organized by category (follow during execution):")
     assert "## Hard Constraints\n- wire_api 必须 responses" in result
     assert "## Lessons Learned\n- codex bridge 必须 SSE" in result
 
@@ -238,5 +238,5 @@ def test_global_section_truncates_long_content():
     body = result.split("\n", 1)[1]
     # 截断保留头部内容 + 加截断标记,整体比原文短
     assert body.startswith("X" * 100)
-    assert "[...已截断...]" in body
+    assert "[...truncated...]" in body
     assert len(body) < len(mem.content)
