@@ -127,6 +127,7 @@ def run_codex_cli_agent(
     followup_query: str | None = None,
     repo_context: str | None = None,
     previous_plan: list[dict[str, Any]] | None = None,
+    agent_type: str = "codex_cli",
 ) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
     """跑一轮 Codex CLI 执行器
 
@@ -145,7 +146,7 @@ def run_codex_cli_agent(
         followup_query=followup_query,
         repo_context=repo_context,
         previous_plan=previous_plan,
-        agent_type="codex_cli",
+        agent_type=agent_type,
         pre_bridge_hook=_codex_pre_bridge_hook,
         # Codex 不需要 credential_env_builder:
         # API Key 经 config.toml 的 env_key="CODEX_API_KEY" 指定,
