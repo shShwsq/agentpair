@@ -21,7 +21,7 @@ import {
   highlightActiveLine,
   placeholder as cmPlaceholder,
 } from '@codemirror/view'
-import { defaultKeymap, historyKeymap, history, indentWithTab } from '@codemirror/commands'
+import { defaultKeymap, historyKeymap, history, indentWithTab, undo, redo, undoDepth, redoDepth } from '@codemirror/commands'
 import { markdown } from '@codemirror/lang-markdown'
 import { HighlightStyle, syntaxHighlighting, defaultHighlightStyle, indentUnit } from '@codemirror/language'
 import { tags as t } from '@lezer/highlight'
@@ -40,10 +40,16 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void
+  /** 撤销栈状态变化(供父组件驱动撤回/恢复按钮的 disabled 态) */
+  (e: 'historyChange', payload: { canUndo: boolean; canRedo: boolean }): void
 }>()
 
 const hostRef = ref<HTMLDivElement | null>(null)
 let view: EditorView | null = null
+
+/** 当前撤销栈状态(内部追踪 + 通过 historyChange 事件外抛) */
+const canUndo = ref(false)
+const canRedo = ref(false)
 
 // 用 Compartment 包装可动态切换的配置(placeholder / editable)
 const placeholderCompartment = new Compartment()
@@ -169,10 +175,18 @@ function buildExtensions() {
     placeholderCompartment.of(cmPlaceholder(props.placeholder)),
     editorTheme,
     EditorView.contentAttributes.of({ spellcheck: 'false' }),
-    // 内容变更 → v-model
+    // 内容变更 → v-model;撤销栈深度变化 → historyChange
     EditorView.updateListener.of((update) => {
       if (update.docChanged) {
         emit('update:modelValue', update.state.doc.toString())
+      }
+      // 撤销/恢复本身也会触发 update(非 docChanged 场景),需在每次 update 重算深度
+      const nextUndo = undoDepth(update.state) > 0
+      const nextRedo = redoDepth(update.state) > 0
+      if (nextUndo !== canUndo.value || nextRedo !== canRedo.value) {
+        canUndo.value = nextUndo
+        canRedo.value = nextRedo
+        emit('historyChange', { canUndo: nextUndo, canRedo: nextRedo })
       }
     }),
   ]
@@ -190,6 +204,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  // 卸载时通知父组件重置按钮态(切预览 / 切文件场景)
+  emit('historyChange', { canUndo: false, canRedo: false })
   view?.destroy()
   view = null
 })
@@ -235,6 +251,14 @@ defineExpose({
   focus: () => view?.focus(),
   /** 获取当前文档长度(字符数) */
   getLength: () => view?.state.doc.length ?? 0,
+  /** 撤回一步(调用 CodeMirror undo 命令) */
+  undo: () => {
+    if (view) undo(view)
+  },
+  /** 恢复一步(调用 CodeMirror redo 命令) */
+  redo: () => {
+    if (view) redo(view)
+  },
 })
 </script>
 

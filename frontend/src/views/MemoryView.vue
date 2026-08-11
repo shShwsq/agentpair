@@ -167,6 +167,42 @@ const projectIds = reactive<Record<string, string>>({})
 // ============================================================
 const mode = ref<'edit' | 'preview'>('edit')
 
+// ============================================================
+// 编辑器实例 + 撤回/恢复状态
+// ============================================================
+/** CodeMirror 编辑器实例引用(用于调用 undo/redo) */
+const editorRef = ref<InstanceType<typeof CodeMirrorEditor> | null>(null)
+/** 当前撤销栈是否有内容(由编辑器 historyChange 事件驱动) */
+const editorCanUndo = ref(false)
+/** 当前恢复栈是否有内容 */
+const editorCanRedo = ref(false)
+
+function onHistoryChange(payload: { canUndo: boolean; canRedo: boolean }): void {
+  editorCanUndo.value = payload.canUndo
+  editorCanRedo.value = payload.canRedo
+}
+
+/** 撤回按钮可用:编辑模式 + 非保存/删除中 + 有撤销栈 */
+const canUndoNow = computed(
+  () => mode.value === 'edit' && !saving.value && !deleting.value && editorCanUndo.value,
+)
+/** 恢复按钮可用:编辑模式 + 非保存/删除中 + 有恢复栈 */
+const canRedoNow = computed(
+  () => mode.value === 'edit' && !saving.value && !deleting.value && editorCanRedo.value,
+)
+
+function handleUndo(): void {
+  if (!canUndoNow.value) return
+  editorRef.value?.undo()
+  editorRef.value?.focus()
+}
+
+function handleRedo(): void {
+  if (!canRedoNow.value) return
+  editorRef.value?.redo()
+  editorRef.value?.focus()
+}
+
 /** 预览 HTML(marked 渲染 + DOMPurify 净化) */
 const previewHtml = computed(() => {
   const md = drafts[activeId.value] ?? ''
@@ -601,6 +637,30 @@ onMounted(() => {
                   {{ deleting ? '删除中...' : '删除' }}
                 </button>
                 <button
+                  class="btn-icon toolbar-icon-btn"
+                  type="button"
+                  title="撤回 (Ctrl+Z)"
+                  :disabled="!canUndoNow"
+                  @click="handleUndo"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="1 4 1 10 7 10" />
+                    <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                  </svg>
+                </button>
+                <button
+                  class="btn-icon toolbar-icon-btn"
+                  type="button"
+                  title="恢复 (Ctrl+Shift+Z)"
+                  :disabled="!canRedoNow"
+                  @click="handleRedo"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="23 4 23 10 17 10" />
+                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                  </svg>
+                </button>
+                <button
                   class="btn btn-primary"
                   :disabled="!activeCanSave || saving || deleting || activeOverLimit"
                   @click="handleSave"
@@ -627,14 +687,19 @@ onMounted(() => {
               <div v-if="loading" class="content-placeholder">
                 <span class="status-spinner" /> 加载中...
               </div>
-              <!-- 编辑模式:CodeMirror 编辑器(行号、Markdown 高亮、软换行对齐) -->
+              <!-- 编辑模式:CodeMirror 编辑器(行号、Markdown 高亮、软换行对齐)
+                   :key 绑定文件 id → 切换文件时强制重建编辑器实例,清空撤销栈,
+                   避免撤回跨文件污染(undo 把上一文件内容写回当前 draft) -->
               <CodeMirrorEditor
                 v-else-if="mode === 'edit'"
+                :key="activeEntry.id"
+                ref="editorRef"
                 v-model="drafts[activeEntry.id]"
                 class="code-area"
                 :class="{ invalid: activeOverLimit }"
                 placeholder="用 Markdown 编写。支持标题、列表、代码块等。"
                 :disabled="saving || deleting"
+                @history-change="onHistoryChange"
               />
               <!-- 预览模式 -->
               <div v-else class="md-preview">
@@ -1028,6 +1093,23 @@ onMounted(() => {
 .mode-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* 工具栏撤回/恢复图标按钮(与 .btn 高度对齐,32px 方便点击) */
+.toolbar-icon-btn {
+  width: 32px;
+  height: 32px;
+}
+
+/* 禁用态:预览模式 / 保存中 / 撤销栈空时灰显,否则视觉上和可用态无差异 */
+.toolbar-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.toolbar-icon-btn:disabled:hover {
+  background: transparent;
+  color: var(--color-text-muted);
 }
 
 /* 内容区(全屏铺满,代码编辑器风格) */
