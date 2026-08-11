@@ -11,6 +11,7 @@
  * - content 卡片用 role/type 对应配色
  */
 import { computed, ref } from 'vue'
+import { renderMarkdown } from '@/utils/markdown'
 
 interface StreamingItem {
   conv_id: string
@@ -143,6 +144,24 @@ const displayContent = computed(() => {
 })
 
 /**
+ * Markdown 渲染后的 HTML(用于 v-html 注入)。
+ *
+ * 应用范围:reasoning(思考)、thinking 正文、react_agent/user_agent 正式输出、
+ * 用户补充消息、summary 等所有可能含 markdown 语法的 LLM/用户文本。
+ *
+ * 不渲染:tool_call/tool_result 详情(代码/参数,等宽纯文本更清晰)。
+ * tool_call 的 intent 标题是单行意图,也不渲染。
+ */
+const streamingReasoningHtml = computed(() => renderMarkdown(streamingReasoning.value))
+const streamingContentHtml = computed(() => renderMarkdown(streamingDisplayContent.value))
+const reasoningHtml = computed(() => renderMarkdown(props.item.reasoning || ''))
+const displayContentHtml = computed(() => {
+  // tool_call 详情走等宽纯文本,不渲染 markdown
+  if (toolCallParts.value) return ''
+  return renderMarkdown(displayContent.value)
+})
+
+/**
  * tool_result / tool_call 长详情可折叠:
  * - tool_result:子智能体输出可能数千字符(审计报告)
  * - tool_call:子智能体参数可能很长(Agent 的 prompt + description)
@@ -190,14 +209,15 @@ const detailLabel = computed(() =>
             </span>
           </span>
         </div>
-        <div v-if="streamingExpanded" class="msg-reasoning-content">{{ streamingReasoning }}</div>
+        <div v-if="streamingExpanded" class="msg-reasoning-content markdown-body" v-html="streamingReasoningHtml" />
       </div>
 
       <!-- content 独立卡片 -->
       <div
         v-if="streamingDisplayContent"
-        :class="['msg-content-card', `msg-${variant}`]"
-      >{{ streamingDisplayContent }}</div>
+        :class="['msg-content-card', 'markdown-body', `msg-${variant}`]"
+        v-html="streamingContentHtml"
+      />
 
       <div
         v-if="isActive && !item.streaming.reasoning && !streamingDisplayContent"
@@ -223,7 +243,7 @@ const detailLabel = computed(() =>
             {{ item.reasoning.length }} 字符
           </span>
         </div>
-        <div v-if="evalExpanded" class="msg-reasoning-content">{{ item.reasoning }}</div>
+        <div v-if="evalExpanded" class="msg-reasoning-content markdown-body" v-html="reasoningHtml" />
       </div>
 
       <!-- content 独立卡片 -->
@@ -248,11 +268,12 @@ const detailLabel = computed(() =>
         <div v-if="detailExpanded" class="msg-tool-result-body">{{ displayContent }}</div>
       </div>
 
-      <!-- 其他类型:普通卡片 -->
+      <!-- 其他类型:普通卡片(markdown 渲染) -->
       <div
-        v-else-if="displayContent"
-        :class="['msg-content-card', `msg-${variant}`]"
-      >{{ displayContent }}</div>
+        v-else-if="displayContentHtml"
+        :class="['msg-content-card', 'markdown-body', `msg-${variant}`]"
+        v-html="displayContentHtml"
+      />
     </template>
   </div>
 </template>
@@ -329,6 +350,13 @@ const detailLabel = computed(() =>
   margin-top: var(--space-1);
   padding-top: var(--space-2);
   border-top: 1px dashed var(--color-border);
+}
+
+/* markdown-body 容器覆盖 pre-wrap:marked 已把换行转成 <p>/<br>,
+   再保留 pre-wrap 会在 <p> 之间产生多余空白行。 */
+.msg-reasoning-content.markdown-body,
+.msg-content-card.markdown-body {
+  white-space: normal;
 }
 
 /* 流式思考时给 reasoning 卡片加脉冲动画 */

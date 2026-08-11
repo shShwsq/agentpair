@@ -49,6 +49,7 @@ import {
 import { subscribeTaskStream } from '@/api/stream'
 import { listArtifacts } from '@/api/taskArtifacts'
 import { extractErrorMessage } from '@/utils/error'
+import { renderMarkdown } from '@/utils/markdown'
 import type {
   AgentCheckpointEventData,
   AnswerItem,
@@ -1551,6 +1552,11 @@ const inferredMetaFields = computed<InferredMetaField[]>(() => {
   return fields
 })
 
+/** 结果清单正文 markdown 渲染(审计结果通常含标题/列表/代码块) */
+function renderResultContent(content: string | null | undefined): string {
+  return renderMarkdown(content)
+}
+
 function getResultMetaItems(r: TaskResult): ResultMetaItem[] {
   const items: ResultMetaItem[] = []
   for (const f of inferredMetaFields.value) {
@@ -1780,7 +1786,7 @@ function parseCheckpoint(item: DisplayItem): {
                   <h4>{{ r.title }}</h4>
                   <span class="round-tag">第 {{ r.round_idx }} 轮</span>
                 </div>
-                <p class="result-content">{{ r.content }}</p>
+                <div class="result-content markdown-body" v-html="renderResultContent(r.content)" />
                 <div v-if="getResultMetaItems(r).length > 0" class="result-meta">
                   <span
                     v-for="item in getResultMetaItems(r)"
@@ -2112,7 +2118,7 @@ function parseCheckpoint(item: DisplayItem): {
           </dl>
           <div class="overview-input">
             <span class="label">用户意图</span>
-            <p>{{ task.user_input }}</p>
+            <p class="markdown-body" v-html="renderMarkdown(task.user_input)"></p>
           </div>
           <div v-if="task.current_stage" class="overview-stage">
             <span class="label">当前阶段</span>
@@ -2434,6 +2440,11 @@ function parseCheckpoint(item: DisplayItem): {
   overflow-y: auto;
 }
 
+/* overview-input 的 p 是 markdown-body 容器,覆盖 pre-wrap */
+.overview-input p.markdown-body {
+  white-space: normal;
+}
+
 /* ---- 状态徽章 ---- */
 .badge {
   display: inline-flex;
@@ -2740,9 +2751,13 @@ function parseCheckpoint(item: DisplayItem): {
 .result-content {
   font-size: var(--fs-sm);
   color: var(--color-text-secondary);
-  white-space: pre-wrap;
   word-break: break-word;
   margin-bottom: var(--space-3);
+}
+
+/* markdown-body 容器覆盖 pre-wrap:marked 已处理换行 */
+.result-content.markdown-body {
+  white-space: normal;
 }
 
 .result-meta {
