@@ -13,7 +13,7 @@
  *
  * 任务创建时可在 TaskCreateView 做任务级覆盖(不改本页默认值)。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import AppHeader from '@/components/AppHeader.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
@@ -205,8 +205,53 @@ function formatTime(iso: string | null | undefined): string {
   }
 }
 
+// ============================================================
+// 字段帮助气泡:圆圈问号按钮,点击显示说明,点击外部关闭
+// 同一时刻只展开一个字段气泡,点开新字段时旧的自动收起
+// ============================================================
+/** 各字段帮助说明(点击问号按钮展示) */
+const FIELD_HELP: Record<string, string> = {
+  checkpoint_interval:
+    'user_agent 每 K 个 react_agent 迭代做一次轻量检查点评估,判断方向是否跑偏。K 越小评估越频繁(更早纠偏,但开销更大),K 越大开销越小(但跑偏更晚发现)。',
+  max_interrupts:
+    '防死锁上限:单轮协作中 user_agent 最多打断 react_agent 的次数。超过此上限后即使发现跑偏也只观察不干预,把控制权交还 react_agent。',
+  allow_interrupt:
+    '开启后,user_agent 在检查点评估发现跑偏时,可通过中断队列向 react_agent 注入追问指令(软中断),不强行终止当前迭代。',
+  allow_verify:
+    '开启后,user_agent 可自行调用工具验证 react_agent 的产出。目前为实验性开关,默认关闭。任务还需在提交时配置测试环境 URL 才会真正触发验证。',
+  verifier_auth_mode:
+    '仅在开启「自行验证」时生效。逐动作授权:每个验证动作(HTTP 请求 / PoC 脚本)执行前弹窗让用户确认;直接执行:验证动作自动执行不弹窗。此为用户级默认,任务创建或运行时可单独覆盖。',
+  policy_advanced:
+    '高级选项。内置 react_agent 和外部 CLI agent 的迭代节奏可能不同,可分别设置评估频率。留空则使用统一 K 值。',
+}
+
+/** 当前展开帮助气泡的字段 key(null=无展开) */
+const openHelpKey = ref<string | null>(null)
+/** 字段帮助气泡容器 DOM(按 key 索引,用于点击外部判断) */
+const fieldHelpRefs = new Map<string, HTMLElement>()
+
+/** 切换某字段帮助气泡:已展开则收起,未展开则展开(同时收起其他字段) */
+function toggleFieldHelp(key: string): void {
+  openHelpKey.value = openHelpKey.value === key ? null : key
+}
+
+/** 点击帮助容器外部时关闭气泡 */
+function onDocClick(e: MouseEvent): void {
+  if (openHelpKey.value) {
+    const el = fieldHelpRefs.get(openHelpKey.value)
+    if (!el || !el.contains(e.target as Node)) {
+      openHelpKey.value = null
+    }
+  }
+}
+
 onMounted(() => {
   loadPolicy()
+  document.addEventListener('click', onDocClick)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', onDocClick)
 })
 </script>
 
@@ -257,42 +302,101 @@ onMounted(() => {
         <section v-else class="policy-card">
           <div class="policy-grid">
             <label class="policy-field">
-              <span class="policy-label">评估频率 K</span>
+              <div class="field-head">
+                <span class="policy-label">评估频率 K</span>
+                <div
+                  :ref="(el) => { if (el) fieldHelpRefs.set('checkpoint_interval', el as HTMLElement); else fieldHelpRefs.delete('checkpoint_interval') }"
+                  class="field-help-wrap"
+                >
+                  <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('checkpoint_interval')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+                  </button>
+                  <Transition name="help-fade">
+                    <div v-if="openHelpKey === 'checkpoint_interval'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.checkpoint_interval }}</div>
+                  </Transition>
+                </div>
+              </div>
               <input
                 v-model.number="policyInterval"
                 type="number" min="1" max="20"
                 class="policy-input"
                 :disabled="saving"
               />
-              <span class="policy-hint">每 K 个迭代评估一次</span>
             </label>
 
             <label class="policy-field">
-              <span class="policy-label">每轮最大打断</span>
+              <div class="field-head">
+                <span class="policy-label">每轮最大打断</span>
+                <div
+                  :ref="(el) => { if (el) fieldHelpRefs.set('max_interrupts', el as HTMLElement); else fieldHelpRefs.delete('max_interrupts') }"
+                  class="field-help-wrap"
+                >
+                  <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('max_interrupts')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+                  </button>
+                  <Transition name="help-fade">
+                    <div v-if="openHelpKey === 'max_interrupts'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.max_interrupts }}</div>
+                  </Transition>
+                </div>
+              </div>
               <input
                 v-model.number="policyMaxInterrupts"
                 type="number" min="0" max="10"
                 class="policy-input"
                 :disabled="saving || !policyAllowInterrupt"
               />
-              <span class="policy-hint">防死锁上限</span>
             </label>
           </div>
 
           <label class="policy-toggle-row">
             <input v-model="policyAllowInterrupt" type="checkbox" :disabled="saving" />
             <span>允许 user_agent 打断 react_agent</span>
+            <div
+              :ref="(el) => { if (el) fieldHelpRefs.set('allow_interrupt', el as HTMLElement); else fieldHelpRefs.delete('allow_interrupt') }"
+              class="field-help-wrap"
+            >
+              <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('allow_interrupt')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+              </button>
+              <Transition name="help-fade">
+                <div v-if="openHelpKey === 'allow_interrupt'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.allow_interrupt }}</div>
+              </Transition>
+            </div>
           </label>
 
           <label class="policy-toggle-row">
             <input v-model="policyAllowVerify" type="checkbox" :disabled="saving" />
             <span>允许 user_agent 自行验证 <span class="policy-experimental">(实验性)</span></span>
+            <div
+              :ref="(el) => { if (el) fieldHelpRefs.set('allow_verify', el as HTMLElement); else fieldHelpRefs.delete('allow_verify') }"
+              class="field-help-wrap"
+            >
+              <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('allow_verify')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+              </button>
+              <Transition name="help-fade">
+                <div v-if="openHelpKey === 'allow_verify'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.allow_verify }}</div>
+              </Transition>
+            </div>
           </label>
 
           <Transition name="collapse">
             <div v-show="policyAllowVerify" class="verifier-config">
               <label class="policy-field">
-                <span class="policy-label">验证授权模式</span>
+                <div class="field-head">
+                  <span class="policy-label">验证授权模式</span>
+                  <div
+                    :ref="(el) => { if (el) fieldHelpRefs.set('verifier_auth_mode', el as HTMLElement); else fieldHelpRefs.delete('verifier_auth_mode') }"
+                    class="field-help-wrap"
+                  >
+                    <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('verifier_auth_mode')">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+                    </button>
+                    <Transition name="help-fade">
+                      <div v-if="openHelpKey === 'verifier_auth_mode'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.verifier_auth_mode }}</div>
+                    </Transition>
+                  </div>
+                </div>
                 <select
                   v-model="policyVerifierAuthMode"
                   class="policy-input"
@@ -301,7 +405,6 @@ onMounted(() => {
                   <option value="per_action">逐动作授权(每个动作弹窗确认)</option>
                   <option value="direct">直接执行(不弹窗)</option>
                 </select>
-                <span class="policy-hint">任务创建时可单独覆盖此默认值</span>
               </label>
             </div>
           </Transition>
@@ -309,6 +412,17 @@ onMounted(() => {
           <label class="policy-toggle-row">
             <input v-model="policyAdvanced" type="checkbox" :disabled="saving" />
             <span>分别配置内置 / CLI agent 的 K 值</span>
+            <div
+              :ref="(el) => { if (el) fieldHelpRefs.set('policy_advanced', el as HTMLElement); else fieldHelpRefs.delete('policy_advanced') }"
+              class="field-help-wrap"
+            >
+              <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('policy_advanced')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+              </button>
+              <Transition name="help-fade">
+                <div v-if="openHelpKey === 'policy_advanced'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.policy_advanced }}</div>
+              </Transition>
+            </div>
           </label>
 
           <Transition name="collapse">
@@ -357,37 +471,6 @@ onMounted(() => {
 
             <span v-if="policyDirty" class="dirty-dot-hint">有未保存改动</span>
           </div>
-        </section>
-
-        <!-- 说明区 -->
-        <section class="info-section">
-          <h2 class="info-title">字段说明</h2>
-          <dl class="info-list">
-            <div class="info-item">
-              <dt>评估频率 K</dt>
-              <dd>user_agent 每 K 个 react_agent 迭代做一次轻量检查点评估,判断方向是否跑偏。K 越小评估越频繁(更早纠偏,但开销更大),K 越大开销越小(但跑偏更晚发现)。</dd>
-            </div>
-            <div class="info-item">
-              <dt>打断权限</dt>
-              <dd>开启后,user_agent 在检查点评估发现跑偏时,可通过中断队列向 react_agent 注入追问指令(软中断),不强行终止当前迭代。</dd>
-            </div>
-            <div class="info-item">
-              <dt>每轮最大打断</dt>
-              <dd>防死锁上限:单轮协作中 user_agent 最多打断 react_agent 的次数。超过此上限后即使发现跑偏也只观察不干预,把控制权交还 react_agent。</dd>
-            </div>
-            <div class="info-item">
-              <dt>分别配置 K 值</dt>
-              <dd>高级选项。内置 react_agent 和外部 CLI agent 的迭代节奏可能不同,可分别设置评估频率。留空则使用统一 K 值。</dd>
-            </div>
-            <div class="info-item">
-              <dt>自行验证(实验性)</dt>
-              <dd>开启后,user_agent 可自行调用工具验证 react_agent 的产出。目前为实验性开关,默认关闭。任务还需在提交时配置测试环境 URL 才会真正触发验证。</dd>
-            </div>
-            <div class="info-item">
-              <dt>验证授权模式</dt>
-              <dd>仅在开启「自行验证」时生效。逐动作授权:每个验证动作(HTTP 请求 / PoC 脚本)执行前弹窗让用户确认;直接执行:验证动作自动执行不弹窗。此为用户级默认,任务创建或运行时可单独覆盖。</dd>
-            </div>
-          </dl>
         </section>
       </main>
     </div>
@@ -538,7 +621,6 @@ onMounted(() => {
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-sm);
   padding: var(--space-5);
-  margin-bottom: var(--space-5);
 }
 
 .policy-grid {
@@ -583,9 +665,75 @@ onMounted(() => {
   cursor: not-allowed;
 }
 
-.policy-hint {
-  font-size: var(--fs-xs);
+/* ---- 字段头部:标签 + 帮助按钮(问号) ---- */
+.field-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* ---- 字段级帮助按钮(问号)+ 说明气泡 ---- */
+.field-help-wrap {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+}
+
+.field-help-btn {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--color-text-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: color var(--transition-fast);
+}
+
+.field-help-btn:hover {
+  color: var(--color-primary);
+}
+
+.field-help-btn svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.field-help-popover {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  left: 0;
+  z-index: 20;
+  width: max-content;
+  min-width: 2em;
+  max-width: min(300px, 80vw);
+  max-height: 240px;
+  overflow-y: auto;
+  padding: var(--space-3);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-relaxed);
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  word-break: break-word;
+}
+
+/* 帮助气泡出现/消失动画 */
+.help-fade-enter-active,
+.help-fade-leave-active {
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+}
+
+.help-fade-enter-from,
+.help-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
 }
 
 .policy-toggle-row {
@@ -703,42 +851,6 @@ onMounted(() => {
 
 .btn-link:hover {
   text-decoration: underline;
-}
-
-/* ---- 说明区 ---- */
-.info-section {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  padding: var(--space-5);
-}
-
-.info-title {
-  font-size: var(--fs-md);
-  font-weight: var(--fw-semibold);
-  margin: 0 0 var(--space-3);
-  color: var(--color-text);
-}
-
-.info-list {
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-.info-item dt {
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
-  color: var(--color-text);
-  margin-bottom: 2px;
-}
-
-.info-item dd {
-  margin: 0;
-  font-size: var(--fs-sm);
-  color: var(--color-text-secondary);
-  line-height: var(--lh-relaxed);
 }
 
 /* ---- collapse 过渡 ---- */
