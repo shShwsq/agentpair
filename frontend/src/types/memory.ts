@@ -35,6 +35,10 @@ export interface SaveUserPreferenceRequest {
  * 作为用户级默认值,任务级可通过 task.params["_agent_policy"] 覆盖。
  */
 export interface SaveAgentPolicyRequest {
+  /** 是否启用 user_agent(关闭=单 agent 模式,跳过评估/打断/验证) */
+  user_agent_enabled: boolean
+  /** user_agent 协作总轮次(1-10,仅 user_agent 启用时生效) */
+  max_rounds: number
   /** 统一 K 值,每 K 个迭代评估一次 */
   checkpoint_interval: number
   /** 高级:内置 react_agent 专用 K 值(null=用统一值) */

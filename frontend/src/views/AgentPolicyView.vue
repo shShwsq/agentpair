@@ -33,6 +33,8 @@ function toggleWorkspace(): void {
 // 默认策略值(与后端 DEFAULT_AGENT_POLICY 对齐)
 // ============================================================
 const DEFAULT_POLICY = {
+  user_agent_enabled: true,
+  max_rounds: 4,
   checkpoint_interval: 3,
   checkpoint_interval_builtin: null as number | null,
   checkpoint_interval_cli: null as number | null,
@@ -45,6 +47,10 @@ const DEFAULT_POLICY = {
 // ============================================================
 // 表单状态
 // ============================================================
+/** 是否启用 user_agent(关闭=单 agent 模式,跳过评估/打断/验证) */
+const policyUserAgentEnabled = ref(DEFAULT_POLICY.user_agent_enabled)
+/** user_agent 协作总轮次(1-10,仅 user_agent 启用时生效) */
+const policyMaxRounds = ref(DEFAULT_POLICY.max_rounds)
 /** 统一 K 值:每 K 个迭代评估一次(1-20) */
 const policyInterval = ref(DEFAULT_POLICY.checkpoint_interval)
 /** 内置 react_agent 专用 K 值(null=用统一值) */
@@ -64,6 +70,8 @@ const policyAdvanced = ref(false)
 
 /** 策略原始值(脏检查基准,hydrate 时写入) */
 const originalPolicy = ref({
+  userAgentEnabled: DEFAULT_POLICY.user_agent_enabled,
+  maxRounds: DEFAULT_POLICY.max_rounds,
   interval: DEFAULT_POLICY.checkpoint_interval,
   intervalBuiltin: DEFAULT_POLICY.checkpoint_interval_builtin as number | null,
   intervalCli: DEFAULT_POLICY.checkpoint_interval_cli as number | null,
@@ -76,6 +84,8 @@ const originalPolicy = ref({
 /** agent 策略是否有未保存改动 */
 const policyDirty = computed(() => {
   return (
+    policyUserAgentEnabled.value !== originalPolicy.value.userAgentEnabled ||
+    policyMaxRounds.value !== originalPolicy.value.maxRounds ||
     policyInterval.value !== originalPolicy.value.interval ||
     policyIntervalBuiltin.value !== originalPolicy.value.intervalBuiltin ||
     policyIntervalCli.value !== originalPolicy.value.intervalCli ||
@@ -88,6 +98,8 @@ const policyDirty = computed(() => {
 
 /** 重置策略表单为系统默认值(不立即保存) */
 function resetPolicyToDefault(): void {
+  policyUserAgentEnabled.value = DEFAULT_POLICY.user_agent_enabled
+  policyMaxRounds.value = DEFAULT_POLICY.max_rounds
   policyInterval.value = DEFAULT_POLICY.checkpoint_interval
   policyIntervalBuiltin.value = DEFAULT_POLICY.checkpoint_interval_builtin
   policyIntervalCli.value = DEFAULT_POLICY.checkpoint_interval_cli
@@ -123,6 +135,8 @@ async function loadPolicy(): Promise<void> {
     const data = await getPreferences()
     updatedAt.value = data.updated_at ?? null
     const policy = data.agent_policy
+    policyUserAgentEnabled.value = policy?.user_agent_enabled ?? DEFAULT_POLICY.user_agent_enabled
+    policyMaxRounds.value = policy?.max_rounds ?? DEFAULT_POLICY.max_rounds
     policyInterval.value = policy?.checkpoint_interval ?? DEFAULT_POLICY.checkpoint_interval
     policyIntervalBuiltin.value = policy?.checkpoint_interval_builtin ?? DEFAULT_POLICY.checkpoint_interval_builtin
     policyIntervalCli.value = policy?.checkpoint_interval_cli ?? DEFAULT_POLICY.checkpoint_interval_cli
@@ -134,6 +148,8 @@ async function loadPolicy(): Promise<void> {
     policyAdvanced.value = policyIntervalBuiltin.value !== null || policyIntervalCli.value !== null
     // 同步原始值(脏检查基准)
     originalPolicy.value = {
+      userAgentEnabled: policyUserAgentEnabled.value,
+      maxRounds: policyMaxRounds.value,
       interval: policyInterval.value,
       intervalBuiltin: policyIntervalBuiltin.value,
       intervalCli: policyIntervalCli.value,
@@ -154,6 +170,8 @@ async function handleSave(): Promise<void> {
   saving.value = true
   try {
     const body: SaveAgentPolicyRequest = {
+      user_agent_enabled: policyUserAgentEnabled.value,
+      max_rounds: policyMaxRounds.value,
       checkpoint_interval: policyInterval.value,
       // 关闭高级模式时,专用 K 值强制为 null(用统一值)
       checkpoint_interval_builtin: policyAdvanced.value ? policyIntervalBuiltin.value : null,
@@ -168,6 +186,8 @@ async function handleSave(): Promise<void> {
     // 重新 hydrate(后端可能规范化字段)
     const policy = data.agent_policy
     if (policy) {
+      policyUserAgentEnabled.value = policy.user_agent_enabled
+      policyMaxRounds.value = policy.max_rounds
       policyInterval.value = policy.checkpoint_interval
       policyIntervalBuiltin.value = policy.checkpoint_interval_builtin
       policyIntervalCli.value = policy.checkpoint_interval_cli
@@ -178,6 +198,8 @@ async function handleSave(): Promise<void> {
       policyAdvanced.value = policyIntervalBuiltin.value !== null || policyIntervalCli.value !== null
     }
     originalPolicy.value = {
+      userAgentEnabled: policyUserAgentEnabled.value,
+      maxRounds: policyMaxRounds.value,
       interval: policyInterval.value,
       intervalBuiltin: policyIntervalBuiltin.value,
       intervalCli: policyIntervalCli.value,
@@ -211,6 +233,10 @@ function formatTime(iso: string | null | undefined): string {
 // ============================================================
 /** 各字段帮助说明(点击问号按钮展示) */
 const FIELD_HELP: Record<string, string> = {
+  user_agent_enabled:
+    '开启后,user_agent 参与协作(初始评估、检查点评估、打断、验证)。关闭后退化为单 agent 模式:react_agent 跑 1 轮直接产出结果,不做覆盖度评估、不打断、不验证。适合简单任务或用户完全信任 react_agent 的场景。',
+  max_rounds:
+    'user_agent 与 react_agent 之间的协作总轮次。每轮含 react_agent 执行 + user_agent 评估。轮次越多覆盖越全面但耗时越长。仅 user_agent 启用时生效。',
   checkpoint_interval:
     'user_agent 每 K 个 react_agent 迭代做一次轻量检查点评估,判断方向是否跑偏。K 越小评估越频繁(更早纠偏,但开销更大),K 越大开销越小(但跑偏更晚发现)。',
   max_interrupts:
@@ -300,6 +326,47 @@ onUnmounted(() => {
 
         <!-- 策略表单 -->
         <section v-else class="policy-card">
+          <!-- 启用 user_agent 开关(最核心,控制全局) -->
+          <label class="policy-toggle-row policy-toggle-primary">
+            <input v-model="policyUserAgentEnabled" type="checkbox" :disabled="saving" />
+            <span>启用 user_agent</span>
+            <div
+              :ref="(el) => { if (el) fieldHelpRefs.set('user_agent_enabled', el as HTMLElement); else fieldHelpRefs.delete('user_agent_enabled') }"
+              class="field-help-wrap"
+            >
+              <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('user_agent_enabled')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+              </button>
+              <Transition name="help-fade">
+                <div v-if="openHelpKey === 'user_agent_enabled'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.user_agent_enabled }}</div>
+              </Transition>
+            </div>
+          </label>
+
+          <!-- 协作总轮次(仅 user_agent 启用时生效) -->
+          <label class="policy-field policy-field-maxrounds">
+            <div class="field-head">
+              <span class="policy-label">协作总轮次</span>
+              <div
+                :ref="(el) => { if (el) fieldHelpRefs.set('max_rounds', el as HTMLElement); else fieldHelpRefs.delete('max_rounds') }"
+                class="field-help-wrap"
+              >
+                <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('max_rounds')">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+                </button>
+                <Transition name="help-fade">
+                  <div v-if="openHelpKey === 'max_rounds'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.max_rounds }}</div>
+                </Transition>
+              </div>
+            </div>
+            <input
+              v-model.number="policyMaxRounds"
+              type="number" min="1" max="10"
+              class="policy-input"
+              :disabled="saving || !policyUserAgentEnabled"
+            />
+          </label>
+
           <div class="policy-grid">
             <label class="policy-field">
               <div class="field-head">
@@ -320,7 +387,7 @@ onUnmounted(() => {
                 v-model.number="policyInterval"
                 type="number" min="1" max="20"
                 class="policy-input"
-                :disabled="saving"
+                :disabled="saving || !policyUserAgentEnabled"
               />
             </label>
 
@@ -343,13 +410,13 @@ onUnmounted(() => {
                 v-model.number="policyMaxInterrupts"
                 type="number" min="0" max="10"
                 class="policy-input"
-                :disabled="saving || !policyAllowInterrupt"
+                :disabled="saving || !policyUserAgentEnabled || !policyAllowInterrupt"
               />
             </label>
           </div>
 
           <label class="policy-toggle-row">
-            <input v-model="policyAllowInterrupt" type="checkbox" :disabled="saving" />
+            <input v-model="policyAllowInterrupt" type="checkbox" :disabled="saving || !policyUserAgentEnabled" />
             <span>允许 user_agent 打断 react_agent</span>
             <div
               :ref="(el) => { if (el) fieldHelpRefs.set('allow_interrupt', el as HTMLElement); else fieldHelpRefs.delete('allow_interrupt') }"
@@ -365,7 +432,7 @@ onUnmounted(() => {
           </label>
 
           <label class="policy-toggle-row">
-            <input v-model="policyAllowVerify" type="checkbox" :disabled="saving" />
+            <input v-model="policyAllowVerify" type="checkbox" :disabled="saving || !policyUserAgentEnabled" />
             <span>允许 user_agent 自行验证 <span class="policy-experimental">(实验性)</span></span>
             <div
               :ref="(el) => { if (el) fieldHelpRefs.set('allow_verify', el as HTMLElement); else fieldHelpRefs.delete('allow_verify') }"
@@ -400,7 +467,7 @@ onUnmounted(() => {
                 <select
                   v-model="policyVerifierAuthMode"
                   class="policy-input"
-                  :disabled="saving"
+                  :disabled="saving || !policyUserAgentEnabled"
                 >
                   <option value="per_action">逐动作授权(每个动作弹窗确认)</option>
                   <option value="direct">直接执行(不弹窗)</option>
@@ -410,7 +477,7 @@ onUnmounted(() => {
           </Transition>
 
           <label class="policy-toggle-row">
-            <input v-model="policyAdvanced" type="checkbox" :disabled="saving" />
+            <input v-model="policyAdvanced" type="checkbox" :disabled="saving || !policyUserAgentEnabled" />
             <span>分别配置内置 / CLI agent 的 K 值</span>
             <div
               :ref="(el) => { if (el) fieldHelpRefs.set('policy_advanced', el as HTMLElement); else fieldHelpRefs.delete('policy_advanced') }"
@@ -434,7 +501,7 @@ onUnmounted(() => {
                   type="number" min="1" max="20"
                   class="policy-input"
                   placeholder="留空用统一值"
-                  :disabled="saving"
+                  :disabled="saving || !policyUserAgentEnabled"
                 />
               </label>
               <label class="policy-field">
@@ -444,7 +511,7 @@ onUnmounted(() => {
                   type="number" min="1" max="20"
                   class="policy-input"
                   placeholder="留空用统一值"
-                  :disabled="saving"
+                  :disabled="saving || !policyUserAgentEnabled"
                 />
               </label>
             </div>

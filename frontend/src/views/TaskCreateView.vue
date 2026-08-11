@@ -238,6 +238,10 @@ const policyInterval = ref(3)
 const policyIntervalBuiltin = ref<number | null>(null)
 /** CLI agent 专用 K 值(null=用统一值) */
 const policyIntervalCli = ref<number | null>(null)
+/** 是否启用 user_agent(关闭=单 agent 模式,跳过评估/打断/验证) */
+const policyUserAgentEnabled = ref(true)
+/** user_agent 协作总轮次(1-10,仅 user_agent 启用时生效) */
+const policyMaxRounds = ref(4)
 /** user_agent 是否能打断 react_agent */
 const policyAllowInterrupt = ref(true)
 /** 每轮最多打断次数 */
@@ -247,6 +251,8 @@ const policyAllowVerify = ref(false)
 
 /** 默认策略值(与后端 DEFAULT_AGENT_POLICY 对齐,用于判断是否需要提交) */
 const DEFAULT_POLICY = {
+  user_agent_enabled: true,
+  max_rounds: 4,
   checkpoint_interval: 3,
   allow_interrupt: true,
   max_interrupts_per_round: 2,
@@ -497,6 +503,12 @@ async function handleSubmit(): Promise<void> {
     // Agent 策略配置(仅当用户改了默认值时才提交,作为任务级覆盖)
     // 后端 resolve_agent_policy 会合并用户级默认 + 此任务级覆盖
     const agentPolicy: Record<string, unknown> = {}
+    if (policyUserAgentEnabled.value !== DEFAULT_POLICY.user_agent_enabled) {
+      agentPolicy.user_agent_enabled = policyUserAgentEnabled.value
+    }
+    if (policyMaxRounds.value !== DEFAULT_POLICY.max_rounds) {
+      agentPolicy.max_rounds = policyMaxRounds.value
+    }
     if (policyInterval.value !== DEFAULT_POLICY.checkpoint_interval) {
       agentPolicy.checkpoint_interval = policyInterval.value
     }
@@ -899,12 +911,30 @@ onMounted(async () => {
                 </svg>
                 <span>协作策略</span>
                 <span class="advanced-summary">
-                  {{ policyAllowInterrupt ? `每${policyInterval}轮评估·可打断` : `每${policyInterval}轮评估·仅观察` }}
+                  {{ !policyUserAgentEnabled ? '单 agent 模式' : (policyAllowInterrupt ? `每${policyInterval}轮评估·可打断` : `每${policyInterval}轮评估·仅观察`) }}
                 </span>
               </button>
 
               <Transition name="collapse">
                 <div v-show="policyOpen" class="advanced-dropdown advanced-dropdown-left">
+                  <!-- 启用 user_agent 开关(最核心,控制全局) -->
+                  <label class="policy-toggle-row">
+                    <input v-model="policyUserAgentEnabled" type="checkbox" />
+                    <span>启用 user_agent</span>
+                  </label>
+
+                  <!-- 协作总轮次(仅 user_agent 启用时生效) -->
+                  <label class="policy-field">
+                    <span class="policy-label">协作总轮次</span>
+                    <input
+                      v-model.number="policyMaxRounds"
+                      type="number" min="1" max="10"
+                      class="policy-input"
+                      :disabled="!policyUserAgentEnabled"
+                    />
+                    <span class="policy-hint">user_agent 协作总轮次</span>
+                  </label>
+
                   <div class="policy-grid">
                     <label class="policy-field">
                       <span class="policy-label">评估频率 K</span>
@@ -912,6 +942,7 @@ onMounted(async () => {
                         v-model.number="policyInterval"
                         type="number" min="1" max="20"
                         class="policy-input"
+                        :disabled="!policyUserAgentEnabled"
                       />
                       <span class="policy-hint">每 K 个迭代评估一次</span>
                     </label>
@@ -922,13 +953,14 @@ onMounted(async () => {
                         v-model.number="policyMaxInterrupts"
                         type="number" min="0" max="10"
                         class="policy-input"
+                        :disabled="!policyUserAgentEnabled || !policyAllowInterrupt"
                       />
                       <span class="policy-hint">防死锁上限</span>
                     </label>
                   </div>
 
                   <label class="policy-toggle-row">
-                    <input v-model="policyAllowInterrupt" type="checkbox" />
+                    <input v-model="policyAllowInterrupt" type="checkbox" :disabled="!policyUserAgentEnabled" />
                     <span>允许 user_agent 打断 react_agent</span>
                   </label>
 
@@ -938,7 +970,7 @@ onMounted(async () => {
                   </label>
 
                   <label class="policy-toggle-row">
-                    <input v-model="policyAdvanced" type="checkbox" />
+                    <input v-model="policyAdvanced" type="checkbox" :disabled="!policyUserAgentEnabled" />
                     <span>分别配置内置 / CLI agent 的 K 值</span>
                   </label>
 
@@ -951,6 +983,7 @@ onMounted(async () => {
                           type="number" min="1" max="20"
                           class="policy-input"
                           placeholder="留空用统一值"
+                          :disabled="!policyUserAgentEnabled"
                         />
                       </label>
                       <label class="policy-field">
@@ -960,6 +993,7 @@ onMounted(async () => {
                           type="number" min="1" max="20"
                           class="policy-input"
                           placeholder="留空用统一值"
+                          :disabled="!policyUserAgentEnabled"
                         />
                       </label>
                     </div>

@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 DEFAULT_AGENT_POLICY: dict[str, Any] = {
+    "user_agent_enabled": True,  # 是否启用 user_agent(关闭=单 agent 模式,跳过评估/打断/验证)
+    "max_rounds": 4,  # user_agent 协作总轮次(替代 user_agent.py 硬编码 MAX_ROUNDS)
     "checkpoint_interval": 3,  # 统一 K 值,每 K 个迭代评估一次
     "checkpoint_interval_builtin": None,  # 高级:内置专用(null=用统一值)
     "checkpoint_interval_cli": None,  # 高级:CLI 专用(null=用统一值)

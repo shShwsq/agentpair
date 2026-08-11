@@ -106,6 +106,13 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         f"max_interrupts={agent_policy.get('max_interrupts_per_round')}"
     )
 
+    # user_agent 启停 + 协作总轮次(替代 user_agent.py 硬编码 MAX_ROUNDS)
+    ua_enabled = bool(agent_policy.get("user_agent_enabled", True))
+    max_rounds = int(agent_policy.get("max_rounds", MAX_ROUNDS))
+    logger.info(
+        f"[task={task.id}] user_agent_enabled={ua_enabled}, max_rounds={max_rounds}"
+    )
+
     # 用户原始意图
     user_intent = task.user_input
     params = task.params or {}
@@ -132,6 +139,77 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         #   user_agent 输入),改为单独传参给 round 0 的 user_agent 调用
         # clone 失败(https+ssh 都不行)抛异常,由外层 except 捕获 → 任务 failed
         repo_path, repo_context = _prepare_repo_context(task, db, task_id_str, git_tokens)
+
+        # ===== 单 agent 模式:user_agent 已禁用,跳过评估/打断/验证 =====
+        # react_agent 只跑 1 轮,用 summary 作为唯一结构化结果(无 covered/missing 提取)
+        if not ua_enabled:
+            logger.info(f"[task={task.id}] user_agent 已禁用,单 agent 模式")
+            task.current_stage = "react_agent 执行(单 agent 模式)"
+            db.commit()
+            _publish_status(task)
+
+            _results, summary, _plan = executor.run(
+                task, db,
+                round_idx=1,
+                followup_query=None,
+                client=react_client,
+                repo_context=repo_context,
+                previous_plan=None,
+                agent_policy=agent_policy,
+            )
+            react_summaries.append({"round": 1, "summary": summary})
+
+            # 用 summary 作为唯一结构化结果(user_agent 已禁用,不做结构化提取)
+            structured_results = [{"title": "执行结果", "content": summary}]
+            for r in structured_results:
+                result = Result(
+                    task_id=task.id,
+                    round_idx=1,
+                    title=r["title"],
+                    content=r["content"],
+                )
+                db.add(result)
+            db.commit()
+            all_results_count = len(structured_results)
+
+            # 标记完成
+            task.status = TaskStatus.COMPLETED
+            task.current_stage = (
+                f"单 agent 执行完成,共 {len(react_summaries)} 轮,"
+                f"共 {all_results_count} 个结果"
+            )
+            task.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            _publish_status(task)
+
+            _add_conversation(
+                db, task, round_idx=len(react_summaries),
+                role="user_agent", type="summary",
+                content=(
+                    f"单 agent 模式执行完成(user_agent 已禁用)。\n"
+                    f"协作轮次: {len(react_summaries)}\n"
+                    f"结果总数: {all_results_count}"
+                ),
+            )
+
+            # 提前推送 done 事件:results 已落库,让前端立即拉取展示
+            publish(task.id, "done", {"status": "completed"})
+
+            # 记忆归纳(失败兜底,不影响任务完成)
+            try:
+                from app.services.memory_summarize import summarize_and_save_memory
+                summarize_and_save_memory(task, db, llm_client)
+            except Exception as mem_err:
+                logger.warning(f"[task={task.id}] 归纳写入记忆失败(忽略): {mem_err}")
+
+            # 捕获工作区 diff(失败兜底,不影响任务完成)
+            try:
+                from app.services.workspace_diff import save_workspace_diff_artifact
+                save_workspace_diff_artifact(task, db, task_id_str)
+            except Exception as diff_err:
+                logger.warning(f"[task={task.id}] 捕获工作区 diff 失败(忽略): {diff_err}")
+
+            return  # 单 agent 模式结束,finally 块仍会执行清理
 
         # ---------- 第 0 轮:user_agent 初始评估(含用户澄清循环) ----------
         task.current_stage = "user_agent 初始评估"
@@ -240,7 +318,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         followup = ua_result_0.get("followup_query", effective_intent)
 
         # ---------- 协作循环 ----------
-        for round_idx in range(1, MAX_ROUNDS + 1):
+        for round_idx in range(1, max_rounds + 1):
             # 暂停检查点:每轮开始前(粗粒度,react_agent 内部还有细粒度检查点)
             wait_if_paused(task.id)
 
@@ -325,7 +403,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
 
             followup = ua_result.get("followup_query", "")
         else:
-            logger.warning(f"[task={task.id}] 达到最大轮次 {MAX_ROUNDS}")
+            logger.warning(f"[task={task.id}] 达到最大轮次 {max_rounds}")
 
         # ---------- 标记完成 ----------
         task.status = TaskStatus.COMPLETED
@@ -947,6 +1025,12 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
         f"max_interrupts={agent_policy.get('max_interrupts_per_round')}"
     )
 
+    # user_agent 启停(重启场景)
+    ua_enabled = bool(agent_policy.get("user_agent_enabled", True))
+    logger.info(
+        f"[task={task.id}] resume user_agent_enabled={ua_enabled}"
+    )
+
     task_checklist = task.checklist
     react_summaries = _load_react_summaries(db, task.id)
     # 重启时不复用旧 plan(让 LLM 根据新消息重新规划)
@@ -960,6 +1044,43 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
     effective_intent = task.user_input + f"\n\n[用户追加消息]\n{user_message}"
 
     try:
+        # ===== 单 agent 模式:user_agent 已禁用,跳过评估,直接跑 react_agent =====
+        if not ua_enabled:
+            logger.info(f"[task={task.id}] resume 单 agent 模式(user_agent 已禁用)")
+            task.current_stage = f"第 {start_round_idx} 轮:react_agent 执行(单 agent)"
+            db.commit()
+            _publish_status(task)
+
+            _results, summary, current_plan = executor.run(
+                task, db,
+                round_idx=start_round_idx,
+                followup_query=user_message,
+                client=react_client,
+                repo_context=None,
+                previous_plan=None,
+                agent_policy=agent_policy,
+            )
+            react_summaries.append({"round": start_round_idx, "summary": summary})
+
+            # 用 summary 作为唯一结构化结果
+            structured_results = [{"title": "执行结果", "content": summary}]
+            for r in structured_results:
+                result = Result(
+                    task_id=task.id,
+                    round_idx=start_round_idx,
+                    title=r["title"],
+                    content=r["content"],
+                )
+                db.add(result)
+            db.commit()
+
+            ua_result = {
+                "reasoning": "user_agent 已禁用,直接产出 react_agent 执行结果",
+                "done": True,
+            }
+            _finish_resume(task, db, react_summaries, ua_result)
+            return  # finally 块仍会执行清理
+
         # 先调 user_agent 分析用户消息(round_idx = start_round_idx)
         task.current_stage = f"第 {start_round_idx} 轮:user_agent 分析用户消息"
         db.commit()
