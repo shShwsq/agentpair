@@ -2,7 +2,7 @@
 /**
  * 应用顶栏(登录后的页面共用)
  *
- * 左侧品牌 + 导航(首页/提交任务/模型设置/CLI 设置/协作策略/记忆管理),右侧用户信息 + 问号(重看新手引导)+ 齿轮(账号设置)+ 登出。
+ * 左侧品牌 + 导航(首页/提交任务/模型设置/CLI 设置/协作策略/记忆管理),右侧用户信息 + 问号(帮助文档)+ 齿轮(账号设置)+ 登出。
  *
  * 导航为 slot 的默认内容:所有界面默认显示这 6 项,无需每个视图重复声明;
  * 当前页高亮依赖 Vue Router 自动添加的 router-link-exact-active。
@@ -10,28 +10,34 @@
  *
  * 硬约束:账号设置(/settings)只由齿轮按钮进入,不入主导航。
  * 记忆管理(/memory)、协作策略(/agent-policy)作为主导航项,与模型设置/CLI 设置并列。
- * 问号按钮:重看当前路由的新手引导,跟随当前页上下文播放对应步骤。
+ * 问号按钮:打开帮助文档弹窗(所有路由行为一致,展示完整 help.md)。
  */
-import { useRoute, useRouter } from 'vue-router'
+import { ref } from 'vue'
+import { useRouter } from 'vue-router'
 
 import BrandLogo from '@/components/BrandLogo.vue'
-import { useOnboarding } from '@/composables/useOnboarding'
+import HelpDialog from '@/components/HelpDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
-const route = useRoute()
 const authStore = useAuthStore()
-const { replay } = useOnboarding()
+
+/** 帮助文档弹窗是否显示 */
+const helpOpen = ref(false)
 
 function handleLogout(): void {
   authStore.logout()
   router.push('/login')
 }
 
-/** 重看当前路由的新手引导(清除完成标记后立即启动) */
-function handleReplayOnboarding(): void {
-  if (!route.name) return
-  replay(String(route.name))
+/** 打开帮助文档弹窗 */
+function handleOpenHelp(): void {
+  helpOpen.value = true
+}
+
+/** 关闭帮助文档弹窗 */
+function handleCloseHelp(): void {
+  helpOpen.value = false
 }
 </script>
 
@@ -66,9 +72,9 @@ function handleReplayOnboarding(): void {
         <span class="user-email">{{ authStore.user?.email }}</span>
         <button
           class="btn-help"
-          title="重看新手引导"
-          aria-label="重看新手引导"
-          @click="handleReplayOnboarding"
+          title="帮助文档"
+          aria-label="帮助文档"
+          @click="handleOpenHelp"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="10" />
@@ -92,6 +98,9 @@ function handleReplayOnboarding(): void {
       </div>
     </div>
   </header>
+
+  <!-- 帮助文档弹窗(所有路由通用) -->
+  <HelpDialog :open="helpOpen" @close="handleCloseHelp" />
 </template>
 
 <style scoped>
