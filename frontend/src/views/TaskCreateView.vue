@@ -834,11 +834,8 @@ onMounted(async () => {
             </div>
           </div>
 
-          <!-- 第 4 行:协作策略(任务级覆盖用户级默认) -->
-          <div class="config-row">
-            <div class="config-label-group">
-              <span class="config-label">协作策略</span>
-            </div>
+          <!-- 第 4 行:协作策略(无标签,直接靠左;任务级覆盖用户级默认) -->
+          <div class="config-row config-row-scenario">
             <div class="advanced-panel">
               <button
                 type="button"
@@ -861,7 +858,7 @@ onMounted(async () => {
               </button>
 
               <Transition name="collapse">
-                <div v-show="policyOpen" class="advanced-dropdown">
+                <div v-show="policyOpen" class="advanced-dropdown advanced-dropdown-left">
                   <div class="policy-grid">
                     <label class="policy-field">
                       <span class="policy-label">评估频率 K</span>
@@ -1767,6 +1764,12 @@ onMounted(async () => {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg, 0 10px 25px rgba(0, 0, 0, 0.12));
+}
+
+/* 左对齐变体:协作策略行无标签靠左,下拉面板与按钮左对齐 */
+.advanced-dropdown-left {
+  right: auto;
+  left: 0;
 }
 
 /* ---- Agent 策略配置面板 ---- */
