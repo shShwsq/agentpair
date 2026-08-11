@@ -38,7 +38,7 @@ const DEFAULT_POLICY = {
   allow_interrupt: true,
   max_interrupts_per_round: 2,
   allow_verify: false,
-} as const
+}
 
 // ============================================================
 // 表单状态

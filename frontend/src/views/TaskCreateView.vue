@@ -831,93 +831,98 @@ onMounted(async () => {
                 </div>
               </Transition>
               </div>
+            </div>
+          </div>
 
-              <!-- Agent 策略配置(检查点评估频率、打断权限) -->
-              <div class="advanced-panel">
-                <button
-                  type="button"
-                  class="advanced-toggle"
-                  :aria-expanded="policyOpen"
-                  @click="policyOpen = !policyOpen"
+          <!-- 第 4 行:协作策略(任务级覆盖用户级默认) -->
+          <div class="config-row">
+            <div class="config-label-group">
+              <span class="config-label">协作策略</span>
+            </div>
+            <div class="advanced-panel">
+              <button
+                type="button"
+                class="advanced-toggle"
+                :aria-expanded="policyOpen"
+                @click="policyOpen = !policyOpen"
+              >
+                <svg
+                  class="advanced-chevron"
+                  :class="{ expanded: policyOpen }"
+                  width="16" height="16" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
                 >
-                  <svg
-                    class="advanced-chevron"
-                    :class="{ expanded: policyOpen }"
-                    width="16" height="16" viewBox="0 0 24 24" fill="none"
-                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-                  >
-                    <polyline points="9 18 15 12 9 6" />
-                  </svg>
-                  <span>Agent 策略</span>
-                  <span class="advanced-summary">
-                    {{ policyAllowInterrupt ? `每${policyInterval}轮评估·可打断` : `每${policyInterval}轮评估·仅观察` }}
-                  </span>
-                </button>
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
+                <span>协作策略</span>
+                <span class="advanced-summary">
+                  {{ policyAllowInterrupt ? `每${policyInterval}轮评估·可打断` : `每${policyInterval}轮评估·仅观察` }}
+                </span>
+              </button>
 
-                <Transition name="collapse">
-                  <div v-show="policyOpen" class="advanced-dropdown">
-                    <div class="policy-grid">
+              <Transition name="collapse">
+                <div v-show="policyOpen" class="advanced-dropdown">
+                  <div class="policy-grid">
+                    <label class="policy-field">
+                      <span class="policy-label">评估频率 K</span>
+                      <input
+                        v-model.number="policyInterval"
+                        type="number" min="1" max="20"
+                        class="policy-input"
+                      />
+                      <span class="policy-hint">每 K 个迭代评估一次</span>
+                    </label>
+
+                    <label class="policy-field">
+                      <span class="policy-label">每轮最大打断</span>
+                      <input
+                        v-model.number="policyMaxInterrupts"
+                        type="number" min="0" max="10"
+                        class="policy-input"
+                      />
+                      <span class="policy-hint">防死锁上限</span>
+                    </label>
+                  </div>
+
+                  <label class="policy-toggle-row">
+                    <input v-model="policyAllowInterrupt" type="checkbox" />
+                    <span>允许 user_agent 打断 react_agent</span>
+                  </label>
+
+                  <label class="policy-toggle-row">
+                    <input v-model="policyAllowVerify" type="checkbox" />
+                    <span>允许 user_agent 自行验证 <span class="policy-experimental">(实验性)</span></span>
+                  </label>
+
+                  <label class="policy-toggle-row">
+                    <input v-model="policyAdvanced" type="checkbox" />
+                    <span>分别配置内置 / CLI agent 的 K 值</span>
+                  </label>
+
+                  <Transition name="collapse">
+                    <div v-show="policyAdvanced" class="policy-grid">
                       <label class="policy-field">
-                        <span class="policy-label">评估频率 K</span>
+                        <span class="policy-label">内置 react_agent K</span>
                         <input
-                          v-model.number="policyInterval"
+                          v-model.number="policyIntervalBuiltin"
                           type="number" min="1" max="20"
                           class="policy-input"
+                          placeholder="留空用统一值"
                         />
-                        <span class="policy-hint">每 K 个迭代评估一次</span>
                       </label>
-
                       <label class="policy-field">
-                        <span class="policy-label">每轮最大打断</span>
+                        <span class="policy-label">CLI agent K</span>
                         <input
-                          v-model.number="policyMaxInterrupts"
-                          type="number" min="0" max="10"
+                          v-model.number="policyIntervalCli"
+                          type="number" min="1" max="20"
                           class="policy-input"
+                          placeholder="留空用统一值"
                         />
-                        <span class="policy-hint">防死锁上限</span>
                       </label>
                     </div>
-
-                    <label class="policy-toggle-row">
-                      <input v-model="policyAllowInterrupt" type="checkbox" />
-                      <span>允许 user_agent 打断 react_agent</span>
-                    </label>
-
-                    <label class="policy-toggle-row">
-                      <input v-model="policyAllowVerify" type="checkbox" />
-                      <span>允许 user_agent 自行验证 <span class="policy-experimental">(实验性)</span></span>
-                    </label>
-
-                    <label class="policy-toggle-row">
-                      <input v-model="policyAdvanced" type="checkbox" />
-                      <span>分别配置内置 / CLI agent 的 K 值</span>
-                    </label>
-
-                    <Transition name="collapse">
-                      <div v-show="policyAdvanced" class="policy-grid">
-                        <label class="policy-field">
-                          <span class="policy-label">内置 react_agent K</span>
-                          <input
-                            v-model.number="policyIntervalBuiltin"
-                            type="number" min="1" max="20"
-                            class="policy-input"
-                            placeholder="留空用统一值"
-                          />
-                        </label>
-                        <label class="policy-field">
-                          <span class="policy-label">CLI agent K</span>
-                          <input
-                            v-model.number="policyIntervalCli"
-                            type="number" min="1" max="20"
-                            class="policy-input"
-                            placeholder="留空用统一值"
-                          />
-                        </label>
-                      </div>
-                    </Transition>
-                  </div>
-                </Transition>
-              </div>
+                  </Transition>
+                </div>
+              </Transition>
             </div>
           </div>
         </div>
