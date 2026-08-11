@@ -42,6 +42,8 @@ class SaveAgentPolicyRequest(BaseModel):
     """保存 agent 策略配置请求(PUT /memory/preferences/agent_policy)
 
     结构与 agent_checkpoint.DEFAULT_AGENT_POLICY 对齐:
+    - user_agent_enabled: 是否启用 user_agent(关闭=单 agent 模式)
+    - max_rounds: user_agent 协作总轮次(上限由 MAX_MAX_ROUNDS 控制)
     - checkpoint_interval: 统一 K 值(每 K 个迭代评估一次)
     - checkpoint_interval_builtin: 内置 react_agent 专用 K 值(null=用统一值)
     - checkpoint_interval_cli: CLI agent 专用 K 值(null=用统一值)
@@ -51,6 +53,9 @@ class SaveAgentPolicyRequest(BaseModel):
     - verifier_auth_mode_default: 验证授权默认模式("direct"直接执行 / "per_action"逐动作授权)
     """
 
+    user_agent_enabled: bool = True
+    # 上界在路由层用 MAX_MAX_ROUNDS 动态校验(schema 层只校验下界)
+    max_rounds: int = Field(default=4, ge=1)
     checkpoint_interval: int = Field(default=3, ge=1, le=20)
     checkpoint_interval_builtin: int | None = Field(default=None, ge=1, le=20)
     checkpoint_interval_cli: int | None = Field(default=None, ge=1, le=20)
@@ -58,6 +63,16 @@ class SaveAgentPolicyRequest(BaseModel):
     max_interrupts_per_round: int = Field(default=2, ge=0, le=10)
     allow_verify: bool = False
     verifier_auth_mode_default: str = Field(default="per_action", pattern="^(direct|per_action)$")
+
+
+class PolicyLimitsOut(BaseModel):
+    """系统级策略限制(GET /memory/policy-limits)
+
+    前端据此动态渲染输入上限,不硬编码。后端 MAX_MAX_ROUNDS 可通过
+    环境变量 AGENTPAIR_MAX_ROUNDS_LIMIT 调整。
+    """
+
+    max_rounds: int
 
 
 class UserMemoryOut(BaseModel):

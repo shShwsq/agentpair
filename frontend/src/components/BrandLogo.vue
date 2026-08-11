@@ -2,50 +2,102 @@
 /**
  * 项目品牌 logo
  *
- * 设计语义:上方单个圆代表 user_agent(沟通评估者),
- * 下方三个圆代表 react_agent(调用多工具/技能执行任务),
- * 三根连线表示两者之间的协作通道。
+ * 新版设计:六边形环(交替双色段)+ 双对话气泡(象征 user_agent 与 react_agent 的协作对话)。
+ * - brand 变体:完整图标(六边形环 + 双气泡),用于品牌标志(AppHeader / LoginView / HomeView 欢迎区)
+ * - user-agent 变体:仅左侧气泡(紫色渐变 + 三点),象征 user_agent(提问者),用作 user_agent 头像
  *
- * 纯描边矢量(stroke=currentColor),可在任意尺寸/颜色下复用:
- * - AppHeader 品牌标志(primary 色,24px)
- * - LoginView 品牌区(32px)
- * - user_agent 头像(白色,16px,叠在彩色圆形底上)
+ * 使用固定品牌渐变色(gradA 紫 / gradB 青),不随 currentColor 变化。
  */
 withDefaults(
   defineProps<{
     /** 图标尺寸(px) */
     size?: number | string
+    /** 变体:brand 完整品牌图标 | user-agent 仅 user_agent 气泡 */
+    variant?: 'brand' | 'user-agent'
   }>(),
   {
     size: 24,
+    variant: 'brand',
   },
 )
 </script>
 
 <template>
+  <!-- 品牌完整图标:六边形环 + 双对话气泡 -->
   <svg
+    v-if="variant === 'brand'"
     :width="size"
     :height="size"
-    viewBox="0 0 24 24"
+    viewBox="0 0 180 180"
     fill="none"
-    stroke="currentColor"
-    stroke-width="1.5"
-    stroke-linecap="round"
-    stroke-linejoin="round"
     aria-hidden="true"
   >
-    <!-- 整体顺时针旋转 90°:单圆(user_agent)在上,三圆(react_agent)在下 -->
-    <g transform="rotate(90 12 12)">
-      <!-- 单节点:user_agent -->
-      <circle cx="5.5" cy="12" r="3.5" />
-      <!-- 三个节点:react_agent(三角形排列,象征多工具/技能;拉开间距;实心) -->
-      <circle cx="15" cy="5.5" r="2.2" fill="currentColor" stroke="none" />
-      <circle cx="21" cy="12" r="2.2" fill="currentColor" stroke="none" />
-      <circle cx="15" cy="18.5" r="2.2" fill="currentColor" stroke="none" />
-      <!-- 三根连接线:单节点 → 三个节点(沿圆心连线方向,起止于圆边缘;上下两根带弧度) -->
-      <path d="M 8.39 10.03 Q 10 7.5, 13.18 6.74" />
-      <line x1="9" y1="12" x2="18.8" y2="12" />
-      <path d="M 8.39 13.97 Q 10 16.5, 13.18 17.26" />
+    <defs>
+      <linearGradient id="brand-grad-a" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#6C5CE7" />
+        <stop offset="100%" stop-color="#4834D4" />
+      </linearGradient>
+      <linearGradient id="brand-grad-b" x1="100%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="#00CEC9" />
+        <stop offset="100%" stop-color="#0984E3" />
+      </linearGradient>
+    </defs>
+    <g transform="translate(90, 90)">
+      <!-- 六段梯形交替双色,组成六边形环 -->
+      <polygon points="-30,-78 30,-78 48,-52 -48,-52" fill="url(#brand-grad-a)" />
+      <polygon points="48,-52 78,0 58,18 30,-48" fill="url(#brand-grad-b)" />
+      <polygon points="58,18 58,54 30,78 30,42" fill="url(#brand-grad-a)" />
+      <polygon points="30,42 30,78 -30,78 -30,42" fill="url(#brand-grad-b)" />
+      <polygon points="-30,42 -30,78 -58,54 -58,18" fill="url(#brand-grad-a)" />
+      <polygon points="-58,18 -78,0 -48,-52 -30,-48" fill="url(#brand-grad-b)" />
+      <!-- 左气泡(user_agent / 提问者) -->
+      <g transform="translate(-16, -4)">
+        <path
+          d="M0,0 h22 a6,6 0 0 1 6,6 v14 a6,6 0 0 1 -6,6 h-10 l-8,8 v-8 h-4 a6,6 0 0 1 -6,-6 v-14 a6,6 0 0 1 6,-6 z"
+          fill="url(#brand-grad-a)"
+        />
+        <circle cx="6" cy="13" r="2" fill="#fff" />
+        <circle cx="11" cy="13" r="2" fill="#fff" />
+        <circle cx="16" cy="13" r="2" fill="#fff" />
+      </g>
+      <!-- 右气泡(react_agent / 回应者),下移错位,含勾选符号(审计/总结) -->
+      <g transform="translate(4, 8)">
+        <path
+          d="M0,0 h22 a6,6 0 0 1 6,6 v14 a6,6 0 0 1 -6,6 h-10 l-8,8 v-8 h-4 a6,6 0 0 1 -6,-6 v-14 a6,6 0 0 1 6,-6 z"
+          fill="url(#brand-grad-b)"
+        />
+        <path
+          d="M5,14 l4,4 l8,-8"
+          fill="none"
+          stroke="#fff"
+          stroke-width="2.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </g>
     </g>
+  </svg>
+  <!-- user_agent 头像:仅左侧气泡(紫色渐变 + 三点) -->
+  <svg
+    v-else
+    :width="size"
+    :height="size"
+    viewBox="-6 0 34 34"
+    fill="none"
+    aria-hidden="true"
+  >
+    <defs>
+      <linearGradient id="ua-grad-a" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#6C5CE7" />
+        <stop offset="100%" stop-color="#4834D4" />
+      </linearGradient>
+    </defs>
+    <path
+      d="M0,0 h22 a6,6 0 0 1 6,6 v14 a6,6 0 0 1 -6,6 h-10 l-8,8 v-8 h-4 a6,6 0 0 1 -6,-6 v-14 a6,6 0 0 1 6,-6 z"
+      fill="url(#ua-grad-a)"
+    />
+    <circle cx="6" cy="13" r="2" fill="#fff" />
+    <circle cx="11" cy="13" r="2" fill="#fff" />
+    <circle cx="16" cy="13" r="2" fill="#fff" />
   </svg>
 </template>

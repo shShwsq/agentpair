@@ -60,7 +60,7 @@ function toggleWorkspace(): void {
           <div class="feature-grid">
             <div class="feature">
               <div class="feature-icon">
-                <BrandLogo :size="24" />
+                <BrandLogo :size="24" variant="user-agent" />
               </div>
               <h3>user_agent</h3>
               <p>对照场景判据评估结果,针对未覆盖项追问,确保任务完整</p>

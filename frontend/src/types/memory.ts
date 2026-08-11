@@ -73,6 +73,17 @@ export interface SaveUserMemoryRequest {
 }
 
 /**
+ * 系统级策略限制(GET /memory/policy-limits)
+ *
+ * 前端据此动态渲染输入上限,不硬编码。后端 max_rounds 可通过
+ * 环境变量 AGENTPAIR_MAX_ROUNDS_LIMIT 调整。
+ */
+export interface PolicyLimitsOut {
+  /** 协作总轮次上限(与后端 MAX_MAX_ROUNDS 对齐) */
+  max_rounds: number
+}
+
+/**
  * 分项目记忆(1:N,按 repo_url 聚合)
  *
  * 项目由 orchestrator 在任务完成时自动归纳创建(_get_or_create_project),

@@ -15,6 +15,7 @@
  */
 import client from './client'
 import type {
+  PolicyLimitsOut,
   ProjectListResponse,
   ProjectOut,
   SaveAgentPolicyRequest,
@@ -42,6 +43,11 @@ export function savePreferences(body: SaveUserPreferenceRequest): Promise<UserPr
 /** 保存/更新 agent 策略配置(检查点评估频率、打断权限等) */
 export function saveAgentPolicy(body: SaveAgentPolicyRequest): Promise<UserPreferenceOut> {
   return client.put('/memory/preferences/agent_policy', body).then((r) => r.data)
+}
+
+/** 获取系统级策略限制(前端据此动态渲染输入上限,不硬编码) */
+export function getPolicyLimits(): Promise<PolicyLimitsOut> {
+  return client.get('/memory/policy-limits').then((r) => r.data)
 }
 
 // ============================================================

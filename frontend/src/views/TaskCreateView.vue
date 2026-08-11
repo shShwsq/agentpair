@@ -31,6 +31,7 @@ import {
   listGitProviderRepos,
 } from '@/api/git_provider'
 import { getSkills, type SkillSummary } from '@/api/skill'
+import { getPolicyLimits } from '@/api/memory'
 import { extractErrorMessage } from '@/utils/error'
 import type { Scenario } from '@/types/task'
 import type { LLMConfigItemOut } from '@/types/model_configs'
@@ -259,8 +260,8 @@ const DEFAULT_POLICY = {
   allow_verify: false,
 }
 
-// 协作总轮次上限(与后端 MAX_MAX_ROUNDS 对齐,后端可通过 AGENTPAIR_MAX_ROUNDS_LIMIT 环境变量调整)
-const MAX_ROUNDS_LIMIT = 10
+// 协作总轮次上限:从后端 GET /memory/policy-limits 动态拉取(默认 10 兜底)
+const MAX_ROUNDS_LIMIT = ref(10)
 
 /** 协作总轮次帮助气泡是否展开 */
 const showMaxRoundsHelp = ref(false)
@@ -294,8 +295,8 @@ function onMaxRoundsInput(e: Event): void {
   }
   if (filtered === '') return  // 临时空,不更新 ref
   let n = parseInt(filtered, 10)
-  if (n > MAX_ROUNDS_LIMIT) {
-    n = MAX_ROUNDS_LIMIT
+  if (n > MAX_ROUNDS_LIMIT.value) {
+    n = MAX_ROUNDS_LIMIT.value
     input.value = String(n)
   }
   if (n < 1) n = 1
@@ -670,14 +671,16 @@ onMounted(async () => {
   try {
     // 并行拉取场景、模型、各 git provider 状态、技能、agent 配置
     // git provider 状态静默失败:未绑定不影响任务提交
-    const [scenarioList, models, ghStatus, giteeStatus, skills, agentCfgs] = await Promise.all([
+    const [scenarioList, models, ghStatus, giteeStatus, skills, agentCfgs, limits] = await Promise.all([
       getScenarios(),
       getMyModels().catch(() => null),
       getGitProviderStatus('github').catch(() => null),
       getGitProviderStatus('gitee').catch(() => null),
       getSkills().catch(() => null as SkillSummary[] | null), // 静默失败,无 skill 不阻塞提交
       getAgentConfigs().catch(() => null), // 静默失败,无 agent 配置不影响提交
+      getPolicyLimits().catch(() => null), // 静默失败:拿不到限制时保留默认 10
     ])
+    if (limits) MAX_ROUNDS_LIMIT.value = limits.max_rounds
     scenarios.value = scenarioList
     if (scenarioList.length > 0) {
       selectedScenario.value = scenarioList[0].id
@@ -760,7 +763,7 @@ onUnmounted(() => {
           <div class="config-row">
             <div class="config-label-group">
               <span class="agent-avatar avatar-user-agent" aria-hidden="true">
-                <BrandLogo :size="16" />
+                <BrandLogo :size="22" variant="user-agent" />
               </span>
               <span class="config-label">user_agent</span>
             </div>
@@ -1430,7 +1433,8 @@ onUnmounted(() => {
 }
 
 .avatar-user-agent {
-  background: var(--color-info);
+  background: transparent;
+  border-radius: 0;
 }
 
 .avatar-react-agent {

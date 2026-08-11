@@ -18,7 +18,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import AppHeader from '@/components/AppHeader.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
-import { getPreferences, saveAgentPolicy } from '@/api/memory'
+import { getPolicyLimits, getPreferences, saveAgentPolicy } from '@/api/memory'
 import { extractErrorMessage } from '@/utils/error'
 import type { SaveAgentPolicyRequest } from '@/types/memory'
 
@@ -33,8 +33,8 @@ function toggleWorkspace(): void {
 // 默认策略值(与后端 DEFAULT_AGENT_POLICY 对齐)
 // ============================================================
 
-// 协作总轮次上限(与后端 MAX_MAX_ROUNDS 对齐,后端可通过 AGENTPAIR_MAX_ROUNDS_LIMIT 环境变量调整)
-const MAX_ROUNDS_LIMIT = 10
+// 协作总轮次上限:从后端 GET /memory/policy-limits 动态拉取(默认 10 兜底)
+const MAX_ROUNDS_LIMIT = ref(10)
 
 const DEFAULT_POLICY = {
   user_agent_enabled: true,
@@ -129,8 +129,8 @@ function onMaxRoundsInput(e: Event): void {
   }
   if (filtered === '') return  // 临时空,不更新 ref
   let n = parseInt(filtered, 10)
-  if (n > MAX_ROUNDS_LIMIT) {
-    n = MAX_ROUNDS_LIMIT
+  if (n > MAX_ROUNDS_LIMIT.value) {
+    n = MAX_ROUNDS_LIMIT.value
     input.value = String(n)
   }
   if (n < 1) n = 1
@@ -168,7 +168,8 @@ async function loadPolicy(): Promise<void> {
   loading.value = true
   loadError.value = ''
   try {
-    const data = await getPreferences()
+    const [data, limits] = await Promise.all([getPreferences(), getPolicyLimits()])
+    MAX_ROUNDS_LIMIT.value = limits.max_rounds
     updatedAt.value = data.updated_at ?? null
     const policy = data.agent_policy
     policyUserAgentEnabled.value = policy?.user_agent_enabled ?? DEFAULT_POLICY.user_agent_enabled

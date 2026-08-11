@@ -319,8 +319,6 @@ function handleOAuth(provider: GitProvider): void {
   width: 56px;
   height: 56px;
   border-radius: var(--radius-lg);
-  background: var(--color-primary);
-  color: white;
   margin-bottom: var(--space-3);
 }
 

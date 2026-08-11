@@ -31,6 +31,7 @@ from app.models.user import User
 from app.models.user_memory import UserMemory
 from app.models.user_preference import UserPreference
 from app.schemas.memory import (
+    PolicyLimitsOut,
     ProjectListResponse,
     ProjectOut,
     SaveAgentPolicyRequest,
@@ -40,6 +41,7 @@ from app.schemas.memory import (
     UserMemoryOut,
     UserPreferenceOut,
 )
+from app.agent_checkpoint import MAX_MAX_ROUNDS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/memory", tags=["memory"])
@@ -109,6 +111,8 @@ def save_agent_policy(
         .first()
     )
     policy_dict = req.model_dump()
+    # 钳制 max_rounds 到 [1, MAX_MAX_ROUNDS](防御前端送超界值)
+    policy_dict["max_rounds"] = max(1, min(int(policy_dict.get("max_rounds", 4)), MAX_MAX_ROUNDS))
     if row is None:
         row = UserPreference(
             user_id=current_user.id,
@@ -127,6 +131,17 @@ def save_agent_policy(
 # ============================================================
 # 全局长期记忆(1:1)
 # ============================================================
+
+
+@router.get("/policy-limits", response_model=PolicyLimitsOut)
+def get_policy_limits(
+    current_user: User = Depends(get_current_user),
+) -> PolicyLimitsOut:
+    """系统级策略限制(前端据此动态渲染输入上限,不硬编码)
+
+    返回当前后端 MAX_MAX_ROUNDS(可通过环境变量 AGENTPAIR_MAX_ROUNDS_LIMIT 调整)。
+    """
+    return PolicyLimitsOut(max_rounds=MAX_MAX_ROUNDS)
 
 
 @router.get("/global", response_model=UserMemoryOut)
