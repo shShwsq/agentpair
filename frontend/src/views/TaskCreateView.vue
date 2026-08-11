@@ -880,8 +880,8 @@ onMounted(async () => {
             </div>
           </div>
 
-          <!-- 第 4 行:协作策略(无标签,直接靠左;任务级覆盖用户级默认) -->
-          <div class="config-row config-row-scenario">
+          <!-- 协作策略 + 测试环境(同一行,两个折叠面板并排) -->
+          <div class="config-row config-row-scenario config-row-dual">
             <div class="advanced-panel">
               <button
                 type="button"
@@ -967,10 +967,8 @@ onMounted(async () => {
                 </div>
               </Transition>
             </div>
-          </div>
 
-          <!-- 第 5 行:测试环境 / 动态验证(可折叠,默认折叠) -->
-          <div class="config-row config-row-scenario">
+            <!-- 测试环境 / 动态验证(可折叠,默认折叠) -->
             <div class="advanced-panel">
               <button
                 type="button"
@@ -1260,7 +1258,7 @@ onMounted(async () => {
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  justify-content: flex-end;
+  justify-content: flex-start;
   overflow-y: auto;
   padding: var(--space-6) var(--space-6) var(--space-8);
 }
@@ -1284,6 +1282,16 @@ onMounted(async () => {
 /* 第 1 行场景:无标签,直接靠左 */
 .config-row-scenario {
   padding-left: 0;
+}
+
+/* 协作策略 + 测试环境并排(两个折叠面板同一行) */
+.config-row-dual {
+  gap: var(--space-4);
+  align-items: flex-start;
+}
+
+.config-row-dual .advanced-panel {
+  flex: 0 0 auto;
 }
 
 .config-label-group {
