@@ -2,7 +2,7 @@
 /**
  * 应用顶栏(登录后的页面共用)
  *
- * 左侧品牌 + 导航(首页/提交任务/模型设置/CLI 设置/协作策略/记忆管理),右侧用户信息 + 齿轮(账号设置)+ 登出。
+ * 左侧品牌 + 导航(首页/提交任务/模型设置/CLI 设置/协作策略/记忆管理),右侧用户信息 + 问号(重看新手引导)+ 齿轮(账号设置)+ 登出。
  *
  * 导航为 slot 的默认内容:所有界面默认显示这 6 项,无需每个视图重复声明;
  * 当前页高亮依赖 Vue Router 自动添加的 router-link-exact-active。
@@ -10,18 +10,28 @@
  *
  * 硬约束:账号设置(/settings)只由齿轮按钮进入,不入主导航。
  * 记忆管理(/memory)、协作策略(/agent-policy)作为主导航项,与模型设置/CLI 设置并列。
+ * 问号按钮:重看当前路由的新手引导,跟随当前页上下文播放对应步骤。
  */
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import BrandLogo from '@/components/BrandLogo.vue'
+import { useOnboarding } from '@/composables/useOnboarding'
 import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
+const route = useRoute()
 const authStore = useAuthStore()
+const { replay } = useOnboarding()
 
 function handleLogout(): void {
   authStore.logout()
   router.push('/login')
+}
+
+/** 重看当前路由的新手引导(清除完成标记后立即启动) */
+function handleReplayOnboarding(): void {
+  if (!route.name) return
+  replay(String(route.name))
 }
 </script>
 
@@ -37,7 +47,7 @@ function handleLogout(): void {
           <BrandLogo :size="24" />
           <span>AgentPair</span>
         </RouterLink>
-        <nav class="nav">
+        <nav class="nav" data-onboarding="app-header-nav">
           <slot name="nav">
             <RouterLink to="/">首页</RouterLink>
             <RouterLink to="/tasks/new">提交任务</RouterLink>
@@ -55,9 +65,22 @@ function handleLogout(): void {
       <div class="user-area">
         <span class="user-email">{{ authStore.user?.email }}</span>
         <button
+          class="btn-help"
+          title="重看新手引导"
+          aria-label="重看新手引导"
+          @click="handleReplayOnboarding"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+        </button>
+        <button
           class="btn-settings"
           title="账号设置"
           aria-label="账号设置"
+          data-onboarding="app-header-settings"
           @click="router.push('/settings')"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -143,7 +166,8 @@ function handleLogout(): void {
 }
 
 /* 设置图标按钮:与登出按钮风格一致但更紧凑,圆形 hover 反馈 */
-.btn-settings {
+.btn-settings,
+.btn-help {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -157,7 +181,8 @@ function handleLogout(): void {
   transition: all var(--transition-fast);
 }
 
-.btn-settings:hover {
+.btn-settings:hover,
+.btn-help:hover {
   color: var(--color-text);
   background: var(--color-surface-alt);
 }

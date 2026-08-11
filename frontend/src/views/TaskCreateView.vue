@@ -745,7 +745,12 @@ onUnmounted(() => {
         <div class="topbar">
           <!-- 第 1 行:场景(无标签,直接靠左) -->
           <div class="config-row config-row-scenario">
-            <div class="scenario-segmented" role="tablist" aria-label="场景选择">
+            <div
+              class="scenario-segmented"
+              role="tablist"
+              aria-label="场景选择"
+              data-onboarding="create-scenario"
+            >
               <button
                 v-for="s in scenarios"
                 :key="s.id"
@@ -760,7 +765,7 @@ onUnmounted(() => {
           </div>
 
           <!-- 第 2 行:user_agent 模型 -->
-          <div class="config-row">
+          <div class="config-row" data-onboarding="create-user-model">
             <div class="config-label-group">
               <span class="agent-avatar avatar-user-agent" aria-hidden="true">
                 <BrandLogo :size="22" variant="user-agent" />
@@ -802,7 +807,7 @@ onUnmounted(() => {
               </span>
               <span class="config-label">react_agent</span>
             </div>
-            <div class="react-controls">
+            <div class="react-controls" data-onboarding="create-react-executor">
               <!-- 执行器选择(下拉框):内置 + 用户已配置且启用的 agent CLI -->
               <div class="executor-select">
                 <BaseSelect
@@ -1231,6 +1236,7 @@ onUnmounted(() => {
             class="chat-input"
             rows="3"
             :placeholder="chatPlaceholder"
+            data-onboarding="create-input"
             @keydown="onTextareaKeydown"
           />
 
@@ -1277,6 +1283,7 @@ onUnmounted(() => {
               class="send-btn"
               :disabled="!canSubmit"
               :title="loading ? '处理中...' : '开始任务 (Enter)'"
+              data-onboarding="create-send"
               aria-label="开始任务"
               @click="handleSubmit"
             >

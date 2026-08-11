@@ -31,6 +31,7 @@ function toggleWorkspace(): void {
           :collapsed="workspaceCollapsed"
           expand-title="展开历史任务"
           collapse-title="折叠历史任务"
+          data-onboarding="home-workspace-toggle"
           @toggle="toggleWorkspace"
         />
       </template>
@@ -40,7 +41,7 @@ function toggleWorkspace(): void {
       <WorkspaceSidebar v-if="!workspaceCollapsed" />
 
       <main class="main">
-        <div class="welcome-card">
+        <div class="welcome-card" data-onboarding="home-welcome-card">
           <div class="welcome-icon">
             <BrandLogo :size="48" />
           </div>
@@ -48,7 +49,7 @@ function toggleWorkspace(): void {
           <p>双智能体协作系统 · user_agent 澄清意图,react_agent 执行任务</p>
 
           <div class="cta-area">
-            <button class="btn-primary" @click="router.push('/tasks/new')">
+            <button class="btn-primary" data-onboarding="home-cta" @click="router.push('/tasks/new')">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <line x1="12" y1="5" x2="12" y2="19" />
                 <line x1="5" y1="12" x2="19" y2="12" />

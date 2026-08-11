@@ -1699,6 +1699,7 @@ function parseCheckpoint(item: DisplayItem): {
           :collapsed="workspaceCollapsed"
           expand-title="展开历史任务"
           collapse-title="折叠历史任务"
+          data-onboarding="detail-workspace-toggle"
           @toggle="toggleWorkspace"
         />
       </template>
@@ -1735,6 +1736,7 @@ function parseCheckpoint(item: DisplayItem): {
             class="btn-pause"
             :disabled="pausing"
             :title="isPaused ? '恢复执行' : '暂停执行'"
+            data-onboarding="detail-pause"
             @click="handleTogglePause"
           >
             {{ pausing ? '处理中...' : isPaused ? '恢复' : '暂停' }}
@@ -1757,7 +1759,11 @@ function parseCheckpoint(item: DisplayItem): {
       <!-- 任务详情(主区聚焦结果清单 + 协作对话流;任务详情/覆盖度看板在右侧栏) -->
       <template v-else-if="task">
         <!-- 结果清单(分组由 task.params._grouping 驱动) -->
-        <section v-if="task.results.length > 0" class="results-section">
+        <section
+          v-if="task.results.length > 0"
+          class="results-section"
+          data-onboarding="detail-results"
+        >
           <h2>结果清单 <span class="count">({{ task.results.length }})</span></h2>
           <div v-for="group in resultGroups" :key="group.key" class="severity-group">
             <h3>
@@ -1791,7 +1797,11 @@ function parseCheckpoint(item: DisplayItem): {
         </section>
 
         <!-- 协作对话流(无外框,顶部仅在运行时显示实时徽标) -->
-        <section v-if="roundGroups.length > 0 || isRunning" class="conversation-section">
+        <section
+          v-if="roundGroups.length > 0 || isRunning"
+          class="conversation-section"
+          data-onboarding="detail-conversation"
+        >
           <!-- 用户指令(右对齐,像聊天界面的用户消息气泡) -->
           <div v-if="userDirective" class="user-directive">
             <ConversationMessage

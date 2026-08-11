@@ -1,0 +1,194 @@
+/**
+ * 新手引导步骤文案与锚点配置(单一数据源)
+ *
+ * 设计:
+ * - 所有引导文案集中在本文件,UI 组件不内嵌任何用户可见文字,便于统一审阅/翻译/调整。
+ * - 锚点 selector 用 [data-onboarding="xxx"] 属性匹配,比 class 名稳定(不随样式重构漂移)。
+ *   各视图只需在对应元素上添加 data-onboarding="xxx" 属性即可被引导定位。
+ * - 路由驱动按需触发:每个步骤声明所属路由名(route),引导组件在路由变化时按需播放
+ *   该路由对应的未读步骤子集,而非一次性播完整套(避免用户疲劳)。
+ * - 跨页面步骤切换:同一路由内的步骤连续播放;路由切换后由新路由的 onboarding
+ *   watcher 决定是否启动该路由的引导。
+ * - 版本号 ONBOARDING_VERSION:引导文案/步骤结构有大改时递增,老用户的 completed 标记作废,
+ *   下次登录会重新看到引导(只影响"已读过"状态,不影响其他数据)。
+ */
+import type { RouteLocationRaw } from 'vue-router'
+
+/** 气泡相对目标元素的位置 */
+export type OnboardingPlacement = 'top' | 'bottom' | 'left' | 'right'
+
+/** 单个引导步骤定义 */
+export interface OnboardingStep {
+  /** 步骤唯一 id(也作为 localStorage 已读记录的 key 段) */
+  id: string
+  /** 锚点元素的 data-onboarding 属性值;空字符串表示居中浮层(无目标元素) */
+  target: string
+  /** 所属路由名(对应 router/index.ts 的 name);引导组件按路由分组播放 */
+  route: string
+  /** 气泡标题 */
+  title: string
+  /** 气泡正文(纯文本,不解析 HTML) */
+  content: string
+  /** 气泡相对目标元素的位置;默认 'bottom' */
+  placement?: OnboardingPlacement
+}
+
+/**
+ * 引导版本号。步骤结构或文案有大改时递增,使老用户重新看到引导。
+ * - v1: 首版,覆盖 HomeView / TaskCreateView / TaskDetailView / AppHeader。
+ */
+export const ONBOARDING_VERSION = 1
+
+/**
+ * 全部引导步骤(按路由分组,组内按顺序播放)。
+ *
+ * 路由划分:
+ * - home:        首页欢迎 + CTA + 工作区 + 主导航(4 步)
+ * - task-create: 场景 + 模型 + 执行器 + 输入 + 发送(5 步)
+ * - task-detail: 结果清单 + 对话流 + 暂停 + 历史切换(4 步)
+ * - settings:    账号设置入口说明(1 步,从 home 阶段末尾的齿轮步骤跳转进入)
+ *
+ * 注意:settings 路由的步骤仅用于用户主动进入 /settings 时播放;
+ * 主流程中"齿轮按钮在哪里"的说明放在 home 路由最后一步,引导用户认识入口位置,
+ * 而非真的跳进 /settings(那会离开当前上下文)。
+ */
+export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
+  // ---- 路由:home(首页) ----
+  {
+    id: 'home-welcome',
+    target: 'home-welcome-card',
+    route: 'home',
+    placement: 'bottom',
+    title: '欢迎使用 AgentPair',
+    content:
+      '这是一个双智能体协作系统:user_agent 负责澄清意图与评估结果,react_agent 负责调用工具执行任务。下面用 30 秒带你认识主要入口。',
+  },
+  {
+    id: 'home-cta',
+    target: 'home-cta',
+    route: 'home',
+    placement: 'right',
+    title: '提交新任务',
+    content: '点这里进入任务提交页,描述你的需求并选择执行器。',
+  },
+  {
+    id: 'home-workspace',
+    target: 'home-workspace-toggle',
+    route: 'home',
+    placement: 'right',
+    title: '历史任务',
+    content: '左上角按钮可展开/折叠历史任务侧栏,方便随时切换之前的任务。',
+  },
+  {
+    id: 'home-nav',
+    target: 'app-header-nav',
+    route: 'home',
+    placement: 'bottom',
+    title: '主导航',
+    content:
+      '顶栏可切换:模型设置(配置 LLM)、CLI 设置(外部 CLI 凭据)、协作策略(评估频率与权限)、记忆管理(用户偏好)。',
+  },
+  {
+    id: 'home-settings',
+    target: 'app-header-settings',
+    route: 'home',
+    placement: 'bottom',
+    title: '账号设置',
+    content: '齿轮按钮进入账号设置(修改密码、GitHub/Gitee 绑定、登出设备等),不在主导航中。',
+  },
+
+  // ---- 路由:task-create(提交任务) ----
+  {
+    id: 'create-scenario',
+    target: 'create-scenario',
+    route: 'task-create',
+    placement: 'bottom',
+    title: '选择场景',
+    content: '场景提供预设 prompt 模板,选择后可自动填入输入框;也可自由输入覆盖模板。',
+  },
+  {
+    id: 'create-user-model',
+    target: 'create-user-model',
+    route: 'task-create',
+    placement: 'right',
+    title: 'user_agent 评估模型',
+    content: '选择用于结果评估的模型。若列表为空,先到「模型设置」配置一个 LLM 凭据。',
+  },
+  {
+    id: 'create-react-executor',
+    target: 'create-react-executor',
+    route: 'task-create',
+    placement: 'right',
+    title: 'react_agent 执行器',
+    content:
+      '选择执行器:内置 react_agent 直接用上面的模型;若已配置外部 CLI(如 codex / qoder),可在此切换。',
+  },
+  {
+    id: 'create-input',
+    target: 'create-input',
+    route: 'task-create',
+    placement: 'top',
+    title: '任务描述',
+    content: '在这里描述你的任务需求,尽量具体:目标、范围、约束、期望产物格式。',
+  },
+  {
+    id: 'create-send',
+    target: 'create-send',
+    route: 'task-create',
+    placement: 'left',
+    title: '提交任务',
+    content: '填好仓库与分支后点这里提交,后端会立即返回 task_id 并跳转到任务详情页观看实时进度。',
+  },
+
+  // ---- 路由:task-detail(任务详情) ----
+  {
+    id: 'detail-results',
+    target: 'detail-results',
+    route: 'task-detail',
+    placement: 'right',
+    title: '结果清单',
+    content:
+      '任务执行完成后,产出的结果会按严重程度分组显示在这里。当前任务还没结果,等你提交第一个任务后回到这里就能看到。',
+  },
+  {
+    id: 'detail-conversation',
+    target: 'detail-conversation',
+    route: 'task-detail',
+    placement: 'top',
+    title: '协作对话流',
+    content:
+      '任务运行时,这里会实时显示 user_agent 与 react_agent 的对话流:思考、工具调用、检查点评估等过程都会按轮次展示。',
+  },
+  {
+    id: 'detail-pause',
+    target: 'detail-pause',
+    route: 'task-detail',
+    placement: 'bottom',
+    title: '暂停 / 恢复',
+    content: '任务运行中可随时点这里暂停,补充信息后恢复执行;暂停期间可向智能体追加指令。',
+  },
+  {
+    id: 'detail-workspace',
+    target: 'detail-workspace-toggle',
+    route: 'task-detail',
+    placement: 'right',
+    title: '历史任务切换',
+    content: '左上角按钮展开侧栏,可在多个任务之间快速切换。',
+  },
+] as const
+
+/**
+ * 取指定路由下的所有引导步骤(按定义顺序)。
+ * 引导组件在进入某路由时调用,若返回非空数组且该路由未标记完成,则启动播放。
+ */
+export function getStepsForRoute(routeName: string): OnboardingStep[] {
+  return ONBOARDING_STEPS.filter((s) => s.route === routeName)
+}
+
+/**
+ * 用于 router.push 的路由跳转目标(从步骤定义派生)。
+ * 预留扩展:当前主流程不跨页面跳转(改为按路由分组播放),此函数保留供"重看引导"等场景使用。
+ */
+export function toRouteLocation(step: OnboardingStep): RouteLocationRaw {
+  return { name: step.route }
+}
