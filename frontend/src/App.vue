@@ -21,10 +21,19 @@ const authStore = useAuthStore()
 const { setUser, maybeStartForRoute } = useOnboarding()
 
 // 用户加载/变化时同步 email 到引导状态机(登出 → null,引导不启动)
+// 首次 user 加载完成(email: null → string)时,主动触发当前路由的引导检查,
+// 因为此时 route.name 未变化(仍在 home),上面的路由 watcher 不会重新触发。
 watch(
   () => authStore.user?.email ?? null,
-  (email) => {
+  (email, prevEmail) => {
     setUser(email)
+    // 仅在从未登录(prevEmail 为 null/undefined)到登录(email 非空)的转变时,
+    // 额外触发一次引导检查(此时 route.name 未变化,上面的路由 watcher 不会重新触发)
+    if (email && !prevEmail && route.name) {
+      requestAnimationFrame(() => {
+        maybeStartForRoute(String(route.name))
+      })
+    }
   },
   { immediate: true },
 )
