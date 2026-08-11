@@ -1520,6 +1520,39 @@ function handleMessageError(message: string): void {
 function isUserMessageItem(item: DisplayItem): boolean {
   return !item.is_streaming && item.role === 'user' && item.type === 'message'
 }
+
+/**
+ * 判断 DisplayItem 是否为 user_agent 检查点评估(迭代边界轻量评估)。
+ *
+ * 与完整评估(round 边界)区分:后端 agent_checkpoint._record_checkpoint 落库时,
+ * content 以 "[检查点评估 · 第N轮迭代M]" 开头;完整评估由 LLM 自由生成,
+ * 不带此前缀。这里靠前缀判定,简单可靠。
+ */
+function isCheckpointItem(item: DisplayItem): boolean {
+  if (item.is_streaming) return false
+  if (item.role !== 'user_agent' || item.type !== 'evaluation') return false
+  return (item.content || '').startsWith('[检查点评估')
+}
+
+/** 解析检查点评估 content,提取 interrupt/reason/query(供卡片渲染) */
+function parseCheckpoint(item: DisplayItem): {
+  isInterrupt: boolean
+  reason: string
+  query: string | null
+} {
+  const c = item.content || ''
+  // content 格式(后端 agent_checkpoint._record_checkpoint):
+  //   打断:[检查点评估 · 第N轮迭代M] 打断\n理由:...\n追问指令:...
+  //   继续:[检查点评估 · 第N轮迭代M] 继续\n理由:...
+  const isInterrupt = c.startsWith('[检查点评估') && /\] 打断/.test(c)
+  const reasonMatch = c.match(/理由:([^\n]*)/)
+  const queryMatch = c.match(/追问指令:([^\n]*)/)
+  return {
+    isInterrupt,
+    reason: reasonMatch ? reasonMatch[1].trim() : '',
+    query: queryMatch ? queryMatch[1].trim() : null,
+  }
+}
 </script>
 
 <template>
@@ -1661,7 +1694,7 @@ function isUserMessageItem(item: DisplayItem): boolean {
                 <!-- 平铺段:user_agent 评估/追问/总结、user 指令等关键消息 -->
                 <!-- 用户补充消息(type=message)右对齐,与顶部 userDirective 视觉一致 -->
                 <div
-                  v-if="seg.kind === 'plain'"
+                  v-if="seg.kind === 'plain' && !isCheckpointItem(seg.item)"
                   :class="{ 'user-msg-row': isUserMessageItem(seg.item) }"
                 >
                   <ConversationMessage
@@ -1670,9 +1703,46 @@ function isUserMessageItem(item: DisplayItem): boolean {
                   />
                 </div>
 
+                <!-- 检查点评估专属轻量卡片:user_agent 在迭代边界做轻量评估,
+                     interrupt=true 时高亮打断指令(显示用户注入 react_agent 的追问) -->
+                <div
+                  v-else-if="seg.kind === 'plain' && isCheckpointItem(seg.item)"
+                  :class="[
+                    'checkpoint-card',
+                    { 'checkpoint-interrupt': parseCheckpoint(seg.item).isInterrupt },
+                  ]"
+                >
+                  <div class="checkpoint-header">
+                    <span class="checkpoint-icon">
+                      {{ parseCheckpoint(seg.item).isInterrupt ? '⚠' : '✓' }}
+                    </span>
+                    <span class="checkpoint-title">检查点评估</span>
+                    <span
+                      :class="[
+                        'checkpoint-badge',
+                        parseCheckpoint(seg.item).isInterrupt
+                          ? 'checkpoint-badge-interrupt'
+                          : 'checkpoint-badge-continue',
+                      ]"
+                    >
+                      {{ parseCheckpoint(seg.item).isInterrupt ? '已打断' : '继续' }}
+                    </span>
+                  </div>
+                  <div class="checkpoint-reason">
+                    {{ parseCheckpoint(seg.item).reason || '无说明' }}
+                  </div>
+                  <div
+                    v-if="parseCheckpoint(seg.item).isInterrupt && parseCheckpoint(seg.item).query"
+                    class="checkpoint-query"
+                  >
+                    <span class="checkpoint-query-label">追问指令</span>
+                    <span class="checkpoint-query-text">{{ parseCheckpoint(seg.item).query }}</span>
+                  </div>
+                </div>
+
                 <!-- step 分组:plan step 下含多个迭代(无 plan 时为单个"审计过程"组) -->
                 <div
-                  v-else
+                  v-else-if="seg.kind === 'step'"
                   class="step-block"
                   :class="{
                     'step-streaming': seg.hasStreaming,
@@ -2959,4 +3029,107 @@ function isUserMessageItem(item: DisplayItem): boolean {
 .diff-line-hunk { color: var(--color-text-muted); }
 .diff-line-meta { color: var(--color-text-secondary); font-weight: var(--fw-medium); }
 .diff-line-ctx { color: var(--color-text); }
+
+/* ============================================================
+ * 检查点评估卡片(user_agent 迭代边界轻量评估)
+ * - 默认态:浅色边框,信息密度低,与对话流不抢戏
+ * - 打断态(interrupt=true):橙红边框 + 高亮追问指令块
+ *   让用户一眼看出 user_agent 打断了 react_agent 的方向
+ * ============================================================ */
+.checkpoint-card {
+  margin: var(--space-2) 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-text-muted);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.checkpoint-card.checkpoint-interrupt {
+  background: #fff7ed;
+  border-color: #fdba74;
+  border-left-color: #ea580c;
+}
+
+.checkpoint-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.checkpoint-icon {
+  flex-shrink: 0;
+  font-size: var(--fs-md);
+  line-height: 1;
+}
+
+.checkpoint-card.checkpoint-interrupt .checkpoint-icon {
+  color: #ea580c;
+}
+
+.checkpoint-card:not(.checkpoint-interrupt) .checkpoint-icon {
+  color: #059669;
+}
+
+.checkpoint-title {
+  font-weight: var(--fw-semibold);
+  color: var(--color-text);
+}
+
+.checkpoint-badge {
+  margin-left: auto;
+  padding: 2px var(--space-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  border-radius: var(--radius-full);
+}
+
+.checkpoint-badge-continue {
+  color: #059669;
+  background: rgba(5, 150, 105, 0.12);
+}
+
+.checkpoint-badge-interrupt {
+  color: #c2410c;
+  background: rgba(234, 88, 12, 0.15);
+}
+
+.checkpoint-reason {
+  color: var(--color-text-secondary);
+  line-height: var(--lh-relaxed);
+  word-break: break-word;
+}
+
+.checkpoint-card.checkpoint-interrupt .checkpoint-reason {
+  color: #7c2d12;
+}
+
+.checkpoint-query {
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: rgba(234, 88, 12, 0.08);
+  border-left: 2px solid #ea580c;
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.checkpoint-query-label {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: #c2410c;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.checkpoint-query-text {
+  color: var(--color-text);
+  font-weight: var(--fw-medium);
+  word-break: break-word;
+  white-space: pre-wrap;
+}
 </style>

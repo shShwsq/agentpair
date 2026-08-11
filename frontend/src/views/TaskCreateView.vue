@@ -251,7 +251,7 @@ const DEFAULT_POLICY = {
   allow_interrupt: true,
   max_interrupts_per_round: 2,
   allow_verify: false,
-})
+}
 
 // ============================================================
 // Git 仓库选择(repo_url 字段专用增强,统一 GitHub / Gitee)

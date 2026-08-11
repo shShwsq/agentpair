@@ -30,7 +30,7 @@ import {
   saveProject,
 } from '@/api/memory'
 import { extractErrorMessage } from '@/utils/error'
-import type { ProjectOut, SaveAgentPolicyRequest, UserPreferenceOut } from '@/types/memory'
+import type { ProjectOut, UserPreferenceOut } from '@/types/memory'
 
 // ============================================================
 // 默认模板(后端初始为空,前端在内容为空时预填模板作为引导)
@@ -170,14 +170,21 @@ const projectIds = reactive<Record<string, string>>({})
 // ============================================================
 
 /** 默认策略值(与后端 DEFAULT_AGENT_POLICY 对齐) */
-const DEFAULT_POLICY = {
+const DEFAULT_POLICY: {
+  checkpoint_interval: number
+  checkpoint_interval_builtin: number | null
+  checkpoint_interval_cli: number | null
+  allow_interrupt: boolean
+  max_interrupts_per_round: number
+  allow_verify: boolean
+} = {
   checkpoint_interval: 3,
-  checkpoint_interval_builtin: null as number | null,
-  checkpoint_interval_cli: null as number | null,
+  checkpoint_interval_builtin: null,
+  checkpoint_interval_cli: null,
   allow_interrupt: true,
   max_interrupts_per_round: 2,
   allow_verify: false,
-} as const
+}
 
 /** 策略面板是否展开 */
 const policyOpen = ref(false)
@@ -803,6 +810,114 @@ onMounted(() => {
                 <div v-else class="preview-empty">暂无内容</div>
               </div>
             </div>
+
+            <!-- Agent 策略配置(仅 pref 文件显示;用户级默认,任务级可覆盖) -->
+            <section v-if="activeEntry.kind === 'pref'" class="policy-section">
+              <button
+                type="button"
+                class="policy-toggle"
+                :aria-expanded="policyOpen"
+                @click="policyOpen = !policyOpen"
+              >
+                <svg
+                  class="policy-chevron"
+                  :class="{ expanded: policyOpen }"
+                  width="14" height="14" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                >
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
+                <span class="policy-title">Agent 策略</span>
+                <span class="policy-summary">
+                  {{ policyAllowInterrupt ? `每${policyInterval}轮评估·可打断` : `每${policyInterval}轮评估·仅观察` }}
+                </span>
+                <span v-if="policyDirty" class="policy-dirty-dot" title="有未保存改动" />
+              </button>
+
+              <Transition name="collapse">
+                <div v-show="policyOpen" class="policy-body">
+                  <p class="policy-intro">
+                    作为 user_agent 检查点评估的用户级默认。任务创建时可单独覆盖。
+                  </p>
+
+                  <div class="policy-grid">
+                    <label class="policy-field">
+                      <span class="policy-label">评估频率 K</span>
+                      <input
+                        v-model.number="policyInterval"
+                        type="number" min="1" max="20"
+                        class="policy-input"
+                        :disabled="saving"
+                      />
+                      <span class="policy-hint">每 K 个迭代评估一次</span>
+                    </label>
+
+                    <label class="policy-field">
+                      <span class="policy-label">每轮最大打断</span>
+                      <input
+                        v-model.number="policyMaxInterrupts"
+                        type="number" min="0" max="10"
+                        class="policy-input"
+                        :disabled="saving || !policyAllowInterrupt"
+                      />
+                      <span class="policy-hint">防死锁上限</span>
+                    </label>
+                  </div>
+
+                  <label class="policy-toggle-row">
+                    <input v-model="policyAllowInterrupt" type="checkbox" :disabled="saving" />
+                    <span>允许 user_agent 打断 react_agent</span>
+                  </label>
+
+                  <label class="policy-toggle-row">
+                    <input v-model="policyAllowVerify" type="checkbox" :disabled="saving" />
+                    <span>允许 user_agent 自行验证 <span class="policy-experimental">(实验性)</span></span>
+                  </label>
+
+                  <label class="policy-toggle-row">
+                    <input v-model="policyAdvanced" type="checkbox" :disabled="saving" />
+                    <span>分别配置内置 / CLI agent 的 K 值</span>
+                  </label>
+
+                  <Transition name="collapse">
+                    <div v-show="policyAdvanced" class="policy-grid">
+                      <label class="policy-field">
+                        <span class="policy-label">内置 react_agent K</span>
+                        <input
+                          v-model.number="policyIntervalBuiltin"
+                          type="number" min="1" max="20"
+                          class="policy-input"
+                          placeholder="留空用统一值"
+                          :disabled="saving"
+                        />
+                      </label>
+                      <label class="policy-field">
+                        <span class="policy-label">CLI agent K</span>
+                        <input
+                          v-model.number="policyIntervalCli"
+                          type="number" min="1" max="20"
+                          class="policy-input"
+                          placeholder="留空用统一值"
+                          :disabled="saving"
+                        />
+                      </label>
+                    </div>
+                  </Transition>
+
+                  <div class="policy-actions">
+                    <button
+                      type="button"
+                      class="btn btn-ghost policy-reset"
+                      :disabled="saving || !policyDirty"
+                      @click="resetPolicyToDefault"
+                    >恢复默认</button>
+                    <span class="policy-save-hint">
+                      点上方「保存」按钮生效(与 user_profile 文本一起写入)
+                    </span>
+                  </div>
+                </div>
+              </Transition>
+            </section>
 
           </template>
 
@@ -1556,5 +1671,192 @@ onMounted(() => {
 .toast-slide-leave-to {
   opacity: 0;
   transform: translate(-50%, -12px);
+}
+
+/* ============================================================
+ * Agent 策略配置面板(pref 文件专用)
+ * 设计与 TaskCreateView 的 policy 面板对齐,但布局不同:
+ * 这里是侧边编辑器底部内嵌面板(非 dropdown 浮层),
+ * 占用纵向空间但不阻挡编辑器内容查看。
+ * ============================================================ */
+.policy-section {
+  flex-shrink: 0;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.policy-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-3) var(--space-5);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.policy-toggle:hover {
+  color: var(--color-text);
+  background: var(--color-surface-alt);
+}
+
+.policy-toggle[aria-expanded="true"] {
+  color: var(--color-primary);
+}
+
+.policy-chevron {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  transition: transform var(--transition-fast);
+}
+
+.policy-chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.policy-title {
+  font-weight: var(--fw-semibold);
+}
+
+.policy-summary {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-normal);
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.policy-dirty-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  flex-shrink: 0;
+}
+
+.policy-body {
+  padding: var(--space-3) var(--space-5) var(--space-4);
+  border-top: 1px solid var(--color-border);
+  background: var(--color-surface-alt);
+}
+
+.policy-intro {
+  margin: 0 0 var(--space-3);
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  line-height: var(--lh-relaxed);
+}
+
+.policy-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.policy-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.policy-label {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--color-text);
+}
+
+.policy-input {
+  width: 100%;
+  height: 34px;
+  padding: 0 var(--space-2);
+  font-size: var(--fs-sm);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.policy-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+
+.policy-input:disabled {
+  color: var(--color-text-muted);
+  background: var(--color-surface-alt);
+  cursor: not-allowed;
+}
+
+.policy-hint {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+}
+
+.policy-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  font-size: var(--fs-sm);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.policy-toggle-row input {
+  cursor: pointer;
+}
+
+.policy-toggle-row input:disabled {
+  cursor: not-allowed;
+}
+
+.policy-experimental {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.policy-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.policy-reset {
+  font-size: var(--fs-xs);
+  padding: var(--space-1) var(--space-3);
+}
+
+.policy-save-hint {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  line-height: var(--lh-relaxed);
+}
+
+/* collapse 过渡:用于策略面板和高级 K 值子面板 */
+.collapse-enter-active,
+.collapse-leave-active {
+  transition: opacity var(--transition-fast), max-height var(--transition-fast);
+  overflow: hidden;
+}
+
+.collapse-enter-from,
+.collapse-leave-to {
+  opacity: 0;
+  max-height: 0;
+}
+
+.collapse-enter-to,
+.collapse-leave-from {
+  opacity: 1;
+  max-height: 600px;
 }
 </style>
