@@ -27,6 +27,7 @@ import type {
   SSEEventType,
   StatusEventData,
   ThinkingDeltaEventData,
+  VerifyActionEventData,
 } from '@/types/task'
 
 /** 事件回调接口 */
@@ -44,6 +45,8 @@ export interface StreamCallbacks {
   onQuestion?: (data: QuestionEventData) => void
   /** 覆盖度清单确认(user_agent 第 0 轮动态生成 checklist 后触发) */
   onChecklistReview?: (data: ChecklistReviewEventData) => void
+  /** 动态验证动作授权(verifier_agent per_action 模式,每个 HTTP/PoC 动作需用户确认) */
+  onVerifyAction?: (data: VerifyActionEventData) => void
   /** user_agent 检查点评估结果(迭代边界轻量评估,interrupt=true 时已注入追问) */
   onAgentCheckpoint?: (data: AgentCheckpointEventData) => void
   onDone?: (data: DoneEventData) => void
@@ -76,6 +79,7 @@ export function subscribeTaskStream(
     'plan',
     'question',
     'checklist_review',
+    'verify_action',
     'agent_checkpoint',
     'done',
     'error',
@@ -111,6 +115,9 @@ export function subscribeTaskStream(
             break
           case 'checklist_review':
             callbacks.onChecklistReview?.(data as unknown as ChecklistReviewEventData)
+            break
+          case 'verify_action':
+            callbacks.onVerifyAction?.(data as unknown as VerifyActionEventData)
             break
           case 'agent_checkpoint':
             callbacks.onAgentCheckpoint?.(data as unknown as AgentCheckpointEventData)

@@ -104,6 +104,25 @@ class Task(Base):
         back_populates="task", cascade="all, delete-orphan"
     )
 
+    # ============================================================
+    # 验证器配置(存储在 params._verifier,免迁移;通过 property 读取)
+    # ============================================================
+
+    @property
+    def test_env_url(self) -> str | None:
+        """测试环境基址 URL(verifier_agent 的 http_request 目标)"""
+        return (self.params or {}).get("_verifier", {}).get("test_env_url")
+
+    @property
+    def verifier_enabled(self) -> bool:
+        """是否启用 verifier_agent(user_agent 可自主调用)"""
+        return (self.params or {}).get("_verifier", {}).get("enabled", False)
+
+    @property
+    def verifier_auth_mode(self) -> str:
+        """验证授权模式:"direct"(直接执行) / "per_action"(每个动作弹窗授权)"""
+        return (self.params or {}).get("_verifier", {}).get("auth_mode", "per_action")
+
 
 class Conversation(Base):
     """对话记录:user / user_agent / react_agent 之间的所有消息

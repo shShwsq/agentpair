@@ -53,6 +53,13 @@ class TaskCreateRequest(BaseModel):
     branch: str | None = None
     scope: str | None = None
 
+    # 验证器配置(可选):user_agent 可自主调用 verifier_agent 在已部署的测试环境验证
+    # react_agent 的发现。对用户透明(前端不出现 verifier_agent 字样,只显示"正在验证")。
+    test_env_url: str | None = Field(default=None, max_length=2048)
+    verifier_enabled: bool = False
+    # "direct":验证动作直接执行不弹窗;"per_action":每个 HTTP 请求/PoC 运行前弹窗授权
+    verifier_auth_mode: str = Field(default="per_action", pattern="^(direct|per_action)$")
+
 
 class TaskTitleUpdateRequest(BaseModel):
     """修改任务标题的请求
@@ -101,6 +108,10 @@ class TaskResponse(BaseModel):
     llm_config_id: str | None = None
     react_llm_config_id: str | None = None
     executor: str = "builtin"
+    # 验证器配置(从 task.params._verifier 读取,见 Task 模型 property)
+    test_env_url: str | None = None
+    verifier_enabled: bool = False
+    verifier_auth_mode: str = "per_action"
     status: str
     current_stage: str | None
     error_message: str | None
@@ -258,3 +269,34 @@ class SendMessageResponse(BaseModel):
 
     accepted: bool
     message: str = ""
+
+
+# ============================================================
+# 验证器动作授权(verifier_agent per_action 模式)
+# ============================================================
+
+
+class VerifyActionRequest(BaseModel):
+    """用户对验证动作的授权决议(POST /tasks/{id}/verify_action)"""
+
+    action_id: str
+    approved: bool
+
+
+class VerifyActionResponse(BaseModel):
+    """提交授权决议的响应"""
+
+    accepted: bool
+    message: str = ""
+
+
+class VerifyConfigUpdateRequest(BaseModel):
+    """更新验证器配置请求(PATCH /tasks/{id}/verifier_config)
+
+    运行时允许调整验证授权模式与开关(任务运行界面也可修改)。
+    所有字段可选,只更新传入的字段。
+    """
+
+    verifier_enabled: bool | None = None
+    verifier_auth_mode: str | None = Field(default=None, pattern="^(direct|per_action)$")
+    test_env_url: str | None = Field(default=None, max_length=2048)

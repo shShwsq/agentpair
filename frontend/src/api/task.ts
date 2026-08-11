@@ -18,6 +18,10 @@ import type {
   TaskCreateResponse,
   TaskDetail,
   TaskListItem,
+  VerifyActionEventData,
+  VerifyActionRequest,
+  VerifyActionResponse,
+  VerifyConfigUpdateRequest,
 } from '@/types/task'
 
 /** 列出可用场景 */
@@ -221,4 +225,47 @@ export function sendTaskMessage(
   req: SendMessageRequest,
 ): Promise<SendMessageResponse> {
   return client.post(`/tasks/${taskId}/messages`, req).then((r) => r.data)
+}
+
+// ============================================================
+// 动态验证动作授权(verifier_agent per_action 模式)
+// ============================================================
+
+/**
+ * 查询任务当前待授权的验证动作
+ *
+ * 用于刷新页面后恢复授权弹窗。无待授权动作返回 null。
+ * 后端 verifier_agent 在 per_action 模式下会推送 verify_action SSE 事件,
+ * 若 SSE 事件在连接前已错过,通过此接口拉取当前待授权动作。
+ */
+export function getPendingVerifyAction(taskId: string): Promise<VerifyActionEventData | null> {
+  return client.get(`/tasks/${taskId}/pending_verify_action`).then((r) => r.data)
+}
+
+/**
+ * 提交用户对验证动作的授权决议
+ *
+ * 唤醒阻塞等待的 verifier_agent 后台线程:
+ * - approved=true:继续执行该 HTTP/PoC 动作
+ * - approved=false:跳过该动作,verifier_agent 收到"用户拒绝"反馈
+ *
+ * 返回 accepted=false 表示当前无待授权动作(可能已答复或任务已结束)。
+ */
+export function submitVerifyAction(
+  taskId: string,
+  req: VerifyActionRequest,
+): Promise<VerifyActionResponse> {
+  return client.post(`/tasks/${taskId}/verify_action`, req).then((r) => r.data)
+}
+
+/**
+ * 更新任务的验证器配置(运行时可调)
+ *
+ * 允许在任务运行界面调整验证授权模式与开关。verifier_agent 每次调用时读取最新配置。
+ */
+export function updateTaskVerifierConfig(
+  taskId: string,
+  req: VerifyConfigUpdateRequest,
+): Promise<TaskDetail> {
+  return client.patch(`/tasks/${taskId}/verifier_config`, req).then((r) => r.data)
 }

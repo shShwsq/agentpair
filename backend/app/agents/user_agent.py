@@ -42,7 +42,7 @@ from sqlalchemy.orm import Session
 
 from app.event_bus import publish
 from app.llm.client import LLMClient
-from app.models.task import Conversation
+from app.models.task import Conversation, Task
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,37 @@ SUPPLEMENT_QUESTION = {
     "question": "是否有其他补充?(可选)",
     "placeholder": "如有其他需求或上下文,请在此填写",
     "required": False,
+}
+
+# 单次评估中最多调用 verifier_agent 的次数(防止无限验证)
+MAX_VERIFY_CALLS = 3
+
+# verify 工具定义(user_agent 可选调用,仅当 task.verifier_enabled 且 policy.allow_verify 时启用)
+_VERIFY_TOOL_DEFINITION: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "verify",
+        "description": (
+            "在已部署的测试环境动态验证 react_agent 发现的安全问题是否真实可利用。"
+            "传入需要验证的安全发现描述,系统会自动构造 PoC 发送到测试环境验证。"
+            "验证完成后你会收到验证结果(已确认/未确认/误报 + 证据),据此调整评估。"
+            "适用于:静态分析疑似但不确定的漏洞、需要实际触发确认的注入/认证绕过等。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "verification_request": {
+                    "type": "string",
+                    "description": (
+                        "需要验证的安全发现描述,应包含:漏洞类型、代码位置、攻击思路。"
+                        "如'验证 src/api/users.py 第 42 行的 SQL 注入:用户输入 username "
+                        "未参数化直接拼接到 SQL,尝试用 ' OR 1=1-- 验证'"
+                    ),
+                },
+            },
+            "required": ["verification_request"],
+        },
+    },
 }
 
 
@@ -159,6 +190,13 @@ grouping 可为 null(不分组,平铺展示)。
 - 每条 result 含 title(简短标题)、content(详细内容)、metadata(自定义字段)。
 - grouping 声明前端如何分组展示:field 指定 metadata 中的分组字段,
   values 列出分组枚举(含显示名和颜色)。无明确分组维度时 grouping=null。
+
+## 动态验证(可选,有 verify 工具时)
+如果任务配置了测试环境,你可以调用 `verify` 工具动态验证 react_agent 发现的安全问题:
+- 对静态分析疑似但不确定的漏洞,调 verify 发送 PoC 到测试环境确认
+- 验证结果会作为 tool_result 返回给你,据此在 results 中标注"已确认可利用"或"误报"
+- 不要对每个发现都验证,只验证关键的、不确定的;已明确的问题不需要验证
+- 验证结果应反映在 results 的 metadata 中(如加 verified: true/false 字段)
 """
 
 
@@ -203,6 +241,8 @@ def run_user_agent(
     task_checklist: list[dict[str, Any]] | None = None,
     user_id: UUID | None = None,
     repo_url: str | None = None,
+    task: Task | None = None,
+    agent_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """执行一次 user_agent 评估
 
@@ -220,6 +260,8 @@ def run_user_agent(
         repo_context: 第 0 轮专用,orchestrator 主动 clone 后的仓库结构上下文。
         task_checklist: 已确认的覆盖度清单(场景降级后从 task.checklist 读取)。
             round_idx=0 时传 None(LLM 动态生成);round_idx>=1 时传已确认清单。
+        task: 任务对象(可选)。传入时用于读取 verifier 配置(test_env_url / verifier_enabled)。
+        agent_policy: agent 策略(可选)。含 allow_verify 开关,控制是否启用 verify 工具。
 
     返回:user_agent 的结构化输出
         {
@@ -323,10 +365,87 @@ def run_user_agent(
         {"role": "user", "content": user_msg},
     ]
 
-    # 流式调用:边收 token 边推 thinking_delta
-    content = _stream_user_agent_llm(
-        client, messages, task_id=task_id, round_idx=round_idx
+    # 判断是否启用 verify 工具
+    # 条件:task 配了 verifier_enabled + agent_policy.allow_verify + 有 test_env_url
+    verify_enabled = (
+        task is not None
+        and task.verifier_enabled
+        and bool(task.test_env_url)
+        and (agent_policy or {}).get("allow_verify", False)
     )
+    tools = [_VERIFY_TOOL_DEFINITION] if verify_enabled else None
+
+    # LLM 调用循环:处理 verify 工具调用(验证结果回灌后再调 LLM 输出 JSON 评估)
+    content = ""
+    verify_count = 0
+    while True:
+        content, tool_calls = _stream_user_agent_llm(
+            client, messages, task_id=task_id, round_idx=round_idx, tools=tools
+        )
+
+        # 无工具调用 → content 是 JSON 评估结果,跳出循环
+        if not tool_calls:
+            break
+
+        # 有工具调用:处理每个 verify 调用
+        # 把 assistant 消息(含 tool_calls)加回 messages
+        assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
+        assistant_msg["tool_calls"] = [
+            {
+                "id": tc["id"] or f"call_{tc['index']}",
+                "type": "function",
+                "function": {"name": tc["name"], "arguments": tc["arguments_str"]},
+            }
+            for tc in tool_calls
+        ]
+        messages.append(assistant_msg)
+
+        for tc in tool_calls:
+            if tc["name"] != "verify":
+                # 未知工具调用:返回错误让 LLM 知道
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"] or f"call_{tc['index']}",
+                    "content": f"[不支持的工具: {tc['name']}]",
+                })
+                continue
+
+            if verify_count >= MAX_VERIFY_CALLS:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"] or f"call_{tc['index']}",
+                    "content": f"已达验证次数上限({MAX_VERIFY_CALLS}),跳过本次验证。",
+                })
+                continue
+
+            verify_count += 1
+            try:
+                args = json.loads(tc["arguments_str"]) if tc["arguments_str"] else {}
+            except json.JSONDecodeError:
+                args = {}
+            verification_request = args.get("verification_request", "")
+
+            # 调用 verifier_agent 执行动态验证
+            logger.info(
+                f"[task={task_id}] user_agent 调用 verify(第 {verify_count} 次),"
+                f"目标: {verification_request[:200]}"
+            )
+            try:
+                from app.agents.verifier_agent import run_verifier_agent
+                verify_result = run_verifier_agent(
+                    task, db, verification_request, client, round_idx
+                )
+            except Exception as e:
+                logger.exception(f"[task={task_id}] verifier_agent 执行失败")
+                verify_result = f"[验证失败: {e}]"
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"] or f"call_{tc['index']}",
+                "content": verify_result,
+            })
+
+        # 循环回去:LLM 看到验证结果后,要么再调 verify,要么输出 JSON 评估
 
     # 解析 JSON(LLM 可能输出带 ```json ``` 包裹的)
     try:
@@ -418,21 +537,25 @@ def run_user_agent(
 
 def _stream_user_agent_llm(
     client: LLMClient,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     *,
     task_id: UUID | str,
     round_idx: int = 0,
-) -> str:
+    tools: list[dict[str, Any]] | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
     """流式调用 user_agent 的 LLM,实时推送 thinking_delta 事件
 
-    user_agent 不调工具(无 tool_calls),只产出 reasoning + content。
-    content 是 JSON 格式的结构化评估结果。
+    支持 verify 工具调用:tools 非空时传入 LLM,返回的 tool_calls 供调用方处理。
+    无 tools 时行为与原来一致(只产出 reasoning + content)。
 
-    返回完整的 content(供后续 JSON 解析)
+    返回 (content_full, tool_calls_full)
+        - content_full: 完整回答内容(JSON 格式的结构化评估结果)
+        - tool_calls_full: 工具调用列表 [{"id", "name", "arguments_str", "index"}]
     """
     conv_id = str(uuid.uuid4())
     reasoning_full = ""
     content_full = ""
+    tool_calls_acc: dict[int, dict[str, Any]] = {}
 
     # 推送流开始事件
     publish(task_id, "thinking_delta", {
@@ -444,7 +567,7 @@ def _stream_user_agent_llm(
     })
 
     try:
-        for chunk in client.chat_stream(messages, max_tokens=2048):
+        for chunk in client.chat_stream(messages, tools=tools, tool_choice="auto", max_tokens=2048):
             # 思考链增量(推给前端流式卡片显示)
             if chunk.reasoning_delta:
                 reasoning_full += chunk.reasoning_delta
@@ -457,16 +580,33 @@ def _stream_user_agent_llm(
                 })
 
             # 正式回答增量(JSON 结构化评估结果)
-            # 注意:content 是 JSON 原文,人类可读性差,且后端会把它格式化成
-            # evaluation 卡片落库展示。这里只累积不推送,避免前端流式卡片
-            # 重复显示同一份信息的 JSON 原文。
             if chunk.content_delta:
                 content_full += chunk.content_delta
+
+            # 工具调用增量(跨 chunk 累积)
+            if chunk.tool_call_deltas:
+                for tc_delta in chunk.tool_call_deltas:
+                    idx = tc_delta.index
+                    if idx not in tool_calls_acc:
+                        tool_calls_acc[idx] = {
+                            "id": tc_delta.id or "",
+                            "name": tc_delta.name or "",
+                            "arguments_str": "",
+                            "index": idx,
+                        }
+                    else:
+                        if tc_delta.id and not tool_calls_acc[idx]["id"]:
+                            tool_calls_acc[idx]["id"] = tc_delta.id
+                        if tc_delta.name and not tool_calls_acc[idx]["name"]:
+                            tool_calls_acc[idx]["name"] = tc_delta.name
+                    if tc_delta.arguments_fragment:
+                        tool_calls_acc[idx]["arguments_str"] += tc_delta.arguments_fragment
 
             if chunk.finish_reason:
                 logger.debug(
                     f"[task={task_id}] user_agent 流式结束,finish={chunk.finish_reason}, "
-                    f"reasoning={len(reasoning_full)}字符, content={len(content_full)}字符"
+                    f"reasoning={len(reasoning_full)}字符, content={len(content_full)}字符, "
+                    f"tool_calls={len(tool_calls_acc)}"
                 )
     except Exception as e:
         logger.exception(f"[task={task_id}] user_agent 流式调用失败")
@@ -488,7 +628,8 @@ def _stream_user_agent_llm(
         "delta": "",
     })
 
-    return content_full
+    tool_calls_full = [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
+    return content_full, tool_calls_full
 
 
 # ============================================================

@@ -47,6 +47,8 @@ export interface SaveAgentPolicyRequest {
   max_interrupts_per_round: number
   /** user_agent 是否能自己验证(实验性,先留开关) */
   allow_verify: boolean
+  /** 验证授权默认模式:"direct" 直接执行 / "per_action" 逐动作授权(任务级可覆盖) */
+  verifier_auth_mode_default: 'direct' | 'per_action'
 }
 
 /**

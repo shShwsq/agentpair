@@ -38,7 +38,8 @@ DEFAULT_AGENT_POLICY: dict[str, Any] = {
     "checkpoint_interval_cli": None,  # 高级:CLI 专用(null=用统一值)
     "allow_interrupt": True,  # user_agent 是否能打断 react_agent
     "max_interrupts_per_round": 2,  # 每轮最多打断次数(防死锁)
-    "allow_verify": False,  # user_agent 是否能自己验证(未来功能,先留开关)
+    "allow_verify": False,  # user_agent 是否能调用 verifier_agent(需任务配了 test_env_url)
+    "verifier_auth_mode_default": "per_action",  # 验证授权默认模式(任务级可覆盖)
 }
 
 

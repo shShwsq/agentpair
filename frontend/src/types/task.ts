@@ -144,6 +144,21 @@ export interface TaskCreateRequest {
    * 传非空数组 = 仅允许使用列表中的 skill。
    */
   allowed_skills?: string[]
+  /**
+   * 测试环境 URL(可选):user_agent 可在已部署的测试环境动态验证 react_agent
+   * 发现的安全问题。对用户透明(前端不出现 verifier_agent 字样,只显示"正在验证")。
+   *
+   * 仅当 verifier_enabled=true 且 test_env_url 非空时启用验证。
+   */
+  test_env_url?: string
+  /** 是否启用动态验证(user_agent 可自主调用验证) */
+  verifier_enabled?: boolean
+  /**
+   * 验证授权模式:
+   * - "direct":验证动作直接执行不弹窗
+   * - "per_action":每个 HTTP 请求/PoC 运行前弹窗授权
+   */
+  verifier_auth_mode?: 'direct' | 'per_action'
 }
 
 /** 提交任务响应(后端 TaskCreateResponse) */
@@ -221,6 +236,12 @@ export interface TaskDetail {
   checklist?: ChecklistDimension[] | null
   /** 用户选择的 skill 列表(null/未定义 = 全部可用) */
   allowed_skills?: string[] | null
+  /** 测试环境 URL(启用验证时,user_agent 在此环境动态验证安全发现) */
+  test_env_url?: string | null
+  /** 是否启用动态验证 */
+  verifier_enabled?: boolean
+  /** 验证授权模式:"direct" 直接执行 / "per_action" 逐动作授权 */
+  verifier_auth_mode?: 'direct' | 'per_action'
 }
 
 /** 任务列表项(后端 TaskListItem,精简版用于侧栏) */
@@ -251,6 +272,7 @@ export type SSEEventType =
   | 'plan'
   | 'question'
   | 'checklist_review'
+  | 'verify_action'
   | 'done'
   | 'error'
   | 'agent_checkpoint'
@@ -318,6 +340,11 @@ export interface ThinkingDeltaEventData {
   delta: string
   /** 迭代序号(仅 react_agent 有,标识 ReAct 循环的第几次 LLM 调用) */
   iteration?: number
+  /**
+   * 是否为动态验证的思考流(verifier_agent 产生,对用户透明归到 user_agent 名下)。
+   * true 时前端显示"正在验证"而非"正在评估"。
+   */
+  verify?: boolean
 }
 
 /** done/error 事件 data */
@@ -402,6 +429,61 @@ export interface AgentCheckpointEventData {
 }
 
 /**
+ * verify_action 事件 data(动态验证动作授权)
+ *
+ * verifier_agent 在 per_action 模式下,每次执行 http_request / run_python_code 前
+ * 推送此事件,前端弹窗展示动作详情让用户确认/拒绝。用户提交授权决议后通过
+ * POST /tasks/{id}/verify_action 唤醒后台线程继续执行。
+ *
+ * 对用户透明:不出现 verifier_agent 字样,只显示"验证动作需要授权"。
+ */
+export interface VerifyActionEventData {
+  /** 动作唯一 ID(提交授权决议时回传) */
+  action_id: string
+  /** 动作类型:http_request / run_python_code / 其他 */
+  type: string
+  /** http_request 专用:HTTP 方法(GET/POST/PUT/DELETE 等) */
+  method?: string
+  /** http_request 专用:完整 URL(已拼接 test_env_url + path) */
+  url?: string
+  /** http_request 专用:请求头 */
+  headers?: Record<string, string>
+  /** http_request 专用:请求体 */
+  body?: string
+  /** run_python_code 专用:PoC 代码(可能已截断) */
+  code?: string
+  /** run_python_code 专用:代码是否被截断 */
+  code_truncated?: boolean
+  /** 其他类型的原始参数 */
+  args?: Record<string, unknown>
+}
+
+/** 验证动作授权请求(POST /tasks/{id}/verify_action body) */
+export interface VerifyActionRequest {
+  /** 对应 verify_action 事件的 action_id */
+  action_id: string
+  /** true=同意执行,false=拒绝 */
+  approved: boolean
+}
+
+/** 验证动作授权响应 */
+export interface VerifyActionResponse {
+  /** 是否成功唤醒后台线程(false=无待授权动作或任务已结束) */
+  accepted: boolean
+  message?: string
+}
+
+/** 更新验证器配置请求(PATCH /tasks/{id}/verifier_config,运行时可调) */
+export interface VerifyConfigUpdateRequest {
+  /** 是否启用动态验证(可选,只更新传入字段) */
+  verifier_enabled?: boolean
+  /** 验证授权模式(可选) */
+  verifier_auth_mode?: 'direct' | 'per_action'
+  /** 测试环境 URL(可选) */
+  test_env_url?: string
+}
+
+/**
  * agent 策略配置(检查点评估频率、打断权限、验证权限)
  *
  * 用户级默认存储在 UserPreference.agent_policy,任务级覆盖存储在
@@ -420,6 +502,8 @@ export interface AgentPolicy {
   max_interrupts_per_round: number
   /** user_agent 是否能自己在测试环境验证(实验性,先留开关) */
   allow_verify: boolean
+  /** 验证授权默认模式:"direct" 直接执行 / "per_action" 逐动作授权(任务级可覆盖) */
+  verifier_auth_mode_default: 'direct' | 'per_action'
 }
 
 // ============================================================

@@ -6,6 +6,7 @@
  * - 评估频率 K:每 K 个 react_agent 迭代做一次轻量检查点评估
  * - 打断权限:user_agent 是否能通过中断队列向 react_agent 注入追问指令(软中断)
  * - 验证权限:user_agent 是否能自行调用工具验证(实验性)
+ * - 验证授权模式:验证动作的默认授权模式(直接执行 / 逐动作授权)
  *
  * 与记忆管理(/memory)、模型设置(/models)、CLI 设置(/cli) 并列为主导航项。
  * 后端 API:PUT /memory/preferences/agent_policy(与 user_profile 文本分离保存)。
@@ -38,6 +39,7 @@ const DEFAULT_POLICY = {
   allow_interrupt: true,
   max_interrupts_per_round: 2,
   allow_verify: false,
+  verifier_auth_mode_default: 'per_action' as 'direct' | 'per_action',
 }
 
 // ============================================================
@@ -55,6 +57,8 @@ const policyAllowInterrupt = ref(DEFAULT_POLICY.allow_interrupt)
 const policyMaxInterrupts = ref(DEFAULT_POLICY.max_interrupts_per_round)
 /** user_agent 是否能自己验证(实验性) */
 const policyAllowVerify = ref(DEFAULT_POLICY.allow_verify)
+/** 验证授权默认模式(任务级可覆盖) */
+const policyVerifierAuthMode = ref<'direct' | 'per_action'>(DEFAULT_POLICY.verifier_auth_mode_default)
 /** 是否分别配置内置/CLI 的 K 值(高级) */
 const policyAdvanced = ref(false)
 
@@ -66,6 +70,7 @@ const originalPolicy = ref({
   allowInterrupt: DEFAULT_POLICY.allow_interrupt,
   maxInterrupts: DEFAULT_POLICY.max_interrupts_per_round,
   allowVerify: DEFAULT_POLICY.allow_verify,
+  verifierAuthMode: DEFAULT_POLICY.verifier_auth_mode_default,
 })
 
 /** agent 策略是否有未保存改动 */
@@ -76,7 +81,8 @@ const policyDirty = computed(() => {
     policyIntervalCli.value !== originalPolicy.value.intervalCli ||
     policyAllowInterrupt.value !== originalPolicy.value.allowInterrupt ||
     policyMaxInterrupts.value !== originalPolicy.value.maxInterrupts ||
-    policyAllowVerify.value !== originalPolicy.value.allowVerify
+    policyAllowVerify.value !== originalPolicy.value.allowVerify ||
+    policyVerifierAuthMode.value !== originalPolicy.value.verifierAuthMode
   )
 })
 
@@ -88,6 +94,7 @@ function resetPolicyToDefault(): void {
   policyAllowInterrupt.value = DEFAULT_POLICY.allow_interrupt
   policyMaxInterrupts.value = DEFAULT_POLICY.max_interrupts_per_round
   policyAllowVerify.value = DEFAULT_POLICY.allow_verify
+  policyVerifierAuthMode.value = DEFAULT_POLICY.verifier_auth_mode_default
   policyAdvanced.value = false
 }
 
@@ -122,6 +129,7 @@ async function loadPolicy(): Promise<void> {
     policyAllowInterrupt.value = policy?.allow_interrupt ?? DEFAULT_POLICY.allow_interrupt
     policyMaxInterrupts.value = policy?.max_interrupts_per_round ?? DEFAULT_POLICY.max_interrupts_per_round
     policyAllowVerify.value = policy?.allow_verify ?? DEFAULT_POLICY.allow_verify
+    policyVerifierAuthMode.value = policy?.verifier_auth_mode_default ?? DEFAULT_POLICY.verifier_auth_mode_default
     // 高级模式:仅当任一专用 K 值非 null 时展开
     policyAdvanced.value = policyIntervalBuiltin.value !== null || policyIntervalCli.value !== null
     // 同步原始值(脏检查基准)
@@ -132,6 +140,7 @@ async function loadPolicy(): Promise<void> {
       allowInterrupt: policyAllowInterrupt.value,
       maxInterrupts: policyMaxInterrupts.value,
       allowVerify: policyAllowVerify.value,
+      verifierAuthMode: policyVerifierAuthMode.value,
     }
   } catch (err) {
     loadError.value = extractErrorMessage(err)
@@ -152,6 +161,7 @@ async function handleSave(): Promise<void> {
       allow_interrupt: policyAllowInterrupt.value,
       max_interrupts_per_round: policyAllowInterrupt.value ? policyMaxInterrupts.value : 0,
       allow_verify: policyAllowVerify.value,
+      verifier_auth_mode_default: policyVerifierAuthMode.value,
     }
     const data = await saveAgentPolicy(body)
     updatedAt.value = data.updated_at ?? null
@@ -164,6 +174,7 @@ async function handleSave(): Promise<void> {
       policyAllowInterrupt.value = policy.allow_interrupt
       policyMaxInterrupts.value = policy.max_interrupts_per_round
       policyAllowVerify.value = policy.allow_verify
+      policyVerifierAuthMode.value = policy.verifier_auth_mode_default
       policyAdvanced.value = policyIntervalBuiltin.value !== null || policyIntervalCli.value !== null
     }
     originalPolicy.value = {
@@ -173,6 +184,7 @@ async function handleSave(): Promise<void> {
       allowInterrupt: policyAllowInterrupt.value,
       maxInterrupts: policyMaxInterrupts.value,
       allowVerify: policyAllowVerify.value,
+      verifierAuthMode: policyVerifierAuthMode.value,
     }
     showToast('协作策略已保存', 'success')
   } catch (err) {
@@ -277,6 +289,23 @@ onMounted(() => {
             <span>允许 user_agent 自行验证 <span class="policy-experimental">(实验性)</span></span>
           </label>
 
+          <Transition name="collapse">
+            <div v-show="policyAllowVerify" class="verifier-config">
+              <label class="policy-field">
+                <span class="policy-label">验证授权模式</span>
+                <select
+                  v-model="policyVerifierAuthMode"
+                  class="policy-input"
+                  :disabled="saving"
+                >
+                  <option value="per_action">逐动作授权(每个动作弹窗确认)</option>
+                  <option value="direct">直接执行(不弹窗)</option>
+                </select>
+                <span class="policy-hint">任务创建时可单独覆盖此默认值</span>
+              </label>
+            </div>
+          </Transition>
+
           <label class="policy-toggle-row">
             <input v-model="policyAdvanced" type="checkbox" :disabled="saving" />
             <span>分别配置内置 / CLI agent 的 K 值</span>
@@ -352,7 +381,11 @@ onMounted(() => {
             </div>
             <div class="info-item">
               <dt>自行验证(实验性)</dt>
-              <dd>开启后,user_agent 可自行调用工具验证 react_agent 的产出。目前为实验性开关,默认关闭。</dd>
+              <dd>开启后,user_agent 可自行调用工具验证 react_agent 的产出。目前为实验性开关,默认关闭。任务还需在提交时配置测试环境 URL 才会真正触发验证。</dd>
+            </div>
+            <div class="info-item">
+              <dt>验证授权模式</dt>
+              <dd>仅在开启「自行验证」时生效。逐动作授权:每个验证动作(HTTP 请求 / PoC 脚本)执行前弹窗让用户确认;直接执行:验证动作自动执行不弹窗。此为用户级默认,任务创建或运行时可单独覆盖。</dd>
             </div>
           </dl>
         </section>
@@ -577,6 +610,16 @@ onMounted(() => {
   font-size: var(--fs-xs);
   color: var(--color-text-muted);
   font-style: italic;
+}
+
+/* 验证授权模式配置(仅 allow_verify 开启时显示) */
+.verifier-config {
+  margin-left: var(--space-5);
+  padding: var(--space-2) 0;
+}
+
+.verifier-config .policy-field {
+  max-width: 360px;
 }
 
 /* ---- 操作区 ---- */

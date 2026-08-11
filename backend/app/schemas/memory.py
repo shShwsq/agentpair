@@ -47,7 +47,8 @@ class SaveAgentPolicyRequest(BaseModel):
     - checkpoint_interval_cli: CLI agent 专用 K 值(null=用统一值)
     - allow_interrupt: user_agent 是否能打断 react_agent
     - max_interrupts_per_round: 每轮最多打断次数
-    - allow_verify: user_agent 是否能自己验证(实验性,先留开关)
+    - allow_verify: user_agent 是否能调用 verifier_agent 验证(需任务配了 test_env_url)
+    - verifier_auth_mode_default: 验证授权默认模式("direct"直接执行 / "per_action"逐动作授权)
     """
 
     checkpoint_interval: int = Field(default=3, ge=1, le=20)
@@ -56,6 +57,7 @@ class SaveAgentPolicyRequest(BaseModel):
     allow_interrupt: bool = True
     max_interrupts_per_round: int = Field(default=2, ge=0, le=10)
     allow_verify: bool = False
+    verifier_auth_mode_default: str = Field(default="per_action", pattern="^(direct|per_action)$")
 
 
 class UserMemoryOut(BaseModel):

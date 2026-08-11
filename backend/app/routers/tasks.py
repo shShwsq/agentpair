@@ -51,16 +51,22 @@ from app.schemas.task import (
     TaskListItem,
     TaskResponse,
     TaskTitleUpdateRequest,
+    VerifyActionRequest,
+    VerifyActionResponse,
+    VerifyConfigUpdateRequest,
 )
 from app.schemas.task_artifact import TaskArtifactOut
 from app.tools import sandbox_tools
 from app.user_interaction import (
     clear_pending_checklist,
     clear_pending_question,
+    clear_pending_verify_action,
     get_pending_checklist,
     get_pending_question,
+    get_pending_verify_action,
     submit_answers,
     submit_checklist,
+    submit_verify_authorization,
 )
 from app.user_messages import push_user_message
 
@@ -480,6 +486,116 @@ def submit_task_checklist(
         db.commit()
 
     return {"accepted": True, "message": "覆盖度清单已确认,智能体将继续执行"}
+
+
+# ============================================================
+# 验证器动作授权(verifier_agent per_action 模式:每个 HTTP/PoC 动作阻塞等用户确认)
+# ============================================================
+
+
+@router.get("/tasks/{task_id}/pending_verify_action")
+def get_task_pending_verify_action(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> dict[str, Any] | None:
+    """查询任务当前待授权的验证动作(刷新页面后恢复弹窗用)
+
+    无待授权动作返回 None。有则返回动作描述(action_id/type/method/url/code 等)。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权访问此任务")
+
+    # 任务已结束,不恢复弹窗
+    if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+        return None
+
+    return get_pending_verify_action(task_id)
+
+
+@router.post("/tasks/{task_id}/verify_action", response_model=VerifyActionResponse)
+def submit_task_verify_action(
+    task_id: uuid.UUID,
+    req: VerifyActionRequest,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> VerifyActionResponse:
+    """提交用户对验证动作的授权决议(per_action 模式)
+
+    唤醒阻塞等待的 verifier_agent 后台线程:
+    - approved=true:继续执行该 HTTP/PoC 动作
+    - approved=false:跳过该动作,verifier_agent 收到"用户拒绝"反馈
+
+    返回 accepted=false 表示当前无待授权动作(可能已答复或任务已结束)。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    if task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.PAUSED):
+        return VerifyActionResponse(
+            accepted=False,
+            message=f"任务已结束({task.status.value}),无法提交授权",
+        )
+
+    ok = submit_verify_authorization(task_id, req.action_id, req.approved)
+    if not ok:
+        return VerifyActionResponse(
+            accepted=False,
+            message="当前没有待授权的验证动作(可能已答复或任务已结束)",
+        )
+    return VerifyActionResponse(
+        accepted=True,
+        message=f"已{'同意' if req.approved else '拒绝'}该验证动作",
+    )
+
+
+@router.patch("/tasks/{task_id}/verifier_config", response_model=TaskResponse)
+def update_task_verifier_config(
+    task_id: uuid.UUID,
+    req: VerifyConfigUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> Task:
+    """更新任务的验证器配置(运行时可调)
+
+    允许在任务运行界面调整验证授权模式(direct/per_action)与开关。
+    配置存储在 task.params._verifier,verifier_agent 每次调用时读取最新值。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    params = dict(task.params or {})
+    verifier_cfg = dict(params.get("_verifier") or {})
+
+    if req.verifier_enabled is not None:
+        verifier_cfg["enabled"] = req.verifier_enabled
+    if req.verifier_auth_mode is not None:
+        verifier_cfg["auth_mode"] = req.verifier_auth_mode
+    if req.test_env_url is not None:
+        verifier_cfg["test_env_url"] = req.test_env_url
+
+    # 若 enabled=false 或 test_env_url 为空,清除 _verifier 配置(禁用验证)
+    if not verifier_cfg.get("enabled") or not verifier_cfg.get("test_env_url"):
+        params.pop("_verifier", None)
+    else:
+        params["_verifier"] = verifier_cfg
+
+    task.params = params
+    db.commit()
+    db.refresh(task)
+    return task
 
 
 def _record_answer(
@@ -1439,9 +1555,14 @@ def _normalize_request(req: TaskCreateRequest) -> tuple[str, dict | None]:
 
     - 通用方式:直接用 scenario + user_input + params
     - 兼容旧 API:传了 repo_url 但没传 user_input,自动生成
+    - 验证器配置(test_env_url/verifier_enabled/verifier_auth_mode)存入 params._verifier
     """
+    params = None
+    user_input = None
+
     if req.user_input:
         # 通用方式:直接用
+        user_input = req.user_input
         params = req.params
         # 若同时传了 repo_url 等,合并到 params
         if req.repo_url:
@@ -1451,10 +1572,8 @@ def _normalize_request(req: TaskCreateRequest) -> tuple[str, dict | None]:
                 params["branch"] = req.branch
             if req.scope:
                 params["scope"] = req.scope
-        return req.user_input, params
-
-    # 兼容旧 API:只有 repo_url,生成通用 user_input(场景无关)
-    if req.repo_url:
+    elif req.repo_url:
+        # 兼容旧 API:只有 repo_url,生成通用 user_input(场景无关)
         user_input = f"请处理这个仓库: {req.repo_url}"
         params = dict(req.params or {})
         params["repo_url"] = str(req.repo_url)
@@ -1462,9 +1581,19 @@ def _normalize_request(req: TaskCreateRequest) -> tuple[str, dict | None]:
             params["branch"] = req.branch
         if req.scope:
             params["scope"] = req.scope
-        return user_input, params
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="必须提供 user_input 或 repo_url",
+        )
 
-    raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        detail="必须提供 user_input 或 repo_url",
-    )
+    # 验证器配置存入 params._verifier(免迁移;Task 模型通过 @property 读取)
+    if req.verifier_enabled and req.test_env_url:
+        params = dict(params or {})
+        params["_verifier"] = {
+            "test_env_url": req.test_env_url,
+            "enabled": True,
+            "auth_mode": req.verifier_auth_mode,
+        }
+
+    return user_input, params

@@ -28,12 +28,14 @@ import ChecklistReviewDialog from '@/components/ChecklistReviewDialog.vue'
 import ConversationMessage from '@/components/ConversationMessage.vue'
 import QuestionDialog from '@/components/QuestionDialog.vue'
 import UserMessageInput from '@/components/UserMessageInput.vue'
+import VerifyActionDialog from '@/components/VerifyActionDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import {
   downloadTaskReportMarkdown,
   getPendingChecklist,
   getPendingQuestion,
+  getPendingVerifyAction,
   getTask,
   getTaskCoverage,
   getTaskReportHtml,
@@ -41,6 +43,8 @@ import {
   resumeTask,
   submitTaskAnswer,
   submitTaskChecklist,
+  submitVerifyAction,
+  updateTaskVerifierConfig,
 } from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
 import { listArtifacts } from '@/api/taskArtifacts'
@@ -60,6 +64,7 @@ import type {
   TaskResult,
   TaskStatus,
   ThinkingDeltaEventData,
+  VerifyActionEventData,
 } from '@/types/task'
 import type { TaskArtifact } from '@/types/taskArtifact'
 
@@ -149,6 +154,8 @@ interface StreamingItem {
   seq: number
   /** 该流式 thinking 开始时,其所在 round 已收到的正式对话数(用于计算插入位置) */
   insertSeq: number
+  /** 是否为动态验证的思考流(verifier_agent 产生,显示"正在验证"而非"正在思考") */
+  verify?: boolean
 }
 
 const streamingItems = reactive<Map<string, StreamingItem>>(new Map())
@@ -304,6 +311,118 @@ async function restorePendingChecklist(taskId: string): Promise<void> {
   }
 }
 
+// ---- 验证动作授权弹窗(verify_action 事件)----
+// verifier_agent 在 per_action 模式下,每次执行 http_request / run_python_code 前
+// 推送 verify_action 事件,前端弹出 VerifyActionDialog 让用户确认/拒绝。
+// 对用户透明:不出现 verifier_agent 字样,只显示"验证动作需要授权"。
+const verifyActionOpen = ref(false)
+const verifyActionData = ref<VerifyActionEventData | null>(null)
+const submittingVerifyAction = ref(false)
+
+/** 从 VerifyActionEventData 填充弹窗数据并打开 */
+function openVerifyActionDialog(action: VerifyActionEventData): void {
+  verifyActionData.value = action
+  verifyActionOpen.value = true
+}
+
+/** 用户同意执行验证动作 */
+async function handleApproveVerifyAction(actionId: string): Promise<void> {
+  if (!task.value?.id || submittingVerifyAction.value) return
+  submittingVerifyAction.value = true
+  try {
+    const resp = await submitVerifyAction(String(task.value.id), {
+      action_id: actionId,
+      approved: true,
+    })
+    if (resp.accepted) {
+      verifyActionOpen.value = false
+      verifyActionData.value = null
+    } else {
+      error.value = resp.message || '授权提交失败,任务可能已结束'
+    }
+  } catch (err) {
+    error.value = extractErrorMessage(err)
+  } finally {
+    submittingVerifyAction.value = false
+  }
+}
+
+/** 用户拒绝执行验证动作 */
+async function handleRejectVerifyAction(actionId: string): Promise<void> {
+  if (!task.value?.id || submittingVerifyAction.value) return
+  submittingVerifyAction.value = true
+  try {
+    const resp = await submitVerifyAction(String(task.value.id), {
+      action_id: actionId,
+      approved: false,
+    })
+    if (resp.accepted) {
+      verifyActionOpen.value = false
+      verifyActionData.value = null
+    } else {
+      error.value = resp.message || '授权提交失败,任务可能已结束'
+    }
+  } catch (err) {
+    error.value = extractErrorMessage(err)
+  } finally {
+    submittingVerifyAction.value = false
+  }
+}
+
+/** 刷新页面后恢复待授权验证动作弹窗(若后端有 pending verify action) */
+async function restorePendingVerifyAction(taskId: string): Promise<void> {
+  try {
+    const pending = await getPendingVerifyAction(taskId)
+    if (pending && pending.action_id) {
+      openVerifyActionDialog(pending)
+    }
+  } catch {
+    // 无 pending verify action 或任务已结束,静默忽略
+  }
+}
+
+// ---- 运行时验证配置切换(任务运行界面调整授权模式) ----
+const verifierConfigSaving = ref(false)
+
+/** 切换验证授权模式(direct ↔ per_action),立即保存到后端 */
+async function toggleVerifierAuthMode(): Promise<void> {
+  if (!task.value?.id || verifierConfigSaving.value) return
+  const newMode = task.value.verifier_auth_mode === 'direct' ? 'per_action' : 'direct'
+  verifierConfigSaving.value = true
+  try {
+    const updated = await updateTaskVerifierConfig(String(task.value.id), {
+      verifier_auth_mode: newMode,
+    })
+    task.value = updated
+  } catch (err) {
+    error.value = extractErrorMessage(err)
+  } finally {
+    verifierConfigSaving.value = false
+  }
+}
+
+/** 切换验证开关,立即保存到后端 */
+async function toggleVerifierEnabled(): Promise<void> {
+  if (!task.value?.id || verifierConfigSaving.value) return
+  const newEnabled = !task.value.verifier_enabled
+  verifierConfigSaving.value = true
+  try {
+    const updated = await updateTaskVerifierConfig(String(task.value.id), {
+      verifier_enabled: newEnabled,
+    })
+    task.value = updated
+  } catch (err) {
+    error.value = extractErrorMessage(err)
+  } finally {
+    verifierConfigSaving.value = false
+  }
+}
+
+/** 任务是否启用了动态验证 */
+const verifierActive = computed(
+  () => !!task.value?.verifier_enabled && !!task.value?.test_env_url,
+)
+
 // ---- 加载 + SSE 订阅 ----
 
 async function initTask(): Promise<void> {
@@ -342,6 +461,8 @@ async function initTask(): Promise<void> {
       void restorePendingQuestion(taskId)
       // 恢复可能存在的待确认清单弹窗(同理,SSE 事件可能已错过)
       void restorePendingChecklist(taskId)
+      // 恢复可能存在的待授权验证动作弹窗(per_action 模式刷新页面后)
+      void restorePendingVerifyAction(taskId)
     }
 
     // 3. 加载覆盖度看板(task.checklist 存在才拉取)
@@ -505,6 +626,10 @@ function connectSSE(taskId: string): void {
         reasoning: data.reasoning,
       })
     },
+    onVerifyAction: (data: VerifyActionEventData) => {
+      // 动态验证动作需要授权(per_action 模式):弹出 VerifyActionDialog
+      openVerifyActionDialog(data)
+    },
     onAgentCheckpoint: (data: AgentCheckpointEventData) => {
       // user_agent 检查点评估结果:存储结构化数据
       // 后端同时推 conversation 事件(role=user_agent, type=evaluation),
@@ -553,7 +678,7 @@ function connectSSE(taskId: string): void {
 // ---- 流式增量处理 ----
 
 function handleThinkingDelta(data: ThinkingDeltaEventData): void {
-  const { conv_id, round_idx, role, phase, delta, iteration } = data
+  const { conv_id, round_idx, role, phase, delta, iteration, verify } = data
 
   if (phase === 'start') {
     // 创建新的流式项:reasoning 默认折叠(用户可手动展开查看思考链)
@@ -572,6 +697,7 @@ function handleThinkingDelta(data: ThinkingDeltaEventData): void {
       reasoning_expanded: false,
       seq: streamingSeqCounter++,
       insertSeq,
+      verify,
     })
     return
   }
@@ -592,6 +718,7 @@ function handleThinkingDelta(data: ThinkingDeltaEventData): void {
       reasoning_expanded: false,
       seq: streamingSeqCounter++,
       insertSeq,
+      verify,
     })
   }
 
@@ -1203,9 +1330,10 @@ function isSubAgentToolItem(
 
 /** 迭代摘要:工具数量 + 工具名预览(最多 3 个) */
 function iterationSummary(seg: IterationSegment): string {
-  // 流式中:显示正在思考
+  // 流式中:显示正在思考(验证流显示"正在验证")
   if (seg.hasStreaming) {
-    return '正在思考...'
+    const isVerifying = seg.thinkingItems.some((i) => i.streaming?.verify)
+    return isVerifying ? '正在验证...' : '正在思考...'
   }
   const count = toolCallCount(seg)
   if (count === 0) {
@@ -1977,6 +2105,39 @@ function parseCheckpoint(item: DisplayItem): {
             {{ task.error_message }}
           </div>
         </section>
+
+        <!-- 动态验证配置(仅当任务配了测试环境 URL 时显示)
+             对用户透明:不出现 verifier_agent 字样,只显示"动态验证"。
+             运行时可切换开关与授权模式,立即保存到后端。 -->
+        <section v-if="task.test_env_url" class="verifier-section">
+          <h2 class="verifier-title">
+            动态验证
+            <span
+              :class="['verifier-status', verifierActive ? 'verifier-on' : 'verifier-off']"
+            >{{ verifierActive ? '运行中' : '已关闭' }}</span>
+          </h2>
+          <div class="verifier-env">
+            <span class="label">测试环境</span>
+            <code :title="task.test_env_url">{{ task.test_env_url }}</code>
+          </div>
+          <button
+            type="button"
+            class="verifier-toggle-btn"
+            :disabled="verifierConfigSaving"
+            @click="toggleVerifierEnabled"
+          >
+            {{ task.verifier_enabled ? '关闭验证' : '开启验证' }}
+          </button>
+          <button
+            v-if="task.verifier_enabled"
+            type="button"
+            class="verifier-toggle-btn"
+            :disabled="verifierConfigSaving"
+            @click="toggleVerifierAuthMode"
+          >
+            {{ task.verifier_auth_mode === 'direct' ? '模式:直接执行' : '模式:逐动作授权' }}
+          </button>
+        </section>
       </div>
     </aside>
 
@@ -2011,6 +2172,15 @@ function parseCheckpoint(item: DisplayItem): {
       :submitting="submittingChecklist"
       @submit="handleSubmitChecklist"
       @cancel="handleCancelChecklist"
+    />
+
+    <!-- 验证动作授权弹窗(per_action 模式,每个 HTTP/PoC 动作需用户确认) -->
+    <VerifyActionDialog
+      :open="verifyActionOpen"
+      :action="verifyActionData"
+      :submitting="submittingVerifyAction"
+      @approve="handleApproveVerifyAction"
+      @reject="handleRejectVerifyAction"
     />
   </div>
 </template>
@@ -2354,6 +2524,81 @@ function parseCheckpoint(item: DisplayItem): {
   color: var(--color-text);
   font-weight: var(--fw-medium);
   word-break: break-word;
+}
+
+/* ---- 动态验证配置(右侧栏,仅 test_env_url 存在时显示)---- */
+.verifier-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.verifier-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--fs-base);
+  font-weight: var(--fw-semibold);
+  color: var(--color-text);
+}
+
+.verifier-status {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+}
+
+.verifier-on {
+  background: var(--color-success-light);
+  color: var(--color-success);
+}
+
+.verifier-off {
+  background: var(--color-surface-alt);
+  color: var(--color-text-muted);
+}
+
+.verifier-env {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--fs-xs);
+}
+
+.verifier-env .label {
+  color: var(--color-text-muted);
+  font-weight: var(--fw-medium);
+}
+
+.verifier-env code {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  color: var(--color-text-secondary);
+  word-break: break-all;
+}
+
+.verifier-toggle-btn {
+  align-self: flex-start;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.verifier-toggle-btn:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.verifier-toggle-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* ---- 结果清单 ---- */

@@ -53,6 +53,7 @@ from app.user_interaction import (
 from app.agent_checkpoint import resolve_agent_policy
 from app.agent_interrupt import clear_interrupt_count, clear_interrupts
 from app.user_messages import clear_user_messages
+from app.user_interaction import clear_pending_verify_action
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,8 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 repo_context=repo_context,  # 修复 9:仅 round 0 注入,不膨胀 effective_intent
                 user_id=task.user_id,
                 repo_url=(task.params or {}).get("repo_url"),
+                task=task,
+                agent_policy=agent_policy,
             )
 
             # user_agent 没请求提问 → 提问循环结束,进入协作阶段
@@ -286,6 +289,8 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 task_checklist=task_checklist,  # 场景降级后:传已确认的 checklist
                 user_id=task.user_id,
                 repo_url=(task.params or {}).get("repo_url"),
+                task=task,
+                agent_policy=agent_policy,
             )
             _record_user_agent(db, task, round_idx, ua_result)
 
@@ -395,6 +400,11 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             clear_user_messages(task.id)
         except Exception as cleanup_err:
             logger.warning(f"[task={task.id}] 清理用户消息队列失败: {cleanup_err}")
+        # 清理 verifier 待授权动作(防止任务结束时仍有阻塞的验证动作)
+        try:
+            clear_pending_verify_action(task.id)
+        except Exception as cleanup_err:
+            logger.warning(f"[task={task.id}] 清理验证待授权状态失败: {cleanup_err}")
         # 清理 user_agent 中断队列 + 打断计数(防止任务结束时仍有 in-memory 残留)
         try:
             clear_interrupts(task.id)
@@ -963,6 +973,8 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
             task_checklist=task_checklist,
             user_id=task.user_id,
             repo_url=(task.params or {}).get("repo_url"),
+            task=task,
+            agent_policy=agent_policy,
         )
         _record_user_agent(db, task, start_round_idx, ua_result)
 
@@ -1008,6 +1020,8 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
                 task_checklist=task_checklist,
                 user_id=task.user_id,
                 repo_url=(task.params or {}).get("repo_url"),
+                task=task,
+                agent_policy=agent_policy,
             )
             _record_user_agent(db, task, round_idx, ua_result)
 
@@ -1042,6 +1056,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
             (clear_pending_checklist, "待确认清单"),
             (clear_pause_state, "暂停状态"),
             (clear_user_messages, "用户消息队列"),
+            (clear_pending_verify_action, "验证待授权状态"),
             (clear_interrupts, "中断队列"),
             (clear_interrupt_count, "打断计数"),
         ]:

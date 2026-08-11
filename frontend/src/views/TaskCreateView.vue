@@ -253,6 +253,22 @@ const DEFAULT_POLICY = {
   allow_verify: false,
 }
 
+// ---- 测试环境 / 动态验证配置(高级设置) ----
+// user_agent 可在已部署的测试环境动态验证 react_agent 发现的安全问题。
+// 对用户透明:不出现 verifier_agent 字样,只显示"正在验证"。
+/** 测试环境面板是否展开(默认折叠) */
+const verifierOpen = ref(false)
+/** 是否启用动态验证 */
+const verifierEnabled = ref(false)
+/** 测试环境 URL(已部署的应用地址,如 http://localhost:3000) */
+const testEnvUrl = ref('')
+/**
+ * 验证授权模式:
+ * - "direct":验证动作直接执行不弹窗
+ * - "per_action":每个 HTTP 请求/PoC 运行前弹窗授权
+ */
+const verifierAuthMode = ref<'direct' | 'per_action'>('per_action')
+
 // ============================================================
 // Git 仓库选择(repo_url 字段专用增强,统一 GitHub / Gitee)
 // ============================================================
@@ -517,6 +533,10 @@ async function handleSubmit(): Promise<void> {
           : undefined,
       executor: selectedExecutor.value,
       allowed_skills: allowedSkillsPayload,
+      // 测试环境 / 动态验证:仅当启用且填了 URL 时提交
+      test_env_url: verifierEnabled.value ? testEnvUrl.value.trim() || undefined : undefined,
+      verifier_enabled: verifierEnabled.value,
+      verifier_auth_mode: verifierEnabled.value ? verifierAuthMode.value : undefined,
       params,
     })
 
@@ -915,6 +935,64 @@ onMounted(async () => {
                           class="policy-input"
                           placeholder="留空用统一值"
                         />
+                      </label>
+                    </div>
+                  </Transition>
+                </div>
+              </Transition>
+            </div>
+          </div>
+
+          <!-- 第 5 行:测试环境 / 动态验证(可折叠,默认折叠) -->
+          <div class="config-row config-row-scenario">
+            <div class="advanced-panel">
+              <button
+                type="button"
+                class="advanced-toggle"
+                :aria-expanded="verifierOpen"
+                @click="verifierOpen = !verifierOpen"
+              >
+                <svg
+                  class="advanced-chevron"
+                  :class="{ expanded: verifierOpen }"
+                  width="16" height="16" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                >
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
+                <span>测试环境</span>
+                <span class="advanced-summary">
+                  {{ verifierEnabled ? (verifierAuthMode === 'direct' ? '已启用·直接执行' : '已启用·逐动作授权') : '未启用' }}
+                </span>
+              </button>
+
+              <Transition name="collapse">
+                <div v-show="verifierOpen" class="advanced-dropdown advanced-dropdown-left">
+                  <label class="policy-toggle-row">
+                    <input v-model="verifierEnabled" type="checkbox" />
+                    <span>启用动态验证 <span class="policy-experimental">(实验性)</span></span>
+                  </label>
+
+                  <Transition name="collapse">
+                    <div v-show="verifierEnabled" class="verifier-config">
+                      <label class="policy-field">
+                        <span class="policy-label">测试环境 URL</span>
+                        <input
+                          v-model.trim="testEnvUrl"
+                          type="url"
+                          class="policy-input"
+                          placeholder="http://localhost:3000(已部署的应用地址)"
+                        />
+                        <span class="policy-hint">user_agent 将在此环境动态验证安全发现</span>
+                      </label>
+
+                      <label class="policy-field">
+                        <span class="policy-label">授权模式</span>
+                        <select v-model="verifierAuthMode" class="policy-input">
+                          <option value="per_action">逐动作授权(每个请求前确认)</option>
+                          <option value="direct">直接执行(不弹窗)</option>
+                        </select>
+                        <span class="policy-hint">控制验证动作执行前是否需要用户确认</span>
                       </label>
                     </div>
                   </Transition>
@@ -1832,6 +1910,25 @@ onMounted(async () => {
   font-size: var(--fs-xs);
   color: var(--color-text-muted);
   font-style: italic;
+}
+
+/* ---- 测试环境 / 动态验证配置面板 ---- */
+.verifier-config {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px dashed var(--color-border);
+}
+
+.verifier-config .policy-field {
+  gap: var(--space-1);
+}
+
+.verifier-config select.policy-input {
+  height: 34px;
+  cursor: pointer;
 }
 
 .skill-header {
