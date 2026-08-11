@@ -226,6 +226,33 @@ const urlPattern = /^https?:\/\/[^\s/$.?#].[^\s]*$/
 const loading = ref(false)
 const error = ref('')
 
+// ---- Agent 策略配置(高级设置,任务级覆盖用户级默认) ----
+
+/** 高级设置面板是否展开(默认折叠) */
+const policyOpen = ref(false)
+/** 是否分别配置内置/CLI 的 K 值(高级中的高级) */
+const policyAdvanced = ref(false)
+/** 统一 K 值:每 K 个迭代评估一次 */
+const policyInterval = ref(3)
+/** 内置 react_agent 专用 K 值(null=用统一值) */
+const policyIntervalBuiltin = ref<number | null>(null)
+/** CLI agent 专用 K 值(null=用统一值) */
+const policyIntervalCli = ref<number | null>(null)
+/** user_agent 是否能打断 react_agent */
+const policyAllowInterrupt = ref(true)
+/** 每轮最多打断次数 */
+const policyMaxInterrupts = ref(2)
+/** user_agent 是否能自己验证(实验性) */
+const policyAllowVerify = ref(false)
+
+/** 默认策略值(与后端 DEFAULT_AGENT_POLICY 对齐,用于判断是否需要提交) */
+const DEFAULT_POLICY = {
+  checkpoint_interval: 3,
+  allow_interrupt: true,
+  max_interrupts_per_round: 2,
+  allow_verify: false,
+})
+
 // ============================================================
 // Git 仓库选择(repo_url 字段专用增强,统一 GitHub / Gitee)
 // ============================================================
@@ -433,6 +460,33 @@ async function handleSubmit(): Promise<void> {
       if (qoderModel.value) params.model = qoderModel.value
       if (qoderReasoningEffort.value) params.reasoning_effort = qoderReasoningEffort.value
       if (qoderContextWindow.value) params.context_window = qoderContextWindow.value
+    }
+
+    // Agent 策略配置(仅当用户改了默认值时才提交,作为任务级覆盖)
+    // 后端 resolve_agent_policy 会合并用户级默认 + 此任务级覆盖
+    const agentPolicy: Record<string, unknown> = {}
+    if (policyInterval.value !== DEFAULT_POLICY.checkpoint_interval) {
+      agentPolicy.checkpoint_interval = policyInterval.value
+    }
+    if (policyAllowInterrupt.value !== DEFAULT_POLICY.allow_interrupt) {
+      agentPolicy.allow_interrupt = policyAllowInterrupt.value
+    }
+    if (policyMaxInterrupts.value !== DEFAULT_POLICY.max_interrupts_per_round) {
+      agentPolicy.max_interrupts_per_round = policyMaxInterrupts.value
+    }
+    if (policyAllowVerify.value !== DEFAULT_POLICY.allow_verify) {
+      agentPolicy.allow_verify = policyAllowVerify.value
+    }
+    if (policyAdvanced.value) {
+      if (policyIntervalBuiltin.value !== null) {
+        agentPolicy.checkpoint_interval_builtin = policyIntervalBuiltin.value
+      }
+      if (policyIntervalCli.value !== null) {
+        agentPolicy.checkpoint_interval_cli = policyIntervalCli.value
+      }
+    }
+    if (Object.keys(agentPolicy).length > 0) {
+      params._agent_policy = agentPolicy
     }
 
     // user_input 优先用用户主输入;若为空但仓库地址已填,自动兜底生成
@@ -776,6 +830,93 @@ onMounted(async () => {
                   </div>
                 </div>
               </Transition>
+              </div>
+
+              <!-- Agent 策略配置(检查点评估频率、打断权限) -->
+              <div class="advanced-panel">
+                <button
+                  type="button"
+                  class="advanced-toggle"
+                  :aria-expanded="policyOpen"
+                  @click="policyOpen = !policyOpen"
+                >
+                  <svg
+                    class="advanced-chevron"
+                    :class="{ expanded: policyOpen }"
+                    width="16" height="16" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                  >
+                    <polyline points="9 18 15 12 9 6" />
+                  </svg>
+                  <span>Agent 策略</span>
+                  <span class="advanced-summary">
+                    {{ policyAllowInterrupt ? `每${policyInterval}轮评估·可打断` : `每${policyInterval}轮评估·仅观察` }}
+                  </span>
+                </button>
+
+                <Transition name="collapse">
+                  <div v-show="policyOpen" class="advanced-dropdown">
+                    <div class="policy-grid">
+                      <label class="policy-field">
+                        <span class="policy-label">评估频率 K</span>
+                        <input
+                          v-model.number="policyInterval"
+                          type="number" min="1" max="20"
+                          class="policy-input"
+                        />
+                        <span class="policy-hint">每 K 个迭代评估一次</span>
+                      </label>
+
+                      <label class="policy-field">
+                        <span class="policy-label">每轮最大打断</span>
+                        <input
+                          v-model.number="policyMaxInterrupts"
+                          type="number" min="0" max="10"
+                          class="policy-input"
+                        />
+                        <span class="policy-hint">防死锁上限</span>
+                      </label>
+                    </div>
+
+                    <label class="policy-toggle-row">
+                      <input v-model="policyAllowInterrupt" type="checkbox" />
+                      <span>允许 user_agent 打断 react_agent</span>
+                    </label>
+
+                    <label class="policy-toggle-row">
+                      <input v-model="policyAllowVerify" type="checkbox" />
+                      <span>允许 user_agent 自行验证 <span class="policy-experimental">(实验性)</span></span>
+                    </label>
+
+                    <label class="policy-toggle-row">
+                      <input v-model="policyAdvanced" type="checkbox" />
+                      <span>分别配置内置 / CLI agent 的 K 值</span>
+                    </label>
+
+                    <Transition name="collapse">
+                      <div v-show="policyAdvanced" class="policy-grid">
+                        <label class="policy-field">
+                          <span class="policy-label">内置 react_agent K</span>
+                          <input
+                            v-model.number="policyIntervalBuiltin"
+                            type="number" min="1" max="20"
+                            class="policy-input"
+                            placeholder="留空用统一值"
+                          />
+                        </label>
+                        <label class="policy-field">
+                          <span class="policy-label">CLI agent K</span>
+                          <input
+                            v-model.number="policyIntervalCli"
+                            type="number" min="1" max="20"
+                            class="policy-input"
+                            placeholder="留空用统一值"
+                          />
+                        </label>
+                      </div>
+                    </Transition>
+                  </div>
+                </Transition>
               </div>
             </div>
           </div>
@@ -1621,6 +1762,68 @@ onMounted(async () => {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg, 0 10px 25px rgba(0, 0, 0, 0.12));
+}
+
+/* ---- Agent 策略配置面板 ---- */
+.policy-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.policy-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.policy-label {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--color-text);
+}
+
+.policy-input {
+  width: 100%;
+  height: 34px;
+  padding: 0 var(--space-2);
+  font-size: var(--fs-sm);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.policy-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+
+.policy-hint {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+}
+
+.policy-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  font-size: var(--fs-sm);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.policy-toggle-row input {
+  cursor: pointer;
+}
+
+.policy-experimental {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  font-style: italic;
 }
 
 .skill-header {

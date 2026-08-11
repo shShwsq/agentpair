@@ -21,6 +21,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.agent_interrupt import drain_interrupts
 from app.event_bus import publish
 from app.llm.client import LLMClient
 from app.models.task import Conversation, Task
@@ -122,6 +123,7 @@ def run_react_agent(
     client: LLMClient | None = None,
     repo_context: str | None = None,
     previous_plan: list[dict[str, Any]] | None = None,
+    agent_policy: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
     """跑一轮 react_agent
 
@@ -138,6 +140,9 @@ def run_react_agent(
         previous_plan: 上一轮结束时的 plan 状态(修复 4)。None 或空表示第一轮
             或上轮无 plan。传入时,本轮启动即从该 plan 继续(避免跨轮重新规划
             已完成项),并在首轮 LLM 调用前作为 system 提醒注入。
+        agent_policy: agent 策略配置(检查点评估频率、打断权限等)。
+            None 时用默认值(不启用检查点评估)。由 orchestrator 调用
+            resolve_agent_policy 合并用户级默认 + 任务级覆盖后传入。
 
     返回:(results 列表, summary 文本, final_plan)
         results: [{"title": str, "content": str, "metadata": dict}](始终为空,
@@ -277,6 +282,20 @@ def run_react_agent(
                 logger.info(
                     f"[task={task.id}] react_agent 第 {round_idx} 轮 / 迭代 {iteration} "
                     f"注入 {len(pending_user_msgs)} 条用户补充消息"
+                )
+
+        # user_agent 检查点中断检查:drain 中断队列(优先级低于用户消息)
+        # user_agent 在迭代边界做轻量评估,若判断方向跑偏会生成追问指令入队。
+        # 这里取出并注入到 LLM 上下文,让模型在下一迭代看到纠正方向。
+        # (软中断:不取消当前 LLM 调用,只在迭代边界注入)
+        pending_interrupts = drain_interrupts(task.id)
+        if pending_interrupts:
+            interrupt_text = _format_interrupts(pending_interrupts)
+            if interrupt_text:
+                messages.append({"role": "user", "content": interrupt_text})
+                logger.info(
+                    f"[task={task.id}] react_agent 第 {round_idx} 轮 / 迭代 {iteration} "
+                    f"注入 {len(pending_interrupts)} 条 user_agent 中断指令"
                 )
 
         # 流式调用 LLM,累积 reasoning / content / tool_calls
@@ -469,6 +488,71 @@ def run_react_agent(
                 if not replaced:
                     messages.append({"role": "system", "content": reminder})
 
+        # user_agent 检查点评估:每 K 个迭代做轻量评估,判断方向是否跑偏
+        # 只在 allow_interrupt=true 且达到评估间隔时触发
+        # 前 2 个迭代不评估(给 react_agent 启动时间)
+        if agent_policy and agent_policy.get("allow_interrupt", True):
+            from app.agent_checkpoint import get_effective_interval, run_user_agent_checkpoint
+            from app.agent_interrupt import (
+                get_interrupt_count,
+                increment_interrupt_count,
+                push_interrupt,
+            )
+
+            effective_k = get_effective_interval(agent_policy, "builtin")
+            max_interrupts = agent_policy.get("max_interrupts_per_round", 2)
+            current_interrupt_count = get_interrupt_count(task.id, round_idx)
+
+            if (
+                iteration >= 2
+                and iteration % effective_k == 0
+                and current_interrupt_count < max_interrupts
+            ):
+                # 构造 react_agent 快照供检查点评估
+                # 记录本迭代最后一个工具的 intent 和 result(若有)
+                last_tool_intent = "(无工具调用)"
+                last_tool_result = "(无工具结果)"
+                if tool_calls_full:
+                    last_tc = tool_calls_full[-1]
+                    try:
+                        last_args = json.loads(last_tc.get("arguments_str") or "{}")
+                        last_tool_intent = _build_tool_intent(last_tc["name"], last_args)
+                    except Exception:
+                        last_tool_intent = last_tc.get("name", "(未知工具)")
+                    # 从 messages 里找最后一个 tool 角色的消息作为 result
+                    for m in reversed(messages):
+                        if m.get("role") == "tool":
+                            last_tool_result = m.get("content", "")[:500]
+                            break
+
+                snapshot = {
+                    "thinking_summary": content_full[:500] if content_full else "",
+                    "tool_intent": last_tool_intent,
+                    "tool_result_summary": last_tool_result,
+                    "plan_status": current_plan,
+                }
+
+                try:
+                    checkpoint_result = run_user_agent_checkpoint(
+                        task, db, round_idx, iteration, snapshot, client,
+                    )
+                    if checkpoint_result.get("interrupt"):
+                        push_interrupt(
+                            task.id,
+                            query=checkpoint_result["query"],
+                            reason=checkpoint_result["reason"],
+                            iteration=iteration,
+                        )
+                        increment_interrupt_count(task.id, round_idx)
+                        logger.info(
+                            f"[task={task.id}] 检查点评估打断(iteration={iteration}): "
+                            f"{checkpoint_result.get('reason', '')[:100]}"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"[task={task.id}] 检查点评估失败(iteration={iteration}, 忽略): {e}"
+                    )
+
         # 循环检测(修复 12:在连续相同检测基础上,增加滑动窗口检测)
         # 1) 连续 MAX_SAME_CALLS 次完全相同调用 → 死循环(A,A,A)
         # 2) 滑动窗口 LOOP_WINDOW_SIZE 内不同 call_sig ≤ LOOP_MIN_DISTINCT →
@@ -566,6 +650,39 @@ def _format_injected_user_messages(messages: list[dict[str, Any]]) -> str:
         "[用户在审计过程中追加的消息]\n"
         "请把以下内容作为新的检查方向或补充要求纳入当前任务,"
         "结合已掌握的仓库信息继续执行(无需重新 clone):\n\n"
+        f"{body}"
+    )
+
+
+def _format_interrupts(interrupts: list[dict[str, Any]]) -> str:
+    """把 drain 出的 user_agent 中断指令格式化为一条 LLM user 消息文本
+
+    user_agent 检查点评估后若判断方向跑偏,会生成追问指令入中断队列。
+    这里取出并格式化,让 react_agent 在下一迭代看到纠正方向。
+
+    与用户消息的区别:这是 user_agent(评估者)的方向纠正,不是用户的直接指令。
+    """
+    parts: list[str] = []
+    for it in interrupts:
+        query = (it.get("query") or "").strip()
+        if not query:
+            continue
+        reason = (it.get("reason") or "").strip()
+        iteration = it.get("iteration", "?")
+        if reason:
+            parts.append(f"[迭代{iteration} 方向纠正:{reason}]\n{query}")
+        else:
+            parts.append(f"[迭代{iteration} 方向纠正]\n{query}")
+
+    if not parts:
+        return ""
+
+    body = "\n\n".join(parts)
+
+    return (
+        "[user_agent 检查点评估:方向纠正]\n"
+        "user_agent 在观察你的执行过程后,认为当前方向需要调整。"
+        "请把以下纠正指令纳入当前任务,调整检查方向继续执行:\n\n"
         f"{body}"
     )
 

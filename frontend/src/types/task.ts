@@ -253,6 +253,7 @@ export type SSEEventType =
   | 'checklist_review'
   | 'done'
   | 'error'
+  | 'agent_checkpoint'
 
 /** SSE 事件通用结构 */
 export interface SSEEvent {
@@ -378,6 +379,47 @@ export interface ChecklistReviewEventData {
   checklist: ChecklistDimension[]
   /** user_agent 生成清单的依据(展示给用户参考,可选) */
   reasoning?: string
+}
+
+/**
+ * agent_checkpoint 事件 data(user_agent 检查点评估结果)
+ *
+ * react_agent(含内置 react_agent 和外部 CLI agent)执行过程中,每 K 个迭代边界
+ * user_agent 做轻量评估,判断方向是否跑偏。评估结果通过此事件推送前端展示。
+ * interrupt=true 时表示 user_agent 决定打断并注入追问指令(软中断)。
+ */
+export interface AgentCheckpointEventData {
+  /** 协作轮次 */
+  round_idx: number
+  /** 触发评估时的迭代序号 */
+  iteration: number
+  /** 是否打断(true=user_agent 认为方向跑偏,注入追问指令) */
+  interrupt: boolean
+  /** 评估理由(展示给用户看) */
+  reason: string
+  /** 打断时的追问指令(interrupt=true 时非空,注入 react_agent 作为 user 消息) */
+  query: string | null
+}
+
+/**
+ * agent 策略配置(检查点评估频率、打断权限、验证权限)
+ *
+ * 用户级默认存储在 UserPreference.agent_policy,任务级覆盖存储在
+ * task.params["_agent_policy"]。resolve_agent_policy 合并两者后生效。
+ */
+export interface AgentPolicy {
+  /** 统一 K 值,每 K 个迭代评估一次 */
+  checkpoint_interval: number
+  /** 高级:内置 react_agent 专用 K 值(null=用统一值) */
+  checkpoint_interval_builtin: number | null
+  /** 高级:CLI agent 专用 K 值(null=用统一值) */
+  checkpoint_interval_cli: number | null
+  /** user_agent 是否能打断 react_agent */
+  allow_interrupt: boolean
+  /** 每轮最多打断次数(防死锁) */
+  max_interrupts_per_round: number
+  /** user_agent 是否能自己在测试环境验证(实验性,先留开关) */
+  allow_verify: boolean
 }
 
 // ============================================================

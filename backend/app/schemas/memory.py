@@ -13,6 +13,7 @@
 后续还有合并时截断(项目 8000 / 全局 10000)与注入时截断(2000)两道防线。
 """
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -22,6 +23,9 @@ class UserPreferenceOut(BaseModel):
 
     # 自由文本 Markdown(用户在记忆管理页编辑,注入 user_agent)
     user_profile: str = ""
+    # agent 策略配置(检查点评估频率、打断权限、验证权限)
+    # None 表示未配置(用系统默认),dict 表示用户自定义的覆盖值
+    agent_policy: dict[str, Any] | None = None
     # 最后更新时间(可空 — 未配置时为 None;FastAPI 序列化为 ISO 字符串)
     updated_at: datetime | None = None
 
@@ -32,6 +36,26 @@ class SaveUserPreferenceRequest(BaseModel):
     """保存 User Profile 请求(PUT /memory/preferences)"""
 
     user_profile: str = Field(default="", max_length=2000)
+
+
+class SaveAgentPolicyRequest(BaseModel):
+    """保存 agent 策略配置请求(PUT /memory/preferences/agent_policy)
+
+    结构与 agent_checkpoint.DEFAULT_AGENT_POLICY 对齐:
+    - checkpoint_interval: 统一 K 值(每 K 个迭代评估一次)
+    - checkpoint_interval_builtin: 内置 react_agent 专用 K 值(null=用统一值)
+    - checkpoint_interval_cli: CLI agent 专用 K 值(null=用统一值)
+    - allow_interrupt: user_agent 是否能打断 react_agent
+    - max_interrupts_per_round: 每轮最多打断次数
+    - allow_verify: user_agent 是否能自己验证(实验性,先留开关)
+    """
+
+    checkpoint_interval: int = Field(default=3, ge=1, le=20)
+    checkpoint_interval_builtin: int | None = Field(default=None, ge=1, le=20)
+    checkpoint_interval_cli: int | None = Field(default=None, ge=1, le=20)
+    allow_interrupt: bool = True
+    max_interrupts_per_round: int = Field(default=2, ge=0, le=10)
+    allow_verify: bool = False
 
 
 class UserMemoryOut(BaseModel):

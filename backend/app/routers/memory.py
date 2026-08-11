@@ -33,6 +33,7 @@ from app.models.user_preference import UserPreference
 from app.schemas.memory import (
     ProjectListResponse,
     ProjectOut,
+    SaveAgentPolicyRequest,
     SaveProjectRequest,
     SaveUserMemoryRequest,
     SaveUserPreferenceRequest,
@@ -88,6 +89,38 @@ def save_preferences(
     db.commit()
     db.refresh(row)
     logger.info("用户 %s 更新了偏好", current_user.id)
+    return UserPreferenceOut.model_validate(row)
+
+
+@router.put("/preferences/agent_policy", response_model=UserPreferenceOut)
+def save_agent_policy(
+    req: SaveAgentPolicyRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> UserPreferenceOut:
+    """保存/更新 agent 策略配置(检查点评估频率、打断权限等)
+
+    作为用户级默认值,任务级可通过 task.params["_agent_policy"] 覆盖。
+    get_or_create:若用户无 UserPreference 行,自动创建(user_profile 为空)。
+    """
+    row = (
+        db.query(UserPreference)
+        .filter(UserPreference.user_id == current_user.id)
+        .first()
+    )
+    policy_dict = req.model_dump()
+    if row is None:
+        row = UserPreference(
+            user_id=current_user.id,
+            user_profile="",
+            agent_policy=policy_dict,
+        )
+        db.add(row)
+    else:
+        row.agent_policy = policy_dict
+    db.commit()
+    db.refresh(row)
+    logger.info("用户 %s 更新了 agent_policy", current_user.id)
     return UserPreferenceOut.model_validate(row)
 
 

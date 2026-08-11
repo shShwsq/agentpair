@@ -44,7 +44,8 @@ logger = logging.getLogger(__name__)
 EventType = Literal[
     "conversation", "status", "thinking_delta", "plan",
     "question",  # user_agent 请求用户澄清(选择题/填空题弹窗)
-    "done", "error"
+    "done", "error",
+    "agent_checkpoint",  # user_agent 检查点评估结果(迭代边界轻量评估)
 ]
 
 # 单个订阅者的队列容量上限(防止消费者过慢导致内存膨胀)

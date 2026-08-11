@@ -18,6 +18,8 @@
 export interface UserPreferenceOut {
   /** 自由文本 Markdown(≤ 2000 字符) */
   user_profile: string
+  /** agent 策略配置(检查点评估频率、打断权限等),null=未配置(用系统默认) */
+  agent_policy: SaveAgentPolicyRequest | null
   /** 最后更新时间(ISO 字符串,未配置时为 null) */
   updated_at: string | null
 }
@@ -25,6 +27,26 @@ export interface UserPreferenceOut {
 /** 保存 User Profile 请求(PUT /memory/preferences body) */
 export interface SaveUserPreferenceRequest {
   user_profile: string
+}
+
+/**
+ * agent 策略配置(PUT /memory/preferences/agent_policy body)
+ *
+ * 作为用户级默认值,任务级可通过 task.params["_agent_policy"] 覆盖。
+ */
+export interface SaveAgentPolicyRequest {
+  /** 统一 K 值,每 K 个迭代评估一次 */
+  checkpoint_interval: number
+  /** 高级:内置 react_agent 专用 K 值(null=用统一值) */
+  checkpoint_interval_builtin: number | null
+  /** 高级:CLI agent 专用 K 值(null=用统一值) */
+  checkpoint_interval_cli: number | null
+  /** user_agent 是否能打断 react_agent */
+  allow_interrupt: boolean
+  /** 每轮最多打断次数(防死锁) */
+  max_interrupts_per_round: number
+  /** user_agent 是否能自己验证(实验性,先留开关) */
+  allow_verify: boolean
 }
 
 /**

@@ -825,7 +825,16 @@ class _ACPCollector:
     让前端以独立流式卡片展示每次思考。
     """
 
-    def __init__(self, task: Task, db: Session, round_idx: int):
+    def __init__(
+        self,
+        task: Task,
+        db: Session,
+        round_idx: int,
+        *,
+        agent_policy: dict[str, Any] | None = None,
+        agent_type: str = "",
+        checkpoint_callback=None,
+    ):
         self.task = task
         self.db = db
         self.round_idx = round_idx
@@ -843,6 +852,14 @@ class _ACPCollector:
         # Qoder CN 的 rawInput 在 tool_call 事件里一次性给出;
         # Kimi 的参数在 tool_call_update(in_progress)里增量构建,需累积 input_text。
         self._pending_tool_calls: dict[str, dict] = {}
+        # 检查点评估配置(CLI agent 的迭代边界轻量评估)
+        self._agent_policy = agent_policy
+        self._agent_type = agent_type
+        self._checkpoint_callback = checkpoint_callback
+        self._interrupt_count = 0
+        # 最近工具调用快照(供检查点评估使用)
+        self._last_tool_intent = "(无工具调用)"
+        self._last_tool_result = "(无工具结果)"
 
     def _ensure_iter_started(self) -> None:
         """懒启动:首个 delta 到达时推送 phase=start"""
@@ -883,11 +900,58 @@ class _ACPCollector:
 
     def _start_new_iteration(self) -> None:
         """开新迭代:iteration+1, 新 conv_id, 清空 buf(懒启动,不立即推 start)"""
+        # 检查点评估:在新迭代开始前(即上一迭代结束时),若达到评估间隔则触发
+        # iteration 在此处 +1 之前表示刚结束的迭代序号
+        self._maybe_trigger_checkpoint()
+
         self.iteration += 1
         self.current_conv_id = str(uuid.uuid4())
         self.reasoning_buf = ""
         self.content_buf = ""
         self._iter_started = False
+
+    def _maybe_trigger_checkpoint(self) -> None:
+        """检查点评估触发:每 K 个迭代边界做轻量评估
+
+        在 _start_new_iteration 开头调用(此时 iteration 还是刚结束的迭代序号)。
+        只在配置了 agent_policy 且 allow_interrupt=true 时触发。
+        前 2 个迭代不评估(给 CLI agent 启动时间)。
+        """
+        if not self._agent_policy or not self._checkpoint_callback:
+            return
+        if not self._agent_policy.get("allow_interrupt", True):
+            return
+        if self.iteration < 2:
+            return
+
+        from app.agent_checkpoint import get_effective_interval
+        effective_k = get_effective_interval(self._agent_policy, self._agent_type)
+        max_interrupts = self._agent_policy.get("max_interrupts_per_round", 2)
+
+        # iteration 此时是刚结束的迭代序号(0-based 起步,实际是已完成的迭代数)
+        # 检查是否达到评估间隔
+        if self.iteration % effective_k != 0:
+            return
+        if self._interrupt_count >= max_interrupts:
+            return
+
+        # 构造快照
+        snapshot = self._build_snapshot()
+        try:
+            self._checkpoint_callback(self.iteration, snapshot)
+        except Exception as e:
+            logger.warning(
+                f"[task={self.task.id}] CLI 检查点评估失败(iteration={self.iteration}, 忽略): {e}"
+            )
+
+    def _build_snapshot(self) -> dict[str, Any]:
+        """构造 react_agent 快照供检查点评估"""
+        return {
+            "thinking_summary": self.content_buf[:500] if self.content_buf else "",
+            "tool_intent": self._last_tool_intent,
+            "tool_result_summary": self._last_tool_result[:500] if self._last_tool_result else "",
+            "plan_status": [],  # CLI agent 的 plan 由 content_full 提取,这里暂不传
+        }
 
     def close(self) -> None:
         """prompt 调用结束:flush 最后一段迭代"""
@@ -1005,6 +1069,9 @@ class _ACPCollector:
         # content: intent + "\n" + detail(前端按首行拆分)
         content = f"{intent}\n{detail}" if detail else intent
 
+        # 记录最近工具调用(供检查点评估快照使用)
+        self._last_tool_intent = intent
+
         conv = _add_conversation(
             self.db, self.task,
             round_idx=self.round_idx,
@@ -1106,6 +1173,9 @@ class _ACPCollector:
             role="react_agent", type="tool_result",
             content=raw_output,
         )
+
+        # 记录最近工具结果(供检查点评估快照使用)
+        self._last_tool_result = raw_output
 
     @staticmethod
     def _infer_tool_name(title: str, kind: str) -> str:
@@ -1511,6 +1581,7 @@ def run_acp_agent(
     repo_context: str | None = None,
     previous_plan: list[dict[str, Any]] | None = None,
     agent_type: str = "",
+    agent_policy: dict[str, Any] | None = None,
     *,
     post_session_setup: Callable[[ACPClient, str, Task], None] | None = None,
     credential_env_builder: Callable[[dict[str, str]], dict[str, str]] | None = None,
@@ -1643,15 +1714,97 @@ def run_acp_agent(
                 content=user_msg,
             )
 
-            # ---- 流式发送 prompt ----
-            collector = _ACPCollector(task, db, round_idx)
+            # ---- 检查点评估回调(CLI agent 的迭代边界轻量评估) ----
+            # 在 _ACPCollector 的 _start_new_iteration 中被调用,
+            # 评估结果若 interrupt=true 会写入中断队列,当前 prompt 结束后检查
+            def _checkpoint_callback(iteration: int, snapshot: dict[str, Any]) -> None:
+                if not agent_policy or not agent_policy.get("allow_interrupt", True):
+                    return
+                from app.agent_checkpoint import run_user_agent_checkpoint
+                from app.agent_interrupt import (
+                    get_interrupt_count,
+                    increment_interrupt_count,
+                    push_interrupt,
+                )
+                max_interrupts = agent_policy.get("max_interrupts_per_round", 2)
+                current_count = get_interrupt_count(task.id, round_idx)
+                if current_count >= max_interrupts:
+                    return
+                try:
+                    checkpoint_result = run_user_agent_checkpoint(
+                        task, db, round_idx, iteration, snapshot, None,
+                    )
+                    if checkpoint_result.get("interrupt"):
+                        push_interrupt(
+                            task.id,
+                            query=checkpoint_result["query"],
+                            reason=checkpoint_result["reason"],
+                            iteration=iteration,
+                        )
+                        increment_interrupt_count(task.id, round_idx)
+                        logger.info(
+                            f"[task={task.id}] CLI 检查点评估打断(iteration={iteration}): "
+                            f"{checkpoint_result.get('reason', '')[:100]}"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"[task={task.id}] CLI 检查点评估回调失败(iteration={iteration}, 忽略): {e}"
+                    )
+
+            # ---- 流式发送 prompt(支持软中断:当前 prompt 结束后检查中断队列) ----
+            collector = _ACPCollector(
+                task, db, round_idx,
+                agent_policy=agent_policy,
+                agent_type=agent_type,
+                checkpoint_callback=_checkpoint_callback if agent_policy else None,
+            )
 
             try:
-                result = client.prompt(
-                    acp_session_id,
-                    [{"type": "text", "text": user_msg}],
-                    on_event=collector,
-                )
+                # 软中断循环:当前 prompt 结束后检查中断队列,
+                # 若有中断则用追问指令发起新 prompt(同 session,CLI 保留对话历史)
+                current_msg = user_msg
+                while True:
+                    result = client.prompt(
+                        acp_session_id,
+                        [{"type": "text", "text": current_msg}],
+                        on_event=collector,
+                    )
+
+                    # 检查中断队列(软中断:不取消当前 prompt,等它结束后再追问)
+                    from app.agent_interrupt import drain_interrupts
+                    pending_interrupts = drain_interrupts(task.id)
+                    if not pending_interrupts:
+                        break  # 无中断,正常结束
+
+                    # 有中断:构造追问 prompt,继续下一轮 prompt
+                    interrupt_parts = []
+                    for it in pending_interrupts:
+                        query = (it.get("query") or "").strip()
+                        if query:
+                            reason = (it.get("reason") or "").strip()
+                            it_text = f"[方向纠正:{reason}]\n{query}" if reason else query
+                            interrupt_parts.append(it_text)
+
+                    if not interrupt_parts:
+                        break  # 中断内容为空,正常结束
+
+                    interrupt_msg = (
+                        "[user_agent 检查点评估:方向纠正]\n"
+                        "user_agent 在观察你的执行过程后,认为当前方向需要调整。"
+                        "请把以下纠正指令纳入当前任务,调整检查方向继续执行:\n\n"
+                        + "\n\n".join(interrupt_parts)
+                    )
+                    logger.info(
+                        f"[task={task.id}] CLI 软中断:用追问指令发起新 prompt "
+                        f"({len(pending_interrupts)} 条中断)"
+                    )
+                    _add_conversation(
+                        db, task, round_idx=round_idx,
+                        role="user_agent", type="evaluation",
+                        content=f"[检查点中断] {interrupt_msg[:200]}",
+                    )
+                    current_msg = interrupt_msg
+
             except Exception as e:
                 logger.exception(f"[task={task.id}] ACP prompt 失败 ({agent_type})")
                 publish(task.id, "thinking_delta", {

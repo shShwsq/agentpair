@@ -17,6 +17,7 @@ import client from './client'
 import type {
   ProjectListResponse,
   ProjectOut,
+  SaveAgentPolicyRequest,
   SaveProjectRequest,
   SaveUserMemoryRequest,
   SaveUserPreferenceRequest,
@@ -36,6 +37,11 @@ export function getPreferences(): Promise<UserPreferenceOut> {
 /** 保存/更新 User Profile (get_or_create) */
 export function savePreferences(body: SaveUserPreferenceRequest): Promise<UserPreferenceOut> {
   return client.put('/memory/preferences', body).then((r) => r.data)
+}
+
+/** 保存/更新 agent 策略配置(检查点评估频率、打断权限等) */
+export function saveAgentPolicy(body: SaveAgentPolicyRequest): Promise<UserPreferenceOut> {
+  return client.put('/memory/preferences/agent_policy', body).then((r) => r.data)
 }
 
 // ============================================================

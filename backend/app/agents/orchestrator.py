@@ -50,6 +50,8 @@ from app.user_interaction import (
     wait_for_answers,
     wait_for_checklist_confirmation,
 )
+from app.agent_checkpoint import resolve_agent_policy
+from app.agent_interrupt import clear_interrupt_count, clear_interrupts
 from app.user_messages import clear_user_messages
 
 logger = logging.getLogger(__name__)
@@ -93,6 +95,15 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
     # 执行器选择:按 task.executor 拿到对应的 ExecutorAgent provider
     # (builtin → 内置 react_agent;registry 中的 agent_type → 外部 CLI via ACP)
     executor = get_executor(task)
+
+    # 加载 agent 策略(检查点评估频率、打断权限等)
+    # 合并用户级默认(UserPreference.agent_policy)+ 任务级覆盖(task.params["_agent_policy"])
+    agent_policy = resolve_agent_policy(task, db)
+    logger.info(
+        f"[task={task.id}] agent_policy: K={agent_policy.get('checkpoint_interval')}, "
+        f"allow_interrupt={agent_policy.get('allow_interrupt')}, "
+        f"max_interrupts={agent_policy.get('max_interrupts_per_round')}"
+    )
 
     # 用户原始意图
     user_intent = task.user_input
@@ -250,6 +261,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 client=react_client,
                 repo_context=repo_context if is_first else None,
                 previous_plan=current_plan if not is_first else None,
+                agent_policy=agent_policy,
             )
 
             react_summaries.append({
@@ -383,6 +395,15 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             clear_user_messages(task.id)
         except Exception as cleanup_err:
             logger.warning(f"[task={task.id}] 清理用户消息队列失败: {cleanup_err}")
+        # 清理 user_agent 中断队列 + 打断计数(防止任务结束时仍有 in-memory 残留)
+        try:
+            clear_interrupts(task.id)
+        except Exception as cleanup_err:
+            logger.warning(f"[task={task.id}] 清理中断队列失败: {cleanup_err}")
+        try:
+            clear_interrupt_count(task.id)
+        except Exception as cleanup_err:
+            logger.warning(f"[task={task.id}] 清理打断计数失败: {cleanup_err}")
         # 延迟关闭沙箱:标记任务完成,保留 session 供前端浏览工作区文件
         # 实际清理由 workspace 路由的 cleanup_expired_sessions() 惰性触发(TTL 1 小时)
         try:
@@ -907,6 +928,15 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
     # 执行器选择:按 task.executor 拿到对应的 ExecutorAgent provider
     executor = get_executor(task)
 
+    # 加载 agent 策略(检查点评估频率、打断权限等)
+    # 合并用户级默认(UserPreference.agent_policy)+ 任务级覆盖(task.params["_agent_policy"])
+    agent_policy = resolve_agent_policy(task, db)
+    logger.info(
+        f"[task={task.id}] resume agent_policy: K={agent_policy.get('checkpoint_interval')}, "
+        f"allow_interrupt={agent_policy.get('allow_interrupt')}, "
+        f"max_interrupts={agent_policy.get('max_interrupts_per_round')}"
+    )
+
     task_checklist = task.checklist
     react_summaries = _load_react_summaries(db, task.id)
     # 重启时不复用旧 plan(让 LLM 根据新消息重新规划)
@@ -959,6 +989,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
                 client=react_client,
                 repo_context=None,  # 重启不传 repo_context(仓库已 clone,react_agent 自行从 sandbox 取)
                 previous_plan=current_plan if round_idx > start_round_idx + 1 else None,
+                agent_policy=agent_policy,
             )
             react_summaries.append({"round": round_idx, "summary": summary})
 
@@ -1011,6 +1042,8 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
             (clear_pending_checklist, "待确认清单"),
             (clear_pause_state, "暂停状态"),
             (clear_user_messages, "用户消息队列"),
+            (clear_interrupts, "中断队列"),
+            (clear_interrupt_count, "打断计数"),
         ]:
             try:
                 cleanup_fn(task.id)

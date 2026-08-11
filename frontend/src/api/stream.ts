@@ -15,6 +15,7 @@
  */
 import { getAccessToken } from './client'
 import type {
+  AgentCheckpointEventData,
   ChecklistReviewEventData,
   ConnectedData,
   ConversationEventData,
@@ -43,6 +44,8 @@ export interface StreamCallbacks {
   onQuestion?: (data: QuestionEventData) => void
   /** 覆盖度清单确认(user_agent 第 0 轮动态生成 checklist 后触发) */
   onChecklistReview?: (data: ChecklistReviewEventData) => void
+  /** user_agent 检查点评估结果(迭代边界轻量评估,interrupt=true 时已注入追问) */
+  onAgentCheckpoint?: (data: AgentCheckpointEventData) => void
   onDone?: (data: DoneEventData) => void
   onError?: (data: DoneEventData) => void
 }
@@ -73,6 +76,7 @@ export function subscribeTaskStream(
     'plan',
     'question',
     'checklist_review',
+    'agent_checkpoint',
     'done',
     'error',
   ]
@@ -107,6 +111,9 @@ export function subscribeTaskStream(
             break
           case 'checklist_review':
             callbacks.onChecklistReview?.(data as unknown as ChecklistReviewEventData)
+            break
+          case 'agent_checkpoint':
+            callbacks.onAgentCheckpoint?.(data as unknown as AgentCheckpointEventData)
             break
           case 'done':
             callbacks.onDone?.(data as unknown as DoneEventData)

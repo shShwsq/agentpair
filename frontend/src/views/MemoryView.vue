@@ -24,12 +24,13 @@ import {
   getGlobalMemory,
   getPreferences,
   listProjects,
+  saveAgentPolicy,
   saveGlobalMemory,
   savePreferences,
   saveProject,
 } from '@/api/memory'
 import { extractErrorMessage } from '@/utils/error'
-import type { ProjectOut, UserPreferenceOut } from '@/types/memory'
+import type { ProjectOut, SaveAgentPolicyRequest, UserPreferenceOut } from '@/types/memory'
 
 // ============================================================
 // 默认模板(后端初始为空,前端在内容为空时预填模板作为引导)
@@ -161,6 +162,74 @@ const projectNotes = reactive<Record<string, string | null>>({})
 const projectIds = reactive<Record<string, string>>({})
 
 // ============================================================
+// Agent 策略配置(仅 pref 文件显示;用户级默认,任务级可覆盖)
+//
+// 统一语义:react_agent 包括内置 react_agent 和外部 CLI agent。
+// user_agent 在 react_agent 每 K 个迭代边界做轻量检查点评估,
+// 方向跑偏时通过中断队列注入追问指令(软中断)。
+// ============================================================
+
+/** 默认策略值(与后端 DEFAULT_AGENT_POLICY 对齐) */
+const DEFAULT_POLICY = {
+  checkpoint_interval: 3,
+  checkpoint_interval_builtin: null as number | null,
+  checkpoint_interval_cli: null as number | null,
+  allow_interrupt: true,
+  max_interrupts_per_round: 2,
+  allow_verify: false,
+} as const
+
+/** 策略面板是否展开 */
+const policyOpen = ref(false)
+/** 是否分别配置内置/CLI 的 K 值(高级) */
+const policyAdvanced = ref(false)
+/** 统一 K 值:每 K 个迭代评估一次(1-20) */
+const policyInterval = ref(DEFAULT_POLICY.checkpoint_interval)
+/** 内置 react_agent 专用 K 值(null=用统一值) */
+const policyIntervalBuiltin = ref<number | null>(DEFAULT_POLICY.checkpoint_interval_builtin)
+/** CLI agent 专用 K 值(null=用统一值) */
+const policyIntervalCli = ref<number | null>(DEFAULT_POLICY.checkpoint_interval_cli)
+/** user_agent 是否能打断 react_agent */
+const policyAllowInterrupt = ref(DEFAULT_POLICY.allow_interrupt)
+/** 每轮最多打断次数(防死锁,0-10) */
+const policyMaxInterrupts = ref(DEFAULT_POLICY.max_interrupts_per_round)
+/** user_agent 是否能自己验证(实验性,先留开关) */
+const policyAllowVerify = ref(DEFAULT_POLICY.allow_verify)
+
+/** 策略原始值(脏检查基准,hydrate 时写入) */
+const originalPolicy = reactive({
+  interval: DEFAULT_POLICY.checkpoint_interval,
+  intervalBuiltin: DEFAULT_POLICY.checkpoint_interval_builtin as number | null,
+  intervalCli: DEFAULT_POLICY.checkpoint_interval_cli as number | null,
+  allowInterrupt: DEFAULT_POLICY.allow_interrupt,
+  maxInterrupts: DEFAULT_POLICY.max_interrupts_per_round,
+  allowVerify: DEFAULT_POLICY.allow_verify,
+})
+
+/** agent 策略是否有未保存改动 */
+const policyDirty = computed(() => {
+  return (
+    policyInterval.value !== originalPolicy.interval ||
+    policyIntervalBuiltin.value !== originalPolicy.intervalBuiltin ||
+    policyIntervalCli.value !== originalPolicy.intervalCli ||
+    policyAllowInterrupt.value !== originalPolicy.allowInterrupt ||
+    policyMaxInterrupts.value !== originalPolicy.maxInterrupts ||
+    policyAllowVerify.value !== originalPolicy.allowVerify
+  )
+})
+
+/** 重置策略表单为系统默认值(不立即保存) */
+function resetPolicyToDefault(): void {
+  policyInterval.value = DEFAULT_POLICY.checkpoint_interval
+  policyIntervalBuiltin.value = DEFAULT_POLICY.checkpoint_interval_builtin
+  policyIntervalCli.value = DEFAULT_POLICY.checkpoint_interval_cli
+  policyAllowInterrupt.value = DEFAULT_POLICY.allow_interrupt
+  policyMaxInterrupts.value = DEFAULT_POLICY.max_interrupts_per_round
+  policyAllowVerify.value = DEFAULT_POLICY.allow_verify
+  policyAdvanced.value = false
+}
+
+// ============================================================
 // 编辑/预览模式
 // ============================================================
 const mode = ref<'edit' | 'preview'>('edit')
@@ -197,10 +266,12 @@ const activeLimit = computed(() => (activeEntry.value ? LIMITS[activeEntry.value
 const activeDraft = computed(() => drafts[activeId.value] ?? '')
 const activeOverLimit = computed(() => activeDraft.value.length > activeLimit.value)
 
-/** 草稿与原始值是否有任何差异(含 alias;不区分模板,用于判定"可保存") */
+/** 草稿与原始值是否有任何差异(含 alias、pref 的 agent 策略;不区分模板,用于判定"可保存") */
 function hasDiff(fileId: string): boolean {
   if ((drafts[fileId] ?? '') !== (originals[fileId] ?? '')) return true
   if (fileId.startsWith('project:') && (aliasDrafts[fileId] ?? '') !== (originalAlias[fileId] ?? '')) return true
+  // pref 文件还检查 agent 策略是否脏
+  if (fileId === 'pref' && policyDirty.value) return true
   return false
 }
 
@@ -210,7 +281,10 @@ function isDirty(fileId: string): boolean {
   const draft = drafts[fileId] ?? ''
   const orig = originals[fileId] ?? ''
   // 纯默认模板预填未改动:草稿===模板且 DB 原本为空 → 不算脏
-  if (isTemplateDefault[fileId] && orig === '' && draft === templateFor(fileKind(fileId))) {
+  // 但若 agent 策略有改动(pref 文件),仍算脏(策略与模板是两件事)
+  const onlyTemplateUnchanged =
+    isTemplateDefault[fileId] && orig === '' && draft === templateFor(fileKind(fileId))
+  if (onlyTemplateUnchanged && !(fileId === 'pref' && policyDirty.value)) {
     return false
   }
   return true
@@ -273,6 +347,25 @@ function hydratePref(data: UserPreferenceOut): void {
     isTemplateDefault['pref'] = false
   }
   updatedAt['pref'] = data.updated_at ?? null
+
+  // ---- hydrate agent 策略(null=未配置,用系统默认值) ----
+  const policy = data.agent_policy
+  policyInterval.value = policy?.checkpoint_interval ?? DEFAULT_POLICY.checkpoint_interval
+  policyIntervalBuiltin.value = policy?.checkpoint_interval_builtin ?? DEFAULT_POLICY.checkpoint_interval_builtin
+  policyIntervalCli.value = policy?.checkpoint_interval_cli ?? DEFAULT_POLICY.checkpoint_interval_cli
+  policyAllowInterrupt.value = policy?.allow_interrupt ?? DEFAULT_POLICY.allow_interrupt
+  policyMaxInterrupts.value = policy?.max_interrupts_per_round ?? DEFAULT_POLICY.max_interrupts_per_round
+  policyAllowVerify.value = policy?.allow_verify ?? DEFAULT_POLICY.allow_verify
+  // 高级模式:仅当任一专用 K 值非 null 时展开
+  policyAdvanced.value = policyIntervalBuiltin.value !== null || policyIntervalCli.value !== null
+
+  // 同步原始值(脏检查基准)
+  originalPolicy.interval = policyInterval.value
+  originalPolicy.intervalBuiltin = policyIntervalBuiltin.value
+  originalPolicy.intervalCli = policyIntervalCli.value
+  originalPolicy.allowInterrupt = policyAllowInterrupt.value
+  originalPolicy.maxInterrupts = policyMaxInterrupts.value
+  originalPolicy.allowVerify = policyAllowVerify.value
 }
 
 function hydrateGlobal(data: { content: string; updated_at?: string | null }): void {
@@ -327,10 +420,27 @@ async function handleSave(): Promise<void> {
   actionError.value = ''
   try {
     if (entry.kind === 'pref') {
-      const data = await savePreferences({
-        user_profile: drafts['pref'],
-      })
-      hydratePref(data)
+      // pref 文件:user_profile 文本 + agent 策略 两路独立保存
+      // 顺序执行避免并发写同一行;最后用最新返回值 hydrate
+      const textDirty = (drafts['pref'] ?? '') !== (originals['pref'] ?? '')
+      const policyDirtyNow = policyDirty.value
+      let latest: UserPreferenceOut | null = null
+
+      if (textDirty) {
+        latest = await savePreferences({ user_profile: drafts['pref'] })
+      }
+      if (policyDirtyNow) {
+        // 关闭高级模式时,专用 K 值强制为 null(用统一值)
+        latest = await saveAgentPolicy({
+          checkpoint_interval: policyInterval.value,
+          checkpoint_interval_builtin: policyAdvanced.value ? policyIntervalBuiltin.value : null,
+          checkpoint_interval_cli: policyAdvanced.value ? policyIntervalCli.value : null,
+          allow_interrupt: policyAllowInterrupt.value,
+          max_interrupts_per_round: policyAllowInterrupt.value ? policyMaxInterrupts.value : 0,
+          allow_verify: policyAllowVerify.value,
+        })
+      }
+      if (latest) hydratePref(latest)
     } else if (entry.kind === 'global') {
       const data = await saveGlobalMemory({ content: drafts['global'] })
       hydrateGlobal(data)

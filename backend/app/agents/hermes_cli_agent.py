@@ -261,6 +261,7 @@ def run_hermes_cli_agent(
     repo_context: str | None = None,
     previous_plan: list[dict[str, Any]] | None = None,
     agent_type: str = AGENT_TYPE,
+    agent_policy: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
     """跑一轮 Hermes CLI 执行器
 
@@ -280,6 +281,7 @@ def run_hermes_cli_agent(
         repo_context=repo_context,
         previous_plan=previous_plan,
         agent_type=agent_type,
+        agent_policy=agent_policy,
         credential_env_builder=_hermes_credential_env_builder,
         pre_bridge_hook=_hermes_pre_bridge_hook,
         # 无需 post_session_setup:HERMES_YOLO_MODE 已处理权限绕过

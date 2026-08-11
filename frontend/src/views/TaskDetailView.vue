@@ -46,6 +46,7 @@ import { subscribeTaskStream } from '@/api/stream'
 import { listArtifacts } from '@/api/taskArtifacts'
 import { extractErrorMessage } from '@/utils/error'
 import type {
+  AgentCheckpointEventData,
   AnswerItem,
   ChecklistDimension,
   ClarificationQuestion,
@@ -168,6 +169,13 @@ const convCountPerRound = reactive<Map<number, number>>(new Map())
 // ---- 计划清单(plan 事件 + 历史回放)----
 // key: round_idx,value: 该 round 最新一次的 plan 步骤列表(覆盖式更新)
 const planPerRound = reactive<Map<number, PlanStep[]>>(new Map())
+
+// ---- user_agent 检查点评估结果(agent_checkpoint 事件)----
+// key: `${round_idx}:${iteration}`,value: 检查点评估结构化数据
+// 后端在检查点评估时同时推 agent_checkpoint 事件 + conversation 事件,
+// conversation 事件已由 onConversation 回调接收并渲染为 user_agent evaluation 卡片,
+// 这里存储 agent_checkpoint 的结构化字段(interrupt/reason/query)供将来扩展可视化。
+const checkpointsPerRound = reactive<Map<string, AgentCheckpointEventData>>(new Map())
 
 // ---- 用户澄清提问弹窗(阶段 8)----
 // user_agent 在第 0 轮评估时若 ask_user=true,后端推送 question 事件,
@@ -497,6 +505,17 @@ function connectSSE(taskId: string): void {
         reasoning: data.reasoning,
       })
     },
+    onAgentCheckpoint: (data: AgentCheckpointEventData) => {
+      // user_agent 检查点评估结果:存储结构化数据
+      // 后端同时推 conversation 事件(role=user_agent, type=evaluation),
+      // 由 onConversation 回调渲染为对话卡片,这里只存储供将来扩展
+      checkpointsPerRound.set(`${data.round_idx}:${data.iteration}`, data)
+      if (data.interrupt) {
+        console.info(
+          `[检查点评估] 第${data.round_idx}轮迭代${data.iteration} 打断: ${data.reason}`,
+        )
+      }
+    },
     onDone: async () => {
       // 任务完成:拉取最终结果(含 results)
       try {
@@ -675,6 +694,7 @@ function resetTaskState(): void {
   streamingItems.clear()
   planPerRound.clear()
   convCountPerRound.clear()
+  checkpointsPerRound.clear()
   historyReasoningExpanded.clear()
   // 关闭提问弹窗
   questionOpen.value = false
