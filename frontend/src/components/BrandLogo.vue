@@ -52,8 +52,8 @@ withDefaults(
         <polygon points="-30,42 -30,78 -58,54 -58,18" fill="url(#brand-grad-a)" />
         <polygon points="-58,18 -78,0 -48,-52 -30,-48" fill="url(#brand-grad-b)" />
       </g>
-      <!-- 双气泡:放大 1.3 倍并平移至六边形环中心 -->
-      <g transform="translate(-10, -22) scale(1.3)">
+      <!-- 双气泡:放大 1.3 倍并平移至六边形环中心(略偏右以视觉居中) -->
+      <g transform="translate(-7, -22) scale(1.3)">
         <!-- 左气泡(user_agent / 提问者) -->
         <g transform="translate(-16, -4)">
           <path
