@@ -32,6 +32,10 @@ function toggleWorkspace(): void {
 // ============================================================
 // 默认策略值(与后端 DEFAULT_AGENT_POLICY 对齐)
 // ============================================================
+
+// 协作总轮次上限(与后端 MAX_MAX_ROUNDS 对齐,后端可通过 AGENTPAIR_MAX_ROUNDS_LIMIT 环境变量调整)
+const MAX_ROUNDS_LIMIT = 10
+
 const DEFAULT_POLICY = {
   user_agent_enabled: true,
   max_rounds: 4,
@@ -111,9 +115,9 @@ function resetPolicyToDefault(): void {
 }
 
 /**
- * 协作总轮次输入处理:只允许非负整数,实时过滤非数字字符,钳制到 [1, 10]
+ * 协作总轮次输入处理:只允许非负整数,实时过滤非数字字符,钳制到 [1, MAX_ROUNDS_LIMIT]
  * - 禁止负号、小数点、字母等非法字符
- * - 超过 10 自动钳制为 10
+ * - 超过上限自动钳制
  * - 临时空值允许(让用户能删除后重新输入),由 @blur 兜底
  */
 function onMaxRoundsInput(e: Event): void {
@@ -125,8 +129,8 @@ function onMaxRoundsInput(e: Event): void {
   }
   if (filtered === '') return  // 临时空,不更新 ref
   let n = parseInt(filtered, 10)
-  if (n > 10) {
-    n = 10
+  if (n > MAX_ROUNDS_LIMIT) {
+    n = MAX_ROUNDS_LIMIT
     input.value = String(n)
   }
   if (n < 1) n = 1
@@ -268,7 +272,7 @@ const FIELD_HELP: Record<string, string> = {
   user_agent_enabled:
     '开启后,user_agent 参与协作(初始评估、检查点评估、打断、验证)。关闭后退化为单 agent 模式:react_agent 跑 1 轮直接产出结果,不做覆盖度评估、不打断、不验证。适合简单任务或用户完全信任 react_agent 的场景。',
   max_rounds:
-    'user_agent 与 react_agent 之间的协作总轮次。每轮含 react_agent 执行 + user_agent 评估。轮次越多覆盖越全面但耗时越长。仅 user_agent 启用时生效。',
+    'user_agent 与 react_agent 之间的协作总轮次。每轮含 react_agent 执行 + user_agent 评估。轮次越多覆盖越全面但耗时越长。仅 user_agent 启用时生效。上限为 10。',
   checkpoint_interval:
     'user_agent 每 K 个 react_agent 迭代做一次轻量检查点评估,判断方向是否跑偏。K 越小评估越频繁(更早纠偏,但开销更大),K 越大开销越小(但跑偏更晚发现)。',
   max_interrupts:
@@ -401,6 +405,7 @@ onUnmounted(() => {
               class="policy-input"
               :disabled="saving || !policyUserAgentEnabled"
             />
+            <span class="policy-hint">上限 {{ MAX_ROUNDS_LIMIT }}</span>
           </label>
 
           <div class="policy-grid">
@@ -743,6 +748,12 @@ onUnmounted(() => {
   font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
   color: var(--color-text);
+}
+
+.policy-hint {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  line-height: var(--lh-relaxed);
 }
 
 .policy-input {

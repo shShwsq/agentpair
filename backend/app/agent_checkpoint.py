@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from typing import Any
 
@@ -31,6 +32,10 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # 默认策略 + 配置解析
 # ============================================================
+
+# 协作总轮次上限(可通过环境变量 AGENTPAIR_MAX_ROUNDS_LIMIT 调整,默认 10)
+# 前端展示的"最大 10"与此对齐;改环境变量后前端需同步(或未来通过 API 下发)
+MAX_MAX_ROUNDS = int(os.environ.get("AGENTPAIR_MAX_ROUNDS_LIMIT", "10"))
 
 DEFAULT_AGENT_POLICY: dict[str, Any] = {
     "user_agent_enabled": True,  # 是否启用 user_agent(关闭=单 agent 模式,跳过评估/打断/验证)
@@ -74,6 +79,12 @@ def resolve_agent_policy(task: Task, db: Session) -> dict[str, Any]:
     # 合并任务级覆盖
     overrides = (task.params or {}).get("_agent_policy") or {}
     merged = {**defaults, **overrides}
+    # 钳制 max_rounds 到 [1, MAX_MAX_ROUNDS](防御:前端/老数据可能送超界值)
+    try:
+        mr = int(merged.get("max_rounds", 4))
+        merged["max_rounds"] = max(1, min(mr, MAX_MAX_ROUNDS))
+    except (TypeError, ValueError):
+        merged["max_rounds"] = 4
     return merged
 
 

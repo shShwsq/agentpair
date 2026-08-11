@@ -14,7 +14,7 @@
  *
  * 提交后:后端立即返回 task_id(异步执行),前端跳转详情页通过 SSE 观看实时进度。
  */
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import AppHeader from '@/components/AppHeader.vue'
@@ -259,10 +259,30 @@ const DEFAULT_POLICY = {
   allow_verify: false,
 }
 
+// 协作总轮次上限(与后端 MAX_MAX_ROUNDS 对齐,后端可通过 AGENTPAIR_MAX_ROUNDS_LIMIT 环境变量调整)
+const MAX_ROUNDS_LIMIT = 10
+
+/** 协作总轮次帮助气泡是否展开 */
+const showMaxRoundsHelp = ref(false)
+
+/** 切换协作总轮次帮助气泡 */
+function toggleMaxRoundsHelp(e: Event): void {
+  e.stopPropagation()
+  showMaxRoundsHelp.value = !showMaxRoundsHelp.value
+}
+
+/** 点击帮助气泡外部时关闭 */
+function onDocClickCloseHelp(e: MouseEvent): void {
+  const target = e.target as HTMLElement
+  if (!target.closest('.field-help-wrap')) {
+    showMaxRoundsHelp.value = false
+  }
+}
+
 /**
- * 协作总轮次输入处理:只允许非负整数,实时过滤非数字字符,钳制到 [1, 10]
+ * 协作总轮次输入处理:只允许非负整数,实时过滤非数字字符,钳制到 [1, MAX_ROUNDS_LIMIT]
  * - 禁止负号、小数点、字母等非法字符
- * - 超过 10 自动钳制为 10
+ * - 超过上限自动钳制
  * - 临时空值允许(让用户能删除后重新输入),由 @blur 兜底
  */
 function onMaxRoundsInput(e: Event): void {
@@ -274,8 +294,8 @@ function onMaxRoundsInput(e: Event): void {
   }
   if (filtered === '') return  // 临时空,不更新 ref
   let n = parseInt(filtered, 10)
-  if (n > 10) {
-    n = 10
+  if (n > MAX_ROUNDS_LIMIT) {
+    n = MAX_ROUNDS_LIMIT
     input.value = String(n)
   }
   if (n < 1) n = 1
@@ -646,6 +666,7 @@ const executorOptions = computed(() => [
 ])
 
 onMounted(async () => {
+  document.addEventListener('click', onDocClickCloseHelp)
   try {
     // 并行拉取场景、模型、各 git provider 状态、技能、agent 配置
     // git provider 状态静默失败:未绑定不影响任务提交
@@ -693,6 +714,10 @@ onMounted(async () => {
     // 自动聚焦输入框
     textareaRef.value?.focus()
   })
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', onDocClickCloseHelp)
 })
 </script>
 
@@ -957,7 +982,19 @@ onMounted(async () => {
 
                   <!-- 协作总轮次(仅 user_agent 启用时生效) -->
                   <label class="policy-field">
-                    <span class="policy-label">协作总轮次</span>
+                    <div class="field-head">
+                      <span class="policy-label">协作总轮次</span>
+                      <div class="field-help-wrap">
+                        <button type="button" class="field-help-btn" aria-label="查看说明" @click="toggleMaxRoundsHelp">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+                        </button>
+                        <Transition name="help-fade">
+                          <div v-if="showMaxRoundsHelp" class="field-help-popover" role="tooltip">
+                            user_agent 与 react_agent 之间的协作总轮次。每轮含 react_agent 执行 + user_agent 评估。轮次越多覆盖越全面但耗时越长。仅 user_agent 启用时生效。上限为 {{ MAX_ROUNDS_LIMIT }}。
+                          </div>
+                        </Transition>
+                      </div>
+                    </div>
                     <input
                       :value="policyMaxRounds"
                       @input="onMaxRoundsInput"
@@ -968,7 +1005,7 @@ onMounted(async () => {
                       class="policy-input"
                       :disabled="!policyUserAgentEnabled"
                     />
-                    <span class="policy-hint">user_agent 协作总轮次</span>
+                    <span class="policy-hint">上限 {{ MAX_ROUNDS_LIMIT }}</span>
                   </label>
 
                   <div class="policy-grid">
@@ -2031,6 +2068,77 @@ onMounted(async () => {
   font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
   color: var(--color-text);
+}
+
+/* 字段头部:标签 + 帮助按钮(问号) */
+.field-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* 字段级帮助按钮(问号)+ 说明气泡 */
+.field-help-wrap {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+}
+
+.field-help-btn {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: color var(--transition-fast);
+}
+
+.field-help-btn:hover {
+  color: var(--color-primary);
+}
+
+.field-help-btn svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.field-help-popover {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  left: 0;
+  z-index: 20;
+  width: max-content;
+  min-width: 2em;
+  max-width: min(300px, 80vw);
+  max-height: 240px;
+  overflow-y: auto;
+  padding: var(--space-3);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-relaxed);
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  word-break: break-word;
+}
+
+/* 帮助气泡出现/消失动画 */
+.help-fade-enter-active,
+.help-fade-leave-active {
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+}
+
+.help-fade-enter-from,
+.help-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
 }
 
 .policy-input {
