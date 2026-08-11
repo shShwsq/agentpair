@@ -9,7 +9,6 @@
  * 5. 兜底 → 未知错误
  */
 import { describe, expect, it } from 'vitest'
-import axios from 'axios'
 
 import { extractErrorMessage } from './error'
 
