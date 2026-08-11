@@ -120,8 +120,10 @@ def http_request(
     *,
     headers: dict[str, str] | None = None,
     body: str | None = None,
+    auth_profile: str | None = None,
     task_id: str = "",
     test_env_url: str = "",
+    auth_tokens: list[dict] | None = None,
 ) -> dict[str, Any]:
     """向测试环境发送 HTTP 请求(在沙箱里执行,授权由 verifier_agent 统一拦截)
 
@@ -130,8 +132,12 @@ def http_request(
         path: 相对路径(拼到 test_env_url 后面),如 "/api/users" 或 "/login?next=/"
         headers: 自定义请求头(可选)
         body: 请求体字符串(可选;POST/PUT 常用)
+        auth_profile: 选择登录身份(可选,对应 auth_tokens 某项的 label);
+            匹配则把该项 header_name: header_value 注入请求头;LLM 不接触 token 明文。
+            None=不带认证;不存在的 label=返回错误,不发送请求。
         task_id: 当前任务 ID(自动注入)
         test_env_url: 测试环境基址(自动注入,来自 task.params._verifier)
+        auth_tokens: 登录凭证列表(自动注入,来自 task.params._verifier.auth_tokens)
 
     返回:
         {"status_code": int, "headers": dict, "body": str, "elapsed_ms": int, "truncated": bool}
@@ -143,6 +149,26 @@ def http_request(
     if not test_env_url:
         return {"status_code": 0, "body": "[未配置 test_env_url,无法发送请求]"}
 
+    # 合并请求头:LLM 显式 headers + auth_profile 注入的凭证头
+    # (显式 headers 优先级高,可覆盖凭证头;但通常不会冲突)
+    final_headers: dict[str, str] = dict(headers or {})
+    if auth_profile:
+        tokens = auth_tokens or []
+        matched = next(
+            (t for t in tokens if t.get("label") == auth_profile),
+            None,
+        )
+        if matched is None:
+            available = ", ".join(t.get("label", "") for t in tokens) or "(无)"
+            return {
+                "status_code": 0,
+                "body": f"[auth_profile='{auth_profile}' 不存在,可用身份: {available}]",
+            }
+        # 注入凭证头(显式 headers 优先,不覆盖 LLM 已设的值)
+        h_name = matched.get("header_name", "")
+        if h_name and h_name not in final_headers:
+            final_headers[h_name] = matched.get("header_value", "")
+
     # 拼接完整 URL(base 去尾斜杠,path 补头斜杠)
     base = test_env_url.rstrip("/")
     p = path if path.startswith("/") else "/" + path
@@ -152,7 +178,7 @@ def http_request(
     params_json = json.dumps({
         "method": method,
         "url": full_url,
-        "headers": headers or {},
+        "headers": final_headers,
         "body": body or "",
         "timeout": _HTTP_TIMEOUT,
         "max_body": _MAX_BODY_CHARS,
@@ -308,11 +334,20 @@ VERIFIER_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     },
                     "headers": {
                         "type": "object",
-                        "description": "自定义请求头(可选),如 {\"Content-Type\": \"application/json\", \"Authorization\": \"Bearer ...\"}",
+                        "description": "自定义请求头(可选),如 {\"Content-Type\": \"application/json\"}。注意:认证头由 auth_profile 自动注入,不要在此手动填 Authorization/Cookie。",
                     },
                     "body": {
                         "type": "string",
                         "description": "请求体字符串(可选;POST/PUT 常用),如 JSON payload 或表单数据",
+                    },
+                    "auth_profile": {
+                        "type": "string",
+                        "description": (
+                            "选择登录身份(可选,对应任务配置的凭证 label,如 '管理员'/'普通用户')。"
+                            "工具自动把该身份的认证头注入请求,你不需要也不应该知道 token 明文。"
+                            "用于越权测试:同一端点用不同身份访问,对比响应差异。"
+                            "留空=不带认证(匿名访问);不存在的 label 会返回错误。"
+                        ),
                     },
                 },
                 "required": ["method", "path"],

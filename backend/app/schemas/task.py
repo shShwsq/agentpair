@@ -18,6 +18,22 @@ _VALID_EXECUTORS = ("builtin", *get_registered_types())
 _EXECUTOR_PATTERN = "^(" + "|".join(_VALID_EXECUTORS) + ")$"
 
 
+class VerifierAuthToken(BaseModel):
+    """登录凭证(verifier_agent 的 http_request 按身份注入请求头)
+
+    label 为身份标识(如"管理员"/"普通用户"),LLM 调 http_request 时通过
+    auth_profile=label 选择身份,工具自动把 header_name: header_value 加到请求头。
+    """
+
+    label: str = Field(..., min_length=1, max_length=64, description="身份标识(LLM 据此选择)")
+    header_name: str = Field(
+        ..., min_length=1, max_length=128, description="请求头名(如 Authorization / Cookie)"
+    )
+    header_value: str = Field(
+        ..., min_length=1, max_length=4096, description="请求头值(如 Bearer xxx / session=yyy)"
+    )
+
+
 class TaskCreateRequest(BaseModel):
     """提交任务的请求
 
@@ -59,6 +75,8 @@ class TaskCreateRequest(BaseModel):
     verifier_enabled: bool = False
     # "direct":验证动作直接执行不弹窗;"per_action":每个 HTTP 请求/PoC 运行前弹窗授权
     verifier_auth_mode: str = Field(default="per_action", pattern="^(direct|per_action)$")
+    # 登录凭证列表(可选):LLM 调 http_request 时按 auth_profile=label 注入对应请求头
+    verifier_auth_tokens: list[VerifierAuthToken] = Field(default_factory=list)
 
 
 class TaskTitleUpdateRequest(BaseModel):
@@ -112,6 +130,7 @@ class TaskResponse(BaseModel):
     test_env_url: str | None = None
     verifier_enabled: bool = False
     verifier_auth_mode: str = "per_action"
+    verifier_auth_tokens: list[VerifierAuthToken] = []
     status: str
     current_stage: str | None
     error_message: str | None
@@ -300,3 +319,5 @@ class VerifyConfigUpdateRequest(BaseModel):
     verifier_enabled: bool | None = None
     verifier_auth_mode: str | None = Field(default=None, pattern="^(direct|per_action)$")
     test_env_url: str | None = Field(default=None, max_length=2048)
+    # 登录凭证列表(可选):传入则整体覆盖;空列表清空;None/省略=不修改
+    verifier_auth_tokens: list[VerifierAuthToken] | None = None

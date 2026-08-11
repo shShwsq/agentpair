@@ -51,8 +51,9 @@ react_agent 通过静态分析发现了潜在的安全问题,你需要通过实�
 1. **http_request**:向测试环境发送 HTTP 请求(在沙箱里执行,不经后端服务器)
    - method: GET/POST/PUT/DELETE 等
    - path: 相对路径(如 /api/users、/login?next=/)
-   - headers: 自定义请求头(如 Content-Type、Authorization)
+   - headers: 自定义请求头(如 Content-Type;注意:认证头由 auth_profile 自动注入,不要手动填)
    - body: 请求体(POST/PUT 的 payload)
+   - auth_profile: 选择登录身份(可选,对应任务配置的凭证 label);工具自动注入对应认证头
    URL base 固定为任务配置的 test_env_url,你只能指定相对路径。
 
 2. **run_python_code**:在沙箱执行 Python 代码
@@ -104,6 +105,7 @@ def run_verifier_agent(
     task_id_str = str(task_id)
     test_env_url = task.test_env_url or ""
     auth_mode = task.verifier_auth_mode or "per_action"
+    auth_tokens = task.verifier_auth_tokens or []
 
     # 推送验证开始事件(前端显示"正在验证...")
     publish(task_id, "thinking_delta", {
@@ -117,8 +119,20 @@ def run_verifier_agent(
 
     client = client or LLMClient()
 
+    # 系统提示:动态注入可用登录身份(LLM 只看到 label,看不到 token 明文)
+    system_prompt = VERIFIER_SYSTEM_PROMPT
+    if auth_tokens:
+        labels = ", ".join(t.get("label", "") for t in auth_tokens)
+        system_prompt += (
+            f"\n\n## 可用登录身份(通过 http_request 的 auth_profile 参数选择)\n"
+            f"任务配置了以下身份,你只需指定 label,工具自动注入对应认证头(你看不到 token 明文):\n"
+            f"- {labels}\n\n"
+            f"越权测试建议:同一受保护端点用不同身份访问,对比状态码/响应体差异。"
+            f"留空 auth_profile=匿名访问。"
+        )
+
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": VERIFIER_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": (
             f"请验证以下安全发现:\n\n{verification_request}\n\n"
             f"测试环境地址: {test_env_url}\n"
@@ -168,17 +182,17 @@ def run_verifier_agent(
             # per_action 授权:每个动作弹窗确认
             if auth_mode == "per_action":
                 approved = _request_action_authorization(
-                    task_id_str, tool_name, args, test_env_url
+                    task_id_str, tool_name, args, test_env_url, auth_tokens
                 )
                 if not approved:
                     tool_result = {"status_code": 0, "body": "[用户拒绝执行此动作]"}
                 else:
                     tool_result = _execute_verifier_tool(
-                        tool_name, args, task_id_str, test_env_url
+                        tool_name, args, task_id_str, test_env_url, auth_tokens
                     )
             else:
                 tool_result = _execute_verifier_tool(
-                    tool_name, args, task_id_str, test_env_url
+                    tool_name, args, task_id_str, test_env_url, auth_tokens
                 )
 
             # 落库工具调用 + 结果(对用户透明,role=user_agent)
@@ -322,6 +336,7 @@ def _request_action_authorization(
     tool_name: str,
     args: dict[str, Any],
     test_env_url: str,
+    auth_tokens: list[dict] | None = None,
 ) -> bool:
     """per_action 模式:弹窗让用户确认是否执行此动作
 
@@ -344,6 +359,8 @@ def _request_action_authorization(
             "url": full_url,
             "headers": args.get("headers", {}),
             "body": args.get("body", ""),
+            # 显示登录身份(若有),便于用户判断该动作是否合理
+            "auth_profile": args.get("auth_profile") or "",
         }
     elif tool_name == "run_python_code":
         code = args.get("code", "")
@@ -369,6 +386,7 @@ def _execute_verifier_tool(
     args: dict[str, Any],
     task_id_str: str,
     test_env_url: str,
+    auth_tokens: list[dict] | None = None,
 ) -> dict[str, Any]:
     """执行 verifier_agent 的工具调用(授权已通过,直接执行)"""
     if tool_name == "http_request":
@@ -377,8 +395,10 @@ def _execute_verifier_tool(
             path=args.get("path", "/"),
             headers=args.get("headers"),
             body=args.get("body"),
+            auth_profile=args.get("auth_profile"),
             task_id=task_id_str,
             test_env_url=test_env_url,
+            auth_tokens=auth_tokens,
         )
     elif tool_name == "run_python_code":
         # 复用 react_agent 的沙箱(set_current_task 已由 orchestrator 设置)

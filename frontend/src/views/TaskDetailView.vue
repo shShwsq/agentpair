@@ -423,6 +423,13 @@ const verifierActive = computed(
   () => !!task.value?.verifier_enabled && !!task.value?.test_env_url,
 )
 
+/** 脱敏展示 token 值(只显示前 8 + 后 4 字符,中间用 *** 代替) */
+function maskTokenValue(value: string): string {
+  if (!value) return ''
+  if (value.length <= 12) return '***'
+  return value.slice(0, 8) + '***' + value.slice(-4)
+}
+
 // ---- 加载 + SSE 订阅 ----
 
 async function initTask(): Promise<void> {
@@ -2137,6 +2144,22 @@ function parseCheckpoint(item: DisplayItem): {
           >
             {{ task.verifier_auth_mode === 'direct' ? '模式:直接执行' : '模式:逐动作授权' }}
           </button>
+
+          <!-- 已配置的登录凭证(只读展示,header_value 脱敏) -->
+          <div
+            v-if="task.verifier_enabled && task.verifier_auth_tokens && task.verifier_auth_tokens.length > 0"
+            class="verifier-tokens"
+          >
+            <span class="label">登录凭证</span>
+            <div
+              v-for="(token, idx) in task.verifier_auth_tokens"
+              :key="idx"
+              class="verifier-token-item"
+            >
+              <span class="token-label">{{ token.label }}</span>
+              <code class="token-header">{{ token.header_name }}: {{ maskTokenValue(token.header_value) }}</code>
+            </div>
+          </div>
         </section>
       </div>
     </aside>
@@ -2599,6 +2622,40 @@ function parseCheckpoint(item: DisplayItem): {
 .verifier-toggle-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* 登录凭证列表(只读展示,header_value 脱敏) */
+.verifier-tokens {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  padding-top: var(--space-2);
+  border-top: 1px dashed var(--color-border);
+  font-size: var(--fs-xs);
+}
+
+.verifier-tokens .label {
+  color: var(--color-text-muted);
+  font-weight: var(--fw-medium);
+}
+
+.verifier-token-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.verifier-token-item .token-label {
+  font-weight: var(--fw-medium);
+  color: var(--color-text);
+}
+
+.verifier-token-item .token-header {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  word-break: break-all;
 }
 
 /* ---- 结果清单 ---- */

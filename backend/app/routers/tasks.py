@@ -585,6 +585,9 @@ def update_task_verifier_config(
         verifier_cfg["auth_mode"] = req.verifier_auth_mode
     if req.test_env_url is not None:
         verifier_cfg["test_env_url"] = req.test_env_url
+    # 登录凭证:None=不修改,空列表=清空,非空=整体覆盖
+    if req.verifier_auth_tokens is not None:
+        verifier_cfg["auth_tokens"] = [t.model_dump() for t in req.verifier_auth_tokens]
 
     # 若 enabled=false 或 test_env_url 为空,清除 _verifier 配置(禁用验证)
     if not verifier_cfg.get("enabled") or not verifier_cfg.get("test_env_url"):
@@ -1594,6 +1597,8 @@ def _normalize_request(req: TaskCreateRequest) -> tuple[str, dict | None]:
             "test_env_url": req.test_env_url,
             "enabled": True,
             "auth_mode": req.verifier_auth_mode,
+            # 登录凭证:序列化为 plain dict 存入 params(避免 SQLAlchemy JSON 列存 Pydantic 模型)
+            "auth_tokens": [t.model_dump() for t in req.verifier_auth_tokens],
         }
 
     return user_input, params

@@ -123,6 +123,15 @@ class Task(Base):
         """验证授权模式:"direct"(直接执行) / "per_action"(每个动作弹窗授权)"""
         return (self.params or {}).get("_verifier", {}).get("auth_mode", "per_action")
 
+    @property
+    def verifier_auth_tokens(self) -> list[dict]:
+        """登录凭证列表(供 verifier_agent 的 http_request 按身份注入请求头)
+
+        每项:{"label": "管理员", "header_name": "Authorization", "header_value": "Bearer xxx"}
+        LLM 调 http_request 时通过 auth_profile=label 选择身份,工具自动注入对应 header。
+        """
+        return (self.params or {}).get("_verifier", {}).get("auth_tokens", [])
+
 
 class Conversation(Base):
     """对话记录:user / user_agent / react_agent 之间的所有消息

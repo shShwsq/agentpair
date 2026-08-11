@@ -159,6 +159,8 @@ export interface TaskCreateRequest {
    * - "per_action":每个 HTTP 请求/PoC 运行前弹窗授权
    */
   verifier_auth_mode?: 'direct' | 'per_action'
+  /** 登录凭证列表(可选,LLM 调 http_request 时按 auth_profile=label 注入对应请求头) */
+  verifier_auth_tokens?: VerifierAuthToken[]
 }
 
 /** 提交任务响应(后端 TaskCreateResponse) */
@@ -242,6 +244,8 @@ export interface TaskDetail {
   verifier_enabled?: boolean
   /** 验证授权模式:"direct" 直接执行 / "per_action" 逐动作授权 */
   verifier_auth_mode?: 'direct' | 'per_action'
+  /** 登录凭证列表(从 params._verifier.auth_tokens 读取) */
+  verifier_auth_tokens?: VerifierAuthToken[]
 }
 
 /** 任务列表项(后端 TaskListItem,精简版用于侧栏) */
@@ -450,12 +454,30 @@ export interface VerifyActionEventData {
   headers?: Record<string, string>
   /** http_request 专用:请求体 */
   body?: string
+  /** http_request 专用:使用的登录身份 label(若有) */
+  auth_profile?: string
   /** run_python_code 专用:PoC 代码(可能已截断) */
   code?: string
   /** run_python_code 专用:代码是否被截断 */
   code_truncated?: boolean
   /** 其他类型的原始参数 */
   args?: Record<string, unknown>
+}
+
+/**
+ * 登录凭证(verifier_agent 的 http_request 按身份注入请求头)
+ *
+ * label 为身份标识(如"管理员"/"普通用户"),LLM 调 http_request 时通过
+ * auth_profile=label 选择身份,工具自动把 header_name: header_value 加到请求头。
+ * LLM 看不到 header_value 明文(安全)。
+ */
+export interface VerifierAuthToken {
+  /** 身份标识(LLM 据此选择,如 '管理员'/'普通用户') */
+  label: string
+  /** 请求头名(如 'Authorization' / 'Cookie' / 'X-API-Key') */
+  header_name: string
+  /** 请求头值(如 'Bearer xxx' / 'session=yyy') */
+  header_value: string
 }
 
 /** 验证动作授权请求(POST /tasks/{id}/verify_action body) */
@@ -481,6 +503,8 @@ export interface VerifyConfigUpdateRequest {
   verifier_auth_mode?: 'direct' | 'per_action'
   /** 测试环境 URL(可选) */
   test_env_url?: string
+  /** 登录凭证列表(可选):传入则整体覆盖;空数组清空;undefined=不修改 */
+  verifier_auth_tokens?: VerifierAuthToken[]
 }
 
 /**

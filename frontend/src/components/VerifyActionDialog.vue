@@ -90,6 +90,12 @@ function handleReject(): void {
                   HTTP 请求
                 </span>
               </div>
+              <div v-if="action.auth_profile" class="detail-row">
+                <span class="detail-label">登录身份</span>
+                <span class="detail-value">
+                  <span class="auth-profile-badge">{{ action.auth_profile }}</span>
+                </span>
+              </div>
               <div class="detail-row">
                 <span class="detail-label">URL</span>
                 <code class="detail-value detail-url">{{ action.url || '(未指定)' }}</code>
@@ -317,6 +323,17 @@ function handleReject(): void {
 .method-put { background: #fef3c7; color: #92400e; }
 .method-delete { background: #fee2e2; color: #991b1b; }
 .method-patch { background: #e9d5ff; color: #6b21a8; }
+
+/* 登录身份徽章(展示 auth_profile) */
+.auth-profile-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  background: var(--color-primary-light);
+  color: var(--color-primary);
+}
 
 .truncate-hint {
   font-size: var(--fs-xs);

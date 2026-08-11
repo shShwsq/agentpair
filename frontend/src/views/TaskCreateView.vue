@@ -268,6 +268,22 @@ const testEnvUrl = ref('')
  * - "per_action":每个 HTTP 请求/PoC 运行前弹窗授权
  */
 const verifierAuthMode = ref<'direct' | 'per_action'>('per_action')
+/**
+ * 登录凭证列表(可选):LLM 调 http_request 时按 auth_profile=label 注入对应请求头。
+ * 用于越权测试:同一端点用不同身份访问,对比响应差异。
+ * 每项 = { label, header_name, header_value };LLM 只看到 label,看不到 header_value。
+ */
+const verifierAuthTokens = ref<Array<{ label: string; header_name: string; header_value: string }>>([])
+
+/** 添加一个空凭证行 */
+function addAuthToken(): void {
+  verifierAuthTokens.value.push({ label: '', header_name: 'Authorization', header_value: '' })
+}
+
+/** 删除指定索引的凭证行 */
+function removeAuthToken(idx: number): void {
+  verifierAuthTokens.value.splice(idx, 1)
+}
 
 // ============================================================
 // Git 仓库选择(repo_url 字段专用增强,统一 GitHub / Gitee)
@@ -537,6 +553,16 @@ async function handleSubmit(): Promise<void> {
       test_env_url: verifierEnabled.value ? testEnvUrl.value.trim() || undefined : undefined,
       verifier_enabled: verifierEnabled.value,
       verifier_auth_mode: verifierEnabled.value ? verifierAuthMode.value : undefined,
+      // 登录凭证:仅提交 label 和 header_value 都非空的项(过滤未填完的空行)
+      verifier_auth_tokens: verifierEnabled.value
+        ? verifierAuthTokens.value
+            .filter((t) => t.label.trim() && t.header_value.trim())
+            .map((t) => ({
+              label: t.label.trim(),
+              header_name: t.header_name.trim() || 'Authorization',
+              header_value: t.header_value.trim(),
+            }))
+        : undefined,
       params,
     })
 
@@ -962,7 +988,12 @@ onMounted(async () => {
                 </svg>
                 <span>测试环境</span>
                 <span class="advanced-summary">
-                  {{ verifierEnabled ? (verifierAuthMode === 'direct' ? '已启用·直接执行' : '已启用·逐动作授权') : '未启用' }}
+                  {{ verifierEnabled
+                    ? (verifierAuthMode === 'direct' ? '已启用·直接执行' : '已启用·逐动作授权')
+                      + (verifierAuthTokens.filter(t => t.label.trim() && t.header_value.trim()).length > 0
+                        ? '·' + verifierAuthTokens.filter(t => t.label.trim() && t.header_value.trim()).length + '个凭证'
+                        : '')
+                    : '未启用' }}
                 </span>
               </button>
 
@@ -994,6 +1025,60 @@ onMounted(async () => {
                         </select>
                         <span class="policy-hint">控制验证动作执行前是否需要用户确认</span>
                       </label>
+
+                      <!-- 登录凭证列表(可选):LLM 按 auth_profile=label 选择身份,
+                           工具自动注入对应请求头。用于越权测试(同一端点不同身份访问)。
+                           LLM 只看到 label,看不到 header_value(安全)。 -->
+                      <div class="auth-tokens-section">
+                        <div class="auth-tokens-header">
+                          <span class="policy-label">登录凭证 <span class="policy-optional">(可选)</span></span>
+                          <button type="button" class="auth-token-add-btn" @click="addAuthToken">
+                            + 添加身份
+                          </button>
+                        </div>
+                        <span class="policy-hint">
+                          配置不同身份的认证头,LLM 验证越权时会按需选择(如:管理员 vs 普通用户访问同一端点)
+                        </span>
+
+                        <div
+                          v-for="(token, idx) in verifierAuthTokens"
+                          :key="idx"
+                          class="auth-token-row"
+                        >
+                          <input
+                            v-model.trim="token.label"
+                            type="text"
+                            class="auth-token-input auth-token-label"
+                            placeholder="身份名(如 管理员)"
+                          />
+                          <input
+                            v-model.trim="token.header_name"
+                            type="text"
+                            class="auth-token-input auth-token-header-name"
+                            placeholder="Header 名"
+                            list="auth-header-suggestions"
+                          />
+                          <input
+                            v-model.trim="token.header_value"
+                            type="text"
+                            class="auth-token-input auth-token-header-value"
+                            placeholder="Header 值(如 Bearer xxx)"
+                          />
+                          <button
+                            type="button"
+                            class="auth-token-remove-btn"
+                            aria-label="删除"
+                            @click="removeAuthToken(idx)"
+                          >×</button>
+                        </div>
+
+                        <datalist id="auth-header-suggestions">
+                          <option value="Authorization" />
+                          <option value="Cookie" />
+                          <option value="X-API-Key" />
+                          <option value="X-Auth-Token" />
+                        </datalist>
+                      </div>
                     </div>
                   </Transition>
                 </div>
@@ -1929,6 +2014,103 @@ onMounted(async () => {
 .verifier-config select.policy-input {
   height: 34px;
   cursor: pointer;
+}
+
+/* ---- 登录凭证列表(verifier_auth_tokens)---- */
+.auth-tokens-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+
+.auth-tokens-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.policy-optional {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  font-weight: var(--fw-normal);
+}
+
+.auth-token-add-btn {
+  padding: 2px 10px;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--color-primary);
+  background: var(--color-primary-light);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.auth-token-add-btn:hover {
+  background: var(--color-primary);
+  color: white;
+}
+
+.auth-token-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+
+.auth-token-input {
+  padding: 4px 8px;
+  font-size: var(--fs-xs);
+  font-family: inherit;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  transition: border-color var(--transition-fast);
+}
+
+.auth-token-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px var(--color-primary-light);
+}
+
+.auth-token-label {
+  flex: 0 0 110px;
+}
+
+.auth-token-header-name {
+  flex: 0 0 120px;
+}
+
+.auth-token-header-value {
+  flex: 1;
+  min-width: 0;
+}
+
+.auth-token-remove-btn {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--color-text-muted);
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.auth-token-remove-btn:hover {
+  background: var(--color-danger-light);
+  color: var(--color-danger);
 }
 
 .skill-header {
