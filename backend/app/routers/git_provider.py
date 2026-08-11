@@ -12,6 +12,7 @@
 - POST   /git/{provider}/refresh     用 refresh_token 刷新 access_token(仅 Gitee 支持)
 """
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -27,6 +28,29 @@ from app.security import decrypt_secret, encrypt_secret
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/git", tags=["git"])
+
+
+# ============================================================
+# 仓库列表内存缓存(30s TTL)
+# ============================================================
+# 背景:list_repos 每次都要调 GitHub/Gitee /user/repos(耗时 1-5s),
+# 而仓库列表短时间内不会变化。加进程内缓存,30s 内同一用户同一 provider
+# 直接返回上次结果。key=(user_id, provider),value=(fetched_at, repos)。
+# bind/unbind 时会调 _invalidate_repos_cache 清除,避免换账号后返回旧仓库。
+_REPOS_CACHE: dict[tuple, tuple[float, list[dict]]] = {}
+_REPOS_CACHE_TTL = 30.0  # 秒
+
+
+def _invalidate_repos_cache(user_id=None, provider=None) -> None:
+    """清除仓库列表缓存
+
+    无参 → 清全部(调试用);指定 user_id+provider → 清该用户该平台一条。
+    bind/unbind 时调用,避免换账号后返回旧仓库(安全考虑)。
+    """
+    if user_id is None or provider is None:
+        _REPOS_CACHE.clear()
+        return
+    _REPOS_CACHE.pop((user_id, provider), None)
 
 
 # ============================================================
@@ -207,6 +231,9 @@ def bind_provider(
         db.add(binding)
     # 统一更新 provider_user_id + token 三件套
     binding.provider_user_id = info.provider_user_id
+    # 缓存 login / avatar,status 接口直接读这两列,不再每次调 /user
+    binding.provider_login = info.login
+    binding.avatar_url = info.avatar_url
     binding.access_token = encrypt_secret(token_set.access_token)
     binding.refresh_token = (
         encrypt_secret(token_set.refresh_token) if token_set.refresh_token else ""
@@ -217,6 +244,8 @@ def bind_provider(
     )
     db.commit()
     db.refresh(binding)
+    # 绑定可能换账号,清除该用户该平台的仓库缓存
+    _invalidate_repos_cache(current_user.id, provider)
 
     logger.info(
         "user %s 绑定 %s 成功,provider_user_id=%s",
@@ -268,20 +297,25 @@ def get_provider_status(
     binding = _get_binding(db, current_user.id, provider)
 
     bound = bool(binding and binding.access_token)
-    provider_login: str | None = None
-    avatar_url: str | None = None
+    # 直接读绑定时缓存的 login / avatar,避免每次打开页面都调外部 /user API
+    provider_login = binding.provider_login if binding else None
+    avatar_url = binding.avatar_url if binding else None
 
-    # 若已绑定,实时查一次 /user 拿 login + avatar
-    if bound:
+    # 老数据回填:绑定早于该字段上线的 binding,login/avatar 为 NULL。
+    # 懒加载一次 /user 回填到 binding,之后 status 永远不再走外部网络。
+    # 仅在 bound 时尝试(有 token 才能调 /user);失败则静默返回 NULL,不阻塞页面。
+    if bound and provider_login is None and avatar_url is None:
         try:
             token = _ensure_valid_token(db, binding, p)
             info = p.get_user_info(token)
             provider_login = info.login
             avatar_url = info.avatar_url
+            binding.provider_login = provider_login
+            binding.avatar_url = avatar_url
+            db.commit()
         except (GitProviderError, ValueError) as e:
-            # token 失效或解密失败,只标记 bound 但不抛错
             logger.warning(
-                "user %s 的 %s token 查询失败: %s",
+                "user %s 的 %s 老数据回填 login/avatar 失败: %s",
                 current_user.id,
                 p.display_name,
                 e,
@@ -317,8 +351,13 @@ def unbind_provider(
     binding = _get_binding(db, current_user.id, provider)
     if binding is not None:
         binding.access_token = ""
+        # 清空 login / avatar 缓存(与 access_token 同生命周期)
+        binding.provider_login = None
+        binding.avatar_url = None
         db.commit()
         db.refresh(binding)
+        # 解绑后仓库列表应清空,清除缓存
+        _invalidate_repos_cache(current_user.id, provider)
         logger.info("user %s 解绑 %s(清除 access_token)", current_user.id, provider)
 
     return GitProviderStatusResponse(
@@ -437,6 +476,7 @@ def list_repos(
     """列出当前用户该平台仓库(含私有)
 
     用于任务创建页下拉选择私有仓库。返回按更新时间倒序的前 100 个。
+    30s 内重复请求走内存缓存,避免每次都调外部 GitHub/Gitee API。
     """
     p = _resolve_provider(provider)
     binding = _get_binding(db, current_user.id, provider)
@@ -445,6 +485,15 @@ def list_repos(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"尚未绑定 {p.display_name} 或未授权仓库访问,请先在设置页绑定",
         )
+
+    # 命中缓存且未过期 → 直接返回(不调外部 API)
+    cache_key = (current_user.id, provider)
+    cached = _REPOS_CACHE.get(cache_key)
+    if cached is not None:
+        fetched_at, raw = cached
+        if time.monotonic() - fetched_at < _REPOS_CACHE_TTL:
+            repos = [GitRepoItem(**item) for item in raw]
+            return GitReposResponse(repos=repos)
 
     try:
         token = _ensure_valid_token(db, binding, p)
@@ -462,6 +511,8 @@ def list_repos(
             detail="token 解密失败,请联系管理员",
         ) from e
 
+    # 仅缓存成功结果(401/403/500 不缓存,让下次请求能重试)
+    _REPOS_CACHE[cache_key] = (time.monotonic(), raw)
     repos = [GitRepoItem(**item) for item in raw]
     return GitReposResponse(repos=repos)
 

@@ -51,6 +51,7 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     # 一次性迁移:把旧 users.github_id/github_access_token 搬到 user_git_bindings
     from app.models.user_git_binding import (
+        add_login_avatar_columns,
         add_refresh_token_columns,
         migrate_legacy_github_bindings,
     )
@@ -58,6 +59,8 @@ async def lifespan(app: FastAPI):
     migrate_legacy_github_bindings()
     # 加 refresh_token / expires_at 列(Gitee access_token 刷新机制)
     add_refresh_token_columns()
+    # 加 provider_login / avatar_url 列(status 接口缓存 login+avatar,避免每次调 /user)
+    add_login_avatar_columns()
     # 加 projects.memory_summary 列(精简版记忆,注入 system prompt 用)
     from app.models.project import migrate_project_memory_summary
 

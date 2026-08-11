@@ -14,6 +14,7 @@ JWT payload:
 避免凭据明文落库。密钥来自 settings.GITHUB_TOKEN_SECRET(与 provider 无关,所有
 git provider token 共用同一把 Fernet 密钥),留空则启动时随机生成。
 """
+import functools
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -149,12 +150,17 @@ def extract_user_id_from_token(
 # ============================================================
 
 
+@functools.lru_cache(maxsize=1)
 def _get_fernet() -> Fernet:
-    """获取 Fernet 实例
+    """获取 Fernet 实例(模块级单例,首次调用后缓存)
 
     密钥来源:settings.GITHUB_TOKEN_SECRET(必须为 Fernet 兼容的 base64 串);
     该密钥与 provider 无关,GitHub / Gitee 等 git provider 的 access_token 共用。
     留空则启动时随机生成(开发期方便,生产环境必须固定,否则重启后旧密文无法解密)。
+
+    用 lru_cache 缓存:同一进程内只构造一次 Fernet,避免每次解密都重建实例。
+    开发期若 GITHUB_TOKEN_SECRET 为空,首次调用生成随机 key 后固定,
+    不再出现「每次调用随机生成 → 旧密文解密失败」的问题。
     """
     key = settings.GITHUB_TOKEN_SECRET
     if not key:

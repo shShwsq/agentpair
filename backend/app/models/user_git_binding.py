@@ -46,6 +46,10 @@ class UserGitBinding(Base):
     provider: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     # 平台用户 ID(GitHub id / Gitee id),字符串
     provider_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 平台用户名(login),绑定时一次性写入并缓存,避免 status 接口每次都调 /user
+    provider_login: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # 平台头像 URL,绑定时一次性写入并缓存
+    avatar_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     # access_token 加密密文(Fernet base64);空串表示仅登录未授权仓库
     access_token: Mapped[str] = mapped_column(
         String(2048), nullable=False, server_default=""
@@ -169,6 +173,45 @@ def add_refresh_token_columns() -> None:
         if not add_clauses:
             return  # 已迁过
         # PG 要求多个 ALTER 动作用逗号分隔:ADD COLUMN ..., ADD COLUMN ...
+        conn.execute(
+            text(f"ALTER TABLE user_git_bindings {', '.join(add_clauses)}")
+        )
+        conn.commit()
+        log.info("user_git_bindings 加列: %s", ", ".join(add_clauses))
+
+
+def add_login_avatar_columns() -> None:
+    """幂等给 user_git_bindings 加 provider_login / avatar_url 两列
+
+    背景:status 接口原先每次都实时调 GitHub/Gitee /user API 拿 login+avatar,
+    导致提交任务页加载耗时数秒(等外部网络)。改为绑定时一次性写入这两列,
+    status 接口直接读缓存,不再走外部网络。老数据这两列为 NULL,
+    status 接口会懒加载一次回填,之后不再调用 /user。
+    """
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    from app.database import engine
+
+    log = logging.getLogger(__name__)
+
+    with engine.connect() as conn:
+        insp = inspect(conn)
+        if not insp.has_table("user_git_bindings"):
+            return  # 全新库,create_all 会建好新列
+        cols = {c["name"] for c in insp.get_columns("user_git_bindings")}
+        add_clauses = []
+        if "provider_login" not in cols:
+            add_clauses.append(
+                "ADD COLUMN provider_login VARCHAR(255) NULL"
+            )
+        if "avatar_url" not in cols:
+            add_clauses.append(
+                "ADD COLUMN avatar_url VARCHAR(512) NULL"
+            )
+        if not add_clauses:
+            return  # 已迁过
         conn.execute(
             text(f"ALTER TABLE user_git_bindings {', '.join(add_clauses)}")
         )
