@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 智能体 CLI 配置 内联面板(动态表单)
+ * 外部 CLI agent 配置 内联面板(动态表单)
  *
  * 由 AgentConfigDialog 演化而来:去掉弹窗外壳(Teleport/mask/card/header/footer),
  * 保留动态凭据字段渲染 + 校验 + 启用开关 + 测试连接(SSE 流式) + 保存/清除。

@@ -9,7 +9,7 @@ AgentPair 的核心创新是 **user_agent 模拟用户追问** 的交互模式 �
 ## 核心特性
 
 - **双智能体协作**:`user_agent`(意图对齐 + 结果审视)+ `react_agent`(执行)多轮迭代,自动补齐覆盖盲区
-- **执行器抽象层**:内置 ReAct 智能体 / Qoder CLI / Kimi Code CLI / Hermes CLI / Codex CLI 等可插拔执行器,通过 ACP 协议统一通信
+- **执行器抽象层**:内置 react_agent / Qoder CLI / Kimi Code CLI / Hermes CLI / Codex CLI 等可插拔执行器,通过 ACP 协议统一通信
 - **场景模板化**:安全审计、代码审查等场景作为快捷模板(预设提示词 + 推荐 skill),checklist 由 LLM 动态生成 + 用户编辑确认
 - **沙箱隔离**:基于 [OpenSandbox](https://github.com/opensandbox/opensandbox) 的容器化执行,工具调用在隔离环境完成
 - **多 Git 平台**:统一抽象层支持 GitHub / Gitee,OAuth 登录 + 私有仓库绑定 + 自动克隆

@@ -2,7 +2,7 @@
 """ACP Bridge:HTTP <-> stdio 桥接服务(运行在沙箱内)
 
 将后端的 HTTP 请求桥接到任意支持 ACP(Agent Client Protocol)over stdio 的
-智能体 CLI(如 Qoder CLI),CLI 通过命令行参数启动,凭证经环境变量注入。
+外部 CLI agent(如 Qoder CLI),CLI 通过命令行参数启动,凭证经环境变量注入。
 
 工作原理:
 1. 启动时 spawn `<bin> <args...>` 子进程(如 `qodercli --acp --yolo`),

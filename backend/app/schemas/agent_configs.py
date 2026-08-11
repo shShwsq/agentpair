@@ -1,6 +1,6 @@
 """智能体配置相关的 Pydantic 模型
 
-用户可配置多种外部智能体 CLI,任务创建时选择一种作为执行器。
+用户可配置多种外部 CLI agent,任务创建时选择一种作为执行器。
 
 安全约定(与 schemas/model_configs.py 一致):
 - 响应(GET)绝不回传凭据原文,只返回 has_credentials 布尔,避免凭据经 HTTP 泄露

@@ -1,8 +1,8 @@
 """执行智能体抽象层(Executor Provider)
 
 将"执行智能体"抽象为统一接口,支持多种实现:
-- BuiltinReactAgent:系统内置的 ReAct 智能体(基于 react_agent.py)
-- ExternalCLIAgent:基于外部智能体 CLI + ACP 协议的智能体(沙箱内运行),
+- BuiltinReactAgent:内置 react_agent(基于 react_agent.py)
+- ExternalCLIAgent:外部 CLI agent,通过 ACP 协议通信(沙箱内运行),
   按 registry 动态派发(如 qoder_cli,未来可扩展 aider / goose 等)
 
 orchestrator 通过 get_executor(task) 拿到对应的 provider,调用 .run() 执行一轮,
@@ -105,7 +105,7 @@ class ExecutorAgent(ABC):
 
 
 class BuiltinReactAgent(ExecutorAgent):
-    """内置 ReAct 智能体
+    """内置 react_agent
 
     直接委托给 app.agents.react_agent.run_react_agent,
     行为与改造前完全一致(零行为变更,纯包装)。
@@ -147,7 +147,7 @@ class BuiltinReactAgent(ExecutorAgent):
 
 
 class ExternalCLIAgent(ExecutorAgent):
-    """基于外部智能体 CLI 的执行智能体(通用包装)
+    """外部 CLI agent(通用包装)
 
     通过 registry 声明的 executor_module / executor_func 延迟加载具体实现
     (如 app.agents.qoder_cli_agent.run_qoder_cli_agent)。

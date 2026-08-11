@@ -42,7 +42,7 @@
 | 角色 | 职责 | 是否调工具 | 模型来源 |
 |------|------|-----------|---------|
 | **user_agent** | 评估覆盖度、生成 checklist、追问、整理结构化结果 | 否，只输出 JSON 评估 | `task.llm_config_id` |
-| **react_agent（内置）** | ReAct 循环执行代码分析（clone / search / read / semgrep 等） | 是，调用沙箱工具 | `task.react_llm_config_id`（空时回退 `llm_config_id`） |
+| **内置 react_agent** | ReAct 循环执行代码分析（clone / search / read / semgrep 等） | 是，调用沙箱工具 | `task.react_llm_config_id`（空时回退 `llm_config_id`） |
 | **ExternalCLIAgent** | 沙箱内启动外部 CLI，通过 ACP 协议通信 | 是，由 CLI 自主调工具 | CLI 自管（凭证经环境变量注入） |
 
 ### 1.2 协作轮次
@@ -624,7 +624,7 @@ orchestrator / user_agent / react_agent / CLI agent 都通过 `event_bus.publish
 |------|------|
 | [orchestrator.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/orchestrator.py) | 双智能体协作编排（round 0 评估 + 协作循环 + resume） |
 | [user_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/user_agent.py) | user_agent 实现（评估 / checklist 生成 / ask_user / 跨轮自记忆） |
-| [react_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/react_agent.py) | 内置 ReAct 智能体（流式 LLM / 工具调用 / plan 状态机 / 三级压缩跨轮记忆 / 循环检测） |
+| [react_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/react_agent.py) | 内置 react_agent（流式 LLM / 工具调用 / plan 状态机 / 三级压缩跨轮记忆 / 循环检测） |
 | [executor_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/executor_agent.py) | 执行器抽象层（BuiltinReactAgent + ExternalCLIAgent + 工厂） |
 | [registry.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/registry.py) | Agent 类型注册表（凭证字段 + 沙箱配置 + executor 入口） |
 | [acp_base.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/acp_base.py) | ACP 基础设施（ACPClient + _ACPCollector + _ACPRecorder + bridge 管理 + 通用 run_acp_agent） |

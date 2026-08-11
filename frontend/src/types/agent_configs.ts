@@ -1,5 +1,5 @@
 /**
- * 智能体 CLI 配置相关类型定义
+ * 外部 CLI agent 配置相关类型定义
  *
  * 对应后端 /agents 系列 API。后端采用动态多 agent 架构:
  * - /agents/types 返回所有已注册 agent 类型及其凭据字段定义(动态表单)

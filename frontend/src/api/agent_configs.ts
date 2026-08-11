@@ -1,5 +1,5 @@
 /**
- * 智能体 CLI 配置 API 模块
+ * 外部 CLI agent 配置 API 模块
  *
  * 对应后端 app/routers/agents.py 的端点(动态多 agent 架构)。
  * - GET    /agents/types              所有已注册 agent 类型(无需登录)

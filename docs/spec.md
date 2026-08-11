@@ -35,7 +35,7 @@
 ```
 
 **执行器抽象层(ExecutorAgent)**:把"执行智能体"抽象为统一接口,支持多种实现:
-- `builtin`:系统内置 ReAct 智能体(基于 react_agent.py),使用后端配置的 LLM
+- `builtin`:系统内置 react_agent(基于 react_agent.py),使用后端配置的 LLM
 - `qoder_cli` / `qoder_cli_cn`:沙箱内运行 Qoder CLI(国际版 / 国内版),通过 ACP 协议通信,模型由 CLI 账号配额管理
 - `kimi_cli`:沙箱内运行 Kimi Code CLI(开源),通过 ACP 协议通信,模型经 `KIMI_MODEL_*` 环境变量注入(支持自部署 LLM 端点)
 - 扩展性:新增 agent 类型只需在 registry 注册,无需改核心代码
@@ -89,7 +89,7 @@
 
 ### 3.2 react_agent 阶段:首轮扫描
 user_agent 将用户意图转化为任务,交给执行器(ExecutorAgent)。
-- 执行器可以是内置 react_agent(ReAct 模式)或外部 CLI(Qoder CLI via ACP)
+- 执行器可以是内置 react_agent(ReAct 模式)或外部 CLI agent(Qoder CLI via ACP)
 - 内置 react_agent 拥有工具:clone_repo / list_files / find_files / read_file / search_code / run_semgrep / query_cve / write_file / run_python_code / list_skills / skill
 - orchestrator 预处理:若用户选了仓库,主动 clone + list_files,仓库结构注入第 0 轮 user_agent 和第 1 轮 react_agent
 - 输出首轮自然语言总结(summary)
@@ -467,8 +467,8 @@ Result(任务结果项,通用)
 ### 9.1 执行器抽象层(ExecutorAgent)
 
 将「执行智能体」抽象为统一接口(`ExecutorAgent` 抽象基类),支持多种实现:
-- **BuiltinReactAgent**:系统内置 ReAct 智能体,委托 `react_agent.run_react_agent`,使用后端配置的 LLM
-- **ExternalCLIAgent**:基于外部智能体 CLI 的通用包装,通过 registry 声明的 `executor_module` / `executor_func` 延迟加载
+- **BuiltinReactAgent**:内置 react_agent,委托 `react_agent.run_react_agent`,使用后端配置的 LLM
+- **ExternalCLIAgent**:外部 CLI agent 的通用包装,通过 registry 声明的 `executor_module` / `executor_func` 延迟加载
 - **工厂模式**:`get_executor(task)` 根据 `task.executor` 字段返回对应实例,未知值回退 builtin
 - **注册表**(registry):`AGENT_REGISTRY` 含 `qoder_cli`、`qoder_cli_cn`、`kimi_cli`,声明 agent 类型、沙箱镜像、executor 位置等
 - 新增 agent 类型只需在 registry 注册,无需改核心代码

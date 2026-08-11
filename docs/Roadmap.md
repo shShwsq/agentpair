@@ -23,8 +23,8 @@
 
 以下功能在迭代过程中自发产生,已落地到代码中:
 
-- **执行器抽象层(ExecutorAgent)**:把"执行智能体"抽象为统一接口,支持 builtin(内置 react_agent)和外部 CLI(通过 ACP 协议通信)两种 provider。新增 agent 类型只需在 registry 注册,无需改核心代码。
-- **ACP Bridge**:HTTP ↔ stdio 桥接服务,运行在沙箱内,让外部智能体 CLI(如 Qoder CLI / Qoder CN CLI / Kimi Code CLI)通过 ACP 协议接入。
+- **执行器抽象层(ExecutorAgent)**:把"执行智能体"抽象为统一接口,支持 builtin(内置 react_agent)和外部 CLI agent(通过 ACP 协议通信)两种 provider。新增 agent 类型只需在 registry 注册,无需改核心代码。
+- **ACP Bridge**:HTTP ↔ stdio 桥接服务,运行在沙箱内,让外部 CLI agent(如 Qoder CLI / Qoder CN CLI / Kimi Code CLI)通过 ACP 协议接入。
 - **Qoder CLI Agent**:通过 ACP 协议调用 Qoder CLI(国际版 + 国内版)作为 react 角色,模型由 CLI 账号配额管理,不走后端 LLM 配置。
 - **Kimi Code CLI Agent**:通过 ACP 协议调用开源 Kimi Code CLI 作为 react 角色,模型经 `KIMI_MODEL_*` 环境变量注入(支持自部署 LLM 端点),凭证由用户在智能体配置页填写。
 - **场景降级**:checklist 不再从场景固定读取,改为 user_agent 第 0 轮动态生成 + 用户编辑确认。prompt 通用化,工具全部开放,结果结构通用化。

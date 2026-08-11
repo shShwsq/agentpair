@@ -1,6 +1,6 @@
-"""用户智能体 CLI 配置(per-user,多行)
+"""用户外部 CLI agent 配置(per-user,多行)
 
-用户可配置多种外部智能体 CLI(Qoder CLI / 未来 Aider / Goose 等),
+用户可配置多种外部 CLI agent(Qoder CLI / 未来 Aider / Goose 等),
 任务创建时选择一种作为执行器。每种 agent 一行配置,凭证加密存储。
 
 设计:
