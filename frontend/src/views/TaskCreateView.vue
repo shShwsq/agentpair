@@ -259,6 +259,38 @@ const DEFAULT_POLICY = {
   allow_verify: false,
 }
 
+/**
+ * 协作总轮次输入处理:只允许非负整数,实时过滤非数字字符,钳制到 [1, 10]
+ * - 禁止负号、小数点、字母等非法字符
+ * - 超过 10 自动钳制为 10
+ * - 临时空值允许(让用户能删除后重新输入),由 @blur 兜底
+ */
+function onMaxRoundsInput(e: Event): void {
+  const input = e.target as HTMLInputElement
+  // 只保留数字字符,过滤负号/小数点/字母
+  const filtered = input.value.replace(/\D/g, '')
+  if (filtered !== input.value) {
+    input.value = filtered
+  }
+  if (filtered === '') return  // 临时空,不更新 ref
+  let n = parseInt(filtered, 10)
+  if (n > 10) {
+    n = 10
+    input.value = String(n)
+  }
+  if (n < 1) n = 1
+  policyMaxRounds.value = n
+}
+
+/** 协作总轮次失焦:若为空,填默认值 1 */
+function onMaxRoundsBlur(e: Event): void {
+  const input = e.target as HTMLInputElement
+  if (input.value === '') {
+    input.value = '1'
+    policyMaxRounds.value = 1
+  }
+}
+
 // ---- 测试环境 / 动态验证配置(高级设置) ----
 // user_agent 可在已部署的测试环境动态验证 react_agent 发现的安全问题。
 // 对用户透明:不出现 verifier_agent 字样,只显示"正在验证"。
@@ -927,8 +959,12 @@ onMounted(async () => {
                   <label class="policy-field">
                     <span class="policy-label">协作总轮次</span>
                     <input
-                      v-model.number="policyMaxRounds"
-                      type="number" min="1" max="10"
+                      :value="policyMaxRounds"
+                      @input="onMaxRoundsInput"
+                      @blur="onMaxRoundsBlur"
+                      type="text"
+                      inputmode="numeric"
+                      pattern="[0-9]*"
                       class="policy-input"
                       :disabled="!policyUserAgentEnabled"
                     />
