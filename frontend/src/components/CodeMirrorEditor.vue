@@ -106,7 +106,10 @@ const editorTheme = EditorView.theme({
   },
   '.cm-gutter': {
     minWidth: '52px',
-    padding: 'var(--space-4) var(--space-2) var(--space-4) 0',
+    padding: '0 var(--space-2) 0 0',
+    /* 不设上下 padding:.cm-scroller 已有 padding-top/bottom,
+       gutter 作为 scroller 的 flex 子元素已被推下去,
+       再加上下 padding 会导致行号比文字低一个 padding 量,造成错位。 */
   },
   '.cm-gutterElement': {
     padding: 0,
