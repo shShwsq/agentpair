@@ -332,6 +332,10 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             ),
         )
 
+        # 提前推送 done 事件:results 已落库,让前端立即拉取展示
+        # (归纳记忆和 git diff 是后台兜底任务,不阻塞前端结果清单展示)
+        publish(task.id, "done", {"status": "completed"})
+
         # 任务成功完成:自动归纳写入长期记忆(失败兜底,不影响任务完成)
         try:
             from app.services.memory_summarize import summarize_and_save_memory
@@ -385,10 +389,10 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             sandbox_tools.mark_task_completed(task_id_str)
         except Exception as cleanup_err:
             logger.warning(f"[task={task.id}] 标记任务完成失败: {cleanup_err}")
-        # 通知事件总线:任务结束,推送 done/error 终止事件
-        if task.status == TaskStatus.COMPLETED:
-            publish(task.id, "done", {"status": "completed"})
-        else:
+        # 通知事件总线:任务结束
+        # done 事件已在 try 块中提前推送(在归纳记忆/git diff 之前)
+        # 此处仅兜底推送 error 事件(异常路径)
+        if task.status != TaskStatus.COMPLETED:
             publish(task.id, "error", {
                 "status": "failed",
                 "error_message": task.error_message or "未知错误",
@@ -1017,9 +1021,9 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
         except Exception as cleanup_err:
             logger.warning(f"[task={task.id}] 标记任务完成失败: {cleanup_err}")
         # 推送终止事件
-        if task.status == TaskStatus.COMPLETED:
-            publish(task.id, "done", {"status": "completed"})
-        else:
+        # done 事件已在 _finish_resume 中提前推送(在归纳记忆/git diff 之前)
+        # 此处仅兜底推送 error 事件(异常路径)
+        if task.status != TaskStatus.COMPLETED:
             publish(task.id, "error", {
                 "status": "failed",
                 "error_message": task.error_message or "未知错误",
@@ -1045,6 +1049,10 @@ def _finish_resume(
             f"user_agent 最终评估: {ua_result.get('reasoning', '')}"
         ),
     )
+
+    # 提前推送 done 事件:results 已落库,让前端立即拉取展示
+    # (归纳记忆和 git diff 是后台兜底任务,不阻塞前端结果清单展示)
+    publish(task.id, "done", {"status": "completed"})
 
     # 重启完成:自动归纳写入长期记忆(失败兜底,不影响;client 用默认,归纳是简单任务)
     try:
