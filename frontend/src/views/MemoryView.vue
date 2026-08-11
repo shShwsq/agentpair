@@ -13,11 +13,12 @@
  * 入口:主导航「记忆管理」项(与模型设置/CLI 设置/协作策略并列)。
  * Agent 策略配置已迁移至 /agent-policy(AgentPolicyView),本页仅管理记忆文本。
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 
 import AppHeader from '@/components/AppHeader.vue'
+import CodeMirrorEditor from '@/components/CodeMirrorEditor.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import {
@@ -313,11 +314,6 @@ function selectFile(id: string): void {
   activeId.value = id
   mode.value = 'edit'
   actionError.value = ''
-  // 切换文件后重置编辑器与行号槽滚动位置(避免上一文件的滚动位置残留)
-  nextTick(() => {
-    if (editorRef.value) editorRef.value.scrollTop = 0
-    if (gutterRef.value) gutterRef.value.scrollTop = 0
-  })
 }
 
 // ============================================================
@@ -433,119 +429,13 @@ function formatRelative(iso: string | null | undefined): string {
 }
 
 // ============================================================
-// 代码编辑器:行号槽 + Tab 缩进 + 滚动同步 + 软换行对齐
+// 编辑器:CodeMirror 6 封装组件(行号、Markdown 高亮、Tab 缩进、软换行对齐)
 // ============================================================
-// 长行在 textarea 中会自动软换行,但行号槽只按逻辑行(\n)计数,
-// 导致折行后行号与视觉行错位。用隐藏镜像元素测量每个逻辑行的
-// 视觉行数,折行续行在行号槽中留空,保持行号与视觉行对齐。
-const editorRef = ref<HTMLTextAreaElement | null>(null)
-const gutterRef = ref<HTMLPreElement | null>(null)
-const mirrorRef = ref<HTMLDivElement | null>(null)
-
-/** 行号条目:每条对应一个视觉行(逻辑行首行显示数字,折行续行留空) */
-const gutterEntries = ref<string[]>(['1'])
-/** 行号文本(条目用换行连接,与 textarea 行高对齐) */
-const gutterText = computed(() => gutterEntries.value.join('\n'))
-
-let gutterRafId: number | null = null
-/** 调度行号刷新(合并同一帧内的多次触发) */
-function scheduleRefreshGutter(): void {
-  if (gutterRafId !== null) cancelAnimationFrame(gutterRafId)
-  gutterRafId = requestAnimationFrame(refreshGutter)
-}
-
-/** 重新计算行号条目(基于镜像元素测量每个逻辑行的视觉行数) */
-function refreshGutter(): void {
-  gutterRafId = null
-  const md = drafts[activeId.value] ?? ''
-  if (md === '') {
-    gutterEntries.value = ['1']
-    return
-  }
-  const lines = md.split('\n')
-  const ta = editorRef.value
-  const mirror = mirrorRef.value
-  if (!ta || !mirror) {
-    // 编辑器未挂载(预览模式):降级为逻辑行号
-    gutterEntries.value = lines.map((_, i) => String(i + 1))
-    return
-  }
-  // 同步镜像宽度(匹配 textarea 内容区,排除滚动条)
-  mirror.style.width = ta.clientWidth + 'px'
-  const cs = window.getComputedStyle(ta)
-  const paddingTop = parseFloat(cs.paddingTop) || 0
-  const paddingBottom = parseFloat(cs.paddingBottom) || 0
-  // 测量单行行框高度(用 'x' 占位以触发行框生成)
-  mirror.textContent = 'x'
-  const singleLineH = mirror.scrollHeight - paddingTop - paddingBottom
-  if (singleLineH <= 0) {
-    gutterEntries.value = lines.map((_, i) => String(i + 1))
-    return
-  }
-  const entries: string[] = []
-  for (let i = 0; i < lines.length; i++) {
-    entries.push(String(i + 1))
-    const line = lines[i]
-    if (line === '') continue // 空行:1 视觉行
-    mirror.textContent = line
-    const lineH = mirror.scrollHeight - paddingTop - paddingBottom
-    const visualRows = Math.max(1, Math.round(lineH / singleLineH))
-    for (let r = 1; r < visualRows; r++) entries.push('')
-  }
-  gutterEntries.value = entries
-}
-
-/** textarea 滚动时同步行号槽 */
-function syncGutterScroll(): void {
-  if (gutterRef.value && editorRef.value) {
-    gutterRef.value.scrollTop = editorRef.value.scrollTop
-  }
-}
-
-/** Tab 键插入两个空格(代码编辑器行为),Shift+Tab 当前行退缩 */
-function handleEditorKeydown(e: KeyboardEvent): void {
-  if (e.key !== 'Tab') return
-  e.preventDefault()
-  const ta = e.target as HTMLTextAreaElement
-  const start = ta.selectionStart
-  const end = ta.selectionEnd
-  const val = drafts[activeId.value] ?? ''
-  if (e.shiftKey) {
-    // 当前行首若有缩进,删掉最多 2 个前导空格
-    const lineStart = val.lastIndexOf('\n', start - 1) + 1
-    const head = val.slice(lineStart, lineStart + 2)
-    if (head === '  ') {
-      drafts[activeId.value] = val.slice(0, lineStart) + val.slice(lineStart + 2)
-      const delta = start - lineStart >= 2 ? 2 : Math.max(0, start - lineStart)
-      nextTick(() => {
-        ta.selectionStart = ta.selectionEnd = Math.max(lineStart, start - delta)
-      })
-    }
-  } else {
-    drafts[activeId.value] = val.slice(0, start) + '  ' + val.slice(end)
-    nextTick(() => {
-      ta.selectionStart = ta.selectionEnd = start + 2
-    })
-  }
-}
-
-// 监听内容/选中文件/模式/侧栏折叠 → 重新计算行号
-watch(() => drafts[activeId.value] ?? '', () => scheduleRefreshGutter())
-watch(activeId, () => nextTick(() => scheduleRefreshGutter()))
-watch(mode, (m) => {
-  if (m === 'edit') nextTick(() => scheduleRefreshGutter())
-})
-watch(workspaceCollapsed, () => nextTick(() => scheduleRefreshGutter()))
+// 由 CodeMirrorEditor.vue 内部维护编辑器实例,本页只负责 v-model 双向绑定。
+// 切换文件时 v-model 变化 → 组件内同步到 doc;编辑时 doc 变化 → 回写 drafts。
 
 onMounted(() => {
   loadAll()
-  nextTick(() => scheduleRefreshGutter())
-  window.addEventListener('resize', scheduleRefreshGutter)
-})
-
-onBeforeUnmount(() => {
-  window.removeEventListener('resize', scheduleRefreshGutter)
-  if (gutterRafId !== null) cancelAnimationFrame(gutterRafId)
 })
 </script>
 
@@ -737,26 +627,15 @@ onBeforeUnmount(() => {
               <div v-if="loading" class="content-placeholder">
                 <span class="status-spinner" /> 加载中...
               </div>
-              <!-- 编辑模式:行号槽 + textarea(代码编辑器风格) -->
-              <div v-else-if="mode === 'edit'" class="code-area" :class="{ invalid: activeOverLimit }">
-                <pre
-                  ref="gutterRef"
-                  class="line-gutter"
-                  aria-hidden="true"
-                >{{ gutterText }}</pre>
-                <textarea
-                  ref="editorRef"
-                  v-model="drafts[activeEntry.id]"
-                  class="md-editor"
-                  placeholder="用 Markdown 编写。支持标题、列表、代码块等。"
-                  :disabled="saving || deleting"
-                  spellcheck="false"
-                  @scroll="syncGutterScroll"
-                  @keydown="handleEditorKeydown"
-                />
-                <!-- 隐藏镜像元素:用于测量每个逻辑行的视觉行数(软换行对齐) -->
-                <div ref="mirrorRef" class="md-mirror" aria-hidden="true"></div>
-              </div>
+              <!-- 编辑模式:CodeMirror 编辑器(行号、Markdown 高亮、软换行对齐) -->
+              <CodeMirrorEditor
+                v-else-if="mode === 'edit'"
+                v-model="drafts[activeEntry.id]"
+                class="code-area"
+                :class="{ invalid: activeOverLimit }"
+                placeholder="用 Markdown 编写。支持标题、列表、代码块等。"
+                :disabled="saving || deleting"
+              />
               <!-- 预览模式 -->
               <div v-else class="md-preview">
                 <div v-if="previewHtml" class="markdown-body" v-html="previewHtml" />
@@ -1169,95 +1048,20 @@ onBeforeUnmount(() => {
   font-size: var(--fs-sm);
 }
 
-/* 代码编辑区:行号槽 + textarea */
+/* 代码编辑区:CodeMirror 宿主容器(内部布局由组件接管) */
 .code-area {
   flex: 1;
   min-height: 0;
-  display: flex;
-  align-items: stretch;
   overflow: hidden;
   background: var(--color-surface);
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
   line-height: var(--lh-relaxed);
-  position: relative; /* 为镜像元素定位 */
 }
 
 .code-area.invalid {
   /* 超限时给整个编辑区一个左边框警示色 */
   box-shadow: inset 2px 0 0 var(--color-danger);
-}
-
-/* 隐藏镜像元素:与 .md-editor 共享字体/内边距/换行规则,
-   用于测量软换行后每个逻辑行的视觉行数(不参与布局,仅用于测量) */
-.md-mirror {
-  position: absolute;
-  left: 52px; /* 行号槽宽度 */
-  top: 0;
-  /* width 由 JS 动态设置为 textarea.clientWidth(排除滚动条) */
-  visibility: hidden;
-  pointer-events: none;
-  padding: var(--space-4) var(--space-5);
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  line-height: var(--lh-relaxed);
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-  tab-size: 2;
-  overflow: hidden;
-  box-sizing: border-box;
-}
-
-/* 行号槽:与 textarea 共享 font-size/line-height/padding-top 以对齐 */
-.line-gutter {
-  flex-shrink: 0;
-  width: 52px;
-  margin: 0;
-  padding: var(--space-4) var(--space-2) var(--space-4) 0;
-  text-align: right;
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  line-height: var(--lh-relaxed);
-  color: var(--color-text-muted);
-  background: var(--color-surface-alt);
-  border-right: 1px solid var(--color-border);
-  overflow: hidden;
-  white-space: pre;
-  user-select: none;
-  pointer-events: none;
-}
-
-.md-editor {
-  flex: 1;
-  min-width: 0;
-  padding: var(--space-4) var(--space-5);
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  line-height: var(--lh-relaxed);
-  color: var(--color-text);
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  resize: none;
-  outline: none;
-  tab-size: 2;
-  /* 显式设置换行规则,与 .md-mirror 一致,确保折行测量与实际显示对齐 */
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-  transition: box-shadow var(--transition-fast);
-}
-
-.md-editor:focus {
-  box-shadow: inset 2px 0 0 var(--color-primary);
-}
-
-.md-editor:disabled {
-  cursor: not-allowed;
-  opacity: 0.7;
-}
-
-.md-editor::placeholder {
-  color: var(--color-text-muted);
 }
 
 /* 预览(全屏铺满,自带内边距) */
