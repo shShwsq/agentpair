@@ -10,7 +10,8 @@
  * 左侧文件列表,右侧编辑器(编辑/预览切换)。
  * 预览用 marked 渲染 + DOMPurify 净化(项目记忆可能由 agent 归纳自不可信仓库内容,防存储型 XSS)。
  *
- * 入口:主导航「记忆管理」项(与模型设置/CLI 设置并列)。
+ * 入口:主导航「记忆管理」项(与模型设置/CLI 设置/协作策略并列)。
+ * Agent 策略配置已迁移至 /agent-policy(AgentPolicyView),本页仅管理记忆文本。
  */
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { marked } from 'marked'
@@ -24,7 +25,6 @@ import {
   getGlobalMemory,
   getPreferences,
   listProjects,
-  saveAgentPolicy,
   saveGlobalMemory,
   savePreferences,
   saveProject,
@@ -162,81 +162,6 @@ const projectNotes = reactive<Record<string, string | null>>({})
 const projectIds = reactive<Record<string, string>>({})
 
 // ============================================================
-// Agent 策略配置(仅 pref 文件显示;用户级默认,任务级可覆盖)
-//
-// 统一语义:react_agent 包括内置 react_agent 和外部 CLI agent。
-// user_agent 在 react_agent 每 K 个迭代边界做轻量检查点评估,
-// 方向跑偏时通过中断队列注入追问指令(软中断)。
-// ============================================================
-
-/** 默认策略值(与后端 DEFAULT_AGENT_POLICY 对齐) */
-const DEFAULT_POLICY: {
-  checkpoint_interval: number
-  checkpoint_interval_builtin: number | null
-  checkpoint_interval_cli: number | null
-  allow_interrupt: boolean
-  max_interrupts_per_round: number
-  allow_verify: boolean
-} = {
-  checkpoint_interval: 3,
-  checkpoint_interval_builtin: null,
-  checkpoint_interval_cli: null,
-  allow_interrupt: true,
-  max_interrupts_per_round: 2,
-  allow_verify: false,
-}
-
-/** 策略面板是否展开 */
-const policyOpen = ref(false)
-/** 是否分别配置内置/CLI 的 K 值(高级) */
-const policyAdvanced = ref(false)
-/** 统一 K 值:每 K 个迭代评估一次(1-20) */
-const policyInterval = ref(DEFAULT_POLICY.checkpoint_interval)
-/** 内置 react_agent 专用 K 值(null=用统一值) */
-const policyIntervalBuiltin = ref<number | null>(DEFAULT_POLICY.checkpoint_interval_builtin)
-/** CLI agent 专用 K 值(null=用统一值) */
-const policyIntervalCli = ref<number | null>(DEFAULT_POLICY.checkpoint_interval_cli)
-/** user_agent 是否能打断 react_agent */
-const policyAllowInterrupt = ref(DEFAULT_POLICY.allow_interrupt)
-/** 每轮最多打断次数(防死锁,0-10) */
-const policyMaxInterrupts = ref(DEFAULT_POLICY.max_interrupts_per_round)
-/** user_agent 是否能自己验证(实验性,先留开关) */
-const policyAllowVerify = ref(DEFAULT_POLICY.allow_verify)
-
-/** 策略原始值(脏检查基准,hydrate 时写入) */
-const originalPolicy = reactive({
-  interval: DEFAULT_POLICY.checkpoint_interval,
-  intervalBuiltin: DEFAULT_POLICY.checkpoint_interval_builtin as number | null,
-  intervalCli: DEFAULT_POLICY.checkpoint_interval_cli as number | null,
-  allowInterrupt: DEFAULT_POLICY.allow_interrupt,
-  maxInterrupts: DEFAULT_POLICY.max_interrupts_per_round,
-  allowVerify: DEFAULT_POLICY.allow_verify,
-})
-
-/** agent 策略是否有未保存改动 */
-const policyDirty = computed(() => {
-  return (
-    policyInterval.value !== originalPolicy.interval ||
-    policyIntervalBuiltin.value !== originalPolicy.intervalBuiltin ||
-    policyIntervalCli.value !== originalPolicy.intervalCli ||
-    policyAllowInterrupt.value !== originalPolicy.allowInterrupt ||
-    policyMaxInterrupts.value !== originalPolicy.maxInterrupts ||
-    policyAllowVerify.value !== originalPolicy.allowVerify
-  )
-})
-
-/** 重置策略表单为系统默认值(不立即保存) */
-function resetPolicyToDefault(): void {
-  policyInterval.value = DEFAULT_POLICY.checkpoint_interval
-  policyIntervalBuiltin.value = DEFAULT_POLICY.checkpoint_interval_builtin
-  policyIntervalCli.value = DEFAULT_POLICY.checkpoint_interval_cli
-  policyAllowInterrupt.value = DEFAULT_POLICY.allow_interrupt
-  policyMaxInterrupts.value = DEFAULT_POLICY.max_interrupts_per_round
-  policyAllowVerify.value = DEFAULT_POLICY.allow_verify
-  policyAdvanced.value = false
-}
-
-// ============================================================
 // 编辑/预览模式
 // ============================================================
 const mode = ref<'edit' | 'preview'>('edit')
@@ -273,12 +198,10 @@ const activeLimit = computed(() => (activeEntry.value ? LIMITS[activeEntry.value
 const activeDraft = computed(() => drafts[activeId.value] ?? '')
 const activeOverLimit = computed(() => activeDraft.value.length > activeLimit.value)
 
-/** 草稿与原始值是否有任何差异(含 alias、pref 的 agent 策略;不区分模板,用于判定"可保存") */
+/** 草稿与原始值是否有任何差异(含 alias;不区分模板,用于判定"可保存") */
 function hasDiff(fileId: string): boolean {
   if ((drafts[fileId] ?? '') !== (originals[fileId] ?? '')) return true
   if (fileId.startsWith('project:') && (aliasDrafts[fileId] ?? '') !== (originalAlias[fileId] ?? '')) return true
-  // pref 文件还检查 agent 策略是否脏
-  if (fileId === 'pref' && policyDirty.value) return true
   return false
 }
 
@@ -288,10 +211,9 @@ function isDirty(fileId: string): boolean {
   const draft = drafts[fileId] ?? ''
   const orig = originals[fileId] ?? ''
   // 纯默认模板预填未改动:草稿===模板且 DB 原本为空 → 不算脏
-  // 但若 agent 策略有改动(pref 文件),仍算脏(策略与模板是两件事)
   const onlyTemplateUnchanged =
     isTemplateDefault[fileId] && orig === '' && draft === templateFor(fileKind(fileId))
-  if (onlyTemplateUnchanged && !(fileId === 'pref' && policyDirty.value)) {
+  if (onlyTemplateUnchanged) {
     return false
   }
   return true
@@ -354,25 +276,6 @@ function hydratePref(data: UserPreferenceOut): void {
     isTemplateDefault['pref'] = false
   }
   updatedAt['pref'] = data.updated_at ?? null
-
-  // ---- hydrate agent 策略(null=未配置,用系统默认值) ----
-  const policy = data.agent_policy
-  policyInterval.value = policy?.checkpoint_interval ?? DEFAULT_POLICY.checkpoint_interval
-  policyIntervalBuiltin.value = policy?.checkpoint_interval_builtin ?? DEFAULT_POLICY.checkpoint_interval_builtin
-  policyIntervalCli.value = policy?.checkpoint_interval_cli ?? DEFAULT_POLICY.checkpoint_interval_cli
-  policyAllowInterrupt.value = policy?.allow_interrupt ?? DEFAULT_POLICY.allow_interrupt
-  policyMaxInterrupts.value = policy?.max_interrupts_per_round ?? DEFAULT_POLICY.max_interrupts_per_round
-  policyAllowVerify.value = policy?.allow_verify ?? DEFAULT_POLICY.allow_verify
-  // 高级模式:仅当任一专用 K 值非 null 时展开
-  policyAdvanced.value = policyIntervalBuiltin.value !== null || policyIntervalCli.value !== null
-
-  // 同步原始值(脏检查基准)
-  originalPolicy.interval = policyInterval.value
-  originalPolicy.intervalBuiltin = policyIntervalBuiltin.value
-  originalPolicy.intervalCli = policyIntervalCli.value
-  originalPolicy.allowInterrupt = policyAllowInterrupt.value
-  originalPolicy.maxInterrupts = policyMaxInterrupts.value
-  originalPolicy.allowVerify = policyAllowVerify.value
 }
 
 function hydrateGlobal(data: { content: string; updated_at?: string | null }): void {
@@ -427,27 +330,10 @@ async function handleSave(): Promise<void> {
   actionError.value = ''
   try {
     if (entry.kind === 'pref') {
-      // pref 文件:user_profile 文本 + agent 策略 两路独立保存
-      // 顺序执行避免并发写同一行;最后用最新返回值 hydrate
-      const textDirty = (drafts['pref'] ?? '') !== (originals['pref'] ?? '')
-      const policyDirtyNow = policyDirty.value
-      let latest: UserPreferenceOut | null = null
-
-      if (textDirty) {
-        latest = await savePreferences({ user_profile: drafts['pref'] })
-      }
-      if (policyDirtyNow) {
-        // 关闭高级模式时,专用 K 值强制为 null(用统一值)
-        latest = await saveAgentPolicy({
-          checkpoint_interval: policyInterval.value,
-          checkpoint_interval_builtin: policyAdvanced.value ? policyIntervalBuiltin.value : null,
-          checkpoint_interval_cli: policyAdvanced.value ? policyIntervalCli.value : null,
-          allow_interrupt: policyAllowInterrupt.value,
-          max_interrupts_per_round: policyAllowInterrupt.value ? policyMaxInterrupts.value : 0,
-          allow_verify: policyAllowVerify.value,
-        })
-      }
-      if (latest) hydratePref(latest)
+      // pref 文件:仅保存 user_profile 文本
+      // (agent 策略已迁移至 /agent-policy 独立页面保存)
+      const latest = await savePreferences({ user_profile: drafts['pref'] })
+      hydratePref(latest)
     } else if (entry.kind === 'global') {
       const data = await saveGlobalMemory({ content: drafts['global'] })
       hydrateGlobal(data)
@@ -810,114 +696,6 @@ onMounted(() => {
                 <div v-else class="preview-empty">暂无内容</div>
               </div>
             </div>
-
-            <!-- Agent 策略配置(仅 pref 文件显示;用户级默认,任务级可覆盖) -->
-            <section v-if="activeEntry.kind === 'pref'" class="policy-section">
-              <button
-                type="button"
-                class="policy-toggle"
-                :aria-expanded="policyOpen"
-                @click="policyOpen = !policyOpen"
-              >
-                <svg
-                  class="policy-chevron"
-                  :class="{ expanded: policyOpen }"
-                  width="14" height="14" viewBox="0 0 24 24" fill="none"
-                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-                >
-                  <polyline points="9 18 15 12 9 6" />
-                </svg>
-                <span class="policy-title">Agent 策略</span>
-                <span class="policy-summary">
-                  {{ policyAllowInterrupt ? `每${policyInterval}轮评估·可打断` : `每${policyInterval}轮评估·仅观察` }}
-                </span>
-                <span v-if="policyDirty" class="policy-dirty-dot" title="有未保存改动" />
-              </button>
-
-              <Transition name="collapse">
-                <div v-show="policyOpen" class="policy-body">
-                  <p class="policy-intro">
-                    作为 user_agent 检查点评估的用户级默认。任务创建时可单独覆盖。
-                  </p>
-
-                  <div class="policy-grid">
-                    <label class="policy-field">
-                      <span class="policy-label">评估频率 K</span>
-                      <input
-                        v-model.number="policyInterval"
-                        type="number" min="1" max="20"
-                        class="policy-input"
-                        :disabled="saving"
-                      />
-                      <span class="policy-hint">每 K 个迭代评估一次</span>
-                    </label>
-
-                    <label class="policy-field">
-                      <span class="policy-label">每轮最大打断</span>
-                      <input
-                        v-model.number="policyMaxInterrupts"
-                        type="number" min="0" max="10"
-                        class="policy-input"
-                        :disabled="saving || !policyAllowInterrupt"
-                      />
-                      <span class="policy-hint">防死锁上限</span>
-                    </label>
-                  </div>
-
-                  <label class="policy-toggle-row">
-                    <input v-model="policyAllowInterrupt" type="checkbox" :disabled="saving" />
-                    <span>允许 user_agent 打断 react_agent</span>
-                  </label>
-
-                  <label class="policy-toggle-row">
-                    <input v-model="policyAllowVerify" type="checkbox" :disabled="saving" />
-                    <span>允许 user_agent 自行验证 <span class="policy-experimental">(实验性)</span></span>
-                  </label>
-
-                  <label class="policy-toggle-row">
-                    <input v-model="policyAdvanced" type="checkbox" :disabled="saving" />
-                    <span>分别配置内置 / CLI agent 的 K 值</span>
-                  </label>
-
-                  <Transition name="collapse">
-                    <div v-show="policyAdvanced" class="policy-grid">
-                      <label class="policy-field">
-                        <span class="policy-label">内置 react_agent K</span>
-                        <input
-                          v-model.number="policyIntervalBuiltin"
-                          type="number" min="1" max="20"
-                          class="policy-input"
-                          placeholder="留空用统一值"
-                          :disabled="saving"
-                        />
-                      </label>
-                      <label class="policy-field">
-                        <span class="policy-label">CLI agent K</span>
-                        <input
-                          v-model.number="policyIntervalCli"
-                          type="number" min="1" max="20"
-                          class="policy-input"
-                          placeholder="留空用统一值"
-                          :disabled="saving"
-                        />
-                      </label>
-                    </div>
-                  </Transition>
-
-                  <div class="policy-actions">
-                    <button
-                      type="button"
-                      class="btn btn-ghost policy-reset"
-                      :disabled="saving || !policyDirty"
-                      @click="resetPolicyToDefault"
-                    >恢复默认</button>
-                    <span class="policy-save-hint">
-                      点上方「保存」按钮生效(与 user_profile 文本一起写入)
-                    </span>
-                  </div>
-                </div>
-              </Transition>
-            </section>
 
           </template>
 
@@ -1671,192 +1449,5 @@ onMounted(() => {
 .toast-slide-leave-to {
   opacity: 0;
   transform: translate(-50%, -12px);
-}
-
-/* ============================================================
- * Agent 策略配置面板(pref 文件专用)
- * 设计与 TaskCreateView 的 policy 面板对齐,但布局不同:
- * 这里是侧边编辑器底部内嵌面板(非 dropdown 浮层),
- * 占用纵向空间但不阻挡编辑器内容查看。
- * ============================================================ */
-.policy-section {
-  flex-shrink: 0;
-  border-top: 1px solid var(--color-border);
-  background: var(--color-surface);
-}
-
-.policy-toggle {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  width: 100%;
-  padding: var(--space-3) var(--space-5);
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
-  color: var(--color-text-secondary);
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  transition: color var(--transition-fast), background var(--transition-fast);
-}
-
-.policy-toggle:hover {
-  color: var(--color-text);
-  background: var(--color-surface-alt);
-}
-
-.policy-toggle[aria-expanded="true"] {
-  color: var(--color-primary);
-}
-
-.policy-chevron {
-  flex-shrink: 0;
-  color: var(--color-text-muted);
-  transition: transform var(--transition-fast);
-}
-
-.policy-chevron.expanded {
-  transform: rotate(90deg);
-}
-
-.policy-title {
-  font-weight: var(--fw-semibold);
-}
-
-.policy-summary {
-  margin-left: auto;
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-normal);
-  color: var(--color-text-muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.policy-dirty-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--color-primary);
-  flex-shrink: 0;
-}
-
-.policy-body {
-  padding: var(--space-3) var(--space-5) var(--space-4);
-  border-top: 1px solid var(--color-border);
-  background: var(--color-surface-alt);
-}
-
-.policy-intro {
-  margin: 0 0 var(--space-3);
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-  line-height: var(--lh-relaxed);
-}
-
-.policy-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-3);
-  margin-bottom: var(--space-2);
-}
-
-.policy-field {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.policy-label {
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
-  color: var(--color-text);
-}
-
-.policy-input {
-  width: 100%;
-  height: 34px;
-  padding: 0 var(--space-2);
-  font-size: var(--fs-sm);
-  color: var(--color-text);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-sm);
-}
-
-.policy-input:focus {
-  outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px var(--color-primary-light);
-}
-
-.policy-input:disabled {
-  color: var(--color-text-muted);
-  background: var(--color-surface-alt);
-  cursor: not-allowed;
-}
-
-.policy-hint {
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-}
-
-.policy-toggle-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) 0;
-  font-size: var(--fs-sm);
-  color: var(--color-text);
-  cursor: pointer;
-}
-
-.policy-toggle-row input {
-  cursor: pointer;
-}
-
-.policy-toggle-row input:disabled {
-  cursor: not-allowed;
-}
-
-.policy-experimental {
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-  font-style: italic;
-}
-
-.policy-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin-top: var(--space-3);
-}
-
-.policy-reset {
-  font-size: var(--fs-xs);
-  padding: var(--space-1) var(--space-3);
-}
-
-.policy-save-hint {
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-  line-height: var(--lh-relaxed);
-}
-
-/* collapse 过渡:用于策略面板和高级 K 值子面板 */
-.collapse-enter-active,
-.collapse-leave-active {
-  transition: opacity var(--transition-fast), max-height var(--transition-fast);
-  overflow: hidden;
-}
-
-.collapse-enter-from,
-.collapse-leave-to {
-  opacity: 0;
-  max-height: 0;
-}
-
-.collapse-enter-to,
-.collapse-leave-from {
-  opacity: 1;
-  max-height: 600px;
 }
 </style>

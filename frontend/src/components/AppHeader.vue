@@ -2,14 +2,14 @@
 /**
  * 应用顶栏(登录后的页面共用)
  *
- * 左侧品牌 + 导航(首页/提交任务/模型设置/CLI 设置/记忆管理),右侧用户信息 + 齿轮(账号设置)+ 登出。
+ * 左侧品牌 + 导航(首页/提交任务/模型设置/CLI 设置/协作策略/记忆管理),右侧用户信息 + 齿轮(账号设置)+ 登出。
  *
- * 导航为 slot 的默认内容:所有界面默认显示这 5 项,无需每个视图重复声明;
+ * 导航为 slot 的默认内容:所有界面默认显示这 6 项,无需每个视图重复声明;
  * 当前页高亮依赖 Vue Router 自动添加的 router-link-exact-active。
  * 个别视图若需自定义导航,仍可用 <template #nav> 覆盖默认内容。
  *
  * 硬约束:账号设置(/settings)只由齿轮按钮进入,不入主导航。
- * 记忆管理(/memory)作为主导航项,与模型设置/CLI 设置并列。
+ * 记忆管理(/memory)、协作策略(/agent-policy)作为主导航项,与模型设置/CLI 设置并列。
  */
 import { useRouter } from 'vue-router'
 
@@ -43,6 +43,7 @@ function handleLogout(): void {
             <RouterLink to="/tasks/new">提交任务</RouterLink>
             <RouterLink to="/models">模型设置</RouterLink>
             <RouterLink to="/cli">CLI 设置</RouterLink>
+            <RouterLink to="/agent-policy">协作策略</RouterLink>
             <RouterLink to="/memory">记忆管理</RouterLink>
           </slot>
         </nav>
