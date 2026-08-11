@@ -6,6 +6,7 @@
 
 工具:
 - http_request:向 test_env_url 发送 HTTP 请求(GET/POST/PUT/DELETE + headers + body)
+  在沙箱里执行(用 urllib 标准库),后端服务器 IP 不暴露给测试环境
 - run_python_code:在沙箱执行 Python(复用 react_agent 沙箱,可 read_file 仓库代码辅助构造 PoC)
 
 授权:
@@ -47,7 +48,7 @@ react_agent 通过静态分析发现了潜在的安全问题,你需要通过实�
 验证这些问题是否真实存在(而非误报)。
 
 ## 可用工具
-1. **http_request**:向测试环境发送 HTTP 请求
+1. **http_request**:向测试环境发送 HTTP 请求(在沙箱里执行,不经后端服务器)
    - method: GET/POST/PUT/DELETE 等
    - path: 相对路径(如 /api/users、/login?next=/)
    - headers: 自定义请求头(如 Content-Type、Authorization)
@@ -57,7 +58,8 @@ react_agent 通过静态分析发现了潜在的安全问题,你需要通过实�
 2. **run_python_code**:在沙箱执行 Python 代码
    - 用于构造复杂 PoC(生成签名、编码 payload、解析响应等)
    - 沙箱与 react_agent 共享,可先 read_file 仓库代码了解接口细节
-   - 网络访问受限,HTTP 探测用 http_request 而非 Python
+   - 网络访问受限,HTTP 探测用 http_request 而非 Python(两者都在沙箱里,
+     但 http_request 有 URL base 锁定 + 授权拦截,更安全)
 
 ## 工作流程
 1. 分析 user_agent 传入的验证目标(哪些安全问题需要验证)
