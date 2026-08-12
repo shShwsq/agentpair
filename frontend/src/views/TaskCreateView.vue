@@ -869,7 +869,7 @@ onUnmounted(() => {
       </template>
     </AppHeader>
 
-    <div class="page-body">
+    <div class="page-body" :class="{ 'panel-open': drawerOpen }">
       <WorkspaceSidebar v-if="!workspaceCollapsed" />
 
       <main class="main">
@@ -1476,7 +1476,6 @@ onUnmounted(() => {
       <!-- 右侧设置面板:内嵌在页面布局中,展开时主内容区相应收窄往左移。
            当前分区表单由各入口处的 defer Teleport 注入(v-show 控制显隐) -->
       <aside v-show="drawerOpen" class="settings-panel" role="complementary" aria-label="任务设置">
-        <button type="button" class="panel-close" aria-label="关闭设置" @click="closeDrawer">×</button>
         <div id="settings-drawer-body" class="panel-body" />
       </aside>
     </div>
@@ -2075,6 +2074,13 @@ onUnmounted(() => {
   opacity: 0;
 }
 
+/* 面板展开时:中间内容不再绝对居中,与设置面板保持 space-5 + main-col 右内边距
+   的间距,两侧留白视觉上对称等宽 */
+.page-body.panel-open .main-col {
+  margin-left: auto;
+  margin-right: var(--space-5);
+}
+
 /* ---- 小屏适配 ---- */
 /* 窄屏:主区已不够宽,设置面板改为覆盖在内容上方 */
 @media (max-width: 1100px) {
@@ -2262,44 +2268,27 @@ onUnmounted(() => {
   flex-direction: column;
   min-height: 0;
   background: var(--color-bg);
-  border-left: 1px solid var(--color-border);
-}
-
-/* 关闭按钮:右上角浮动,不占布局 */
-.panel-close {
-  position: absolute;
-  top: var(--space-3);
-  right: var(--space-3);
-  z-index: 1;
-  padding: 4px 8px;
-  font-size: 20px;
-  line-height: 1;
-  color: var(--color-text-muted);
-  border-radius: var(--radius-sm);
-  transition: all var(--transition-fast);
-}
-
-.panel-close:hover {
-  background: var(--color-surface-alt);
-  color: var(--color-text);
 }
 
 .panel-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  /* 顶部多留白,避免内容被右上角关闭按钮遮挡 */
-  padding: var(--space-8) var(--space-5) var(--space-5);
+  /* 左右留白 = space-5 + space-6,与中间内容 ↔ 面板的间距等宽 */
+  padding: var(--space-5) calc(var(--space-5) + var(--space-6));
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
 }
 
-/* 当前分区表单(由各入口处的 Teleport 注入) */
+/* 当前分区表单(由各入口处的 Teleport 注入):无边框卡片,垂直居中;
+   内容超高时 margin auto 退化为 0,自动改为顶部对齐可滚动,不会被裁剪 */
 .drawer-section-body {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+  width: 100%;
+  margin: auto 0;
 }
 
 /* 设置面板内技能列表改单列,卡片更舒展 */
