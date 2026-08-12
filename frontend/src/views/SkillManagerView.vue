@@ -591,13 +591,16 @@ onMounted(loadSkills)
   gap: var(--space-6);
 }
 
-/* ============ 卡片 ============ */
+/* ============ 分区(无卡片包裹:平铺在页面上,分区之间用分隔线) ============ */
 .upload-card,
 .list-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  padding: var(--space-5) var(--space-6);
+  padding-bottom: var(--space-6);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.list-card {
+  padding-bottom: 0;
+  border-bottom: none;
 }
 
 .section-title {

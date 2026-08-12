@@ -297,51 +297,56 @@ async function handleTest(type: string): Promise<void> {
         </div>
 
         <template v-else>
-          <!-- 页头 -->
-          <div class="page-header">
-            <h1>CLI 智能体设置</h1>
+          <!-- 固定头部(居中,不随面板滚动) -->
+          <div class="main-inner">
+            <!-- 页头 -->
+            <div class="page-header">
+              <h1>CLI 智能体设置</h1>
+            </div>
+
+            <!-- ============ 选项卡 ============ -->
+            <div class="tab-bar" role="tablist">
+              <button
+                v-for="(meta, idx) in agentTypes"
+                :key="meta.agent_type"
+                :ref="(el) => { if (el) tabRefs[idx] = el as HTMLElement }"
+                class="tab"
+                :class="{ 'tab-active': activeType === meta.agent_type }"
+                role="tab"
+                :aria-selected="activeType === meta.agent_type"
+                :tabindex="activeType === meta.agent_type ? 0 : -1"
+                @click="activateTab(meta)"
+              >
+                {{ meta.display_name }}
+              </button>
+            </div>
           </div>
 
-          <!-- ============ 选项卡 ============ -->
-          <div class="tab-bar" role="tablist">
-            <button
-              v-for="(meta, idx) in agentTypes"
-              :key="meta.agent_type"
-              :ref="(el) => { if (el) tabRefs[idx] = el as HTMLElement }"
-              class="tab"
-              :class="{ 'tab-active': activeType === meta.agent_type }"
-              role="tab"
-              :aria-selected="activeType === meta.agent_type"
-              :tabindex="activeType === meta.agent_type ? 0 : -1"
-              @click="activateTab(meta)"
-            >
-              {{ meta.display_name }}
-            </button>
-          </div>
-
-          <!-- ============ 面板滚动区(仅此区滚动,header/tab 固定在顶部) ============ -->
+          <!-- ============ 面板滚动区(全宽,滚动条贴界面右边;仅此区滚动,header/tab 固定在顶部) ============ -->
           <div class="panels-scroll">
-            <div
-              v-for="p in panels"
-              :key="p.meta.agent_type"
-              role="tabpanel"
-            >
-              <AgentConfigPanel
-                v-if="activated.has(p.meta.agent_type)"
-                v-show="activeType === p.meta.agent_type"
-                :meta="p.meta"
-                :detail="p.state.detail"
-                :saving="p.state.saving || p.state.detailLoading"
-                :error="p.state.error"
-                :testing="p.state.testing"
-                :test-result="p.state.testResult"
-                :test-stage="p.state.testStage"
-                :test-thinking="p.state.testThinking"
-                :test-content="p.state.testContent"
-                @save="(creds, active) => handleSave(p.meta.agent_type, creds, active)"
-                @clear="handleClear(p.meta.agent_type)"
-                @test="handleTest(p.meta.agent_type)"
-              />
+            <div class="panels-col">
+              <div
+                v-for="p in panels"
+                :key="p.meta.agent_type"
+                role="tabpanel"
+              >
+                <AgentConfigPanel
+                  v-if="activated.has(p.meta.agent_type)"
+                  v-show="activeType === p.meta.agent_type"
+                  :meta="p.meta"
+                  :detail="p.state.detail"
+                  :saving="p.state.saving || p.state.detailLoading"
+                  :error="p.state.error"
+                  :testing="p.state.testing"
+                  :test-result="p.state.testResult"
+                  :test-stage="p.state.testStage"
+                  :test-thinking="p.state.testThinking"
+                  :test-content="p.state.testContent"
+                  @save="(creds, active) => handleSave(p.meta.agent_type, creds, active)"
+                  @clear="handleClear(p.meta.agent_type)"
+                  @test="handleTest(p.meta.agent_type)"
+                />
+              </div>
             </div>
           </div>
         </template>
@@ -401,12 +406,18 @@ async function handleTest(type: string): Promise<void> {
 .main {
   flex: 1;
   min-width: 0;
-  max-width: 680px;
-  margin: 0 auto;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding: var(--space-6) var(--space-5) var(--space-8);
+}
+
+/* 固定头部(页头 + 选项卡):全宽容器内居中 */
+.main-inner {
+  flex-shrink: 0;
+  width: 100%;
+  max-width: 680px;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5) 0;
 }
 
 .loading {
@@ -480,11 +491,18 @@ async function handleTest(type: string): Promise<void> {
   flex-shrink: 0;
 }
 
-/* ---- 面板滚动区(仅此区垂直滚动) ---- */
+/* ---- 面板滚动区(全宽,垂直滚动条贴界面右边;仅此区滚动) ---- */
 .panels-scroll {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+}
+
+/* 面板内容列:在滚动区内部居中 */
+.panels-col {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 0 var(--space-5) var(--space-8);
 }
 
 .tab {

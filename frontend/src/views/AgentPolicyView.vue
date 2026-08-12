@@ -335,252 +335,254 @@ onUnmounted(() => {
       <WorkspaceSidebar v-if="!workspaceCollapsed" />
 
       <main class="main">
-        <!-- 页头 -->
-        <div class="page-header">
-          <div>
-            <h1>协作策略</h1>
-            <p class="page-subtitle">
-              user_agent 检查点评估的用户级默认。任务创建时可单独覆盖。
-            </p>
-          </div>
-          <div class="header-meta">
-            <span class="meta-label">最后保存</span>
-            <span class="meta-value">{{ loading ? '加载中…' : formatTime(updatedAt) }}</span>
-          </div>
-        </div>
-
-        <!-- 加载态 -->
-        <div v-if="loading" class="loading-box">
-          <span class="status-spinner" aria-label="加载中" />
-          <span>正在加载策略配置…</span>
-        </div>
-
-        <!-- 加载失败 -->
-        <div v-else-if="loadError" class="alert alert-error" role="alert">
-          <span>加载失败:{{ loadError }}</span>
-          <button class="btn-link" @click="loadPolicy">重试</button>
-        </div>
-
-        <!-- 策略表单 -->
-        <section v-else class="policy-card">
-          <!-- 启用 user_agent 开关(最核心,控制全局) -->
-          <label class="policy-toggle-row policy-toggle-primary">
-            <input v-model="policyUserAgentEnabled" type="checkbox" :disabled="saving" />
-            <span>启用 user_agent</span>
-            <div
-              :ref="(el) => { if (el) fieldHelpRefs.set('user_agent_enabled', el as HTMLElement); else fieldHelpRefs.delete('user_agent_enabled') }"
-              class="field-help-wrap"
-            >
-              <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('user_agent_enabled')">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
-              </button>
-              <Transition name="help-fade">
-                <div v-if="openHelpKey === 'user_agent_enabled'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.user_agent_enabled }}</div>
-              </Transition>
+        <div class="main-col">
+          <!-- 页头 -->
+          <div class="page-header">
+            <div>
+              <h1>协作策略</h1>
+              <p class="page-subtitle">
+                user_agent 检查点评估的用户级默认。任务创建时可单独覆盖。
+              </p>
             </div>
-          </label>
+            <div class="header-meta">
+              <span class="meta-label">最后保存</span>
+              <span class="meta-value">{{ loading ? '加载中…' : formatTime(updatedAt) }}</span>
+            </div>
+          </div>
 
-          <!-- 协作总轮次(仅 user_agent 启用时生效) -->
-          <label class="policy-field policy-field-maxrounds">
-            <div class="field-head">
-              <span class="policy-label">协作总轮次</span>
+          <!-- 加载态 -->
+          <div v-if="loading" class="loading-box">
+            <span class="status-spinner" aria-label="加载中" />
+            <span>正在加载策略配置…</span>
+          </div>
+
+          <!-- 加载失败 -->
+          <div v-else-if="loadError" class="alert alert-error" role="alert">
+            <span>加载失败:{{ loadError }}</span>
+            <button class="btn-link" @click="loadPolicy">重试</button>
+          </div>
+
+          <!-- 策略表单 -->
+          <section v-else class="policy-card">
+            <!-- 启用 user_agent 开关(最核心,控制全局) -->
+            <label class="policy-toggle-row policy-toggle-primary">
+              <input v-model="policyUserAgentEnabled" type="checkbox" :disabled="saving" />
+              <span>启用 user_agent</span>
               <div
-                :ref="(el) => { if (el) fieldHelpRefs.set('max_rounds', el as HTMLElement); else fieldHelpRefs.delete('max_rounds') }"
+                :ref="(el) => { if (el) fieldHelpRefs.set('user_agent_enabled', el as HTMLElement); else fieldHelpRefs.delete('user_agent_enabled') }"
                 class="field-help-wrap"
               >
-                <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('max_rounds')">
+                <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('user_agent_enabled')">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
                 </button>
                 <Transition name="help-fade">
-                  <div v-if="openHelpKey === 'max_rounds'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.max_rounds }}</div>
+                  <div v-if="openHelpKey === 'user_agent_enabled'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.user_agent_enabled }}</div>
                 </Transition>
               </div>
-            </div>
-            <input
-              :value="policyMaxRounds"
-              @input="onMaxRoundsInput"
-              @blur="onMaxRoundsBlur"
-              type="text"
-              inputmode="numeric"
-              pattern="[0-9]*"
-              class="policy-input"
-              :disabled="saving || !policyUserAgentEnabled"
-            />
-            <span class="policy-hint">上限 {{ MAX_ROUNDS_LIMIT }}</span>
-          </label>
-
-          <div class="policy-grid">
-            <label class="policy-field">
+            </label>
+  
+            <!-- 协作总轮次(仅 user_agent 启用时生效) -->
+            <label class="policy-field policy-field-maxrounds">
               <div class="field-head">
-                <span class="policy-label">评估频率 K</span>
+                <span class="policy-label">协作总轮次</span>
                 <div
-                  :ref="(el) => { if (el) fieldHelpRefs.set('checkpoint_interval', el as HTMLElement); else fieldHelpRefs.delete('checkpoint_interval') }"
+                  :ref="(el) => { if (el) fieldHelpRefs.set('max_rounds', el as HTMLElement); else fieldHelpRefs.delete('max_rounds') }"
                   class="field-help-wrap"
                 >
-                  <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('checkpoint_interval')">
+                  <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('max_rounds')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
                   </button>
                   <Transition name="help-fade">
-                    <div v-if="openHelpKey === 'checkpoint_interval'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.checkpoint_interval }}</div>
+                    <div v-if="openHelpKey === 'max_rounds'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.max_rounds }}</div>
                   </Transition>
                 </div>
               </div>
               <input
-                v-model.number="policyInterval"
-                type="number" min="1" max="20"
+                :value="policyMaxRounds"
+                @input="onMaxRoundsInput"
+                @blur="onMaxRoundsBlur"
+                type="text"
+                inputmode="numeric"
+                pattern="[0-9]*"
                 class="policy-input"
                 :disabled="saving || !policyUserAgentEnabled"
               />
+              <span class="policy-hint">上限 {{ MAX_ROUNDS_LIMIT }}</span>
             </label>
-
-            <label class="policy-field">
-              <div class="field-head">
-                <span class="policy-label">每轮最大打断</span>
-                <div
-                  :ref="(el) => { if (el) fieldHelpRefs.set('max_interrupts', el as HTMLElement); else fieldHelpRefs.delete('max_interrupts') }"
-                  class="field-help-wrap"
-                >
-                  <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('max_interrupts')">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
-                  </button>
-                  <Transition name="help-fade">
-                    <div v-if="openHelpKey === 'max_interrupts'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.max_interrupts }}</div>
-                  </Transition>
-                </div>
-              </div>
-              <input
-                v-model.number="policyMaxInterrupts"
-                type="number" min="0" max="10"
-                class="policy-input"
-                :disabled="saving || !policyUserAgentEnabled || !policyAllowInterrupt"
-              />
-            </label>
-          </div>
-
-          <label class="policy-toggle-row">
-            <input v-model="policyAllowInterrupt" type="checkbox" :disabled="saving || !policyUserAgentEnabled" />
-            <span>允许 user_agent 打断 react_agent</span>
-            <div
-              :ref="(el) => { if (el) fieldHelpRefs.set('allow_interrupt', el as HTMLElement); else fieldHelpRefs.delete('allow_interrupt') }"
-              class="field-help-wrap"
-            >
-              <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('allow_interrupt')">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
-              </button>
-              <Transition name="help-fade">
-                <div v-if="openHelpKey === 'allow_interrupt'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.allow_interrupt }}</div>
-              </Transition>
-            </div>
-          </label>
-
-          <label class="policy-toggle-row">
-            <input v-model="policyAllowVerify" type="checkbox" :disabled="saving || !policyUserAgentEnabled" />
-            <span>允许 user_agent 自行验证 <span class="policy-experimental">(实验性)</span></span>
-            <div
-              :ref="(el) => { if (el) fieldHelpRefs.set('allow_verify', el as HTMLElement); else fieldHelpRefs.delete('allow_verify') }"
-              class="field-help-wrap"
-            >
-              <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('allow_verify')">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
-              </button>
-              <Transition name="help-fade">
-                <div v-if="openHelpKey === 'allow_verify'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.allow_verify }}</div>
-              </Transition>
-            </div>
-          </label>
-
-          <Transition name="collapse">
-            <div v-show="policyAllowVerify" class="verifier-config">
+  
+            <div class="policy-grid">
               <label class="policy-field">
                 <div class="field-head">
-                  <span class="policy-label">验证授权模式</span>
+                  <span class="policy-label">评估频率 K</span>
                   <div
-                    :ref="(el) => { if (el) fieldHelpRefs.set('verifier_auth_mode', el as HTMLElement); else fieldHelpRefs.delete('verifier_auth_mode') }"
+                    :ref="(el) => { if (el) fieldHelpRefs.set('checkpoint_interval', el as HTMLElement); else fieldHelpRefs.delete('checkpoint_interval') }"
                     class="field-help-wrap"
                   >
-                    <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('verifier_auth_mode')">
+                    <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('checkpoint_interval')">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
                     </button>
                     <Transition name="help-fade">
-                      <div v-if="openHelpKey === 'verifier_auth_mode'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.verifier_auth_mode }}</div>
+                      <div v-if="openHelpKey === 'checkpoint_interval'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.checkpoint_interval }}</div>
                     </Transition>
                   </div>
                 </div>
-                <select
-                  v-model="policyVerifierAuthMode"
+                <input
+                  v-model.number="policyInterval"
+                  type="number" min="1" max="20"
                   class="policy-input"
                   :disabled="saving || !policyUserAgentEnabled"
-                >
-                  <option value="per_action">逐动作授权(每个动作弹窗确认)</option>
-                  <option value="direct">直接执行(不弹窗)</option>
-                </select>
+                />
+              </label>
+  
+              <label class="policy-field">
+                <div class="field-head">
+                  <span class="policy-label">每轮最大打断</span>
+                  <div
+                    :ref="(el) => { if (el) fieldHelpRefs.set('max_interrupts', el as HTMLElement); else fieldHelpRefs.delete('max_interrupts') }"
+                    class="field-help-wrap"
+                  >
+                    <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('max_interrupts')">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+                    </button>
+                    <Transition name="help-fade">
+                      <div v-if="openHelpKey === 'max_interrupts'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.max_interrupts }}</div>
+                    </Transition>
+                  </div>
+                </div>
+                <input
+                  v-model.number="policyMaxInterrupts"
+                  type="number" min="0" max="10"
+                  class="policy-input"
+                  :disabled="saving || !policyUserAgentEnabled || !policyAllowInterrupt"
+                />
               </label>
             </div>
-          </Transition>
-
-          <label class="policy-toggle-row">
-            <input v-model="policyAdvanced" type="checkbox" :disabled="saving || !policyUserAgentEnabled" />
-            <span>分别配置内置 / CLI agent 的 K 值</span>
-            <div
-              :ref="(el) => { if (el) fieldHelpRefs.set('policy_advanced', el as HTMLElement); else fieldHelpRefs.delete('policy_advanced') }"
-              class="field-help-wrap"
-            >
-              <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('policy_advanced')">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+  
+            <label class="policy-toggle-row">
+              <input v-model="policyAllowInterrupt" type="checkbox" :disabled="saving || !policyUserAgentEnabled" />
+              <span>允许 user_agent 打断 react_agent</span>
+              <div
+                :ref="(el) => { if (el) fieldHelpRefs.set('allow_interrupt', el as HTMLElement); else fieldHelpRefs.delete('allow_interrupt') }"
+                class="field-help-wrap"
+              >
+                <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('allow_interrupt')">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+                </button>
+                <Transition name="help-fade">
+                  <div v-if="openHelpKey === 'allow_interrupt'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.allow_interrupt }}</div>
+                </Transition>
+              </div>
+            </label>
+  
+            <label class="policy-toggle-row">
+              <input v-model="policyAllowVerify" type="checkbox" :disabled="saving || !policyUserAgentEnabled" />
+              <span>允许 user_agent 自行验证 <span class="policy-experimental">(实验性)</span></span>
+              <div
+                :ref="(el) => { if (el) fieldHelpRefs.set('allow_verify', el as HTMLElement); else fieldHelpRefs.delete('allow_verify') }"
+                class="field-help-wrap"
+              >
+                <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('allow_verify')">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+                </button>
+                <Transition name="help-fade">
+                  <div v-if="openHelpKey === 'allow_verify'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.allow_verify }}</div>
+                </Transition>
+              </div>
+            </label>
+  
+            <Transition name="collapse">
+              <div v-show="policyAllowVerify" class="verifier-config">
+                <label class="policy-field">
+                  <div class="field-head">
+                    <span class="policy-label">验证授权模式</span>
+                    <div
+                      :ref="(el) => { if (el) fieldHelpRefs.set('verifier_auth_mode', el as HTMLElement); else fieldHelpRefs.delete('verifier_auth_mode') }"
+                      class="field-help-wrap"
+                    >
+                      <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('verifier_auth_mode')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+                      </button>
+                      <Transition name="help-fade">
+                        <div v-if="openHelpKey === 'verifier_auth_mode'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.verifier_auth_mode }}</div>
+                      </Transition>
+                    </div>
+                  </div>
+                  <select
+                    v-model="policyVerifierAuthMode"
+                    class="policy-input"
+                    :disabled="saving || !policyUserAgentEnabled"
+                  >
+                    <option value="per_action">逐动作授权(每个动作弹窗确认)</option>
+                    <option value="direct">直接执行(不弹窗)</option>
+                  </select>
+                </label>
+              </div>
+            </Transition>
+  
+            <label class="policy-toggle-row">
+              <input v-model="policyAdvanced" type="checkbox" :disabled="saving || !policyUserAgentEnabled" />
+              <span>分别配置内置 / CLI agent 的 K 值</span>
+              <div
+                :ref="(el) => { if (el) fieldHelpRefs.set('policy_advanced', el as HTMLElement); else fieldHelpRefs.delete('policy_advanced') }"
+                class="field-help-wrap"
+              >
+                <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('policy_advanced')">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+                </button>
+                <Transition name="help-fade">
+                  <div v-if="openHelpKey === 'policy_advanced'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.policy_advanced }}</div>
+                </Transition>
+              </div>
+            </label>
+  
+            <Transition name="collapse">
+              <div v-show="policyAdvanced" class="policy-grid">
+                <label class="policy-field">
+                  <span class="policy-label">内置 react_agent K</span>
+                  <input
+                    v-model.number="policyIntervalBuiltin"
+                    type="number" min="1" max="20"
+                    class="policy-input"
+                    placeholder="留空用统一值"
+                    :disabled="saving || !policyUserAgentEnabled"
+                  />
+                </label>
+                <label class="policy-field">
+                  <span class="policy-label">CLI agent K</span>
+                  <input
+                    v-model.number="policyIntervalCli"
+                    type="number" min="1" max="20"
+                    class="policy-input"
+                    placeholder="留空用统一值"
+                    :disabled="saving || !policyUserAgentEnabled"
+                  />
+                </label>
+              </div>
+            </Transition>
+  
+            <!-- 操作区 -->
+            <div class="policy-actions">
+              <button
+                type="button"
+                class="btn btn-secondary"
+                :disabled="saving || !policyDirty"
+                @click="resetPolicyToDefault"
+              >恢复默认</button>
+  
+              <button
+                type="button"
+                class="btn btn-primary"
+                :disabled="saving || !policyDirty"
+                @click="handleSave"
+              >
+                <span v-if="saving" class="btn-spinner" />
+                {{ saving ? '保存中…' : '保存' }}
               </button>
-              <Transition name="help-fade">
-                <div v-if="openHelpKey === 'policy_advanced'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.policy_advanced }}</div>
-              </Transition>
+  
+              <span v-if="policyDirty" class="dirty-dot-hint">有未保存改动</span>
             </div>
-          </label>
-
-          <Transition name="collapse">
-            <div v-show="policyAdvanced" class="policy-grid">
-              <label class="policy-field">
-                <span class="policy-label">内置 react_agent K</span>
-                <input
-                  v-model.number="policyIntervalBuiltin"
-                  type="number" min="1" max="20"
-                  class="policy-input"
-                  placeholder="留空用统一值"
-                  :disabled="saving || !policyUserAgentEnabled"
-                />
-              </label>
-              <label class="policy-field">
-                <span class="policy-label">CLI agent K</span>
-                <input
-                  v-model.number="policyIntervalCli"
-                  type="number" min="1" max="20"
-                  class="policy-input"
-                  placeholder="留空用统一值"
-                  :disabled="saving || !policyUserAgentEnabled"
-                />
-              </label>
-            </div>
-          </Transition>
-
-          <!-- 操作区 -->
-          <div class="policy-actions">
-            <button
-              type="button"
-              class="btn btn-secondary"
-              :disabled="saving || !policyDirty"
-              @click="resetPolicyToDefault"
-            >恢复默认</button>
-
-            <button
-              type="button"
-              class="btn btn-primary"
-              :disabled="saving || !policyDirty"
-              @click="handleSave"
-            >
-              <span v-if="saving" class="btn-spinner" />
-              {{ saving ? '保存中…' : '保存' }}
-            </button>
-
-            <span v-if="policyDirty" class="dirty-dot-hint">有未保存改动</span>
-          </div>
         </section>
+        </div>
       </main>
     </div>
 
@@ -637,9 +639,13 @@ onUnmounted(() => {
 .main {
   flex: 1;
   min-width: 0;
+  /* 全宽滚动容器:垂直滚动条贴界面右边,内容在 main-col 内居中 */
+  overflow-y: auto;
+}
+
+.main-col {
   max-width: 760px;
   margin: 0 auto;
-  overflow-y: auto;
   padding: var(--space-6) var(--space-5) var(--space-8);
 }
 
