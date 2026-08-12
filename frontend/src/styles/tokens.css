@@ -33,7 +33,11 @@
   /* user_agent 总结卡片背景 */
   --color-msg-summary-bg: linear-gradient(135deg, #faf5ff 0%, #f0f4ff 100%);
   /* 流式思考 content 卡片背景 */
-  --color-msg-streaming-bg: linear-gradient(135deg, #fefce8 0%, #fef3c7 100%);
+  --color-msg-streaming-bg: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
+  /* 流式进行中的动画色:脉冲光环两档透明度 + 打字小圆点 */
+  --color-msg-pulse-soft: rgba(22, 163, 74, 0.2);
+  --color-msg-pulse-strong: rgba(22, 163, 74, 0.35);
+  --color-msg-streaming-dot: #16a34a;
   /* 折叠 header(reasoning/长详情)hover 背景 */
   --color-msg-header-hover: rgba(0, 0, 0, 0.04);
 
@@ -163,7 +167,10 @@
   /* ---- 色彩:对话消息卡片(深底上降低饱和度) ---- */
   --color-msg-react-bg: #2e1065;
   --color-msg-summary-bg: linear-gradient(135deg, #1e1b4b 0%, #172554 100%);
-  --color-msg-streaming-bg: linear-gradient(135deg, #422006 0%, #451a03 100%);
+  --color-msg-streaming-bg: linear-gradient(135deg, #052e16 0%, #14532d 100%);
+  --color-msg-pulse-soft: rgba(74, 222, 128, 0.2);
+  --color-msg-pulse-strong: rgba(74, 222, 128, 0.35);
+  --color-msg-streaming-dot: #4ade80;
   --color-msg-header-hover: rgba(255, 255, 255, 0.06);
 
   /* ---- 色彩:严重程度徽章(深底加深背景、调亮前景) ---- */

@@ -361,13 +361,13 @@ const detailLabel = computed(() =>
 
 /* 流式思考时给 reasoning 卡片加脉冲动画 */
 .msg-reasoning-streaming {
-  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2);
+  box-shadow: 0 0 0 2px var(--color-msg-pulse-soft);
   animation: streaming-pulse 2s ease-in-out infinite;
 }
 
 @keyframes streaming-pulse {
-  0%, 100% { box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2); }
-  50% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.35); }
+  0%, 100% { box-shadow: 0 0 0 2px var(--color-msg-pulse-soft); }
+  50% { box-shadow: 0 0 0 4px var(--color-msg-pulse-strong); }
 }
 
 .msg-streaming-tag {
@@ -377,7 +377,7 @@ const detailLabel = computed(() =>
 }
 
 .msg-streaming-tag .typing-dots span {
-  background: #f59e0b;
+  background: var(--color-msg-streaming-dot);
 }
 
 .typing-dots {

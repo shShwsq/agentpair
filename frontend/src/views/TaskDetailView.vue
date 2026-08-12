@@ -3105,9 +3105,9 @@ function parseCheckpoint(item: DisplayItem): {
 }
 
 .iteration-streaming {
-  /* 包含正在流式 thinking 的迭代:加橙色光晕提示 */
-  border-color: #f59e0b;
-  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.15);
+  /* 包含正在流式 thinking 的迭代:加绿色光晕提示 */
+  border-color: var(--color-msg-streaming-dot);
+  box-shadow: 0 0 0 2px var(--color-msg-pulse-soft);
 }
 
 .iteration-header {
@@ -3153,7 +3153,7 @@ function parseCheckpoint(item: DisplayItem): {
 }
 
 .iteration-streaming-tag .typing-dots span {
-  background: #f59e0b;
+  background: var(--color-msg-streaming-dot);
 }
 
 .iteration-body {
