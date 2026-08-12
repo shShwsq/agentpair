@@ -37,11 +37,30 @@ MAX_FILES = settings.SKILL_MAX_FILES
 
 # 附加资源允许的扩展名白名单(SKILL.md 不受此限制)
 # 文档/配置/脚本/常见源码,排除可执行文件、压缩包、二进制格式
-ALLOWED_EXTENSIONS = {
+_BASE_ALLOWED_EXTENSIONS = {
     ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
     ".csv", ".xml", ".sql", ".py", ".sh", ".js", ".ts", ".html", ".css",
     ".rules", ".example", ".gitignore",
 }
+
+
+def _parse_extra_extensions(raw: str) -> set[str]:
+    """解析逗号分隔的额外扩展名:去空白、转小写、补前导点"""
+    result: set[str] = set()
+    for item in raw.split(","):
+        ext = item.strip().lower()
+        if not ext:
+            continue
+        if not ext.startswith("."):
+            ext = "." + ext
+        result.add(ext)
+    return result
+
+
+# 最终白名单 = 内置基础白名单 ∪ 环境变量追加(默认含常见图片格式)
+ALLOWED_EXTENSIONS = _BASE_ALLOWED_EXTENSIONS | _parse_extra_extensions(
+    settings.SKILL_ALLOWED_EXTENSIONS_EXTRA
+)
 
 # Mac zip 常见噪音(打包时自动生成的资源分叉 / 元数据)
 _SKIP_PREFIXES = ("__MACOSX/",)

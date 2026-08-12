@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     SKILL_MAX_READ_SIZE_MB: int = 20
     # 管理界面文件列表条目数上限(防御异常目录,默认 200)
     SKILL_MAX_LISTED_FILES: int = 200
+    # 附加资源额外允许的扩展名(逗号分隔,追加到内置白名单之上)
+    # 内置白名单见 app/skills/uploader.py 的 _BASE_ALLOWED_EXTENSIONS;
+    # 默认放行常见位图(png/jpg/jpeg/webp/gif,无可执行风险);
+    # 注意:不建议追加 .svg(可内嵌脚本,有 XSS 风险)
+    SKILL_ALLOWED_EXTENSIONS_EXTRA: str = ".png,.jpg,.jpeg,.webp,.gif"
 
     # 沙箱配置(阶段 2 起)
     # mode: mock(本地未部署 Server)/ sandbox(连真实 OpenSandbox Server)

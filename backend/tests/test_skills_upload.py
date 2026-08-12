@@ -177,6 +177,16 @@ def test_extract_zip_archive_inside_rejected(tmp_path):
         extract_skill_zip(data, tmp_path)
 
 
+def test_extract_image_extension_allowed(tmp_path):
+    """附加资源为位图(.png)→ 允许(默认白名单含常见图片格式)。"""
+    data = _make_zip({
+        "s/SKILL.md": SKILL_MD,
+        "s/assets/logo.png": b"\x89PNG\r\n\x1a\nfake",
+    })
+    skill = extract_skill_zip(data, tmp_path)
+    assert (skill.skill_dir / "assets" / "logo.png").is_file()
+
+
 # ============================================================
 # 大小限制(monkeypatch 缩小阈值)
 # ============================================================
