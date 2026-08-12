@@ -32,6 +32,9 @@ logs/
 # 运行时数据
 _repos/
 
+# 用户上传的 skill(按用户隔离的运行时数据,不入库)
+backend/skills/user_*/
+
 # 参考资料
 references/
 

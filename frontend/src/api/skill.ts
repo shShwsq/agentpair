@@ -64,7 +64,11 @@ export function uploadSkill(file: File, force: boolean): Promise<SkillUploadResu
   const form = new FormData()
   form.append('file', file)
   form.append('force', String(force))
-  return client.post('/skills/upload', form).then((r) => r.data)
+  // 覆盖实例默认的 application/json(否则 axios 不会自动切 multipart),
+  // 置 undefined 让 axios 为 FormData 自动生成 boundary
+  return client.post('/skills/upload', form, {
+    headers: { 'Content-Type': undefined },
+  }).then((r) => r.data)
 }
 
 /** 删除自己上传的 skill(内置/他人 skill 后端会拒绝) */
