@@ -4,12 +4,16 @@
  * 覆盖紧凑工具(读文件/搜索/列目录)的配对与单行摘要生成:
  * 1. 配对:紧凑 tool_call 与紧邻 tool_result 成对,其余保持原顺序进 plain 段
  * 2. 摘要:各工具的计数/路径提取、执行中、执行失败兜底
+ * 3. Bash/run_command 命令解析:只读命令白名单摘要、危险命令拒绝
  */
 import { describe, expect, it } from 'vitest'
 
 import {
   buildToolSegments,
   buildToolSummary,
+  commandOf,
+  shortenPath,
+  summarizeCommand,
   toolNameOf,
   type ToolItem,
 } from './toolSummary'
@@ -149,5 +153,159 @@ describe('buildToolSegments', () => {
     const segs = buildToolSegments([result('r1', '孤儿结果')])
     expect(segs).toHaveLength(1)
     expect(segs[0].kind).toBe('plain')
+  })
+})
+
+describe('commandOf', () => {
+  it('Bash:首行后全部是命令原文', () => {
+    const c = call('1', "执行: cat /x/f.py [Bash]\n/bin/bash -lc 'cat /x/f.py'")
+    expect(commandOf(c)).toBe("/bin/bash -lc 'cat /x/f.py'")
+  })
+
+  it('run_command:从参数 JSON 提取 command 字段', () => {
+    const c = call('1', '执行命令: pytest [run_command]\n{"command": "pytest -x", "timeout": 60}')
+    expect(commandOf(c)).toBe('pytest -x')
+  })
+
+  it('无 detail 时返回空串', () => {
+    expect(commandOf(call('1', '执行: ls [Bash]'))).toBe('')
+  })
+})
+
+describe('shortenPath', () => {
+  it('剥掉 /repos/<仓库名>/ 前缀', () => {
+    expect(shortenPath('/home/user/repos/openclaw-manager/services/app.py'))
+      .toBe('services/app.py')
+  })
+
+  it('无仓库前缀时保持原样', () => {
+    expect(shortenPath('src/main.py')).toBe('src/main.py')
+  })
+})
+
+describe('summarizeCommand(日志真实命令形态)', () => {
+  it('cat 单文件(bash -lc 包装)', () => {
+    expect(summarizeCommand(
+      "/bin/bash -lc 'cat /home/user/repos/openclaw-manager/services/manager-web/metadata_store.py'",
+    )).toBe('📖 阅读了 services/manager-web/metadata_store.py')
+  })
+
+  it('cat | head -N → 前 N 行', () => {
+    expect(summarizeCommand(
+      "/bin/bash -lc 'cat /home/user/repos/proj/services/manager-web/app.py | head -200'",
+    )).toBe('📖 阅读了 services/manager-web/app.py · 前 200 行')
+  })
+
+  it('cat 多文件', () => {
+    expect(summarizeCommand('cat a.py b.py c.py')).toBe('📖 阅读了 3 个文件')
+  })
+
+  it('cat 带 || echo 回退分支', () => {
+    expect(summarizeCommand(
+      '/bin/bash -lc \'cat /home/user/.agent_memory/project_memory.md 2>/dev/null || echo "Memory file not found"\'',
+    )).toBe('📖 阅读了 /home/user/.agent_memory/project_memory.md')
+  })
+
+  it('head -n N 直接读文件', () => {
+    expect(summarizeCommand('head -n 50 src/main.py')).toBe('📖 阅读了 src/main.py · 前 50 行')
+  })
+
+  it('tail -20 读文件尾部', () => {
+    expect(summarizeCommand('tail -20 app.log')).toBe('📖 阅读了 app.log · 后 20 行')
+  })
+
+  it('ls -la 列目录', () => {
+    expect(summarizeCommand(
+      "ls -la /home/user/repos/openclaw-manager/services/",
+    )).toBe('📂 查看目录 services/')
+  })
+
+  it('tree 列目录树', () => {
+    expect(summarizeCommand('tree src')).toBe('📂 查看目录树 src')
+  })
+
+  it('find -name 查找文件', () => {
+    expect(summarizeCommand(
+      '/bin/bash -lc \'find /home/user/repos/openclaw-manager -type f -name "*.py" | head -50\'',
+    )).toBe('🔍 查找文件 *.py')
+  })
+
+  it('grep 搜索内容与路径', () => {
+    expect(summarizeCommand('grep -rn "TODO" src/')).toBe('🔍 搜索 TODO · src/')
+  })
+
+  it('wc -l 统计行数', () => {
+    expect(summarizeCommand('wc -l src/main.py')).toBe('📄 统计行数 src/main.py')
+  })
+
+  it('链式命令 cd + ls && cat | head', () => {
+    expect(summarizeCommand(
+      "/bin/bash -lc 'cd /home/user/repos/proj && ls -la *.md && cat README.md | head -100'",
+    )).toBe('📂 查看目录 *.md、📖 阅读了 README.md · 前 100 行')
+  })
+
+  it('非只读命令拒绝:rm', () => {
+    expect(summarizeCommand('rm -rf /tmp/x')).toBeNull()
+  })
+
+  it('写重定向拒绝:cat f > out', () => {
+    expect(summarizeCommand('cat a.py > out.txt')).toBeNull()
+  })
+
+  it('命令替换拒绝:$( )', () => {
+    expect(summarizeCommand('echo $(cat /etc/passwd)')).toBeNull()
+  })
+
+  it('xargs 拒绝(可执行任意命令)', () => {
+    expect(summarizeCommand(
+      "/bin/bash -lc 'find /home/user/repos/proj -name \"*.py\" -type f | xargs wc -l | tail -20'",
+    )).toBeNull()
+  })
+
+  it('sudo 拒绝', () => {
+    expect(summarizeCommand('sudo cat /etc/shadow')).toBeNull()
+  })
+
+  it('未知命令拒绝:pip install', () => {
+    expect(summarizeCommand('pip install requests')).toBeNull()
+  })
+})
+
+describe('Bash/run_command 紧凑化集成', () => {
+  function bashCall(cmd: string): ToolItem {
+    return { id: 'b1', type: 'tool_call', content: `执行: ${cmd.slice(0, 40)} [Bash]\n${cmd}` }
+  }
+
+  it('只读 Bash 命令配对成 compact 段并生成摘要', () => {
+    const items = [
+      bashCall("/bin/bash -lc 'cat /home/user/repos/proj/app.py'"),
+      result('r1', 'def main(): ...'),
+    ]
+    const segs = buildToolSegments(items)
+    expect(segs).toHaveLength(1)
+    expect(segs[0].kind).toBe('compact')
+    if (segs[0].kind === 'compact') {
+      expect(buildToolSummary(segs[0].call, segs[0].result)).toBe('📖 阅读了 app.py')
+    }
+  })
+
+  it('危险 Bash 命令保持 plain', () => {
+    const items = [
+      bashCall('rm -rf build/'),
+      result('r1', 'done'),
+    ]
+    const segs = buildToolSegments(items)
+    expect(segs).toHaveLength(1)
+    expect(segs[0].kind).toBe('plain')
+  })
+
+  it('Bash result 未到达:摘要 + 省略号', () => {
+    const c = bashCall("/bin/bash -lc 'ls /home/user/repos/proj/src'")
+    expect(buildToolSummary(c, null)).toBe('📂 查看目录 src ...')
+  })
+
+  it('run_command 只读命令也紧凑化', () => {
+    const c = call('1', '执行命令: cat app.py [run_command]\n{"command": "cat app.py"}')
+    expect(buildToolSummary(c, result('r', 'content'))).toBe('📖 阅读了 app.py')
   })
 })

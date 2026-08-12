@@ -22,6 +22,208 @@ export const COMPACT_TOOLS = new Set([
   'list_files',
 ])
 
+// ============================================================
+// Bash/run_command 命令解析:只读命令白名单 → 单行摘要
+//
+// 来源:logs/acp 真实命令分布统计(cat 59/find 20/ls 12/grep 5/wc/head/tree),
+// CLI 智能体(如 codex)无 Read 工具,全靠 bash 命令读文件。
+// 安全策略:整条命令(含管道/链式)全部命中白名单才紧凑化,
+// 出现写操作/未知命令/命令替换时回退原折叠展示。
+// ============================================================
+
+const READ_FILE_CMDS = new Set(['cat', 'head', 'tail', 'bat', 'less', 'more'])
+const LIST_DIR_CMDS = new Set(['ls', 'll', 'dir', 'tree'])
+const SEARCH_CMDS = new Set(['find', 'grep', 'rg', 'egrep', 'fgrep'])
+/** 只读辅助命令(管道尾/链式成员安全) */
+const AUX_CMDS = new Set([
+  'wc', 'sort', 'uniq', 'cut', 'tr', 'file', 'stat', 'pwd', 'echo', 'true', 'cd',
+])
+const READONLY_CMDS = new Set([
+  ...READ_FILE_CMDS, ...LIST_DIR_CMDS, ...SEARCH_CMDS, ...AUX_CMDS,
+])
+
+/** 从 tool_call content 提取命令文本:Bash 的 detail 是命令原文,
+ * run_command(react_agent)的 detail 是参数 JSON(含 command 字段) */
+export function commandOf(call: ToolItem): string {
+  const content = call.content || ''
+  const idx = content.indexOf('\n')
+  if (idx < 0) return ''
+  const detail = content.slice(idx + 1).trim()
+  if (detail.startsWith('{')) {
+    try {
+      const args = JSON.parse(detail)
+      if (typeof args.command === 'string') return args.command
+    } catch { /* 非 JSON 则按命令原文处理 */ }
+  }
+  return detail
+}
+
+/** 剥掉 /repos/<仓库名>/ 前缀,路径更短更易读 */
+export function shortenPath(p: string): string {
+  const m = p.match(/\/repos\/[^/]+\/(.+)$/)
+  return m ? m[1] : p
+}
+
+function stripQuotes(s: string): string {
+  return s.replace(/^(['"])(.*)\1$/, '$2')
+}
+
+/** 取段的非 flag 参数(跳过 -n 等选项的值) */
+function filesOf(args: string[]): string[] {
+  const files: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]
+    if (a.startsWith('-')) {
+      if (a === '-n' || a === '-c') i++ // 跳过选项值
+      continue
+    }
+    files.push(a)
+  }
+  return files
+}
+
+/** 提取 head/tail 的行数:-200 / -n 200 / -n200 */
+function headTailLines(args: string[]): string | null {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]
+    if (/^-\d+$/.test(a)) return a.slice(1)
+    if (a === '-n' && /^\d+$/.test(args[i + 1] || '')) return args[i + 1]
+    const m = a.match(/^-n(\d+)$/)
+    if (m) return m[1]
+  }
+  return null
+}
+
+interface CmdSeg { cmd: string; args: string[] }
+
+/**
+ * 解析命令为链式管道结构;含非只读内容时返回 null。
+ * 处理:/bin/bash -lc 包装、cd 前缀、2>/dev/null 重定向、|| 回退分支(取首支)。
+ */
+function parseReadonlyChains(cmdRaw: string): CmdSeg[][] | null {
+  let c = cmdRaw.trim()
+  if (!c) return null
+  // 危险特征直接拒绝:命令替换、sudo、xargs(可执行任意命令)
+  if (/`|\$\(|\bsudo\b|\bxargs\b/.test(c)) return null
+  // 剥掉 /bin/bash -lc '...' 包装(bash/zsh/sh,支持 -lc -c 等组合 flag)
+  c = c.replace(/^(?:\/usr)?\/bin\/(?:ba|da|z)?sh\s+(?:-\w+\s+)+['"]?/, '')
+  c = c.replace(/['"]$/, '')
+
+  const chains = c.split(/\s*(?:&&|;)\s*/).filter(Boolean)
+  if (!chains.length) return null
+
+  const result: CmdSeg[][] = []
+  for (const chain of chains) {
+    // || 回退分支(如 || echo "not found")只看首支
+    const main = chain.split(/\s*\|\|\s*/)[0]
+    const pipes = main.split('|')
+    const segs: CmdSeg[] = []
+    for (const p of pipes) {
+      // 剥 /dev/null 重定向与 fd 复制;剩余 > 视为写文件 → 拒绝
+      const cleaned = p
+        .replace(/\d*\s*>>?\s*\/dev\/null/g, '')
+        .replace(/\d*>\s*&\d+/g, '')
+      if (cleaned.includes('>')) return null
+      const tokens = cleaned.trim().split(/\s+/).filter(Boolean).map(stripQuotes)
+      // 跳过 env VAR=x 前缀
+      let i = 0
+      while (i < tokens.length && /^[\w]+=.*/.test(tokens[i])) i++
+      const cmdToken = tokens[i]
+      if (!cmdToken) return null
+      const name = cmdToken.split('/').pop() || ''
+      if (!READONLY_CMDS.has(name)) return null
+      segs.push({ cmd: name, args: tokens.slice(i + 1) })
+    }
+    result.push(segs)
+  }
+  return result
+}
+
+/** 单个链式分支的摘要(无可展示内容如 cd/echo 时返回 null) */
+function summarizeChain(segs: CmdSeg[]): string | null {
+  const head = segs[0]
+  const tail = segs.length > 1 ? segs[segs.length - 1] : null
+  // 管道尾修饰:cat f | head -200 → 前 200 行;tail → 后 N 行
+  let mod = ''
+  if (tail && (tail.cmd === 'head' || tail.cmd === 'tail')) {
+    const n = headTailLines(tail.args)
+    if (n) mod = ` · ${tail.cmd === 'head' ? '前' : '后'} ${n} 行`
+  }
+
+  if (READ_FILE_CMDS.has(head.cmd)) {
+    const files = filesOf(head.args)
+    if (!files.length) return null
+    if (head.cmd === 'head' || head.cmd === 'tail') {
+      // head/tail 自身就是读文件:行数从自身参数取
+      const n = headTailLines(head.args)
+      const m = n ? ` · ${head.cmd === 'head' ? '前' : '后'} ${n} 行` : ''
+      return files.length === 1
+        ? `📖 阅读了 ${shortenPath(files[0])}${m}`
+        : `📖 阅读了 ${files.length} 个文件${m}`
+    }
+    return files.length === 1
+      ? `📖 阅读了 ${shortenPath(files[0])}${mod}`
+      : `📖 阅读了 ${files.length} 个文件${mod}`
+  }
+  if (head.cmd === 'tree') {
+    const dir = filesOf(head.args)[0]
+    return `📂 查看目录树 ${dir ? shortenPath(dir) : '.'}`
+  }
+  if (LIST_DIR_CMDS.has(head.cmd)) {
+    const dir = filesOf(head.args)[0]
+    return `📂 查看目录 ${dir ? shortenPath(dir) : '.'}`
+  }
+  if (head.cmd === 'find') {
+    const args = head.args
+    const dir = args.find((a) => !a.startsWith('-'))
+    const nameIdx = args.findIndex((a) => a === '-name' || a === '-iname')
+    const pattern = nameIdx >= 0 ? stripQuotes(args[nameIdx + 1] || '') : ''
+    return pattern
+      ? `🔍 查找文件 ${pattern}`
+      : `🔍 查找文件${dir ? `(${shortenPath(dir)})` : ''}`
+  }
+  if (SEARCH_CMDS.has(head.cmd)) {
+    const nonFlag = filesOf(head.args)
+    const pattern = (nonFlag[0] || '').slice(0, 40)
+    const path = nonFlag[1]
+    if (!pattern) return null
+    return `🔍 搜索 ${pattern}${path ? ` · ${shortenPath(path)}` : ''}`
+  }
+  if (head.cmd === 'wc') {
+    const files = filesOf(head.args)
+    return files.length
+      ? `📄 统计行数 ${shortenPath(files[0])}`
+      : '📄 统计行数'
+  }
+  // cd/echo/pwd/sort 等辅助命令无独立展示价值
+  return null
+}
+
+/**
+ * 命令摘要:整条命令全部只读时返回单行文案,否则 null(保持原折叠展示)。
+ * 多个链式分支(如 ls x && cat y)摘要用顿号连接,最多 3 段。
+ */
+export function summarizeCommand(cmdRaw: string): string | null {
+  const chains = parseReadonlyChains(cmdRaw)
+  if (!chains) return null
+  const parts = chains
+    .map(summarizeChain)
+    .filter((s): s is string => !!s)
+  if (!parts.length) return null
+  if (parts.length > 3) return `${parts.slice(0, 3).join('、')} 等`
+  return parts.join('、')
+}
+
+/** 判断 tool_call 是否可紧凑化:内置浏览型工具,或命令全部只读的 Bash/run_command */
+function isCompactCall(it: ToolItem): boolean {
+  const name = toolNameOf(it)
+  if (COMPACT_TOOLS.has(name)) return true
+  if (name === 'Bash' || name === 'run_command') {
+    return !!summarizeCommand(commandOf(it))
+  }
+  return false
+}
+
 /** 配对后的渲染段:紧凑工具对(单行摘要)或普通工具项(保持原折叠渲染)。
  * 泛型 T 保留调用方传入的具体项类型(如 TaskDetailView 的 DisplayItem) */
 export type ToolSegment<T extends ToolItem = ToolItem> =
@@ -61,6 +263,14 @@ function intentOf(item: ToolItem): string {
 export function buildToolSummary(call: ToolItem, result: ToolItem | null): string {
   const name = toolNameOf(call)
   const intent = intentOf(call)
+
+  // Bash/run_command:按命令内容摘要(结果是原始输出文本,非 JSON)
+  if (name === 'Bash' || name === 'run_command') {
+    const s = summarizeCommand(commandOf(call))
+    if (!s) return intent
+    if (!result || !result.content) return `${s} ...`
+    return s
+  }
 
   if (!result || !result.content) return `${intent} ...`
 
@@ -115,7 +325,7 @@ export function buildToolSegments<T extends ToolItem>(items: T[]): ToolSegment<T
   }
   for (let i = 0; i < items.length; i++) {
     const it = items[i]
-    if (it.type === 'tool_call' && COMPACT_TOOLS.has(toolNameOf(it))) {
+    if (it.type === 'tool_call' && isCompactCall(it)) {
       flush()
       // react_agent 执行循环中 result 紧跟 call 落库;尚未到达时 result 为 null
       const next = items[i + 1]
