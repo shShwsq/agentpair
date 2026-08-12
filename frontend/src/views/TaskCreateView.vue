@@ -935,6 +935,14 @@ onUnmounted(() => {
                 </span>
                 <span class="config-label">user_agent</span>
               </div>
+              <!-- 启用开关(自协作策略抽屉移至此处):关闭=单 agent 模式,右侧模型选择器置灰 -->
+              <label
+                class="ua-enable-toggle"
+                :title="policyUserAgentEnabled ? 'user_agent 参与协作(评估 / 打断 / 验证)' : '单 agent 模式:react_agent 跑 1 轮直接产出结果'"
+              >
+                <input v-model="policyUserAgentEnabled" class="switch" type="checkbox" />
+                <span>{{ policyUserAgentEnabled ? '已启用' : '已停用' }}</span>
+              </label>
               <div class="model-select">
                 <BaseSelect
                   v-model="selectedLlmConfigId"
@@ -948,14 +956,6 @@ onUnmounted(() => {
                   class="model-empty-link"
                 >配置 →</RouterLink>
               </div>
-              <!-- 启用开关(自协作策略抽屉移至此处):关闭=单 agent 模式,上方模型选择器置灰 -->
-              <label
-                class="ua-enable-toggle"
-                :title="policyUserAgentEnabled ? 'user_agent 参与协作(评估 / 打断 / 验证)' : '单 agent 模式:react_agent 跑 1 轮直接产出结果'"
-              >
-                <input v-model="policyUserAgentEnabled" class="switch" type="checkbox" />
-                <span>{{ policyUserAgentEnabled ? '已启用' : '已停用' }}</span>
-              </label>
             </div>
   
             <!-- 第 3 行:react_agent 设置(执行器 + CLI 模型配置 / 技能) -->
@@ -2394,12 +2394,11 @@ onUnmounted(() => {
   gap: var(--space-3);
 }
 
-/* user_agent 启用开关(topbar 第 2 行,靠右对齐) */
+/* user_agent 启用开关(topbar 第 2 行,位于模型下拉框左侧) */
 .ua-enable-toggle {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  margin-left: auto;
   font-size: var(--fs-xs);
   color: var(--color-text-secondary);
   cursor: pointer;
