@@ -167,7 +167,8 @@
   /* ---- 色彩:对话消息卡片(深底上降低饱和度) ---- */
   --color-msg-react-bg: #2e1065;
   --color-msg-summary-bg: linear-gradient(135deg, #1e1b4b 0%, #172554 100%);
-  --color-msg-streaming-bg: linear-gradient(135deg, #052e16 0%, #14532d 100%);
+  /* 深色下降低不透明度,让页面深底透出,卡片整体更深更融合 */
+  --color-msg-streaming-bg: linear-gradient(135deg, rgba(5, 46, 22, 0.45) 0%, rgba(20, 83, 45, 0.4) 100%);
   --color-msg-pulse-soft: rgba(74, 222, 128, 0.2);
   --color-msg-pulse-strong: rgba(74, 222, 128, 0.35);
   --color-msg-streaming-dot: #4ade80;
