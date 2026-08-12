@@ -36,8 +36,9 @@ export interface OnboardingStep {
 /**
  * 引导版本号。步骤结构或文案有大改时递增,使老用户重新看到引导。
  * - v1: 首版,覆盖 HomeView / TaskCreateView / TaskDetailView / AppHeader。
+ * - v2: 主导航文案对齐实际 7 项(补「技能管理」),并补充主题切换入口说明。
  */
-export const ONBOARDING_VERSION = 1
+export const ONBOARDING_VERSION = 2
 
 /**
  * 全部引导步骤(按路由分组,组内按顺序播放)。
@@ -86,15 +87,16 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
     placement: 'bottom',
     title: '主导航',
     content:
-      '顶栏可切换:模型设置(配置 LLM)、CLI 设置(外部 CLI 凭据)、协作策略(评估频率与权限)、记忆管理(用户偏好)。',
+      '顶栏可切换:模型设置(配置 LLM)、CLI 设置(外部 CLI 凭据)、协作策略(评估频率与验证权限)、技能管理(上传自定义技能)、记忆管理(用户偏好 / 全局 / 项目记忆)。',
   },
   {
     id: 'home-settings',
     target: 'app-header-settings',
     route: 'home',
     placement: 'bottom',
-    title: '账号设置',
-    content: '齿轮按钮进入账号设置(修改密码、GitHub/Gitee 绑定、登出设备等),不在主导航中。',
+    title: '账号与辅助按钮',
+    content:
+      '右侧依次为:问号(帮助文档弹窗)、主题切换(浅色 / 深色 / 跟随系统)、齿轮(账号设置:修改密码、GitHub/Gitee 绑定、删除账号)、登出。账号设置不在主导航中,只能从这里进入。',
   },
 
   // ---- 路由:task-create(提交任务) ----
@@ -112,7 +114,8 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
     route: 'task-create',
     placement: 'right',
     title: 'user_agent 评估模型',
-    content: '选择用于结果评估的模型。若列表为空,先到「模型设置」配置一个 LLM 凭据。',
+    content:
+      '选择用于结果评估的模型。若列表为空,先到「模型设置」配置一个 LLM 凭据。下方 react_agent 还可单独选另一个模型(空时回退到此模型)。',
   },
   {
     id: 'create-react-executor',
@@ -121,7 +124,7 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
     placement: 'right',
     title: 'react_agent 执行器',
     content:
-      '选择执行器:内置 react_agent 直接用上面的模型;若已配置外部 CLI(如 codex / qoder),可在此切换。',
+      '选择执行器:内置 react_agent 直接用上面的模型;若已配置外部 CLI(Qoder / Kimi / Hermes / Codex),可在此切换,模型由 CLI 账号或环境变量管理。',
   },
   {
     id: 'create-input',
@@ -148,7 +151,7 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
     placement: 'right',
     title: '结果清单',
     content:
-      '任务执行完成后,产出的结果会按严重程度分组显示在这里。当前任务还没结果,等你提交第一个任务后回到这里就能看到。',
+      '任务执行完成后,产出的结果会按维度分组显示在这里(安全审计场景按严重程度,代码审查场景按类别)。当前任务还没结果,等你提交第一个任务后回到这里就能看到。',
   },
   {
     id: 'detail-conversation',

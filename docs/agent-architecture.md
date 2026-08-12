@@ -26,7 +26,7 @@
 │   └─ ExternalCLIAgent   → acp_base + wrapper │
 │      (qoder_cli / kimi_cli / hermes_cli /    │
 │       qoder_cli_cn / codex_cli)              │
-└───────────────┬──────────────────────────────┘
+└───────┬──────────────────────────────────────┘
                 │ summary + plan
                 ▼
        user_agent 对照 checklist 评估
@@ -35,7 +35,18 @@
    done=true        missing≠∅
         │               │
    落库 results    followup_query → 下一轮
+        │
+        │ (实验性,允许验证时)
+        ▼
+┌──────────────────────────────────────────────┐
+│ verifier_agent (独立 ReAct, 复用沙箱)         │
+│   - http_request (沙箱内 urllib)             │
+│   - run_python_code (复用 react_agent 沙箱)  │
+│   - auth_mode: per_action / direct           │
+└──────────────────────────────────────────────┘
 ```
+
+> verifier_agent 是实验性功能,仅在用户开启「允许 user_agent 自行验证」时启用。详见本文第 5 节。
 
 ### 1.1 角色分工
 
@@ -44,6 +55,7 @@
 | **user_agent** | 评估覆盖度、生成 checklist、追问、整理结构化结果 | 否，只输出 JSON 评估 | `task.llm_config_id` |
 | **内置 react_agent** | ReAct 循环执行代码分析（clone / search / read / semgrep 等） | 是，调用沙箱工具 | `task.react_llm_config_id`（空时回退 `llm_config_id`） |
 | **ExternalCLIAgent** | 沙箱内启动外部 CLI，通过 ACP 协议通信 | 是，由 CLI 自主调工具 | CLI 自管（凭证经环境变量注入） |
+| **verifier_agent**（实验性） | 在沙箱里跑 PoC / HTTP 请求动态验证 react_agent 的发现 | 是，独立工具集（`http_request` + `run_python_code`） | `task.llm_config_id`（复用 user_agent 的 LLMClient） |
 
 ### 1.2 协作轮次
 
@@ -508,9 +520,123 @@ bridge 监听 `ACP_BRIDGE_PORT=8088`，凭证经环境变量注入，CLI 子进�
 
 ---
 
-## 5. 上下文传递机制总结
+## 5. verifier_agent 详解（实验性）
 
-### 5.1 上下文传递维度
+**文件**：[backend/app/agents/verifier_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/verifier_agent.py)
+
+### 5.1 定位与触发
+
+user_agent 在评估覆盖度后,若用户开启了「允许自行验证」(`allow_verify=true`),可调用独立的 `verifier_agent` 在已部署测试环境动态验证 react_agent 的发现(如确认 SQL 注入是否真实可利用、IDOR 是否可访问他人资源)。
+
+**对用户透明**：前端不暴露 `verifier_agent` 字样,SSE 事件 `role=user_agent` + `verify=true`,UI 显示「正在验证」而非「正在评估」。
+
+### 5.2 核心特征
+
+- **独立 ReAct 循环**：自己的 messages + 迭代（最大 10 次），不复用 react_agent 的 messages
+- **复用沙箱会话**：`run_python_code` 在同一沙箱执行，可 `read_file` 仓库代码辅助构造 PoC
+- **独立 LLM 调用**：用 user_agent 的 `LLMClient`（`task.llm_config_id`），与 react_agent 模型解耦
+- **工具集**（不复用 react_agent 工具表，独立 `backend/app/tools/verifier_tools.py`）：
+  - `http_request`：向 `test_env_url` 发 HTTP 请求（GET/POST/PUT/DELETE + headers + body），**在沙箱里执行**（用 urllib 标准库，不依赖 httpx/requests），URL base 锁定为任务配置，后端服务器 IP 不暴露给测试环境。支持 `auth_profile` 选择登录身份
+  - `run_python_code`：在沙箱执行 Python（与 react_agent 共享沙箱，可 `read_file` 仓库代码）
+
+### 5.3 授权模式（`task.params._verifier.auth_mode`）
+
+| 模式 | 行为 | 适用场景 |
+|------|------|---------|
+| `per_action`（默认） | 每个 `http_request` / `run_python_code` 调用前推送 `verify_action` SSE 事件 → 前端弹窗 `VerifyActionDialog` 让用户确认 → 阻塞等待（`user_interaction.request_verify_authorization`） | 生产 / 测试环境隔离不彻底，需人工把关 |
+| `direct` | 不弹窗，直接执行 | 测试环境完全隔离，可信 |
+
+用户可在「协作策略」页设默认模式（`verifier_auth_mode_default`），任务创建时可覆盖。
+
+### 5.4 登录 token（`task.params._verifier.auth_tokens`）
+
+list of `{label, header_name, header_value}`：
+
+- 前端 `TaskCreateView` 允许添加多个 token（label + header_name + header_value）
+- `TaskDetailView` 只读展示（`maskTokenValue`：首 8 + 尾 4 字符）
+- `VerifyActionDialog` 显示当前动作用的 `auth_profile` 徽标
+- LLM 调 `http_request` 时传 `auth_profile=label`，工具自动注入 `header_name: header_value` 到请求头
+- **LLM 永不见 `header_value` 明文**（安全）：系统提示词只列出可用 labels，工具内部完成注入
+- `VerifyConfigUpdateRequest.verifier_auth_tokens=None` 表示不改，空列表表示清空，非空表示覆盖
+
+### 5.5 事件流与落库
+
+| 阶段 | event_bus 事件 | Conversation 落库 |
+|------|---------------|-------------------|
+| 思考增量 | `thinking_delta(role=user_agent, verify=true, phase=reasoning/content)` | （累积到 reasoning_buf） |
+| 工具调用 | `conversation(role=user_agent, type=tool_call, verify=true)` | 是（人类可读描述如「验证请求: GET /api/users [http_request]」） |
+| 工具结果 | `conversation(role=user_agent, type=tool_result, verify=true)` | 是（超 5000 字符截断） |
+| 思考完成 | （隐含 phase=end） | `role=user_agent, type=thinking, content="[验证结果] ..."` |
+
+### 5.6 输出
+
+验证完成后输出自然语言总结：
+
+- 每个验证目标的结论：已确认可利用 / 无法确认 / 确认为误报
+- 关键证据：HTTP 状态码、响应内容片段
+- 建议：是否提升 / 降低严重级别
+
+系统提示强调「不要对生产环境造成破坏性影响」「优先用最小化的 PoC（如 `' OR 1=1--` 比 `DROP TABLE` 更合适）」。
+
+### 5.7 安全设计
+
+- `http_request` 在沙箱内执行（urllib 标准库），后端服务器 IP 不暴露给测试环境
+- SSL 证书验证跳过（测试环境可能自签）
+- 自定义 `AllMethodRedirect` 处理器跟随 307 / 308 重定向（适用于所有 HTTP 方法）
+- LLM 永不见 token 明文（只看到 label）
+- 默认 `per_action` 授权模式，防止误伤生产环境
+
+---
+
+## 6. local 模式安全策略
+
+`SANDBOX_MODE=local`（无沙箱，开发期使用）时，虽不提供容器隔离，仍通过四层软策略降低风险（详见 `docs/spec.md` 7.4）：
+
+### 6.1 路径策略（`check_local_write_permission`）
+
+`backend/app/sandbox/client.py` 模块级函数：
+
+- `.git` 目录写保护（`SANDBOX_LOCAL_PROTECT_GIT=true` 默认开，防破坏版本控制元数据）
+- 配置的只读目录（`SANDBOX_LOCAL_READONLY_PATHS=.vscode,.trae,.idea`）写保护
+- `sandbox_tools.py` 的 `write_file` / `str_replace_editor` 在 local 分支调用它做权限校验
+
+### 6.2 命令白名单（`_classify_command`）
+
+`sandbox_tools.py` 按 `SANDBOX_LOCAL_SAFE_COMMANDS` / `SANDBOX_LOCAL_DANGEROUS_COMMANDS` 配置分类：
+
+| 分类 | 行为 | 示例 |
+|------|------|------|
+| `safe` | 直接执行，不拦截 | `git status` / `git diff` / `ls` / `cat` / `grep` / `python` / `mkdir -p` / `cp -r` |
+| `normal` | 执行 + 记录日志 | （其他未匹配的命令） |
+| `dangerous` | 推前端确认 | `rm -rf /` / `rm -rf ~` / `mkfs` / `dd if=` / fork bomb / `curl ... \| sh` / `sudo` / `shutdown` |
+
+### 6.3 危险命令前端确认
+
+对齐 `_PendingVerifyAction` 模式（与 verifier_agent 的 `per_action` 授权机制一致）：
+
+- `user_interaction.py` 新增 `_PendingCommandConfirm` + `request` / `wait` / `submit` / `get` / `clear` / `has` 六函数
+- SSE 新增 `command_confirm` 事件，推送 `{tool, reason, command, command_id}` 给前端
+- API 新增 `GET /tasks/{id}/pending_command_confirm` + `POST /tasks/{id}/command_confirm`
+- 前端 `CommandConfirmDialog.vue`：显示完整命令 + 拦截原因（红色高亮）+ 「拒绝 / 同意」按钮
+- 用户拒绝时返回 `{"status_code": 0, "body": "[用户拒绝执行此命令]"}`，agent 收到反馈跳过
+
+### 6.4 平台原生隔离（`SANDBOX_LOCAL_NATIVE_ISOLATION=true`，可选）
+
+| 平台 | 工具 | 隔离策略 |
+|------|------|---------|
+| macOS | `sandbox-exec` | 系统目录只读 + 工作区读写 + 禁 `sudo` / `su` |
+| Linux | `bwrap` | `--ro-bind / /` + `--bind work_dir` + `--dev /dev` + `--proc /proc` |
+| Windows | — | 无原生沙箱，跳过（仅靠 6.1-6.3 软策略） |
+
+`SandboxSession.__init__` 检测工具可用性（`_native_sandbox` 属性），`_wrap_native_sandbox` 在 `_local_run_command` 中包装命令。
+
+> **生产环境务必用 `SANDBOX_MODE=sandbox`**。local 模式的四层策略只能降低风险，不能替代容器隔离——任意 shell 仍可在工作区外读写（除非配 `bwrap` / `sandbox-exec` 原生隔离）。
+
+---
+
+## 7. 上下文传递机制总结
+
+### 7.1 上下文传递维度
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -540,7 +666,7 @@ bridge 监听 `ACP_BRIDGE_PORT=8088`，凭证经环境变量注入，CLI 子进�
 └──────────────┘                     └──────────────────┘
 ```
 
-### 5.2 跨轮记忆传递路径
+### 7.2 跨轮记忆传递路径
 
 | 传递路径 | 机制 | 字符上限 |
 |---------|------|---------|
@@ -555,7 +681,7 @@ bridge 监听 `ACP_BRIDGE_PORT=8088`，凭证经环境变量注入，CLI 子进�
 | 长期记忆 → CLI agent | `_load_project_memory_summary` + `_load_global_memory` 注入 prompt 末尾 | 各段 2000 |
 | 完整项目记忆 → 沙箱 | orchestrator clone 后 `write_project_memory_file` 写入 `/home/user/.agent_memory/project_memory.md` | 无限制（react_agent / CLI 可 read_file 查阅） |
 
-### 5.3 用户交互上下文
+### 7.3 用户交互上下文
 
 | 交互类型 | 触发条件 | 传递方式 |
 |---------|---------|---------|
@@ -564,67 +690,72 @@ bridge 监听 `ACP_BRIDGE_PORT=8088`，凭证经环境变量注入，CLI 子进�
 | **运行中追加消息** | 用户在对话界面输入框发消息 | API 端点落库 `Conversation(role=user, type=message)` + 推 SSE；react_agent 每个迭代开头 `drain_user_messages` 注入 `messages` |
 | **完成后重启** | 任务 COMPLETED 后用户追加消息 | `resume_audit_with_message`：用户消息拼到 `task.user_input` 后面作为 `effective_intent`，从 Conversation 表加载 `react_summaries`，重启协作循环 |
 
-### 5.4 事件流（event_bus）
+### 7.4 事件流（event_bus）
 
-orchestrator / user_agent / react_agent / CLI agent 都通过 `event_bus.publish(task_id, event_type, payload)` 推送事件，前端通过 SSE 实时接收：
+orchestrator / user_agent / react_agent / CLI agent / verifier_agent 都通过 `event_bus.publish(task_id, event_type, payload)` 推送事件，前端通过 SSE 实时接收：
 
 | 事件类型 | 触发者 | 用途 |
 |---------|--------|------|
 | `status` | orchestrator | 任务状态变更（status + current_stage） |
-| `conversation` | orchestrator / react_agent / CLI agent | 新对话记录（thinking / tool_call / tool_result / evaluation / question / summary / error） |
+| `conversation` | orchestrator / react_agent / CLI agent / verifier_agent | 新对话记录（thinking / tool_call / tool_result / evaluation / question / summary / error；verifier 落库带 `verify=true`） |
 | `conversation_update` | CLI agent (Kimi) | 更新已有 conversation 的 content（节流推送） |
-| `thinking_delta` | user_agent / react_agent / CLI agent | 流式思考增量（phase: start / reasoning / content / error / end） |
+| `thinking_delta` | user_agent / react_agent / CLI agent / verifier_agent | 流式思考增量（phase: start / reasoning / content / error / end；verifier 带 `role=user_agent, verify=true`） |
 | `plan` | react_agent / CLI agent | plan 状态更新（round_idx + steps） |
 | `question` | orchestrator | 用户澄清提问（ask_round + questions + reasoning） |
 | `checklist_review` | orchestrator | checklist 确认请求（checklist + reasoning） |
+| `verify_action` | verifier_agent | 验证动作授权请求（`per_action` 模式，前端 VerifyActionDialog） |
+| `command_confirm` | sandbox_tools (local 模式) | 危险命令确认（前端 CommandConfirmDialog） |
 | `done` / `error` | orchestrator | 任务终止事件 |
 
 ---
 
-## 6. 关键设计点
+## 8. 关键设计点
 
-### 6.1 职责分离
+### 8.1 职责分离
 
-- **user_agent 不调工具**：只评估和追问，避免与 react_agent 职责重叠
+- **user_agent 不调工具**：只评估和追问，避免与 react_agent 职责重叠（verifier_agent 是独立 ReAct，不算 user_agent 调工具）
 - **react_agent 不管理 task 状态**：只跑一轮返回结果，由 orchestrator 控制 task 状态
 - **结构化结果由 user_agent 整理**：react_agent 只输出自然语言 summary，`results + grouping` 由 user_agent 在 `done=true` 时输出
 - **执行器抽象**：orchestrator 通过 `get_executor(task)` 拿 provider，无需关心底层是内置 LLM 循环还是外部 CLI 协议
+- **verifier_agent 独立工具集**：不复用 react_agent 工具表（避免 `http_request` 暴露给代码执行阶段），独立 `verifier_tools.py`
 
-### 6.2 防止 LLM 反复摇摆
+### 8.2 防止 LLM 反复摇摆
 
 - **user_agent 跨轮自记忆**：第 2 轮起注入之前各轮评估，提示"之前已标 covered 的类别，本轮若 react_agent 未推翻结论，继续保持"
 - **优先级裁剪**：missing 非空的轮次优先保留（对决策更有参考价值）
 - **react_agent 三级压缩**：跨轮记忆超限时按优先级降级，最终 LLM 压缩早期轮次
 
-### 6.3 防止死循环
+### 8.3 防止死循环
 
 - **react_agent 循环检测**：连续相同调用 + 滑动窗口低多样性检测，强制转入总结
 - **MAX_ROUNDS=4**：协作轮次上限
 - **MAX_ITERATIONS=30**：单轮 ReAct 迭代上限
 - **MAX_ASKS=2**：用户澄清提问上限
+- **verifier MAX_ITERATIONS=10**：验证 ReAct 迭代上限
 
-### 6.4 暂停检查点
+### 8.4 暂停检查点
 
 - **粗粒度**：每轮开始前 + react_agent 跑完后、user_agent 评估前
 - **细粒度**：react_agent 每个迭代边界 + 工具调用前
 
-### 6.5 资源清理（finally 块）
+### 8.5 资源清理（finally 块）
 
 `run_dual_agent_audit` 和 `resume_audit_with_message` 的 finally 块清理：
-- `clear_pending_question` / `clear_pending_checklist` / `clear_pause_state` / `clear_user_messages`
+- `clear_pending_question` / `clear_pending_checklist` / `clear_pause_state` / `clear_user_messages` / `clear_pending_verify_authorization` / `clear_pending_command_confirm`
 - `sandbox_tools.mark_task_completed`（延迟关闭沙箱，TTL 1 小时惰性清理）
 - 推送 `done` / `error` 终止事件
 - `finish_task`（通知事件总线任务结束）
 
 ---
 
-## 7. 文件索引
+## 9. 文件索引
 
 | 文件 | 职责 |
 |------|------|
 | [orchestrator.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/orchestrator.py) | 双智能体协作编排（round 0 评估 + 协作循环 + resume） |
 | [user_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/user_agent.py) | user_agent 实现（评估 / checklist 生成 / ask_user / 跨轮自记忆） |
 | [react_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/react_agent.py) | 内置 react_agent（流式 LLM / 工具调用 / plan 状态机 / 三级压缩跨轮记忆 / 循环检测） |
+| [verifier_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/verifier_agent.py) | 验证智能体（独立 ReAct 循环 + http_request / run_python_code 工具 + per_action 授权） |
 | [executor_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/executor_agent.py) | 执行器抽象层（BuiltinReactAgent + ExternalCLIAgent + 工厂） |
 | [registry.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/registry.py) | Agent 类型注册表（凭证字段 + 沙箱配置 + executor 入口） |
 | [acp_base.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/acp_base.py) | ACP 基础设施（ACPClient + _ACPCollector + _ACPRecorder + bridge 管理 + 通用 run_acp_agent） |
@@ -634,8 +765,11 @@ orchestrator / user_agent / react_agent / CLI agent 都通过 `event_bus.publish
 | [kimi_cli_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/kimi_cli_agent.py) | Kimi CLI wrapper（post_session_setup 设 yolo 模式） |
 | [hermes_cli_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/hermes_cli_agent.py) | Hermes CLI wrapper（动态凭证映射 + config.yaml） |
 | [codex_cli_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/codex_cli_agent.py) | Codex CLI wrapper（pre_bridge_hook 写 config.toml） |
+| [sandbox/client.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/sandbox/client.py) | OpenSandbox 客户端（SandboxSync + local 模式 + 路径写保护 check_local_write_permission + 原生隔离 _wrap_native_sandbox） |
+| [tools/sandbox_tools.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/tools/sandbox_tools.py) | 沙箱工具实现（clone_repo / search_code / run_command 等 + local 模式 _classify_command + 危险命令确认） |
+| [tools/verifier_tools.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/tools/verifier_tools.py) | verifier_agent 工具（http_request 沙箱内 urllib + run_python_code + auth_profile 注入） |
 | [memory_injection.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/services/memory_injection.py) | 记忆注入服务（User Profile / 全局记忆 / 项目记忆） |
-| [user_interaction.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/user_interaction.py) | 用户交互状态管理（pending question / checklist 阻塞等待） |
+| [user_interaction.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/user_interaction.py) | 用户交互状态管理（pending question / checklist / verify_authorization / command_confirm 阻塞等待） |
 | [user_messages.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/user_messages.py) | 用户补充消息队列（运行中/暂停中追加） |
 | [pause_controller.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/pause_controller.py) | 暂停/恢复控制器 |
 | [event_bus.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/event_bus.py) | 事件总线（publish / SSE 订阅） |

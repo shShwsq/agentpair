@@ -23,22 +23,59 @@
 
 以下功能在迭代过程中自发产生,已落地到代码中:
 
+#### 执行器与外部 CLI 集成
+
 - **执行器抽象层(ExecutorAgent)**:把"执行智能体"抽象为统一接口,支持 builtin(内置 react_agent)和外部 CLI agent(通过 ACP 协议通信)两种 provider。新增 agent 类型只需在 registry 注册,无需改核心代码。
-- **ACP Bridge**:HTTP ↔ stdio 桥接服务,运行在沙箱内,让外部 CLI agent(如 Qoder CLI / Qoder CN CLI / Kimi Code CLI)通过 ACP 协议接入。
+- **ACP Bridge**:HTTP ↔ stdio 桥接服务,运行在沙箱内,让外部 CLI agent(如 Qoder CLI / Qoder CN CLI / Kimi Code CLI / Hermes CLI)通过 ACP 协议接入。
 - **Qoder CLI Agent**:通过 ACP 协议调用 Qoder CLI(国际版 + 国内版)作为 react 角色,模型由 CLI 账号配额管理,不走后端 LLM 配置。
 - **Kimi Code CLI Agent**:通过 ACP 协议调用开源 Kimi Code CLI 作为 react 角色,模型经 `KIMI_MODEL_*` 环境变量注入(支持自部署 LLM 端点),凭证由用户在智能体配置页填写。
+- **Hermes CLI Agent**:通过 ACP 协议调用开源 Hermes CLI(NousResearch),支持 7 种 LLM 供应商(OpenRouter / Anthropic / OpenAI / z.ai / Kimi / MiniMax / Gemini),按 provider 动态映射 API Key 环境变量,通过 `~/.hermes/config.yaml` 注入模型配置。
+- **Codex CLI Agent**:通过 ACP 协议调用 OpenAI Codex CLI。Codex 不原生支持 ACP,通过专用的 `codex_bridge.py` 翻译 `codex exec --json` 的 JSONL 事件流为 ACP 通知。凭证经 `CODEX_API_KEY` 环境变量注入,`~/.codex/config.toml` 写入 `approval_policy=never` + `sandbox_mode=danger-full-access` 支持非交互模式。
+- **codex_bridge.py**:Codex 专用桥接脚本,处理 Codex 特有的事件流语义(ErrorItem 通知翻译为 thought_chunk 而非 error、stderr 累积到错误消息等),所有 POST `/rpc` 响应以 SSE 流式返回。
+
+#### 双智能体协作增强
+
 - **场景降级**:checklist 不再从场景固定读取,改为 user_agent 第 0 轮动态生成 + 用户编辑确认。prompt 通用化,工具全部开放,结果结构通用化。
 - **任务暂停/恢复**:用户可暂停运行中的任务,后台线程在检查点(迭代边界/工具调用前)阻塞,恢复后继续。
 - **用户补充消息**:任务运行中/完成后,用户可追加消息触发新一轮协作(resume_audit_with_message)。
 - **跨轮记忆传递**:三级压缩策略(完整 → 丢工具摘要 → LLM 压缩早期轮次),控制 token 成本。
 - **循环检测**:滑动窗口检测重复工具调用(连续相同 + 交替循环),打破死循环。
 - **Plan 状态管理**:react_agent 在思考中输出 `<plan>` 清单,代码维护状态,跨轮续接避免重复规划。
-- **工作区浏览**:前端可浏览 react_agent clone 的工作区文件结构和内容(任务完成后保留 1 小时)。
+- **verifier_agent(实验性)**:独立的验证智能体,user_agent 在评估覆盖度后可调用它在已部署测试环境动态验证 react_agent 的发现(如确认 SQL 注入是否真实可利用)。独立 ReAct 循环 + 独立工具集(`http_request` 在沙箱内 urllib 执行 + `run_python_code`),支持 `per_action`(每个动作弹窗确认)/ `direct`(直接执行)两种授权模式。支持登录 token 注入(auth_profile,label 选择身份,LLM 永不见 token 明文)。
+- **协作策略设置页**:用户可配置评估频率(每轮 / 每两轮 / 仅最后)与验证权限(是否允许 user_agent 自行验证 + 授权模式默认值 + verifier 测试环境 URL + 多个登录 token)。
+- **用户澄清提问(ask_user)**:round 0 user_agent 可向用户提问(选择题 + 填空题,最多 2 轮),前端弹窗交互,后端阻塞等待答案。
+
+#### 记忆与技能系统
+
+- **记忆管理**:三类长期记忆统一管理(用户偏好 User Profile / 全局记忆 UserMemory / 项目记忆 Project)。user_agent 在 system prompt 注入精简版,react_agent 与 CLI agent 在沙箱写入完整项目记忆供 `read_file` 查阅。前端记忆管理页支持查看 / 编辑 / 删除。
+- **用户技能上传**:用户可上传自定义 skill(SKILL.md 文件),隔离存储(per-user 目录),仅本人任务可用。系统内置 skill 全局共享。任务创建时可选允许调用的 skill 集合(`allowed_skills`)。
+
+#### 安全与隔离
+
 - **Git 平台抽象层(GitHub / Gitee)**:统一 `GitProvider` 抽象层,支持 GitHub + Gitee 双平台 OAuth 登录与仓库绑定。同一用户可同时绑定两平台,clone 时按仓库 URL 主机自动选用对应 token。取代旧的 `User.github_id` 字段,改为 `UserGitBinding` 表(含一次性数据迁移)。
+- **解绑时主动撤销 Token**:解绑 Git 平台时不仅清本地 token,还主动调 GitHub / Gitee 的 revocation API 撤销授权,避免 OAuth 授权态残留导致无法重新绑定。
+- **local 模式安全策略**:无沙箱场景(SANDBOX_MODE=local,开发期使用)下通过四层软策略降低风险:
+  1. **路径策略**:`.git` 目录 + 配置的只读目录(`.vscode` / `.trae` / `.idea`)写保护
+  2. **命令白名单**:按 `SANDBOX_LOCAL_SAFE_COMMANDS` / `SANDBOX_LOCAL_DANGEROUS_COMMANDS` 分类 safe / normal / dangerous
+  3. **危险命令前端确认**:dangerous 命令推 `command_confirm` SSE 事件,前端 `CommandConfirmDialog` 弹窗显示完整命令 + 拦截原因 + 拒绝 / 同意按钮,用户拒绝时返回 `[用户拒绝执行此命令]`
+  4. **平台原生隔离(可选)**:macOS 用 `sandbox-exec`、Linux 用 `bwrap`,Windows 无原生沙箱跳过
+- **GitHub Token 加密存储**:固定 `GITHUB_TOKEN_SECRET` 加密 GitHub / Gitee 的 access token,避免每次重启随机密钥导致解密失败。
+
+#### 前端体验
+
+- **工作区浏览**:前端可浏览 react_agent clone 的工作区文件结构和内容(任务完成后保留 1 小时)。
 - **思考链流式推送**:LLM 的 reasoning_content 通过 SSE thinking_delta 事件实时推给前端(打字机效果)。
-- **删除账号**:硬删除 + 级联清理(任务/配置/token)。
 - **多厂商 LLM 支持**:DashScope(通义千问)/ DeepSeek / 智谱 / Kimi / 豆包 / MiniMax 等,通过 models_catalog.json 统一管理差异。
 - **代码审查场景模板**:除安全审计外,新增 code_review 场景(预设提示词 + 推荐 skill)。
+- **新手引导(OnboardingTour)**:首次登录播放分步引导,按路由分组(首页 / 任务创建 / 任务详情 / 账号设置),锚点用 `data-onboarding` 属性匹配(比 class 名稳定),版本号递增使老用户重新看到。
+- **主题切换**:浅色 / 深色 / 跟随系统三档,顶栏主题切换按钮。
+- **帮助文档弹窗**:顶栏问号按钮打开 `help.md` 渲染的帮助弹窗,覆盖所有功能的使用说明。
+- **账号设置入口收敛**:账号设置(修改密码 / Git 平台绑定 / 删除账号)只能从顶栏齿轮按钮进入,不在主导航中。
+- **任务运行中的多种弹窗**:
+  - `QuestionDialog`:user_agent round 0 澄清提问(选择题 + 填空题)
+  - `ChecklistReviewDialog`:checklist 编辑确认
+  - `VerifyActionDialog`:verifier_agent 的 per_action 授权确认(显示 auth_profile 徽标)
+  - `CommandConfirmDialog`:local 模式危险命令确认(红色高亮拦截原因)
 
 ---
 
@@ -104,10 +141,15 @@ uvicorn app.main:app --reload
 **完成标志**:所有代码执行都在沙箱里,宿主机只做调度。
 
 **实际实现**:
-- `SandboxSession` 封装,支持 sandbox(真实 OpenSandbox)和 local(本地模式,不用沙箱)两种模式
+- `SandboxSession` 封装,支持 sandbox(真实 OpenSandbox)和 local(本地模式,不用沙箱,原 "mock" 模式已重命名)两种模式
 - 使用 OpenSandbox 官方 `SandboxSync` 同步 API,对齐 react_agent 的同步循环
 - 支持 SSH key 挂载(私有仓库 clone)、资源限制(CPU/内存/执行时间)、端口转发
 - 后台命令管理(ACP bridge 等长驻服务)
+- **local 模式四层安全策略**(开发期使用,不能替代容器隔离):
+  1. 路径策略:`.git` + 配置只读目录(`.vscode` / `.trae` / `.idea`)写保护(`check_local_write_permission`)
+  2. 命令白名单:`_classify_command` 按 `SANDBOX_LOCAL_SAFE_COMMANDS` / `SANDBOX_LOCAL_DANGEROUS_COMMANDS` 分类 safe / normal / dangerous
+  3. 危险命令前端确认:`command_confirm` SSE 事件 + `CommandConfirmDialog` 弹窗(显示完整命令 + 拦截原因)
+  4. 平台原生隔离(可选):macOS `sandbox-exec` / Linux `bwrap`,Windows 跳过
 
 ---
 
@@ -222,7 +264,7 @@ uvicorn app.main:app --reload
 - 用户 LLM 配置(UserLLMConfig):列表式配置,每个配置含 provider/api_key/model/enable_thinking/base_url
 - 用户 Agent 配置(UserAgentConfig):存储外部 CLI agent 的凭证(如 Qoder CLI PAT / Kimi Code API Key)
 - 任务级模型选择:`llm_config_id`(user_agent 用)+ `react_llm_config_id`(react_agent 用,空时回退)
-- 任务级执行器选择:`executor` 字段(builtin / qoder_cli / qoder_cli_cn / kimi_cli)
+- 任务级执行器选择:`executor` 字段(builtin / qoder_cli / qoder_cli_cn / kimi_cli / hermes_cli / codex_cli)
 
 ---
 
@@ -250,18 +292,26 @@ uvicorn app.main:app --reload
 
 **实际实现(超出原规划)**:
 - Vue3 + TypeScript + Vue Router + Pinia
-- 完整页面:LoginView / VerifyEmailView / ResetPasswordView / OAuthCallbackView / HomeView(任务列表)/ TaskCreateView / TaskDetailView / ModelSettingsView / SettingsView
-- 实时对话流:ConversationMessage 组件,支持 thinking / tool_call / tool_result / evaluation / question / summary 等消息类型
+- 完整页面:LoginView / VerifyEmailView / ResetPasswordView / OAuthCallbackView / HomeView(任务列表)/ TaskCreateView / TaskDetailView / ModelSettingsView / SettingsView / SkillManagementView / MemoryManagementView / CollaborationPolicyView
+- 实时对话流:ConversationMessage 组件,支持 thinking / tool_call / tool_result / evaluation / question / summary / verify 等消息类型
 - 流式思考链:thinking_delta SSE 事件,打字机效果实时展示 reasoning + content
 - 覆盖度看板:ChecklistReviewDialog(第 0 轮用户编辑确认清单)+ 任务详情页覆盖度展示
 - 工作区侧栏:WorkspaceSidebar 组件,浏览 clone 的文件结构和内容
 - 暂停/恢复按钮 + 用户消息输入框(UserMessageInput)
 - 报告导出:Markdown 下载 + HTML 打印为 PDF
 - 模型配置:ModelConfigDialog + ModelCombobox + AgentConfigDialog
-- Git 平台绑定:GitProviderDialog(统一 GitHub / Gitee,按 provider 动态渲染标题/品牌色/scope 文案)
+- Git 平台绑定:GitProviderDialog(统一 GitHub / Gitee,按 provider 动态渲染标题/品牌色/scope 文案),解绑时后端主动撤销平台 Token
 - 多平台仓库选择:TaskCreateView 并行加载已绑定平台仓库,合并到带 `[GitHub]`/`[Gitee]` 标记的统一下拉
 - 登录页:GitHub + Gitee 双 OAuth 登录按钮
 - 全文搜索:任务列表支持按标题/输入/对话内容/结果内容搜索
+- **新手引导(OnboardingTour)**:首次登录播放分步引导,按路由分组,`data-onboarding` 属性匹配锚点,版本号递增使老用户重新看到
+- **主题切换**:浅色 / 深色 / 跟随系统三档,顶栏主题切换按钮
+- **帮助文档弹窗**:顶栏问号按钮打开 help.md 渲染的帮助弹窗
+- **账号设置入口收敛**:账号设置只从顶栏齿轮按钮进入,不在主导航
+- **任务运行中弹窗**:QuestionDialog(澄清提问)/ ChecklistReviewDialog(checklist 确认)/ VerifyActionDialog(verifier 授权)/ CommandConfirmDialog(local 模式危险命令确认)
+- **技能管理页**:SkillManagementView,用户上传 / 编辑自定义 skill(SKILL.md),隔离存储
+- **记忆管理页**:MemoryManagementView,管理用户偏好 / 全局记忆 / 项目记忆三类长期记忆
+- **协作策略页**:CollaborationPolicyView,配置评估频率 + 验证权限 + verifier 测试环境 + 登录 token
 
 ---
 

@@ -38,6 +38,8 @@
 - `builtin`:系统内置 react_agent(基于 react_agent.py),使用后端配置的 LLM
 - `qoder_cli` / `qoder_cli_cn`:沙箱内运行 Qoder CLI(国际版 / 国内版),通过 ACP 协议通信,模型由 CLI 账号配额管理
 - `kimi_cli`:沙箱内运行 Kimi Code CLI(开源),通过 ACP 协议通信,模型经 `KIMI_MODEL_*` 环境变量注入(支持自部署 LLM 端点)
+- `hermes_cli`:沙箱内运行 Hermes CLI(开源,NousResearch),通过 ACP 协议通信,支持 7 种 LLM 供应商(OpenRouter / Anthropic / OpenAI / z.ai / Kimi / MiniMax / Gemini)
+- `codex_cli`:沙箱内运行 OpenAI Codex CLI,不原生支持 ACP,通过 `codex_bridge.py` 翻译 `codex exec --json` 的 JSONL 事件流为 ACP 通知
 - 扩展性:新增 agent 类型只需在 registry 注册,无需改核心代码
 
 ### 1.3 双端策略
@@ -134,6 +136,21 @@ user_agent 对照**动态生成的 checklist**评估每轮:
 - 追问要带上**已有发现作为上下文**,避免 react_agent 重复扫描
 - 示例:"已发现 SQL 注入 2 处(位置见上文)。请继续检查认证与授权模块,重点关注:1) 权限校验是否在每个受保护路由上;2) JWT 验证是否校验签名与过期;3) 是否存在 IDOR(通过用户可控 ID 访问他人资源)。"
 
+### 3.5.1 验证智能体(实验性,verifier_agent)
+**实验性功能**:在协作策略中开启「允许 user_agent 自行验证」后,user_agent 可调用独立的 `verifier_agent` 在已部署测试环境动态验证 react_agent 的发现(如确认 SQL 注入是否真实可利用、IDOR 是否可访问他人资源)。
+
+- **对用户透明**:前端不暴露 `verifier_agent` 字样,SSE 事件 `role=user_agent` + `verify=true`,UI 显示「正在验证」而非「正在评估」
+- **独立 ReAct 循环**:自己的 messages + 迭代(最大 10 次),复用 react_agent 的沙箱会话(`run_python_code` 在同一沙箱,可 `read_file` 仓库代码辅助构造 PoC)
+- **独立 LLM 调用**:用 user_agent 的 `LLMClient`,与 react_agent 模型解耦
+- **工具**:
+  - `http_request`:向 `test_env_url` 发 HTTP 请求(GET/POST/PUT/DELETE + headers + body),**在沙箱里执行**(用 urllib 标准库,不依赖 httpx/requests),URL base 锁定为任务配置,后端服务器 IP 不暴露给测试环境。支持 `auth_profile` 选择登录身份(自动注入对应认证头,LLM 只看到 label 不看到 token)
+  - `run_python_code`:在沙箱执行 Python(可复用 react_agent 沙箱已 clone 的仓库)
+- **授权模式**(`task.params._verifier.auth_mode`):
+  - `per_action`:每个 `http_request` / `run_python_code` 调用前推送 `verify_action` SSE 事件 → 前端弹窗 `VerifyActionDialog` 让用户确认 → 阻塞等待(`user_interaction.request_verify_authorization`)
+  - `direct`:不弹窗,直接执行(用户可在「协作策略」设默认,任务创建时可覆盖)
+- **登录 token**(`task.params._verifier.auth_tokens`):list of `{label, header_name, header_value}`,LLM 调 `http_request` 时传 `auth_profile=label` 选择身份,工具自动注入 `header_name: header_value` 到请求头。LLM 永不见 token 明文(安全)。前端 TaskCreateView 允许添加多个 token,TaskDetailView 只读展示(`maskTokenValue`:首 8 + 尾 4 字符)
+- **输出**:验证完成后输出自然语言总结——每个验证目标的结论(已确认可利用 / 无法确认 / 确认为误报)+ 关键证据(状态码、响应片段)+ 严重级别建议。系统提示强调「不要对生产环境造成破坏性影响」「优先用最小化 PoC(如 `' OR 1=1--` 比 `DROP TABLE` 更合适)」
+
 ### 3.6 终止条件(硬性,避免死循环)
 满足以下**全部**条件后输出最终报告:
 1. checklist 所有适用维度均有明确结论(有 / 无 / 无法确定)
@@ -197,7 +214,8 @@ Task(任务)
   - scenario: 场景标识字符串(默认 "general")
   - title: 任务标题(可空,为空时前端用 user_input 截断展示)
   - user_input: 用户原始输入(意图,通用化:不再固定 repo_url)
-  - params: JSONB,可选补充参数(repo_url / branch / scope 等)
+  - params: JSONB,可选补充参数(repo_url / branch / scope / _verifier 等)
+    - params._verifier: 验证智能体配置(auth_mode / auth_tokens / test_env_url,实验性)
   - checklist: JSONB,动态覆盖度清单(user_agent 第 0 轮生成 + 用户编辑确认)
   - allowed_skills: JSONB,用户选择的允许调用的 skill 名称列表(空=全部可用)
   - status: pending / running / paused / completed / failed
@@ -205,7 +223,7 @@ Task(任务)
   - error_message: 失败时的错误信息
   - llm_config_id: user_agent 使用的 LLM 配置 ID
   - react_llm_config_id: 内置 react_agent 使用的 LLM 配置 ID(空=回退到 llm_config_id)
-  - executor: 执行器选择("builtin" / "qoder_cli" / "qoder_cli_cn")
+  - executor: 执行器选择("builtin" / "qoder_cli" / "qoder_cli_cn" / "kimi_cli" / "hermes_cli" / "codex_cli")
   - created_at, completed_at
 
 Conversation(对话)
@@ -268,6 +286,43 @@ Result(任务结果项,通用)
 - 单任务执行时间上限(防 react_agent 死循环)
 - 单任务 token 消耗上限
 - 仓库克隆大小限制
+- 沙箱资源限制(`SANDBOX_CPU` / `SANDBOX_MEMORY`,通过 SDK `resource` 参数传入)
+
+### 7.4 local 模式安全策略(对齐 TRAE 沙箱路径策略)
+`SANDBOX_MODE=local`(无沙箱,宿主机直接执行)时,虽不提供容器隔离,仍通过四层软策略降低风险:
+
+1. **路径策略**(`check_local_write_permission`,client.py 模块级函数):
+   - `.git` 目录写保护(防破坏版本控制元数据,`SANDBOX_LOCAL_PROTECT_GIT=true` 默认开)
+   - 配置的只读目录(`SANDBOX_LOCAL_READONLY_PATHS=.vscode,.trae,.idea`)写保护
+   - `sandbox_tools.py` 的 `write_file` / `str_replace_editor` 在 local 分支调用它做权限校验
+
+2. **命令白名单**(`_classify_command`,sandbox_tools.py):
+   - 按 `SANDBOX_LOCAL_SAFE_COMMANDS` / `SANDBOX_LOCAL_DANGEROUS_COMMANDS` 配置分类
+   - `safe`(如 `git status` / `ls` / `cat` / `python`):直接执行
+   - `normal`:执行 + 记录日志
+   - `dangerous`(如 `rm -rf /` / `curl ... | sh` / `sudo` / `mkfs` / fork bomb):推前端确认
+
+3. **危险命令前端确认**(对齐 `_PendingVerifyAction` 模式):
+   - `user_interaction.py` 新增 `_PendingCommandConfirm` + `request` / `wait` / `submit` / `get` / `clear` / `has` 六函数
+   - SSE 新增 `command_confirm` 事件,推送 `{tool, reason, command, command_id}` 给前端
+   - API 新增 `GET /tasks/{id}/pending_command_confirm` + `POST /tasks/{id}/command_confirm`
+   - 前端 `CommandConfirmDialog.vue` 组件:显示完整命令 + 拦截原因(红色高亮)+ 「拒绝 / 同意」按钮
+   - 用户拒绝时返回 `{"status_code": 0, "body": "[用户拒绝执行此命令]"}`,agent 收到反馈跳过
+
+4. **平台原生隔离**(`SANDBOX_LOCAL_NATIVE_ISOLATION=true`,可选):
+   - macOS:`sandbox-exec`(系统目录只读 + 工作区读写 + 禁 `sudo` / `su`)
+   - Linux:`bwrap`(`--ro-bind / / + --bind work_dir + --dev /dev + --proc /proc`)
+   - Windows:无原生沙箱,跳过(仅靠 1-3 软策略)
+   - `SandboxSession.__init__` 检测工具可用性(`_native_sandbox` 属性),`_wrap_native_sandbox` 在 `_local_run_command` 中包装命令
+
+> **生产环境务必用 `SANDBOX_MODE=sandbox`**。local 模式的四层策略只能降低风险,不能替代容器隔离——任意 shell 仍可在工作区外读写(除非配 `bwrap` / `sandbox-exec` 原生隔离)。
+
+### 7.5 验证动作安全(verifier_agent)
+- `http_request` 工具在沙箱内执行(用 urllib 标准库,不暴露后端服务器 IP 给测试环境)
+- SSL 证书验证跳过(测试环境可能自签)
+- 自定义 `AllMethodRedirect` 处理器跟随 307 / 308 重定向(适用于所有 HTTP 方法)
+- 登录 token 注入:LLM 永不见 `header_value` 明文,只看到 `label`,工具自动注入对应认证头
+- 默认 `per_action` 授权模式:每个动作执行前必须用户确认,防止误伤生产环境
 
 ---
 
@@ -317,6 +372,8 @@ Result(任务结果项,通用)
 | list_skills / skill | 查看并加载专家技能(获取 SKILL.md 指令后按其指引执行) | ✓ |
 
 **场景降级后**:工具全部开放,不再按场景过滤。用户创建任务时可通过 `allowed_skills` 选择允许调用的 skill。
+
+> verifier_agent(实验性)有独立的工具集(`http_request` + `run_python_code`),不复用 react_agent 工具表,详见 3.5.1。
 
 ### 8.5 用户账户体系(已决策)
 **方案:邮箱密码注册登录 + Git 平台 OAuth 登录(GitHub / Gitee),均已实现。**
@@ -410,15 +467,31 @@ Result(任务结果项,通用)
   调用 `submit_results` 提交……
   ```
 - **设计说明**:skill 不是硬编码步骤编排,而是给 LLM 的自然语言指令。LLM 读取 body 后自行决定调用哪些工具、按什么顺序执行,灵活性远高于固定 YAML 步骤
-- **目录结构**:`<skills_root>/<scenario_id>/<skill_name>/SKILL.md`(skill 目录可含附加资源文件)
-- **加载机制**:进程启动时扫描磁盘所有 SKILL.md,解析 frontmatter,注册到 SkillRegistry。管理员后台增删后调 `reload_registry()` 刷新
-- **管理 API**:`GET/POST/DELETE /skills`(CRUD)+ `POST /skills/reload`(重新扫描)
-- **react_agent 调用**:通过 `list_skills` 工具查看可用 skill,通过 `skill` 工具加载指定 skill 的 body 到上下文,LLM 按其指引执行
+- **目录结构**:
+  - 系统内置:`<skills_root>/<scenario_id>/<skill_name>/SKILL.md`(skill 目录可含附加资源文件)
+  - 用户上传:`<USER_SKILLS_DIR>/<user_id>/<scenario_id>/<skill_name>/SKILL.md`(`scenario_id` 以 `user_` 前缀标识用户 skill)
+- **加载机制**:进程启动时扫描磁盘所有 SKILL.md,解析 frontmatter,注册到 SkillRegistry。管理员后台增删后调 `reload_registry()` 刷新。用户上传 skill 通过 API 触发热加载(后端 `upsert` + 注册到对应用户的 registry 视图)
+- **管理 API**:
+  - 系统内置:`GET /skills`(列出全部,含内置 + 各用户自己的)+ `POST /skills/reload`(管理员重新扫描)
+  - 用户上传:`POST /skills/upload`(zip,含 `SKILL.md`)+ `DELETE /skills/{scenario_id}/{skill_name}`(只能删自己的)+ `PUT /skills/{scenario_id}/{skill_name}/SKILL.md`(在线编辑自己的 SKILL.md,热保存)
+- **react_agent 调用**:通过 `list_skills` 工具查看可用 skill(内置 + 当前用户上传的),通过 `skill` 工具加载指定 skill 的 body 到上下文,LLM 按其指引执行
 - **首版技能清单**(场景降级后按 scenario 组织,用户创建任务时可选 `allowed_skills` 过滤):
   - `code_security_audit/check_sql_injection`(注入类)
   - `code_security_audit/check_hardcoded_secrets`(硬编码密钥)
   - `code_security_audit/check_ssrf`(SSRF)
-- **扩展性**:管理员可通过 API 或直接编辑磁盘文件添加新 skill,用户不能自定义(避免安全风险)
+- **用户上传 skill 限制**(`backend/app/config.py`):
+  - zip 最大:`SKILL_MAX_ZIP_SIZE_MB=50`
+  - 解压后最大:`SKILL_MAX_EXTRACT_SIZE_MB=200`
+  - 单文件最大:`SKILL_MAX_SINGLE_FILE_SIZE_MB=20`
+  - 文件数上限:`SKILL_MAX_FILES=100`
+  - 列出文件上限:`SKILL_MAX_LISTED_FILES=200`
+  - 默认放行的图片扩展名:`.png,.jpg,.jpeg,.webp,.gif`(`SKILL_ALLOWED_EXTENSIONS_EXTRA`;不建议追加 `.svg`,可含恶意脚本)
+  - skill 存储目录:`USER_SKILLS_DIR=./user_skills`
+- **隔离**:用户上传的 skill 仅自己可见,他人 `list_skills` 不会列出,也无法 `skill` 工具加载。内置 skill 全员可见但只读
+- **同名冲突**:用户上传与内置 / 他人 skill 同名时直接报错 `无法覆盖`;与自己已有 skill 同名时弹窗确认覆盖
+- **扩展性**:管理员可通过 API 或直接编辑磁盘文件添加新 skill;用户通过 zip 上传添加自己的 skill(仅自己可用)
+
+
 
 ### 8.7 人工审计师模式(后期功能,首版不实现)
 
@@ -520,11 +593,14 @@ react_agent 维护跨轮 plan 状态:
 | 事件 | 说明 |
 |------|------|
 | `conversation` | 对话消息(user_agent / react_agent 的每一步) |
+| `conversation_update` | 更新已有 conversation 的 content(节流推送,如 Kimi 工具调用增量) |
 | `status` | 任务状态变更(进入新阶段) |
-| `thinking_delta` | LLM 流式 token 增量(打字机效果) |
-| `question` | 用户澄清提问(前端弹窗) |
-| `checklist_review` | 覆盖度清单确认(用户编辑后落库) |
+| `thinking_delta` | LLM 流式 token 增量(打字机效果;phase: start / reasoning / content / error / end) |
+| `question` | 用户澄清提问(前端 QuestionDialog 弹窗) |
+| `checklist_review` | 覆盖度清单确认(前端 ChecklistReviewDialog,用户编辑后落库) |
 | `plan` | 计划清单状态更新(跨轮续接) |
+| `verify_action` | 验证动作授权请求(verifier_agent 的 `per_action` 模式,前端 VerifyActionDialog) |
+| `command_confirm` | 危险命令确认(local 模式,前端 CommandConfirmDialog) |
 | `done` | 任务完成 |
 | `error` | 任务失败/异常 |
 
@@ -538,6 +614,10 @@ react_agent 维护跨轮 plan 状态:
 | `/tasks/new` | TaskCreateView | 创建新任务(选场景/仓库/skill/模型) |
 | `/tasks/:id` | TaskDetailView | 任务详情(SSE 实时流 + 对话 + 报告) |
 | `/models` | ModelSettingsView | LLM 模型配置(多厂商列表式管理) |
+| `/cli` | CliSettingsView | 外部 CLI 凭据配置(Qoder / Kimi / Hermes / Codex) |
+| `/agent-policy` | AgentPolicyView | 协作策略(user_agent 启用 / 轮次 / 评估频率 / 验证授权模式) |
+| `/skills` | SkillManagerView | 技能管理(上传 zip / 列表 / 在线编辑 SKILL.md / 删除) |
+| `/memory` | MemoryView | 记忆管理(用户偏好 / 全局记忆 / 项目记忆) |
 | `/settings` | SettingsView | 用户设置(改密码/Git 平台绑定 GitHub+Gitee/删除账号) |
 | `/login` | LoginView | 登录(邮箱密码 + GitHub / Gitee OAuth) |
 | `/auth/github/callback` | OAuthCallbackView | GitHub OAuth 回调(登录/绑定共用) |
@@ -546,3 +626,53 @@ react_agent 维护跨轮 plan 状态:
 | `/auth/password/reset` | ResetPasswordView | 重置密码 |
 
 路由守卫:受保护路由未登录跳 `/login?redirect=...`;已登录访问 `/login` 跳首页;页面刷新时自动 `fetchMe` 恢复会话。
+
+### 9.9 验证智能体(verifier_agent,实验性)
+
+user_agent 调用独立 ReAct 智能体在已部署测试环境动态验证发现(详见 3.5.1):
+- 独立 ReAct 循环(最大 10 次迭代),复用 react_agent 沙箱会话
+- 工具:`http_request`(沙箱内 urllib,支持 auth_profile 注入登录 token)+ `run_python_code`(沙箱执行)
+- 授权模式:`per_action`(弹窗确认)/ `direct`(直接执行),默认 `per_action`
+- 对用户透明:前端不暴露 verifier_agent 字样,显示为「验证」而非「评估」
+- 详见 spec 3.5.1 与 `backend/app/agents/verifier_agent.py`
+
+### 9.10 local 模式安全策略
+
+`SANDBOX_MODE=local`(无沙箱,开发期使用)时,虽无容器隔离仍通过四层软策略降低风险(详见 7.4):
+1. 路径策略(`check_local_write_permission`):`.git` + 配置只读目录写保护
+2. 命令白名单(`_classify_command`):safe / normal / dangerous 三档分类
+3. 危险命令前端确认(`_PendingCommandConfirm` + `command_confirm` SSE 事件 + `CommandConfirmDialog.vue`)
+4. 平台原生隔离(`SANDBOX_LOCAL_NATIVE_ISOLATION`):macOS `sandbox-exec` / Linux `bwrap`,Windows 无
+
+> 生产环境务必用 `SANDBOX_MODE=sandbox`。local 模式的四层策略只能降低风险,不替代容器隔离。
+
+### 9.11 用户技能上传(SKILL)
+
+用户可上传自己的 skill(详见 8.6):
+- 上传 zip(含 `SKILL.md`),系统解压校验后存到 `<USER_SKILLS_DIR>/<user_id>/`
+- 用户上传的 skill 仅自己可见(`list_skills` / `skill` 工具仅返回内置 + 自己的)
+- 用户可在线编辑自己的 `SKILL.md`(`PUT` 热保存,后端 `upsert` + 热刷新 registry)
+- 同名冲突:与内置 / 他人同名直接报错;与自己同名弹窗确认覆盖
+- 上传大小 / 文件数 / 扩展名限制见 spec 8.6 配置项
+
+### 9.12 主题切换
+
+顶栏右侧主题按钮(太阳 / 月亮图标)弹出三选项:
+- 浅色 / 深色 / 跟随系统
+- 选择持久化到 localStorage(`useTheme` composable)
+- 通过 CSS 变量实现(`tokens.css` 定义浅色 + 深色两套色板,`data-theme` 属性切换)
+
+### 9.13 帮助文档弹窗
+
+顶栏问号按钮打开 `HelpDialog` 组件,展示完整 `frontend/src/data/help.md`(marked 渲染 + DOMPurify 净化)。所有路由行为一致,常驻入口,不必跳页。
+
+### 9.14 新手引导(Onboarding)
+
+按路由分组播放的新手引导气泡(`OnboardingTour.vue` + `useOnboarding` composable + `data/onboardingSteps.ts`):
+- 步骤按路由(home / task-create / task-detail)分组,进入某路由时若该路由未读则自动播放
+- 锚点用 `data-onboarding="xxx"` 属性匹配(比 class 名稳定)
+- 完成标记按"用户 email + 路由名 + 版本号"持久化到 localStorage
+- 版本号 `ONBOARDING_VERSION` 递增时,老用户的完成标记作废,下次登录重新看到引导
+- 支持 ESC 跳过、方向键导航、resize / scroll 重定位
+
+
