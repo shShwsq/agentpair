@@ -1044,22 +1044,35 @@ defineExpose({ openTaskFile })
             @click="item.node.type === 'dir' ? toggleDir(item.node) : selectFile(item.node)"
           >
             <span class="tree-icon">
-              <!-- 文件夹:展开/折叠两种形态 -->
-              <svg
-                v-if="item.node.type === 'dir'"
-                viewBox="0 0 24 24"
-                width="14"
-                height="14"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-                <!-- 展开时:在文件夹右下角加一个开口小三角 -->
-                <path v-if="item.node.expanded" d="M6 13l3 3 5-5" />
-              </svg>
+              <!-- 文件夹:chevron(展开旋转 90°)+ 文件夹图标,与技能管理文件列表风格一致 -->
+              <template v-if="item.node.type === 'dir'">
+                <svg
+                  class="tree-chevron"
+                  :class="{ expanded: item.node.expanded }"
+                  viewBox="0 0 24 24"
+                  width="10"
+                  height="10"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
+                <svg
+                  viewBox="0 0 24 24"
+                  width="14"
+                  height="14"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                </svg>
+              </template>
               <!-- 文件 -->
               <svg
                 v-else
@@ -1708,7 +1721,7 @@ defineExpose({ openTaskFile })
 .file-tree {
   flex: 1;
   overflow-y: auto;
-  padding: var(--space-1) 0;
+  padding: var(--space-2);
 }
 
 .empty-tree {
@@ -1721,11 +1734,12 @@ defineExpose({ openTaskFile })
 .tree-node {
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 3px var(--space-2);
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
   cursor: pointer;
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
   color: var(--color-text);
+  border-radius: var(--radius-md);
   transition: background var(--transition-fast);
   white-space: nowrap;
   overflow: hidden;
@@ -1739,20 +1753,42 @@ defineExpose({ openTaskFile })
 .tree-selected {
   background: var(--color-primary-light) !important;
   color: var(--color-primary);
+  font-weight: var(--fw-semibold);
+}
+
+.tree-selected .tree-icon {
+  color: var(--color-primary);
 }
 
 .tree-icon {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
+  gap: 2px;
+  color: var(--color-text-secondary);
+}
+
+/* 文件夹行:次级文字色 + muted 图标(hover 提亮),与技能管理一致 */
+.tree-dir {
   color: var(--color-text-secondary);
 }
 
 .tree-dir .tree-icon {
-  color: var(--color-warning);
+  color: var(--color-text-muted);
+}
+
+.tree-dir:hover .tree-icon {
+  color: var(--color-text);
+}
+
+.tree-chevron {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  transition: transform var(--transition-fast);
+}
+
+.tree-chevron.expanded {
+  transform: rotate(90deg);
 }
 
 .tree-file .tree-icon {
