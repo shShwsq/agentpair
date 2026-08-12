@@ -20,6 +20,7 @@ import BaseSelect from '@/components/BaseSelect.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import { getPolicyLimits, getPreferences, saveAgentPolicy } from '@/api/memory'
+import { useUnsavedGuard } from '@/composables/useUnsavedGuard'
 import { extractErrorMessage } from '@/utils/error'
 import type { SaveAgentPolicyRequest } from '@/types/memory'
 
@@ -118,6 +119,9 @@ const policyDirty = computed(() => {
     policyExecutorCommandConfirm.value !== originalPolicy.value.executorCommandConfirm
   )
 })
+
+// 未保存改动时切换路由弹窗提醒(保存并离开复用 handleSave)
+useUnsavedGuard(policyDirty, () => handleSave())
 
 /** 重置策略表单为系统默认值(不立即保存) */
 function resetPolicyToDefault(): void {
@@ -224,8 +228,8 @@ async function loadPolicy(): Promise<void> {
   }
 }
 
-async function handleSave(): Promise<void> {
-  if (!policyDirty.value || saving.value) return
+async function handleSave(): Promise<boolean> {
+  if (!policyDirty.value || saving.value) return false
   saving.value = true
   try {
     const body: SaveAgentPolicyRequest = {
@@ -271,8 +275,10 @@ async function handleSave(): Promise<void> {
       executorCommandConfirm: policyExecutorCommandConfirm.value,
     }
     showToast('协作策略已保存', 'success')
+    return true
   } catch (err) {
     showToast(extractErrorMessage(err), 'error')
+    return false
   } finally {
     saving.value = false
   }

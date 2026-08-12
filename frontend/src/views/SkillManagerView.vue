@@ -32,6 +32,7 @@ import {
   type SkillFileEntry,
   type SkillSummary,
 } from '@/api/skill'
+import { useUnsavedGuard } from '@/composables/useUnsavedGuard'
 import { extractErrorMessage } from '@/utils/error'
 
 /** 历史任务侧栏是否折叠 */
@@ -220,6 +221,9 @@ const canEdit = computed(
 const isDirty = computed(() => draft.value !== original.value)
 const canSave = computed(() => canEdit.value && isDirty.value && !saving.value)
 
+// 未保存改动时切换路由弹窗提醒(保存并离开复用 handleSave)
+useUnsavedGuard(isDirty, () => handleSave())
+
 /** 文件树中处于展开态的文件夹路径(每次 loadFiles 默认全部展开) */
 const expandedFolders = ref<Set<string>>(new Set())
 
@@ -374,10 +378,10 @@ function closeSkill(): void {
   original.value = ''
 }
 
-/** 保存 SKILL.md(直写全文,含 frontmatter;后端热刷新注册表) */
-async function handleSave(): Promise<void> {
+/** 保存 SKILL.md(直写全文,含 frontmatter;后端热刷新注册表);返回是否保存成功 */
+async function handleSave(): Promise<boolean> {
   const s = activeSkill.value
-  if (!s || !canSave.value) return
+  if (!s || !canSave.value) return false
   saving.value = true
   try {
     const result = await updateSkill(s.scenario_id, s.name, draft.value)
@@ -391,9 +395,11 @@ async function handleSave(): Promise<void> {
       owned: result.owned,
     }
     await loadSkills()
+    return true
   } catch (e) {
     showToast(extractErrorMessage(e), 'error')
     await loadSkills()
+    return false
   } finally {
     saving.value = false
   }

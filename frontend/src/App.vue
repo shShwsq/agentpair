@@ -5,6 +5,7 @@
  * 职责:
  * - RouterView 容器 + 全局过渡
  * - 全局挂载新手引导组件 OnboardingTour(单例,跟随路由按需触发)
+ * - 全局挂载未保存改动确认弹窗 UnsavedGuardDialog(路由守卫触发)
  * - 在用户加载完成 / 路由切换时驱动引导状态机(setUser + maybeStartForRoute)
  *
  * 具体页面布局由各 View 自行负责(全屏 vs 带导航等)。
@@ -13,6 +14,7 @@ import { watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import OnboardingTour from '@/components/OnboardingTour.vue'
+import UnsavedGuardDialog from '@/components/UnsavedGuardDialog.vue'
 import { useOnboarding } from '@/composables/useOnboarding'
 import { useAuthStore } from '@/stores/auth'
 
@@ -56,6 +58,7 @@ watch(
 <template>
   <RouterView />
   <OnboardingTour />
+  <UnsavedGuardDialog />
 </template>
 
 <style>

@@ -30,6 +30,7 @@ import {
   savePreferences,
   saveProject,
 } from '@/api/memory'
+import { useUnsavedGuard } from '@/composables/useUnsavedGuard'
 import { extractErrorMessage } from '@/utils/error'
 import type { ProjectOut, UserPreferenceOut } from '@/types/memory'
 
@@ -275,7 +276,7 @@ function fileKind(fileId: string): FileKind {
   return 'project'
 }
 
-/** 任一文件有未保存改动(用于切换/离开提示,此处仅展示) */
+/** 任一文件有未保存改动(用于离开页面前弹窗提醒,见底部 useUnsavedGuard) */
 const hasAnyDirty = computed(() => fileList.value.some((f) => isDirty(f.id)))
 
 // ============================================================
@@ -355,39 +356,45 @@ function selectFile(id: string): void {
 // ============================================================
 // 保存当前文件
 // ============================================================
+
+/** 保存单份文件(不含 loading/toast,供 handleSave 与 saveAllDirty 复用) */
+async function saveFile(entry: FileEntry): Promise<void> {
+  if (entry.kind === 'pref') {
+    // pref 文件:仅保存 user_profile 文本
+    // (agent 策略已迁移至 /agent-policy 独立页面保存)
+    const latest = await savePreferences({ user_profile: drafts['pref'] })
+    hydratePref(latest)
+  } else if (entry.kind === 'global') {
+    const data = await saveGlobalMemory({ content: drafts['global'] })
+    hydrateGlobal(data)
+  } else {
+    const fid = entry.id
+    const pid = projectIds[fid]
+    const alias = (aliasDrafts[fid] || '').trim()
+    const data = await saveProject(pid, {
+      alias: alias || null,
+      note: projectNotes[fid] ?? null,
+      memory_content: drafts[fid],
+    })
+    // 就地更新项目列表 + 重水化草稿
+    const idx = projects.value.findIndex((p) => p.id === pid)
+    if (idx >= 0) projects.value[idx] = data
+    drafts[fid] = data.memory_content || ''
+    originals[fid] = data.memory_content || ''
+    aliasDrafts[fid] = data.alias || ''
+    originalAlias[fid] = data.alias || ''
+    projectNotes[fid] = data.note ?? null
+    updatedAt[fid] = data.updated_at ?? null
+  }
+}
+
 async function handleSave(): Promise<void> {
   const entry = activeEntry.value
   if (!entry || !activeCanSave.value || activeOverLimit.value || saving.value) return
   saving.value = true
   actionError.value = ''
   try {
-    if (entry.kind === 'pref') {
-      // pref 文件:仅保存 user_profile 文本
-      // (agent 策略已迁移至 /agent-policy 独立页面保存)
-      const latest = await savePreferences({ user_profile: drafts['pref'] })
-      hydratePref(latest)
-    } else if (entry.kind === 'global') {
-      const data = await saveGlobalMemory({ content: drafts['global'] })
-      hydrateGlobal(data)
-    } else {
-      const fid = entry.id
-      const pid = projectIds[fid]
-      const alias = (aliasDrafts[fid] || '').trim()
-      const data = await saveProject(pid, {
-        alias: alias || null,
-        note: projectNotes[fid] ?? null,
-        memory_content: drafts[fid],
-      })
-      // 就地更新项目列表 + 重水化草稿
-      const idx = projects.value.findIndex((p) => p.id === pid)
-      if (idx >= 0) projects.value[idx] = data
-      drafts[fid] = data.memory_content || ''
-      originals[fid] = data.memory_content || ''
-      aliasDrafts[fid] = data.alias || ''
-      originalAlias[fid] = data.alias || ''
-      projectNotes[fid] = data.note ?? null
-      updatedAt[fid] = data.updated_at ?? null
-    }
+    await saveFile(entry)
     showToast('已保存', 'success')
   } catch (err) {
     actionError.value = extractErrorMessage(err)
@@ -395,6 +402,29 @@ async function handleSave(): Promise<void> {
     saving.value = false
   }
 }
+
+/** 保存所有未保存文件(离开页面前"保存并离开"用;任一失败返回 false) */
+async function saveAllDirty(): Promise<boolean> {
+  const dirtyEntries = fileList.value.filter((f) => isDirty(f.id))
+  if (dirtyEntries.length === 0) return true
+  saving.value = true
+  actionError.value = ''
+  try {
+    for (const entry of dirtyEntries) {
+      await saveFile(entry)
+    }
+    showToast('未保存改动已全部保存', 'success')
+    return true
+  } catch (err) {
+    actionError.value = extractErrorMessage(err)
+    return false
+  } finally {
+    saving.value = false
+  }
+}
+
+// 未保存改动时切换路由弹窗提醒
+useUnsavedGuard(hasAnyDirty, saveAllDirty)
 
 // ============================================================
 // 删除当前项目文件

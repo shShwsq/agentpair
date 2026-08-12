@@ -13,6 +13,7 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
 import { useAuthStore } from '@/stores/auth'
+import { useUnsavedGuardStore } from '@/stores/unsavedGuard'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -114,7 +115,15 @@ const router = createRouter({
 // 标记是否已尝试恢复会话(避免每次路由都 fetchMe)
 let sessionRestored = false
 
-router.beforeEach(async (to) => {
+router.beforeEach(async (to, from) => {
+  // 未保存改动守卫:当前页有未保存改动且要切到别的页面时,弹窗询问
+  // (仅拦截真正换页;同路由 query/params 变化不拦截)
+  const unsavedStore = useUnsavedGuardStore()
+  if (unsavedStore.dirty && to.name !== from.name) {
+    const proceed = await unsavedStore.confirmLeave()
+    if (!proceed) return false
+  }
+
   const authStore = useAuthStore()
 
   // 有 token 但 user 为空(页面刷新场景):先尝试恢复
