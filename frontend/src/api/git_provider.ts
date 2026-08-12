@@ -90,9 +90,20 @@ export function syncGitProviderEmail(provider: GitProvider): Promise<SyncEmailRe
   return client.patch(`/git/${provider}/sync-email`).then((r) => r.data)
 }
 
-/** 列出当前用户某平台仓库(含私有,按更新时间倒序) */
-export function listGitProviderRepos(provider: GitProvider): Promise<GitReposResponse> {
-  return client.get(`/git/${provider}/repos`).then((r) => r.data)
+/** 列出当前用户某平台仓库(含私有,按更新时间倒序)
+ *
+ * @param provider 平台标识
+ * @param refresh 强制刷新(跳过后端 30s 缓存,直接调平台 API),
+ *                用于「刷新」按钮:用户在平台上新建仓库后立即拉取
+ */
+export function listGitProviderRepos(
+  provider: GitProvider,
+  refresh = false,
+): Promise<GitReposResponse> {
+  const params = refresh ? { refresh: 'true' } : undefined
+  return client
+    .get(`/git/${provider}/repos`, { params })
+    .then((r) => r.data)
 }
 
 /**

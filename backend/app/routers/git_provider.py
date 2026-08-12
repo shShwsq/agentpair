@@ -496,6 +496,7 @@ def sync_email(
 @router.get("/{provider}/repos", response_model=GitReposResponse)
 def list_repos(
     provider: str,
+    refresh: bool = False,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> GitReposResponse:
@@ -503,6 +504,9 @@ def list_repos(
 
     用于任务创建页下拉选择私有仓库。返回按更新时间倒序的前 100 个。
     30s 内重复请求走内存缓存,避免每次都调外部 GitHub/Gitee API。
+
+    refresh=true 时跳过缓存读(强制调外部 API 并更新缓存),
+    用于仓库下拉框旁的「刷新」按钮:用户在平台上新建仓库后立即拉取。
     """
     p = _resolve_provider(provider)
     binding = _get_binding(db, current_user.id, provider)
@@ -512,14 +516,15 @@ def list_repos(
             detail=f"尚未绑定 {p.display_name} 或未授权仓库访问,请先在设置页绑定",
         )
 
-    # 命中缓存且未过期 → 直接返回(不调外部 API)
+    # 命中缓存且未过期且非强制刷新 → 直接返回(不调外部 API)
     cache_key = (current_user.id, provider)
-    cached = _REPOS_CACHE.get(cache_key)
-    if cached is not None:
-        fetched_at, raw = cached
-        if time.monotonic() - fetched_at < _REPOS_CACHE_TTL:
-            repos = [GitRepoItem(**item) for item in raw]
-            return GitReposResponse(repos=repos)
+    if not refresh:
+        cached = _REPOS_CACHE.get(cache_key)
+        if cached is not None:
+            fetched_at, raw = cached
+            if time.monotonic() - fetched_at < _REPOS_CACHE_TTL:
+                repos = [GitRepoItem(**item) for item in raw]
+                return GitReposResponse(repos=repos)
 
     try:
         token = _ensure_valid_token(db, binding, p)

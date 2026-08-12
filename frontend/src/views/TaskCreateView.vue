@@ -407,9 +407,15 @@ function providerDisplayName(p: GitProvider): string {
 /**
  * 并行加载所有已绑定平台的仓库列表,合并到 allRepos。
  * 任一平台失败不影响其他平台,仅记录到 reposError。
+ *
+ * @param force 强制刷新(跳过后端 30s 缓存,直接调平台 API),
+ *              用于「刷新」按钮:用户在平台上新建仓库后立即拉取。
+ *              force=true 时忽略 reposLoaded 一次性保护。
  */
-async function loadAllRepos(): Promise<void> {
-  if (reposLoaded.value || reposLoading.value) return
+async function loadAllRepos(force = false): Promise<void> {
+  // force 模式跳过一次性保护,允许重复加载
+  if (!force && (reposLoaded.value || reposLoading.value)) return
+  if (reposLoading.value) return  // 正在加载中,避免并发
   reposLoading.value = true
   reposError.value = ''
 
@@ -421,8 +427,9 @@ async function loadAllRepos(): Promise<void> {
 
   try {
     // 并行拉取所有已绑定平台的仓库;result 与 boundProviders 索引一一对应
+    // force=true 时传 refresh=true 给后端,跳过 30s 缓存
     const results = await Promise.allSettled(
-      boundProviders.map((p) => listGitProviderRepos(p)),
+      boundProviders.map((p) => listGitProviderRepos(p, force)),
     )
 
     const merged: RepoEntry[] = []
@@ -454,6 +461,24 @@ async function loadAllRepos(): Promise<void> {
   } finally {
     reposLoading.value = false
   }
+}
+
+/**
+ * 刷新仓库列表(强制跳过缓存)。
+ * 防抖 500ms:防止狂点按钮导致并发请求;
+ * 保留当前选中的 repoUrl,刷新后若该仓库仍在列表中则不变,否则保持原值(用户可手动改)。
+ */
+let refreshReposTimer: ReturnType<typeof setTimeout> | null = null
+async function refreshRepos(): Promise<void> {
+  if (reposLoading.value) return  // 正在加载,忽略
+  if (refreshReposTimer) {
+    clearTimeout(refreshReposTimer)
+  }
+  // 防抖:500ms 内重复点击只执行最后一次
+  await new Promise<void>((resolve) => {
+    refreshReposTimer = setTimeout(() => resolve(), 500)
+  })
+  await loadAllRepos(true)
 }
 
 /**
@@ -1267,6 +1292,35 @@ onUnmounted(() => {
                   placeholder="https://github.com/owner/repo"
                   aria-label="仓库地址"
                 />
+                <!-- 刷新仓库列表按钮(强制跳过后端缓存,用于在平台上新建仓库后立即拉取) -->
+                <button
+                  v-if="anyProviderBound"
+                  type="button"
+                  class="repo-refresh-btn"
+                  :disabled="reposLoading"
+                  :title="reposLoading ? '加载中...' : '刷新仓库列表'"
+                  aria-label="刷新仓库列表"
+                  @click="refreshRepos"
+                >
+                  <!-- 旋转动画:loading 时加 .spinning class -->
+                  <svg
+                    class="refresh-icon"
+                    :class="{ spinning: reposLoading }"
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                    <path d="M3 3v5h5" />
+                    <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                    <path d="M16 16h5v5" />
+                  </svg>
+                </button>
                 <input
                   v-model.trim="branch"
                   type="text"
@@ -1671,6 +1725,42 @@ onUnmounted(() => {
 .repo-input.invalid {
   border-color: var(--color-danger);
   box-shadow: 0 0 0 3px var(--color-danger-light);
+}
+
+/* 刷新仓库列表按钮 */
+.repo-refresh-btn {
+  flex: 0 0 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  outline: none;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.repo-refresh-btn:hover:not(:disabled) {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+.repo-refresh-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* loading 时图标持续旋转 */
+.refresh-icon.spinning {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 /* ---- 仓库提示弹窗 ---- */
