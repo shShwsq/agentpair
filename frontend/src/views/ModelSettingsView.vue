@@ -952,7 +952,7 @@ function modelLabel(row: TableRow): string {
 
 .btn-add:hover:not(:disabled) {
   background: var(--color-primary);
-  color: white;
+  color: var(--color-text-inverse);
 }
 
 .btn-add:disabled {

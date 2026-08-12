@@ -464,8 +464,9 @@ function handleCancel(): void {
 .btn-spinner {
   width: 14px;
   height: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: white;
+  /* 轨道/高亮跟随文字色:主色按钮(深色主题下深字)与品牌色按钮(恒白字)都正确 */
+  border: 2px solid color-mix(in srgb, currentColor 30%, transparent);
+  border-top-color: currentColor;
   border-radius: 50%;
   animation: btn-spin 0.8s linear infinite;
 }

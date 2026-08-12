@@ -641,7 +641,8 @@ function handleCancel(): void {
 .btn-spinner {
   width: 12px;
   height: 12px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
+  /* 轨道/高亮跟随文字色:主色按钮(深色主题下深字)正确 */
+  border: 2px solid color-mix(in srgb, currentColor 30%, transparent);
   border-top-color: currentColor;
   border-radius: 50%;
   animation: btn-spin 0.8s linear infinite;
