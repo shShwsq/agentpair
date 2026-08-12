@@ -295,6 +295,11 @@ function handleOAuth(provider: GitProvider): void {
   background: linear-gradient(135deg, #f0f4ff 0%, #f8fafc 50%, #faf5ff 100%);
 }
 
+/* 暗色:保留渐变质感,色板整体加深(蓝→中性→紫,与浅色渐变对应) */
+:root[data-theme='dark'] .auth-page {
+  background: linear-gradient(135deg, #141b3c 0%, #0f172a 50%, #1c1330 100%);
+}
+
 /* ---- 卡片容器 ---- */
 .auth-card {
   width: 100%;
@@ -389,13 +394,13 @@ function handleOAuth(provider: GitProvider): void {
 .alert-error {
   background: var(--color-danger-light);
   color: var(--color-danger);
-  border: 1px solid #fecaca;
+  border: 1px solid color-mix(in srgb, var(--color-danger) 35%, transparent);
 }
 
 .alert-success {
   background: var(--color-success-light);
   color: var(--color-success);
-  border: 1px solid #bbf7d0;
+  border: 1px solid color-mix(in srgb, var(--color-success) 35%, transparent);
 }
 
 /* ---- 表单字段 ---- */
