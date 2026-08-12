@@ -155,7 +155,7 @@ function toggleWorkspace(): void {
   padding: 0 var(--space-6);
   font-size: var(--fs-base);
   font-weight: var(--fw-semibold);
-  color: white;
+  color: var(--color-text-inverse);
   background: var(--color-primary);
   border-radius: var(--radius-md);
   transition: background var(--transition-fast);

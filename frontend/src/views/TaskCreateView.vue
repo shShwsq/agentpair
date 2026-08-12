@@ -1538,7 +1538,7 @@ onUnmounted(() => {
 }
 
 .seg-btn.active {
-  color: white;
+  color: var(--color-text-inverse);
   background: var(--color-primary);
 }
 
@@ -1868,7 +1868,7 @@ onUnmounted(() => {
 
 .repo-dialog-footer .btn-primary {
   background: var(--color-primary);
-  color: white;
+  color: var(--color-text-inverse);
 }
 
 .repo-dialog-footer .btn-primary:hover {
@@ -1894,7 +1894,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: white;
+  color: var(--color-text-inverse);
   background: var(--color-primary);
   border: none;
   border-radius: var(--radius-md);
@@ -1915,8 +1915,8 @@ onUnmounted(() => {
 .spinner {
   width: 16px;
   height: 16px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: white;
+  border: 2px solid color-mix(in srgb, var(--color-text-inverse) 30%, transparent);
+  border-top-color: var(--color-text-inverse);
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
 }
@@ -2343,7 +2343,7 @@ onUnmounted(() => {
 
 .auth-token-add-btn:hover {
   background: var(--color-primary);
-  color: white;
+  color: var(--color-text-inverse);
 }
 
 .auth-token-row {

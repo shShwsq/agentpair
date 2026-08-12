@@ -410,18 +410,23 @@ function handleCancel(): void {
 /* 实心危险按钮(删除账号) */
 .btn-danger-solid {
   background: var(--color-danger);
-  color: white;
+  color: var(--color-text-inverse);
 }
 
 .btn-danger-solid:hover:not(:disabled) {
   background: #b91c1c;
 }
 
+/* 深色主题:danger 背景已调亮,按钮 hover 改用更亮的红,深字保持对比度 */
+:global(html[data-theme='dark']) .btn-danger-solid:hover:not(:disabled) {
+  background: #ef4444;
+}
+
 .btn-spinner {
   width: 14px;
   height: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: white;
+  border: 2px solid color-mix(in srgb, var(--color-text-inverse) 30%, transparent);
+  border-top-color: var(--color-text-inverse);
   border-radius: 50%;
   animation: btn-spin 0.8s linear infinite;
 }

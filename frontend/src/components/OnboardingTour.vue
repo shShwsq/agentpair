@@ -433,7 +433,7 @@ const totalSteps = computed(() => currentSteps.value.length)
 }
 
 .btn-primary {
-  color: white;
+  color: var(--color-text-inverse);
   background: var(--color-primary);
 }
 

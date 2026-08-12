@@ -176,7 +176,7 @@ async function handleSubmit(): Promise<void> {
   height: 56px;
   border-radius: var(--radius-lg);
   background: var(--color-primary);
-  color: white;
+  color: var(--color-text-inverse);
   margin-bottom: var(--space-3);
 }
 
@@ -270,7 +270,7 @@ async function handleSubmit(): Promise<void> {
   gap: var(--space-2);
   font-size: var(--fs-base);
   font-weight: var(--fw-semibold);
-  color: white;
+  color: var(--color-text-inverse);
   background: var(--color-primary);
   border-radius: var(--radius-md);
   transition: background var(--transition-fast);
@@ -282,8 +282,8 @@ async function handleSubmit(): Promise<void> {
 .spinner {
   width: 16px;
   height: 16px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: white;
+  border: 2px solid color-mix(in srgb, var(--color-text-inverse) 30%, transparent);
+  border-top-color: var(--color-text-inverse);
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
 }

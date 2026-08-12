@@ -498,7 +498,7 @@ function handleConfirm(): void {
 
 .btn-primary {
   background: var(--color-primary);
-  color: white;
+  color: var(--color-text-inverse);
 }
 
 .btn-primary:hover:not(:disabled) {

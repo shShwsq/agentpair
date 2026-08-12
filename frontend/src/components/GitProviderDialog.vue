@@ -311,7 +311,7 @@ function handleCancel(): void {
   align-items: center;
   justify-content: center;
   background: var(--color-primary);
-  color: white;
+  color: var(--color-text-inverse);
   font-weight: var(--fw-semibold);
   font-size: var(--fs-sm);
 }
@@ -412,7 +412,7 @@ function handleCancel(): void {
 
 .btn-primary {
   background: var(--color-primary);
-  color: white;
+  color: var(--color-text-inverse);
 }
 
 .btn-primary:hover:not(:disabled) {
@@ -438,7 +438,7 @@ function handleCancel(): void {
 
 .btn-danger:hover:not(:disabled) {
   background: var(--color-danger);
-  color: white;
+  color: var(--color-text-inverse);
 }
 
 /* GitHub 品牌色按钮 */

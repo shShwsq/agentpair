@@ -113,8 +113,11 @@
   /* 原生控件(滚动条/输入框等)按深色渲染 */
   color-scheme: dark;
 
-  /* ---- 色彩:主色(按钮背景保持原色,浅色变体加深) ---- */
-  --color-primary-light: #312e81;
+  /* ---- 色彩:主色(前景调亮保证深色底对比度;主按钮背景配 text-inverse 深字) ---- */
+  --color-primary: #818cf8;
+  --color-primary-hover: #6366f1;
+  --color-primary-active: #4f46e5;
+  --color-primary-light: #1e1b4b;
   --color-primary-border: #4338ca;
 
   /* ---- 色彩:功能色(调亮 + 背景变体加深) ---- */
@@ -136,5 +139,6 @@
   --color-text: #f1f5f9;
   --color-text-secondary: #cbd5e1;
   --color-text-muted: #94a3b8;
-  --color-text-inverse: #f8fafc;
+  /* 主按钮文字:浅色下为白色,深色下主色/危险色背景调亮后改用深字保持对比度 */
+  --color-text-inverse: #0f172a;
 }

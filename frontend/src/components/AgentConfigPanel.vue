@@ -1005,7 +1005,7 @@ onUnmounted(() => {
 
 .btn-primary {
   background: var(--color-primary);
-  color: white;
+  color: var(--color-text-inverse);
 }
 
 .btn-primary:hover:not(:disabled) {
@@ -1020,14 +1020,14 @@ onUnmounted(() => {
 
 .btn-danger:hover:not(:disabled) {
   background: var(--color-danger);
-  color: white;
+  color: var(--color-text-inverse);
 }
 
 .btn-spinner {
   width: 14px;
   height: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: white;
+  border: 2px solid color-mix(in srgb, var(--color-text-inverse) 30%, transparent);
+  border-top-color: var(--color-text-inverse);
   border-radius: 50%;
   animation: btn-spin 0.8s linear infinite;
 }
