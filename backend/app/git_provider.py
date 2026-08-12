@@ -107,6 +107,15 @@ class GitProvider(ABC):
         [{ "full_name", "name", "private", "html_url", "clone_url", "default_branch" }, ...]
         """
 
+    @abstractmethod
+    def revoke_token(self, access_token: str) -> None:
+        """在平台端撤销 access_token,使其立即失效
+
+        用于解绑场景:仅清本地 token 不够,平台端旧 token 仍有效会导致
+        重新绑定时 OAuth 授权状态粘性(平台跳过授权页 → 换 token 失败)。
+        失败应抛 GitProviderError,由上层捕获并降级(不阻塞解绑)。
+        """
+
     @property
     @abstractmethod
     def supports_verified_email(self) -> bool:
@@ -307,6 +316,34 @@ class GitHubProvider(GitProvider):
             })
         return repos
 
+    def revoke_token(self, access_token: str) -> None:
+        """撤销 GitHub access_token(DELETE /applications/{client_id}/token)
+
+        用 client_id + client_secret 做 Basic Auth 鉴权(非用户 token 鉴权),
+        撤销后该 token 立即失效,且会清除用户对该 OAuth App 的授权状态,
+        下次绑定时 GitHub 会重新显示授权页(避免授权状态粘性导致换 token 失败)。
+
+        参考:https://docs.github.com/en/rest/apps/oauth-applications#delete-an-app-token
+        """
+        if not settings.GITHUB_OAUTH_CLIENT_ID or not settings.GITHUB_OAUTH_CLIENT_SECRET:
+            raise GitProviderError("GitHub OAuth 未配置,无法 revoke token")
+
+        url = f"https://api.github.com/applications/{settings.GITHUB_OAUTH_CLIENT_ID}/token"
+        try:
+            with httpx.Client(timeout=10) as client:
+                # GitHub 要求 Basic Auth(client_id:client_secret),不能用 Bearer token
+                r = client.delete(
+                    url,
+                    auth=(settings.GITHUB_OAUTH_CLIENT_ID, settings.GITHUB_OAUTH_CLIENT_SECRET),
+                    headers={"Accept": "application/vnd.github+json"},
+                    json={"access_token": access_token},
+                )
+                # GitHub 成功返回 204 No Content;404 表示 token 已不存在(视为已撤销)
+                if r.status_code not in (204, 404):
+                    r.raise_for_status()
+        except httpx.HTTPError as e:
+            raise GitProviderError(f"撤销 GitHub token 失败: {e}") from e
+
 
 # ============================================================
 # Gitee
@@ -466,6 +503,33 @@ class GiteeProvider(GitProvider):
                 "default_branch": item.get("default_branch") or "master",
             })
         return repos
+
+    def revoke_token(self, access_token: str) -> None:
+        """撤销 Gitee access_token(DELETE /applications/{client_id}/tokens/{token})
+
+        用 client_secret 作为 query 参数鉴权。撤销后 token 立即失效,
+        用户对该 OAuth App 的授权状态也会清除,下次绑定时会重新显示授权页。
+
+        参考:https://gitee.com/api/v5/swagger#/deleteApplicationToken
+        """
+        if not settings.GITEE_OAUTH_CLIENT_ID or not settings.GITEE_OAUTH_CLIENT_SECRET:
+            raise GitProviderError("Gitee OAuth 未配置,无法 revoke token")
+
+        url = (
+            f"https://gitee.com/api/v5/applications/"
+            f"{settings.GITEE_OAUTH_CLIENT_ID}/tokens/{access_token}"
+        )
+        try:
+            with httpx.Client(timeout=10) as client:
+                r = client.delete(
+                    url,
+                    params={"client_secret": settings.GITEE_OAUTH_CLIENT_SECRET},
+                )
+                # Gitee 成功返回 200/204;404 表示 token 已不存在(视为已撤销)
+                if r.status_code not in (200, 204, 404):
+                    r.raise_for_status()
+        except httpx.HTTPError as e:
+            raise GitProviderError(f"撤销 Gitee token 失败: {e}") from e
 
 
 # ============================================================

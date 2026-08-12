@@ -346,10 +346,36 @@ def unbind_provider(
     """解绑:清除 access_token(保留 provider_user_id 行,因为 OAuth 登录仍可能用到)
 
     若想彻底解除账号关联,需走账号设置里的"删除账号"(随用户 CASCADE 删除)。
+
+    最佳实践:解绑时主动调平台 revoke API 把旧 token 在平台端也失效掉,
+    否则平台端旧 token 仍有效 + 授权状态粘性会导致用户重新绑定时换 token 失败。
+    revoke 失败不阻塞解绑(本地 token 照清),记 warning 日志,后续 API 调用
+    收到 401 时会自动提示"token 失效,请重新绑定"作为兜底。
     """
-    _resolve_provider(provider)
+    p = _resolve_provider(provider)
     binding = _get_binding(db, current_user.id, provider)
     if binding is not None:
+        # 先在平台端 revoke 旧 token(用明文 token 调用),再清本地
+        # 顺序很重要:先清本地就拿不到明文 token 了
+        if binding.access_token:
+            try:
+                token = decrypt_secret(binding.access_token)
+                p.revoke_token(token)
+                logger.info(
+                    "user %s 的 %s token 已在平台端 revoke",
+                    current_user.id,
+                    p.display_name,
+                )
+            except (GitProviderError, ValueError) as e:
+                # revoke 失败不阻塞解绑:本地 token 照清,
+                # 平台端旧 token 会自然过期或被下次绑定时的新 token 覆盖
+                logger.warning(
+                    "user %s 的 %s token revoke 失败(不阻塞解绑): %s",
+                    current_user.id,
+                    p.display_name,
+                    e,
+                )
+
         binding.access_token = ""
         # 清空 login / avatar 缓存(与 access_token 同生命周期)
         binding.provider_login = None
