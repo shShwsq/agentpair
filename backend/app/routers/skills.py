@@ -328,6 +328,36 @@ def read_skill_file(
     return _read_skill_file(skill.skill_dir, file_path)
 
 
+def _check_upload_name_conflict(skill_name: str, user_id: uuid.UUID) -> ParsedSkill | None:
+    """上传前重名检查
+
+    规则:
+    - 与内置 skill 同名 → raise 409(内置全局共享,会与自己的 skill 产生去重歧义,不可覆盖)
+    - 与其他用户的 skill 同名 → 允许(运行时 skill 工具按用户隔离,互不可见,不冲突)
+    - 与自己的 skill 同名 → 返回该 skill,由调用方按 force 决定是否覆盖
+    - 无冲突 → 返回 None
+    """
+    existing = None
+    for sid in skill_loader.REGISTRY.list_scenarios():
+        hit = skill_loader.REGISTRY.get(sid, skill_name)
+        if not hit:
+            continue
+        owner = scenario_owner_id(sid)
+        if owner == user_id:
+            existing = hit  # 自己的重名(可能跨场景,理论上只有 user_<uid>)
+        elif owner is None:
+            # 内置 skill 全局共享,同名会与自己冲突,拒绝
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"skill 名称与系统内置的「{hit.name}」冲突,无法覆盖"
+                    f"(请换一个 skill 名称)"
+                ),
+            )
+        # owner 为其他用户:运行时按用户隔离,互不可见,允许同名
+    return existing
+
+
 @router.post("/upload", response_model=SkillUploadResponse)
 async def upload_skill_zip(
     file: UploadFile = File(...),
@@ -364,24 +394,9 @@ async def upload_skill_zip(
 
         skill_name = skill.name
 
-        # 全局重名检查:与内置/他人 skill 重名不可覆盖;与自己重名需 force
-        existing = None
-        for sid in skill_loader.REGISTRY.list_scenarios():
-            hit = skill_loader.REGISTRY.get(sid, skill_name)
-            if not hit:
-                continue
-            owner = scenario_owner_id(sid)
-            if owner == current_user.id:
-                existing = hit  # 自己的重名(可能跨场景,理论上只有 user_<uid>)
-            else:
-                # 内置或其他用户的 skill:同名会遮蔽,拒绝
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"skill 名称与全局已存在的「{hit.name}」冲突"
-                        f"(该 skill 由系统内置或其他用户上传),无法覆盖"
-                    ),
-                )
+        # 重名检查(规则见 _check_upload_name_conflict):
+        # 与内置同名拒绝;与他人同名允许(运行时隔离);与自己同名需 force
+        existing = _check_upload_name_conflict(skill_name, current_user.id)
         if existing and not force:
             raise HTTPException(
                 status_code=409,

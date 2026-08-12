@@ -274,6 +274,34 @@ def test_list_visible_skills_isolation(tmp_path, monkeypatch):
     assert anon_visible == {"builtin_a"}
 
 
+def test_upload_name_conflict_allows_cross_user_same_name(tmp_path, monkeypatch):
+    """上传重名判定:内置同名拒绝;他人同名允许(运行时隔离);自己同名返回 existing。"""
+    from fastapi import HTTPException
+
+    from app.routers.skills import _check_upload_name_conflict
+
+    alice, bob = uuid.uuid4(), uuid.uuid4()
+    registry = SkillRegistry()
+    registry.register(_make_skill("builtin_a", "code_security_audit", tmp_path))
+    registry.register(_make_skill("alice_priv", f"user_{alice}", tmp_path))
+    registry.register(_make_skill("bob_priv", f"user_{bob}", tmp_path))
+    monkeypatch.setattr(skill_loader, "REGISTRY", registry)
+
+    # 与内置同名 → 409 拒绝
+    with pytest.raises(HTTPException) as ei:
+        _check_upload_name_conflict("builtin_a", alice)
+    assert ei.value.status_code == 409
+
+    # 与自己同名 → 返回 existing(交由 force 判断)
+    assert _check_upload_name_conflict("alice_priv", alice) is not None
+
+    # 与他人同名 → 允许(运行时按用户隔离,返回 None)
+    assert _check_upload_name_conflict("bob_priv", alice) is None
+
+    # 全新名称 → 无冲突
+    assert _check_upload_name_conflict("brand_new", alice) is None
+
+
 # ============================================================
 # skill_tool:按用户过滤 + allowed_skills 白名单叠加
 # ============================================================
