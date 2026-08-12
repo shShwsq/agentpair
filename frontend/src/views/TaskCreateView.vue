@@ -92,8 +92,7 @@ const selectedExecutor = ref<string>('builtin')
 /** 是否选中了非内置执行器(CLI 自管 react 模型,LLM 配置仅供 user_agent) */
 const useAgentExecutor = computed(() => selectedExecutor.value !== 'builtin')
 
-/**
- * 模型选择器在当前执行器下的语义标签
+/** 模型选择器在当前执行器下的语义标签
  * - builtin:模型同时用于内置 react_agent 与 user_agent 评估
  * - CLI:模型仅用于 user_agent 评估(执行模型由 CLI 自管)
  */
@@ -290,8 +289,8 @@ const policyExecutorCommandConfirm = ref<'always_approve' | 'per_command'>('alwa
 
 /** 执行智能体命令确认模式选项(对齐 BaseSelect {value,label} 结构) */
 const executorConfirmOptions = [
-  { value: 'always_approve' as 'always_approve' | 'per_command', label: '自动批准(不弹窗)' },
-  { value: 'per_command' as 'always_approve' | 'per_command', label: '逐命令确认(危险命令弹窗)' },
+  { value: 'always_approve' as 'always_approve' | 'per_command', label: '自动批准' },
+  { value: 'per_command' as 'always_approve' | 'per_command', label: '逐命令确认' },
 ]
 
 /** 验证授权模式选项 */
@@ -399,6 +398,14 @@ watch(
     }
   },
 )
+
+// 单 agent 模式下策略抽屉入口被内联选择器替代;若关闭 user_agent 时 policy 分区正展开,
+// 收起抽屉避免残留近乎空白的面板
+watch(policyUserAgentEnabled, (enabled) => {
+  if (!enabled && drawerOpen.value && drawerSection.value === 'policy') {
+    closeDrawer()
+  }
+})
 
 // ---- 测试环境 / 动态验证配置(协作策略抽屉内,开启「允许自行验证」后展示) ----
 // user_agent 可在已部署的测试环境动态验证 react_agent 发现的安全问题。
@@ -1103,6 +1110,21 @@ onUnmounted(() => {
                     <polyline points="9 18 15 12 9 6" />
                   </svg>
                 </button>
+
+                <!-- 单 agent 模式:命令确认模式内联设置(与 react_agent 同行;不显示文字标签,悬停提示用途) -->
+                <div
+                  v-if="!policyUserAgentEnabled"
+                  class="command-confirm-inline"
+                  title="设置命令确认模式"
+                >
+                  <BaseSelect
+                    v-model="policyExecutorCommandConfirm"
+                    :options="executorConfirmOptions"
+                    size="sm"
+                    class="command-confirm-select"
+                    aria-label="命令确认模式"
+                  />
+                </div>
                 <template v-if="!useAgentExecutor && allSkills.length > 0">
                   <Teleport defer to="#settings-drawer-body">
                     <div v-show="drawerOpen && drawerSection === 'skills'" class="drawer-section-body">
@@ -1145,8 +1167,8 @@ onUnmounted(() => {
               </div>
             </div>
   
-            <!-- 协作策略入口(内容在右侧设置抽屉;开启「允许自行验证」后内含测试环境设置) -->
-            <div class="config-row config-row-scenario">
+            <!-- 协作策略抽屉入口(仅 user_agent 启用时展示;单 agent 模式下命令确认模式已内联到 react_agent 行) -->
+            <div v-if="policyUserAgentEnabled" class="config-row config-row-scenario">
               <button
                 type="button"
                 class="drawer-toggle"
@@ -1179,7 +1201,7 @@ onUnmounted(() => {
                 </svg>
                 <span>协作策略</span>
                 <span class="advanced-summary">
-                  {{ !policyUserAgentEnabled ? '单 agent 模式' : (policyAllowInterrupt ? `每${policyInterval}轮评估·可打断` : `每${policyInterval}轮评估·仅观察`) }}{{ policyAllowVerify ? '·可自行验证' : '' }}
+                  {{ policyAllowInterrupt ? `每${policyInterval}轮评估·可打断` : `每${policyInterval}轮评估·仅观察` }}{{ policyAllowVerify ? '·可自行验证' : '' }}
                 </span>
                 <svg
                   class="advanced-chevron"
@@ -2403,6 +2425,17 @@ onUnmounted(() => {
   color: var(--color-text-secondary);
   cursor: pointer;
   user-select: none;
+}
+
+/* 单 agent 模式:命令确认模式内联设置(替代「协作策略」抽屉入口;无文字标签,悬停提示用途) */
+.command-confirm-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.command-confirm-select {
+  min-width: 120px;
 }
 
 /* 设置面板内技能列表改单列,卡片更舒展 */
