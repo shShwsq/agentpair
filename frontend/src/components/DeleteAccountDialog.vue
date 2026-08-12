@@ -414,12 +414,7 @@ function handleCancel(): void {
 }
 
 .btn-danger-solid:hover:not(:disabled) {
-  background: #b91c1c;
-}
-
-/* 深色主题:danger 背景已调亮,按钮 hover 改用更亮的红,深字保持对比度 */
-:global(html[data-theme='dark']) .btn-danger-solid:hover:not(:disabled) {
-  background: #ef4444;
+  background: var(--color-danger-hover);
 }
 
 .btn-spinner {

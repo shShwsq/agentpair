@@ -22,9 +22,38 @@
   --color-warning: #d97706;
   --color-warning-light: #fffbeb;
   --color-danger: #dc2626;
+  --color-danger-hover: #b91c1c;
   --color-danger-light: #fef2f2;
   --color-info: #2563eb;
   --color-info-light: #eff6ff;
+
+  /* ---- 色彩:对话消息卡片(ConversationMessage) ---- */
+  /* react_agent 回复卡片背景 */
+  --color-msg-react-bg: #faf5ff;
+  /* user_agent 总结卡片背景 */
+  --color-msg-summary-bg: linear-gradient(135deg, #faf5ff 0%, #f0f4ff 100%);
+  /* 流式思考 content 卡片背景 */
+  --color-msg-streaming-bg: linear-gradient(135deg, #fefce8 0%, #fef3c7 100%);
+  /* 折叠 header(reasoning/长详情)hover 背景 */
+  --color-msg-header-hover: rgba(0, 0, 0, 0.04);
+
+  /* ---- 色彩:严重程度徽章(TaskDetailView 结果清单) ---- */
+  --color-sev-critical-bg: #fef2f2;
+  --color-sev-critical-fg: #991b1b;
+  --color-sev-critical-border: #fecaca;
+  --color-sev-high-border: #fecaca;
+  --color-sev-medium-border: #fde68a;
+  --color-sev-low-bg: #fefce8;
+  --color-sev-low-fg: #a16207;
+  --color-sev-low-border: #fef08a;
+  --color-sev-info-border: #bfdbfe;
+
+  /* ---- 色彩:检查点打断卡片(user_agent interrupt) ---- */
+  --color-checkpoint-interrupt-bg: #fff7ed;
+  --color-checkpoint-interrupt-border: #fdba74;
+
+  /* ---- 色彩:警告条 ---- */
+  --color-alert-error-border: #fecaca;
 
   /* ---- 色彩:中性 ---- */
   --color-bg: #f8fafc;
@@ -126,9 +155,34 @@
   --color-warning: #fbbf24;
   --color-warning-light: #451a03;
   --color-danger: #f87171;
+  --color-danger-hover: #ef4444;
   --color-danger-light: #450a0a;
   --color-info: #60a5fa;
   --color-info-light: #172554;
+
+  /* ---- 色彩:对话消息卡片(深底上降低饱和度) ---- */
+  --color-msg-react-bg: #2e1065;
+  --color-msg-summary-bg: linear-gradient(135deg, #1e1b4b 0%, #172554 100%);
+  --color-msg-streaming-bg: linear-gradient(135deg, #422006 0%, #451a03 100%);
+  --color-msg-header-hover: rgba(255, 255, 255, 0.06);
+
+  /* ---- 色彩:严重程度徽章(深底加深背景、调亮前景) ---- */
+  --color-sev-critical-bg: #450a0a;
+  --color-sev-critical-fg: #fca5a5;
+  --color-sev-critical-border: #7f1d1d;
+  --color-sev-high-border: #7f1d1d;
+  --color-sev-medium-border: #78350f;
+  --color-sev-low-bg: #422006;
+  --color-sev-low-fg: #fde047;
+  --color-sev-low-border: #713f12;
+  --color-sev-info-border: #1e3a8a;
+
+  /* ---- 色彩:检查点打断卡片 ---- */
+  --color-checkpoint-interrupt-bg: #431407;
+  --color-checkpoint-interrupt-border: #7c2d12;
+
+  /* ---- 色彩:警告条 ---- */
+  --color-alert-error-border: #7f1d1d;
 
   /* ---- 色彩:中性 ---- */
   --color-bg: #0f172a;

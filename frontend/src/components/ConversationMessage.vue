@@ -313,7 +313,7 @@ const detailLabel = computed(() =>
 }
 
 .msg-reasoning-header:hover {
-  background: rgba(0, 0, 0, 0.04);
+  background: var(--color-msg-header-hover);
 }
 
 .msg-reasoning-toggle {
@@ -416,7 +416,7 @@ const detailLabel = computed(() =>
 }
 
 .msg-react-agent {
-  background: #faf5ff;
+  background: var(--color-msg-react-bg);
 }
 
 .msg-tool {
@@ -441,11 +441,11 @@ const detailLabel = computed(() =>
 }
 
 .msg-summary {
-  background: linear-gradient(135deg, #faf5ff 0%, #f0f4ff 100%);
+  background: var(--color-msg-summary-bg);
 }
 
 .msg-streaming {
-  background: linear-gradient(135deg, #fefce8 0%, #fef3c7 100%);
+  background: var(--color-msg-streaming-bg);
 }
 
 .msg-content-muted {
@@ -480,7 +480,7 @@ const detailLabel = computed(() =>
 }
 
 .msg-tool-result-header:hover {
-  background: rgba(0, 0, 0, 0.04);
+  background: var(--color-msg-header-hover);
 }
 
 .msg-tool-result-label {
@@ -500,21 +500,4 @@ const detailLabel = computed(() =>
   overflow-y: auto;
 }
 
-/* ---- 深色主题适配(仅覆盖硬编码的浅色背景,变量部分由 tokens.css 自动切换) ---- */
-:global(html[data-theme='dark']) .msg-react-agent {
-  background: #2e1065;
-}
-
-:global(html[data-theme='dark']) .msg-reasoning-header:hover,
-:global(html[data-theme='dark']) .msg-tool-result-header:hover {
-  background: rgba(255, 255, 255, 0.06);
-}
-
-:global(html[data-theme='dark']) .msg-summary {
-  background: linear-gradient(135deg, #1e1b4b 0%, #172554 100%);
-}
-
-:global(html[data-theme='dark']) .msg-streaming {
-  background: linear-gradient(135deg, #422006 0%, #451a03 100%);
-}
 </style>

@@ -2765,37 +2765,12 @@ function parseCheckpoint(item: DisplayItem): {
   border-radius: var(--radius-full);
 }
 
-.sev-critical { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
-.sev-high { background: var(--color-danger-light); color: var(--color-danger); border: 1px solid #fecaca; }
-.sev-medium { background: var(--color-warning-light); color: var(--color-warning); border: 1px solid #fde68a; }
-.sev-low { background: #fefce8; color: #a16207; border: 1px solid #fef08a; }
-.sev-info { background: var(--color-info-light); color: var(--color-info); border: 1px solid #bfdbfe; }
+.sev-critical { background: var(--color-sev-critical-bg); color: var(--color-sev-critical-fg); border: 1px solid var(--color-sev-critical-border); }
+.sev-high { background: var(--color-danger-light); color: var(--color-danger); border: 1px solid var(--color-sev-high-border); }
+.sev-medium { background: var(--color-warning-light); color: var(--color-warning); border: 1px solid var(--color-sev-medium-border); }
+.sev-low { background: var(--color-sev-low-bg); color: var(--color-sev-low-fg); border: 1px solid var(--color-sev-low-border); }
+.sev-info { background: var(--color-info-light); color: var(--color-info); border: 1px solid var(--color-sev-info-border); }
 .sev-unknown { background: var(--color-surface-alt); color: var(--color-text-secondary); border: 1px solid var(--color-border); }
-
-/* 深色主题:仅覆盖硬编码的浅色底/边框,变量部分由 tokens.css 自动切换 */
-:global(html[data-theme='dark']) .sev-critical {
-  background: #450a0a;
-  color: #fca5a5;
-  border-color: #7f1d1d;
-}
-
-:global(html[data-theme='dark']) .sev-high {
-  border-color: #7f1d1d;
-}
-
-:global(html[data-theme='dark']) .sev-medium {
-  border-color: #78350f;
-}
-
-:global(html[data-theme='dark']) .sev-low {
-  background: #422006;
-  color: #fde047;
-  border-color: #713f12;
-}
-
-:global(html[data-theme='dark']) .sev-info {
-  border-color: #1e3a8a;
-}
 
 .result-cards {
   display: flex;
@@ -3464,15 +3439,8 @@ function parseCheckpoint(item: DisplayItem): {
 }
 
 .checkpoint-card.checkpoint-interrupt {
-  background: #fff7ed;
-  border-color: #fdba74;
-  border-left-color: #ea580c;
-}
-
-/* 深色主题:interrupt 卡片改用深橙底,左侧强调色保持不变 */
-:global(html[data-theme='dark']) .checkpoint-card.checkpoint-interrupt {
-  background: #431407;
-  border-color: #7c2d12;
+  background: var(--color-checkpoint-interrupt-bg);
+  border-color: var(--color-checkpoint-interrupt-border);
   border-left-color: #ea580c;
 }
 
