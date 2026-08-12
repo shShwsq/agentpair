@@ -125,12 +125,13 @@ class Settings(BaseSettings):
         "echo,printf,test,"
         "mkdir -p,touch,cp -r,mv"
     )
+    # fork bomb 正则等,逗号在引号内作为分隔符
     SANDBOX_LOCAL_DANGEROUS_COMMANDS: str = (
         r"rm\s+-rf\s+/,"
-        r"rm\s+-rf\s+~,"
+        r"rm\s+-rf\s+~/,"
         r"rm\s+-rf\s+\*,"
         r"mkfs,dd\s+if=,"
-        r":\(\)\{\s*:\|:\s*&\s*\};:",  # fork bomb
+        r":\(\)\{\s*:\|:\s*&\s*\};:,"
         r"curl\s+.*\|\s*(ba)?sh,"
         r"wget\s+.*\|\s*(ba)?sh,"
         r"chmod\s+777\s+/,"
