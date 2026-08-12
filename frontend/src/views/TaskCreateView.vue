@@ -1600,6 +1600,11 @@ onUnmounted(() => {
   border: 1px solid #fecaca;
 }
 
+/* 深色主题:错误边框改用深红,背景/文字色由 tokens.css 自动切换 */
+:global(html[data-theme='dark']) .alert-error {
+  border-color: #7f1d1d;
+}
+
 /* ---- 对话式输入框 ---- */
 .chat-card {
   background: var(--color-surface);

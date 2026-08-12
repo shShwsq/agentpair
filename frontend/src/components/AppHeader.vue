@@ -11,19 +11,53 @@
  * 硬约束:账号设置(/settings)只由齿轮按钮进入,不入主导航。
  * 记忆管理(/memory)、协作策略(/agent-policy)作为主导航项,与模型设置/CLI 设置并列。
  * 问号按钮:打开帮助文档弹窗(所有路由行为一致,展示完整 help.md)。
+ * 主题按钮:弹出浅色/深色/跟随系统三选项,选择持久化到 localStorage(useTheme)。
  */
-import { ref } from 'vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import BrandLogo from '@/components/BrandLogo.vue'
 import HelpDialog from '@/components/HelpDialog.vue'
+import { useTheme } from '@/composables/useTheme'
+import type { ThemeMode } from '@/composables/useTheme'
 import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
 const authStore = useAuthStore()
+const { mode, resolved, setMode } = useTheme()
 
 /** 帮助文档弹窗是否显示 */
 const helpOpen = ref(false)
+
+/** 主题菜单是否展开 */
+const themeOpen = ref(false)
+/** 主题按钮容器(用于点击外部关闭) */
+const themeRootRef = ref<HTMLElement | null>(null)
+
+/** 选择主题模式:应用 + 持久化 + 关闭菜单 */
+function selectTheme(next: ThemeMode): void {
+  setMode(next)
+  themeOpen.value = false
+}
+
+/** 点击主题按钮区域外关闭菜单 */
+function onDocumentClick(e: MouseEvent): void {
+  if (themeRootRef.value?.contains(e.target as Node)) return
+  themeOpen.value = false
+}
+
+// 菜单打开时监听外部点击,关闭时移除
+watch(themeOpen, (isOpen) => {
+  if (isOpen) {
+    document.addEventListener('mousedown', onDocumentClick)
+  } else {
+    document.removeEventListener('mousedown', onDocumentClick)
+  }
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('mousedown', onDocumentClick)
+})
 
 function handleLogout(): void {
   authStore.logout()
@@ -82,6 +116,75 @@ function handleCloseHelp(): void {
             <line x1="12" y1="17" x2="12.01" y2="17" />
           </svg>
         </button>
+        <!-- 主题切换:按钮显示当前生效主题图标,点击弹出三选项菜单 -->
+        <div ref="themeRootRef" class="theme-switch">
+          <button
+            class="btn-theme"
+            :class="{ 'is-open': themeOpen }"
+            title="切换主题"
+            aria-label="切换主题"
+            aria-haspopup="menu"
+            :aria-expanded="themeOpen"
+            @click="themeOpen = !themeOpen"
+          >
+            <!-- 深色:月亮;浅色/跟随系统生效浅色时:太阳 -->
+            <svg v-if="resolved === 'dark'" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+            </svg>
+            <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+            </svg>
+          </button>
+          <!-- 主题选择菜单:浅色 / 深色 / 跟随系统 -->
+          <div v-if="themeOpen" class="theme-menu" role="menu">
+            <button
+              class="theme-option"
+              :class="{ 'is-selected': mode === 'light' }"
+              role="menuitem"
+              @click="selectTheme('light')"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="4" />
+                <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+              </svg>
+              <span>浅色</span>
+              <svg v-if="mode === 'light'" class="theme-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+            </button>
+            <button
+              class="theme-option"
+              :class="{ 'is-selected': mode === 'dark' }"
+              role="menuitem"
+              @click="selectTheme('dark')"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+              </svg>
+              <span>深色</span>
+              <svg v-if="mode === 'dark'" class="theme-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+            </button>
+            <button
+              class="theme-option"
+              :class="{ 'is-selected': mode === 'system' }"
+              role="menuitem"
+              @click="selectTheme('system')"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect width="20" height="14" x="2" y="3" rx="2" />
+                <line x1="8" x2="16" y1="21" y2="21" />
+                <line x1="12" x2="12" y1="17" y2="21" />
+              </svg>
+              <span>跟随系统</span>
+              <svg v-if="mode === 'system'" class="theme-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+            </button>
+          </div>
+        </div>
         <button
           class="btn-settings"
           title="账号设置"
@@ -176,7 +279,8 @@ function handleCloseHelp(): void {
 
 /* 设置图标按钮:与登出按钮风格一致但更紧凑,圆形 hover 反馈 */
 .btn-settings,
-.btn-help {
+.btn-help,
+.btn-theme {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -191,7 +295,9 @@ function handleCloseHelp(): void {
 }
 
 .btn-settings:hover,
-.btn-help:hover {
+.btn-help:hover,
+.btn-theme:hover,
+.btn-theme.is-open {
   color: var(--color-text);
   background: var(--color-surface-alt);
 }
@@ -211,6 +317,55 @@ function handleCloseHelp(): void {
   color: var(--color-danger);
   border-color: var(--color-danger);
   background: var(--color-danger-light);
+}
+
+/* ---- 主题切换菜单 ---- */
+.theme-switch {
+  position: relative;
+}
+
+/* 下拉菜单:绝对定位于按钮下方右缘,悬浮在页面内容之上 */
+.theme-menu {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  z-index: 30;
+  min-width: 148px;
+  padding: var(--space-1);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+
+.theme-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--fs-sm);
+  color: var(--color-text-secondary);
+  border-radius: var(--radius-md);
+  text-align: left;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.theme-option:hover {
+  color: var(--color-text);
+  background: var(--color-surface-alt);
+}
+
+.theme-option.is-selected {
+  color: var(--color-primary);
+  font-weight: var(--fw-medium);
+}
+
+/* 选中对勾:占位右侧,与未选中项文字右缘对齐 */
+.theme-check {
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 /* 导航项(slot 里的 RouterLink/a):去掉强填充,用文字色 + 极细下划线指示当前页 */

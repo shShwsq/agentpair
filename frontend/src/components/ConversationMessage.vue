@@ -499,4 +499,22 @@ const detailLabel = computed(() =>
   max-height: 500px;
   overflow-y: auto;
 }
+
+/* ---- 深色主题适配(仅覆盖硬编码的浅色背景,变量部分由 tokens.css 自动切换) ---- */
+:global(html[data-theme='dark']) .msg-react-agent {
+  background: #2e1065;
+}
+
+:global(html[data-theme='dark']) .msg-reasoning-header:hover,
+:global(html[data-theme='dark']) .msg-tool-result-header:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+:global(html[data-theme='dark']) .msg-summary {
+  background: linear-gradient(135deg, #1e1b4b 0%, #172554 100%);
+}
+
+:global(html[data-theme='dark']) .msg-streaming {
+  background: linear-gradient(135deg, #422006 0%, #451a03 100%);
+}
 </style>

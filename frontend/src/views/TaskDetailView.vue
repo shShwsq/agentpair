@@ -2708,6 +2708,31 @@ function parseCheckpoint(item: DisplayItem): {
 .sev-info { background: var(--color-info-light); color: var(--color-info); border: 1px solid #bfdbfe; }
 .sev-unknown { background: var(--color-surface-alt); color: var(--color-text-secondary); border: 1px solid var(--color-border); }
 
+/* 深色主题:仅覆盖硬编码的浅色底/边框,变量部分由 tokens.css 自动切换 */
+:global(html[data-theme='dark']) .sev-critical {
+  background: #450a0a;
+  color: #fca5a5;
+  border-color: #7f1d1d;
+}
+
+:global(html[data-theme='dark']) .sev-high {
+  border-color: #7f1d1d;
+}
+
+:global(html[data-theme='dark']) .sev-medium {
+  border-color: #78350f;
+}
+
+:global(html[data-theme='dark']) .sev-low {
+  background: #422006;
+  color: #fde047;
+  border-color: #713f12;
+}
+
+:global(html[data-theme='dark']) .sev-info {
+  border-color: #1e3a8a;
+}
+
 .result-cards {
   display: flex;
   flex-direction: column;
@@ -3377,6 +3402,13 @@ function parseCheckpoint(item: DisplayItem): {
 .checkpoint-card.checkpoint-interrupt {
   background: #fff7ed;
   border-color: #fdba74;
+  border-left-color: #ea580c;
+}
+
+/* 深色主题:interrupt 卡片改用深橙底,左侧强调色保持不变 */
+:global(html[data-theme='dark']) .checkpoint-card.checkpoint-interrupt {
+  background: #431407;
+  border-color: #7c2d12;
   border-left-color: #ea580c;
 }
 
