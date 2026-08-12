@@ -153,8 +153,39 @@ const qoderContextWindow = ref(0)
 const allSkills = ref<SkillSummary[]>([])
 /** skill 列表加载错误(静默失败,不阻塞提交) */
 const skillsError = ref('')
-/** 高级选项面板是否展开(默认折叠) */
-const advancedOpen = ref(false)
+
+// ============================================================
+// 右侧设置抽屉(协作策略 / 测试环境 / 技能三个分区,手风琴式)
+// ============================================================
+
+/** 抽屉分区标识 */
+type DrawerSection = 'policy' | 'testenv' | 'skills'
+
+/** 抽屉是否打开 */
+const drawerOpen = ref(false)
+/** 当前展开的分区(同一时刻只展开一个) */
+const drawerSection = ref<DrawerSection | null>(null)
+
+/** 点击入口按钮:打开抽屉并展开对应分区;再次点击同一分区则收起(不关抽屉) */
+function openDrawer(section: DrawerSection): void {
+  // 再次点击已展开的分区入口 → 收起面板
+  if (drawerOpen.value && drawerSection.value === section) {
+    closeDrawer()
+    return
+  }
+  drawerOpen.value = true
+  drawerSection.value = section
+}
+
+/** 关闭抽屉(遮罩点击 / × / Esc) */
+function closeDrawer(): void {
+  drawerOpen.value = false
+}
+
+/** Esc 关闭抽屉 */
+function onDrawerKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Escape' && drawerOpen.value) closeDrawer()
+}
 /**
  * 当前选中的 skill name 集合
  *
@@ -227,10 +258,8 @@ const urlPattern = /^https?:\/\/[^\s/$.?#].[^\s]*$/
 const loading = ref(false)
 const error = ref('')
 
-// ---- Agent 策略配置(高级设置,任务级覆盖用户级默认) ----
+// ---- Agent 策略配置(任务级覆盖用户级默认,在右侧设置抽屉中编辑) ----
 
-/** 高级设置面板是否展开(默认折叠) */
-const policyOpen = ref(false)
 /** 是否分别配置内置/CLI 的 K 值(高级中的高级) */
 const policyAdvanced = ref(false)
 /** 统一 K 值:每 K 个迭代评估一次 */
@@ -345,11 +374,9 @@ function onMaxRoundsBlur(e: Event): void {
   }
 }
 
-// ---- 测试环境 / 动态验证配置(高级设置) ----
+// ---- 测试环境 / 动态验证配置(在右侧设置抽屉中编辑) ----
 // user_agent 可在已部署的测试环境动态验证 react_agent 发现的安全问题。
 // 对用户透明:不出现 verifier_agent 字样,只显示"正在验证"。
-/** 测试环境面板是否展开(默认折叠) */
-const verifierOpen = ref(false)
 /** 是否启用动态验证 */
 const verifierEnabled = ref(false)
 /** 测试环境 URL(已部署的应用地址,如 http://localhost:3000) */
@@ -738,6 +765,7 @@ const executorOptions = computed(() => [
 
 onMounted(async () => {
   document.addEventListener('click', onDocClickCloseHelp)
+  document.addEventListener('keydown', onDrawerKeydown)
   try {
     // 并行拉取场景、模型、各 git provider 状态、技能、agent 配置
     // git provider 状态静默失败:未绑定不影响任务提交
@@ -824,6 +852,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   document.removeEventListener('click', onDocClickCloseHelp)
+  document.removeEventListener('keydown', onDrawerKeydown)
 })
 </script>
 
@@ -992,17 +1021,17 @@ onUnmounted(() => {
                   </Transition>
                 </div>
   
-                <!-- 技能多选(仅内置执行器显示:CLI 用自身工具系统,本地 skill 无效) -->
-                <div v-if="!useAgentExecutor && allSkills.length > 0" class="advanced-panel">
+                <!-- 技能设置入口(内容在右侧设置抽屉;仅内置执行器显示:CLI 用自身工具系统,本地 skill 无效) -->
                 <button
+                  v-if="!useAgentExecutor && allSkills.length > 0"
                   type="button"
-                  class="advanced-toggle"
-                  :aria-expanded="advancedOpen"
-                  @click="advancedOpen = !advancedOpen"
+                  class="drawer-toggle"
+                  :aria-expanded="drawerOpen && drawerSection === 'skills'"
+                  @click="openDrawer('skills')"
                 >
                   <svg
                     class="advanced-chevron"
-                    :class="{ expanded: advancedOpen }"
+                    :class="{ expanded: drawerOpen && drawerSection === 'skills' }"
                     width="12"
                     height="12"
                     viewBox="0 0 24 24"
@@ -1019,9 +1048,9 @@ onUnmounted(() => {
                     {{ selectedSkillCount }}/{{ allSkills.length }}
                   </span>
                 </button>
-  
-                <Transition name="collapse">
-                  <div v-show="advancedOpen" class="advanced-dropdown">
+                <template v-if="!useAgentExecutor && allSkills.length > 0">
+                  <Teleport defer to="#settings-drawer-body">
+                    <div v-show="drawerOpen && drawerSection === 'skills'" class="drawer-section-body">
                     <div class="skill-header">
                       <label class="skill-select-all">
                         <input
@@ -1055,37 +1084,28 @@ onUnmounted(() => {
                         </div>
                       </label>
                     </div>
-                  </div>
-                </Transition>
-                </div>
+                    </div>
+                  </Teleport>
+                </template>
               </div>
             </div>
   
-            <!-- 协作策略 + 测试环境(同一行,两个折叠面板并排) -->
+            <!-- 协作策略 + 测试环境入口(内容在右侧设置抽屉) -->
             <div class="config-row config-row-scenario config-row-dual">
-              <div class="advanced-panel">
-                <button
-                  type="button"
-                  class="advanced-toggle"
-                  :aria-expanded="policyOpen"
-                  @click="policyOpen = !policyOpen"
-                >
-                  <svg
-                    class="advanced-chevron"
-                    :class="{ expanded: policyOpen }"
-                    width="16" height="16" viewBox="0 0 24 24" fill="none"
-                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-                  >
-                    <polyline points="9 18 15 12 9 6" />
-                  </svg>
-                  <span>协作策略</span>
-                  <span class="advanced-summary">
-                    {{ !policyUserAgentEnabled ? '单 agent 模式' : (policyAllowInterrupt ? `每${policyInterval}轮评估·可打断` : `每${policyInterval}轮评估·仅观察`) }}
-                  </span>
-                </button>
+              <button
+                type="button"
+                class="drawer-toggle"
+                :aria-expanded="drawerOpen && drawerSection === 'policy'"
+                @click="openDrawer('policy')"
+              >
+                <span>协作策略</span>
+                <span class="advanced-summary">
+                  {{ !policyUserAgentEnabled ? '单 agent 模式' : (policyAllowInterrupt ? `每${policyInterval}轮评估·可打断` : `每${policyInterval}轮评估·仅观察`) }}
+                </span>
+              </button>
   
-                <Transition name="collapse">
-                  <div v-show="policyOpen" class="inline-dropdown">
+                <Teleport defer to="#settings-drawer-body">
+                  <div v-show="drawerOpen && drawerSection === 'policy'" class="drawer-section-body">
                     <!-- 启用 user_agent 开关(最核心,控制全局) -->
                     <label class="policy-toggle-row">
                       <input v-model="policyUserAgentEnabled" class="switch" type="checkbox" />
@@ -1196,38 +1216,26 @@ onUnmounted(() => {
                       </div>
                     </Transition>
                   </div>
-                </Transition>
-              </div>
+                </Teleport>
+              <button
+                type="button"
+                class="drawer-toggle"
+                :aria-expanded="drawerOpen && drawerSection === 'testenv'"
+                @click="openDrawer('testenv')"
+              >
+                <span>测试环境</span>
+                <span class="advanced-summary">
+                  {{ verifierEnabled
+                    ? (verifierAuthMode === 'direct' ? '已启用·直接执行' : '已启用·逐动作授权')
+                      + (verifierAuthTokens.filter(t => t.label.trim() && t.header_value.trim()).length > 0
+                        ? '·' + verifierAuthTokens.filter(t => t.label.trim() && t.header_value.trim()).length + '个凭证'
+                        : '')
+                    : '未启用' }}
+                </span>
+              </button>
   
-              <!-- 测试环境 / 动态验证(可折叠,默认折叠) -->
-              <div class="advanced-panel">
-                <button
-                  type="button"
-                  class="advanced-toggle"
-                  :aria-expanded="verifierOpen"
-                  @click="verifierOpen = !verifierOpen"
-                >
-                  <svg
-                    class="advanced-chevron"
-                    :class="{ expanded: verifierOpen }"
-                    width="16" height="16" viewBox="0 0 24 24" fill="none"
-                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-                  >
-                    <polyline points="9 18 15 12 9 6" />
-                  </svg>
-                  <span>测试环境</span>
-                  <span class="advanced-summary">
-                    {{ verifierEnabled
-                      ? (verifierAuthMode === 'direct' ? '已启用·直接执行' : '已启用·逐动作授权')
-                        + (verifierAuthTokens.filter(t => t.label.trim() && t.header_value.trim()).length > 0
-                          ? '·' + verifierAuthTokens.filter(t => t.label.trim() && t.header_value.trim()).length + '个凭证'
-                          : '')
-                      : '未启用' }}
-                  </span>
-                </button>
-  
-                <Transition name="collapse">
-                  <div v-show="verifierOpen" class="inline-dropdown">
+                <Teleport defer to="#settings-drawer-body">
+                  <div v-show="drawerOpen && drawerSection === 'testenv'" class="drawer-section-body">
                     <label class="policy-toggle-row">
                       <input v-model="verifierEnabled" class="switch" type="checkbox" />
                       <span>启用动态验证 <span class="policy-experimental">(实验性)</span></span>
@@ -1313,8 +1321,7 @@ onUnmounted(() => {
                       </div>
                     </Transition>
                   </div>
-                </Transition>
-              </div>
+                </Teleport>
             </div>
           </div>
   
@@ -1465,6 +1472,13 @@ onUnmounted(() => {
           </p>
         </div>
       </main>
+
+      <!-- 右侧设置面板:内嵌在页面布局中,展开时主内容区相应收窄往左移。
+           当前分区表单由各入口处的 defer Teleport 注入(v-show 控制显隐) -->
+      <aside v-show="drawerOpen" class="settings-panel" role="complementary" aria-label="任务设置">
+        <button type="button" class="panel-close" aria-label="关闭设置" @click="closeDrawer">×</button>
+        <div id="settings-drawer-body" class="panel-body" />
+      </aside>
     </div>
 
     <!-- 仓库提示弹窗(加载失败/无仓库/未绑定) -->
@@ -1514,6 +1528,8 @@ onUnmounted(() => {
   align-items: stretch;
   min-height: 0;
   overflow: hidden;
+  /* 窄屏时设置面板以本容器为定位基准覆盖显示 */
+  position: relative;
 }
 
 .main {
@@ -1560,8 +1576,8 @@ onUnmounted(() => {
   align-items: flex-start;
 }
 
-/* 协作策略 + 测试环境并排:两个面板均分宽度,内联展开时内容不局促 */
-.config-row-dual .advanced-panel {
+/* 协作策略 + 测试环境入口并排:两个入口按钮均分宽度 */
+.config-row-dual .drawer-toggle {
   flex: 1 1 280px;
   min-width: 0;
 }
@@ -2060,6 +2076,19 @@ onUnmounted(() => {
 }
 
 /* ---- 小屏适配 ---- */
+/* 窄屏:主区已不够宽,设置面板改为覆盖在内容上方 */
+@media (max-width: 1100px) {
+  .settings-panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 901;
+    width: min(400px, 100%);
+    box-shadow: var(--shadow-xl);
+  }
+}
+
 @media (max-width: 640px) {
   /* 窄屏每行标签与控件上下排列 */
   .config-row {
@@ -2084,14 +2113,6 @@ onUnmounted(() => {
 
   .branch-input {
     flex: 0 0 96px;
-  }
-
-  /* 窄屏下拉浮层撑满宽度 */
-  .advanced-dropdown {
-    min-width: 0;
-    max-width: calc(100vw - var(--space-6) * 2);
-    right: 0;
-    left: 0;
   }
 
   .qoder-config-dropdown {
@@ -2186,15 +2207,11 @@ onUnmounted(() => {
   flex: 1;
 }
 
-/* ---- 高级选项:Skill 多选(下拉浮层,挂在模型选择右边) ---- */
-.advanced-panel {
-  position: relative;
-}
-
-.advanced-toggle {
+/* ---- 设置抽屉入口按钮(协作策略 / 测试环境 / 技能) ---- */
+.drawer-toggle {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--space-2);
   height: 36px;
   padding: 0 var(--space-3);
   font-size: var(--fs-sm);
@@ -2208,12 +2225,12 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.advanced-toggle:hover {
+.drawer-toggle:hover {
   color: var(--color-text);
   border-color: var(--color-primary-border);
 }
 
-.advanced-toggle[aria-expanded="true"] {
+.drawer-toggle[aria-expanded="true"] {
   color: var(--color-primary);
   border-color: var(--color-primary);
   box-shadow: 0 0 0 3px var(--color-primary-light);
@@ -2236,37 +2253,82 @@ onUnmounted(() => {
   font-variant-numeric: tabular-nums;
 }
 
-/* 下拉浮层:绝对定位,不撑高 topbar */
-.advanced-dropdown {
+/* ---- 右侧内嵌设置面板 ---- */
+.settings-panel {
+  position: relative;
+  width: 400px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--color-bg);
+  border-left: 1px solid var(--color-border);
+}
+
+/* 关闭按钮:右上角浮动,不占布局 */
+.panel-close {
   position: absolute;
-  top: calc(100% + var(--space-2));
-  right: 0;
-  z-index: var(--z-dropdown, 100);
-  min-width: 420px;
-  max-width: min(80vw, 640px);
-  padding: var(--space-3) var(--space-4) var(--space-4);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg, 0 10px 25px rgba(0, 0, 0, 0.12));
+  top: var(--space-3);
+  right: var(--space-3);
+  z-index: 1;
+  padding: 4px 8px;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--color-text-muted);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
 }
 
-/* 内联展开面板:协作策略 / 测试环境(流内展开推下下方内容,不再用绝对定位浮层) */
-.inline-dropdown {
-  margin-top: var(--space-2);
-  padding: var(--space-3) var(--space-4) var(--space-4);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
+.panel-close:hover {
+  background: var(--color-surface-alt);
+  color: var(--color-text);
 }
 
-/* ---- Agent 策略配置面板 ---- */
+.panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* 顶部多留白,避免内容被右上角关闭按钮遮挡 */
+  padding: var(--space-8) var(--space-5) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* 当前分区表单(由各入口处的 Teleport 注入) */
+.drawer-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* 设置面板内技能列表改单列,卡片更舒展 */
+.drawer-section-body .skill-list {
+  grid-template-columns: 1fr;
+}
+
+/* 设置面板内登录凭证行:空间不足时换行(身份名+删除一行,header 名/值一行) */
+.drawer-section-body .auth-token-row {
+  flex-wrap: wrap;
+}
+
+.drawer-section-body .auth-token-label {
+  flex: 1 1 160px;
+}
+
+.drawer-section-body .auth-token-header-name {
+  flex: 1 1 45%;
+}
+
+.drawer-section-body .auth-token-header-value {
+  flex: 1 1 45%;
+}
+
+/* ---- Agent 策略配置面板(设置面板内分区内容) ---- */
 .policy-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--space-3);
-  margin-bottom: var(--space-3);
 }
 
 .policy-field {

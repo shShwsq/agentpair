@@ -389,8 +389,8 @@ onUnmounted(() => {
             <button class="btn-link" @click="loadPolicy">重试</button>
           </div>
 
-          <!-- 策略表单 -->
-          <section v-else class="policy-card">
+          <!-- 策略表单(无卡片,平铺更简洁) -->
+          <section v-else class="policy-form">
             <!-- 启用 user_agent 开关(最核心,控制全局) -->
             <label class="policy-toggle-row policy-toggle-primary">
               <input v-model="policyUserAgentEnabled" class="switch" type="checkbox" :disabled="saving" />
@@ -780,13 +780,11 @@ onUnmounted(() => {
   to { transform: rotate(360deg); }
 }
 
-/* ---- 策略卡片 ---- */
-.policy-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-sm);
-  padding: var(--space-5);
+/* ---- 策略表单(无卡片,直接平铺) ---- */
+.policy-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
 }
 
 .policy-grid {
@@ -926,8 +924,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-2);
-  margin: 0 calc(-1 * var(--space-2));
+  padding: var(--space-2);
   font-size: var(--fs-sm);
   color: var(--color-text);
   cursor: pointer;
@@ -949,9 +946,9 @@ onUnmounted(() => {
 
 /* 主开关行(启用 user_agent):加强视觉权重 */
 .policy-toggle-primary {
-  padding: var(--space-3) var(--space-3);
-  margin: calc(-1 * var(--space-2)) calc(-1 * var(--space-2)) var(--space-2);
-  background: var(--color-surface-alt);
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
   font-weight: var(--fw-medium);
 }
 
@@ -1022,12 +1019,17 @@ input.switch:disabled {
   margin-bottom: var(--space-2);
 }
 
+/* 数字字段限宽,避免单字段独占整行显得空旷 */
+.policy-field-maxrounds {
+  max-width: 240px;
+}
+
 /* ---- 操作区 ---- */
 .policy-actions {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  margin-top: var(--space-4);
+  margin-top: var(--space-2);
   padding-top: var(--space-4);
   border-top: 1px solid var(--color-border);
 }
