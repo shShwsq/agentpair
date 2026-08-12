@@ -30,15 +30,22 @@ from app.models.user import User
 from app.skills import loader as skill_loader
 from app.skills.loader import (
     DEFAULT_SKILLS_ROOT,
+    get_user_skills_root,
     reload_registry,
     scenario_owner_id,
 )
 from app.skills.schema import ParsedSkill
+from app.skills.storage import DirectorySkillStorage, SkillStorage
 from app.skills.uploader import MAX_ZIP_SIZE, extract_skill_zip
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/skills", tags=["skills"])
+
+
+# 用户上传 skill 的存储后端(目录实现,根目录来自 USER_SKILLS_DIR)
+# 未来切换数据库 / 对象存储时,替换此实例即可(实现同一 SkillStorage 接口)
+user_skill_storage: SkillStorage = DirectorySkillStorage(get_user_skills_root())
 
 
 # ============================================================
@@ -102,15 +109,15 @@ def _is_owned(skill: ParsedSkill, user: User | None) -> bool:
     return scenario_owner_id(skill.scenario_id) == user.id
 
 
-def _skill_path(scenario_id: str, skill_name: str) -> Path:
-    """构造 SKILL.md 路径,校验合法性"""
+def _user_skill_path(scenario_id: str, skill_name: str) -> Path:
+    """构造用户 skill 的 SKILL.md 路径(upsert 直写用),校验合法性"""
     # 防止路径穿越:scenario_id 和 skill_name 不能含 .. 或路径分隔符
     if "/" in scenario_id or "\\" in scenario_id or ".." in scenario_id:
         raise HTTPException(status_code=400, detail="非法 scenario_id")
     if "/" in skill_name or "\\" in skill_name or ".." in skill_name:
         raise HTTPException(status_code=400, detail="非法 skill_name")
 
-    return DEFAULT_SKILLS_ROOT / scenario_id / skill_name / "SKILL.md"
+    return get_user_skills_root() / scenario_id / skill_name / "SKILL.md"
 
 
 def _to_summary(skill: ParsedSkill, user: User | None) -> SkillSummaryResponse:
@@ -211,7 +218,7 @@ async def upload_skill_zip(
         SKILL.md                # 简化结构,单文件
 
     - skill 名以 SKILL.md frontmatter.name 为准
-    - 落地到 <skills_root>/user_<uid>/<skill_name>/,仅上传者可见可用
+    - 落地到 USER_SKILLS_DIR 下的 user_<uid>/<skill_name>/,仅上传者可见可用
     - 与全局(含内置/他人)skill 重名 → 409;与自己的 skill 重名时
       传 force=true 可覆盖,否则 409
     """
@@ -223,7 +230,6 @@ async def upload_skill_zip(
         )
 
     scenario_id = _user_scenario_id(current_user.id)
-    target_dir = DEFAULT_SKILLS_ROOT / scenario_id
 
     # 解压到临时目录并校验(结构 / frontmatter / 大小 / 扩展名白名单)
     tmp_root = Path(tempfile.mkdtemp(prefix="skill_upload_"))
@@ -234,11 +240,9 @@ async def upload_skill_zip(
             raise HTTPException(status_code=400, detail=str(e)) from e
 
         skill_name = skill.name
-        skill_dest = target_dir / skill_name
 
         # 全局重名检查:与内置/他人 skill 重名不可覆盖;与自己重名需 force
-        existing = skill_loader.REGISTRY.get(scenario_id, skill_name)
-        replaced = False
+        existing = None
         for sid in skill_loader.REGISTRY.list_scenarios():
             hit = skill_loader.REGISTRY.get(sid, skill_name)
             if not hit:
@@ -262,17 +266,12 @@ async def upload_skill_zip(
                     f"skill「{skill_name}」已存在,如需覆盖请勾选「覆盖同名技能」"
                 ),
             )
-        if existing:
-            replaced = True
 
-        # 落地:先清旧(force 覆盖),再拷贝
-        target_dir.mkdir(parents=True, exist_ok=True)
-        if replaced:
-            shutil.rmtree(skill_dest, ignore_errors=True)
-        shutil.copytree(skill.skill_dir, skill_dest)
+        # 落地(目录实现:拷贝到 USER_SKILLS_DIR;覆盖时由存储后端清旧数据)
+        replaced = user_skill_storage.save(scenario_id, skill_name, skill.skill_dir)
         logger.info(
             f"upload skill: user={current_user.id} name={skill_name} "
-            f"replaced={replaced} ({skill_dest})"
+            f"replaced={replaced}"
         )
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
@@ -309,7 +308,7 @@ def upsert_skill(
             status_code=403,
             detail="仅允许更新自己上传的 skill",
         )
-    skill_md = _skill_path(scenario_id, skill_name)
+    skill_md = _user_skill_path(scenario_id, skill_name)
     skill_md.parent.mkdir(parents=True, exist_ok=True)
     skill_md.write_text(req.content, encoding="utf-8")
 
@@ -347,10 +346,13 @@ def delete_skill(
         )
     _require_owned(skill, current_user)
 
-    # 删整个 skill 目录(SKILL.md + 可能的附加资源)
+    # 删除:经存储后端(目录实现删 USER_SKILLS_DIR 下的落地位置)
+    user_skill_storage.delete(scenario_id, skill_name)
+    # 注册表路径(可能为旧版本遗留的 backend/skills/user_* 位置)一并清理,幂等
     shutil.rmtree(skill.skill_dir, ignore_errors=True)
+    shutil.rmtree(DEFAULT_SKILLS_ROOT / scenario_id / skill_name, ignore_errors=True)
     reload_registry()
-    logger.info(f"delete skill: {scenario_id}/{skill_name} ({skill.skill_dir})")
+    logger.info(f"delete skill: {scenario_id}/{skill_name}")
 
 
 @router.post("/reload", response_model=list[SkillSummaryResponse])

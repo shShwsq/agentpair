@@ -34,6 +34,8 @@ _repos/
 
 # 用户上传的 skill(按用户隔离的运行时数据,不入库)
 backend/skills/user_*/
+# 用户上传 skill 的默认存储目录(可经 USER_SKILLS_DIR 环境变量配置)
+backend/user_skills/
 
 # 参考资料
 references/

@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     # 仓库克隆超时(秒)。完整克隆比浅克隆慢,默认 600s;超大仓库可调大
     REPO_CLONE_TIMEOUT: int = 600
 
+    # 用户上传 skill 存储目录(默认相对后端运行目录)
+    # 生产环境可指向独立可写 volume(如 /data/agentpair/user_skills);
+    # 内置 skill 始终在代码目录 backend/skills/,不经过此配置
+    USER_SKILLS_DIR: str = "./user_skills"
+
     # 沙箱配置(阶段 2 起)
     # mode: mock(本地未部署 Server)/ sandbox(连真实 OpenSandbox Server)
     SANDBOX_MODE: str = "mock"

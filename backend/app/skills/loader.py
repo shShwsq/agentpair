@@ -18,17 +18,33 @@ from pathlib import Path
 
 import yaml
 
+from app.config import settings
 from app.skills.schema import ParsedSkill, SkillRegistry
 
 logger = logging.getLogger(__name__)
 
 
-# SKILL 根目录(backend/skills/)
+# 内置 SKILL 根目录(backend/skills/,代码资产,随仓库版本化)
 DEFAULT_SKILLS_ROOT = Path(__file__).parent.parent.parent / "skills"
 
 
 # 进程级注册表(模块单例)
 REGISTRY = SkillRegistry()
+
+
+# ============================================================
+# 用户上传 skill 根目录
+# ============================================================
+
+
+def get_user_skills_root() -> Path:
+    """用户上传 skill 根目录(settings.USER_SKILLS_DIR,相对路径基于运行目录)
+
+    与 storage.DirectorySkillStorage 同源:router 上传落地 / loader 扫描共用此目录。
+    生产环境可经环境变量指向独立可写 volume。
+    """
+    p = Path(settings.USER_SKILLS_DIR)
+    return p if p.is_absolute() else Path.cwd() / p
 
 
 # ============================================================
@@ -94,21 +110,38 @@ def parse_skill_md(path: Path, scenario_id: str) -> ParsedSkill:
 
 
 def discover_skills(skills_root: Path | None = None) -> SkillRegistry:
-    """扫描 skills_root 下所有 SKILL.md,返回新的 SkillRegistry
+    """扫描 SKILL.md,返回新的 SkillRegistry
 
-    扫描规则:
+    扫描规则(每个根):
         <skills_root>/<scenario_id>/<skill_name>/SKILL.md
 
-    - scenario_id 取第二层目录名
-    - skill_name 取 frontmatter.name(以文件内容为准,不依赖目录名)
+    - skills_root 显式传入时仅扫该根(供测试 / 单根场景)
+    - 默认扫内置根(DEFAULT_SKILLS_ROOT)+ 用户根(get_user_skills_root(),目录存在时)
+    - 用户根与内置根共用同一注册表;内置根中历史遗留的 user_* 目录仍会被扫到
+      (兼容旧版本落地位置),用户根后扫、同名覆盖
     - 单个 SKILL.md 解析失败不阻断其他 skill,只记录 warning
     """
-    root = skills_root or DEFAULT_SKILLS_ROOT
-    registry = SkillRegistry()
+    if skills_root is not None:
+        registry = SkillRegistry()
+        _scan_root(skills_root, registry)
+        return registry
 
+    registry = SkillRegistry()
+    _scan_root(DEFAULT_SKILLS_ROOT, registry)
+
+    user_root = get_user_skills_root()
+    if user_root.is_dir():
+        _scan_root(user_root, registry)
+    else:
+        logger.debug(f"用户 skill 目录不存在,跳过: {user_root}")
+    return registry
+
+
+def _scan_root(root: Path, registry: SkillRegistry) -> None:
+    """扫描单个根目录下所有 SKILL.md 并注册到 registry"""
     if not root.is_dir():
         logger.warning(f"skills 目录不存在: {root},返回空注册表")
-        return registry
+        return
 
     # 遍历 <root>/<scenario_id>/<skill_name>/SKILL.md
     for scenario_dir in sorted(root.iterdir()):
@@ -129,7 +162,7 @@ def discover_skills(skills_root: Path | None = None) -> SkillRegistry:
                 logger.warning(f"解析 SKILL.md 失败,跳过: {skill_md}: {e}")
                 continue
 
-            # 同一 scenario 下重名,后注册的覆盖(以磁盘扫描顺序为准)
+            # 同一 scenario 下重名,后注册的覆盖(以扫描顺序为准)
             if registry.get(scenario_id, skill.name):
                 logger.warning(
                     f"skill 重名覆盖: scenario={scenario_id} name={skill.name} "
@@ -137,8 +170,6 @@ def discover_skills(skills_root: Path | None = None) -> SkillRegistry:
                 )
             registry.register(skill)
             logger.info(f"已加载 skill: {scenario_id}/{skill.name} ({skill_md})")
-
-    return registry
 
 
 def reload_registry(skills_root: Path | None = None) -> SkillRegistry:
