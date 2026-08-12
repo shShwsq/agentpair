@@ -381,6 +381,25 @@ function onMaxRoundsBlur(e: Event): void {
   }
 }
 
+// builtin + user_agent 关闭:react_agent 模型不再有「同评估模型」选项,
+// react 模型为空时自动补齐(兼容「手动关闭」与「初始加载即默认关闭」两种时机)
+watch(
+  [policyUserAgentEnabled, llmConfigs, selectedExecutor],
+  () => {
+    if (
+      !policyUserAgentEnabled.value &&
+      !useAgentExecutor.value &&
+      selectedReactLlmConfigId.value === ''
+    ) {
+      const fallback =
+        selectedLlmConfigId.value ||
+        (llmConfigs.value.find((c) => c.has_api_key) ?? llmConfigs.value[0])?.id ||
+        ''
+      if (fallback) selectedReactLlmConfigId.value = fallback
+    }
+  },
+)
+
 // ---- 测试环境 / 动态验证配置(协作策略抽屉内,开启「允许自行验证」后展示) ----
 // user_agent 可在已部署的测试环境动态验证 react_agent 发现的安全问题。
 // 对用户透明:不出现 verifier_agent 字样,只显示"正在验证"。
@@ -712,7 +731,8 @@ async function handleSubmit(): Promise<void> {
       scenario: selectedScenario.value,
       title: taskTitle.value.trim() || undefined,
       user_input: finalUserInput,
-      llm_config_id: selectedLlmConfigId.value || undefined,
+      // 评估模型是 user_agent 的能力:user_agent 关闭时不提交(builtin 下 react 模型已单独显式指定)
+      llm_config_id: policyUserAgentEnabled.value ? selectedLlmConfigId.value || undefined : undefined,
       // 仅 builtin 模式下传 react_llm_config_id;空串不传(后端回退到 llm_config_id)
       react_llm_config_id:
         selectedExecutor.value === 'builtin'
@@ -760,9 +780,10 @@ const llmConfigOptions = computed(() => [
   ...llmConfigs.value.map((cfg) => ({ value: cfg.id, label: modelLabel(cfg) })),
 ])
 
-/** react_agent 模型选项(仅 builtin,空=同评估模型) */
+/** react_agent 模型选项(仅 builtin,空=同评估模型)。
+ * user_agent 关闭时评估模型不再存在,去掉「同评估模型」选项 */
 const reactLlmConfigOptions = computed(() => [
-  { value: '', label: '同评估模型' },
+  ...(policyUserAgentEnabled.value ? [{ value: '', label: '同评估模型' }] : []),
   ...llmConfigs.value.map((cfg) => ({ value: cfg.id, label: modelLabel(cfg) })),
 ])
 
@@ -906,7 +927,7 @@ onUnmounted(() => {
               </div>
             </div>
   
-            <!-- 第 2 行:user_agent 模型 -->
+            <!-- 第 2 行:user_agent(启用开关 + 评估模型;关闭时模型选择器置灰) -->
             <div class="config-row" data-onboarding="create-user-model">
               <div class="config-label-group">
                 <span class="agent-avatar avatar-user-agent" aria-hidden="true">
@@ -918,7 +939,7 @@ onUnmounted(() => {
                 <BaseSelect
                   v-model="selectedLlmConfigId"
                   :options="llmConfigOptions"
-                  :disabled="loadingModels"
+                  :disabled="loadingModels || !policyUserAgentEnabled"
                   :aria-label="modelSelectLabel"
                 />
                 <RouterLink
@@ -927,6 +948,14 @@ onUnmounted(() => {
                   class="model-empty-link"
                 >配置 →</RouterLink>
               </div>
+              <!-- 启用开关(自协作策略抽屉移至此处):关闭=单 agent 模式,上方模型选择器置灰 -->
+              <label
+                class="ua-enable-toggle"
+                :title="policyUserAgentEnabled ? 'user_agent 参与协作(评估 / 打断 / 验证)' : '单 agent 模式:react_agent 跑 1 轮直接产出结果'"
+              >
+                <input v-model="policyUserAgentEnabled" class="switch" type="checkbox" />
+                <span>{{ policyUserAgentEnabled ? '已启用' : '已停用' }}</span>
+              </label>
             </div>
   
             <!-- 第 3 行:react_agent 设置(执行器 + CLI 模型配置 / 技能) -->
@@ -1171,13 +1200,7 @@ onUnmounted(() => {
   
                 <Teleport defer to="#settings-drawer-body">
                   <div v-show="drawerOpen && drawerSection === 'policy'" class="drawer-section-body">
-                    <!-- 启用 user_agent 开关(最核心,控制全局) -->
-                    <label class="policy-toggle-row">
-                      <input v-model="policyUserAgentEnabled" class="switch" type="checkbox" />
-                      <span>启用 user_agent</span>
-                    </label>
-
-                    <!-- 单 agent 模式提示:user_agent 关闭时说明下方依赖字段为何隐藏 -->
+                    <!-- 单 agent 模式提示:user_agent 关闭时(开关在 topbar 第 2 行),说明下方依赖字段为何隐藏 -->
                     <p v-if="!policyUserAgentEnabled" class="policy-single-hint">
                       当前为单 agent 模式:react_agent 跑 1 轮直接产出结果,不做覆盖度评估、打断与验证。
                     </p>
@@ -2369,6 +2392,18 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+}
+
+/* user_agent 启用开关(topbar 第 2 行,靠右对齐) */
+.ua-enable-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  user-select: none;
 }
 
 /* 设置面板内技能列表改单列,卡片更舒展 */
