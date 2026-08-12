@@ -166,7 +166,7 @@ const drawerOpen = ref(false)
 /** 当前展开的分区(同一时刻只展开一个) */
 const drawerSection = ref<DrawerSection | null>(null)
 
-/** 点击入口按钮:打开抽屉并展开对应分区;再次点击同一分区则收起(不关抽屉) */
+/** 点击入口按钮:打开设置面板并展开对应分区;再次点击同一分区则收起面板 */
 function openDrawer(section: DrawerSection): void {
   // 再次点击已展开的分区入口 → 收起面板
   if (drawerOpen.value && drawerSection.value === section) {
@@ -175,6 +175,13 @@ function openDrawer(section: DrawerSection): void {
   }
   drawerOpen.value = true
   drawerSection.value = section
+}
+
+/** 入口按钮 title:展开中提示「再次点击收起」,收起时提示「点击打开设置」 */
+function drawerTitle(section: DrawerSection, label: string): string {
+  return drawerOpen.value && drawerSection.value === section
+    ? '再次点击收起设置面板'
+    : `点击打开${label}设置`
 }
 
 /** 关闭抽屉(遮罩点击 / × / Esc) */
@@ -1027,8 +1034,28 @@ onUnmounted(() => {
                   type="button"
                   class="drawer-toggle"
                   :aria-expanded="drawerOpen && drawerSection === 'skills'"
+                  :title="drawerTitle('skills', '技能')"
                   @click="openDrawer('skills')"
                 >
+                  <svg
+                    class="toggle-icon"
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <!-- 星光(技能/专长) -->
+                    <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" />
+                  </svg>
+                  <span>技能</span>
+                  <span class="advanced-summary">
+                    {{ selectedSkillCount }}/{{ allSkills.length }}
+                  </span>
                   <svg
                     class="advanced-chevron"
                     :class="{ expanded: drawerOpen && drawerSection === 'skills' }"
@@ -1040,13 +1067,10 @@ onUnmounted(() => {
                     stroke-width="2"
                     stroke-linecap="round"
                     stroke-linejoin="round"
+                    aria-hidden="true"
                   >
                     <polyline points="9 18 15 12 9 6" />
                   </svg>
-                  <span>技能</span>
-                  <span class="advanced-summary">
-                    {{ selectedSkillCount }}/{{ allSkills.length }}
-                  </span>
                 </button>
                 <template v-if="!useAgentExecutor && allSkills.length > 0">
                   <Teleport defer to="#settings-drawer-body">
@@ -1096,12 +1120,51 @@ onUnmounted(() => {
                 type="button"
                 class="drawer-toggle"
                 :aria-expanded="drawerOpen && drawerSection === 'policy'"
+                :title="drawerTitle('policy', '协作策略')"
                 @click="openDrawer('policy')"
               >
+                <svg
+                  class="toggle-icon"
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <!-- 滑块(策略调节) -->
+                  <line x1="21" y1="4" x2="14" y2="4" />
+                  <line x1="10" y1="4" x2="3" y2="4" />
+                  <line x1="21" y1="12" x2="12" y2="12" />
+                  <line x1="8" y1="12" x2="3" y2="12" />
+                  <line x1="21" y1="20" x2="16" y2="20" />
+                  <line x1="12" y1="20" x2="3" y2="20" />
+                  <line x1="14" y1="2" x2="14" y2="6" />
+                  <line x1="8" y1="10" x2="8" y2="14" />
+                  <line x1="16" y1="18" x2="16" y2="22" />
+                </svg>
                 <span>协作策略</span>
                 <span class="advanced-summary">
                   {{ !policyUserAgentEnabled ? '单 agent 模式' : (policyAllowInterrupt ? `每${policyInterval}轮评估·可打断` : `每${policyInterval}轮评估·仅观察`) }}
                 </span>
+                <svg
+                  class="advanced-chevron"
+                  :class="{ expanded: drawerOpen && drawerSection === 'policy' }"
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
               </button>
   
                 <Teleport defer to="#settings-drawer-body">
@@ -1221,8 +1284,26 @@ onUnmounted(() => {
                 type="button"
                 class="drawer-toggle"
                 :aria-expanded="drawerOpen && drawerSection === 'testenv'"
+                :title="drawerTitle('testenv', '测试环境')"
                 @click="openDrawer('testenv')"
               >
+                <svg
+                  class="toggle-icon"
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <!-- 监视器(测试环境) -->
+                  <rect x="2" y="3" width="20" height="14" rx="2" />
+                  <line x1="8" y1="21" x2="16" y2="21" />
+                  <line x1="12" y1="17" x2="12" y2="21" />
+                </svg>
                 <span>测试环境</span>
                 <span class="advanced-summary">
                   {{ verifierEnabled
@@ -1232,6 +1313,21 @@ onUnmounted(() => {
                         : '')
                     : '未启用' }}
                 </span>
+                <svg
+                  class="advanced-chevron"
+                  :class="{ expanded: drawerOpen && drawerSection === 'testenv' }"
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
               </button>
   
                 <Teleport defer to="#settings-drawer-body">
@@ -2242,14 +2338,30 @@ onUnmounted(() => {
   box-shadow: 0 0 0 3px var(--color-primary-light);
 }
 
+/* 分区专属图标(协作策略=滑块 / 测试环境=监视器 / 技能=星光),强化「点击可设置」的入口感 */
+.toggle-icon {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  transition: color var(--transition-fast);
+}
+
+/* 展开中:图标与箭头跟随主题色,与按钮高亮态一致 */
+.drawer-toggle[aria-expanded="true"] .toggle-icon,
+.drawer-toggle[aria-expanded="true"] .advanced-chevron {
+  color: var(--color-primary);
+}
+
 .advanced-chevron {
   flex-shrink: 0;
-  transition: transform var(--transition-fast);
+  /* 箭头统一推到按钮右端:三个入口的状态指示位置对齐 */
+  margin-left: auto;
+  transition: transform var(--transition-fast), color var(--transition-fast);
   color: var(--color-text-muted);
 }
 
+/* 展开态:箭头转向(右→左),暗示「再次点击收起」 */
 .advanced-chevron.expanded {
-  transform: rotate(90deg);
+  transform: rotate(180deg);
 }
 
 .advanced-summary {
@@ -2257,6 +2369,10 @@ onUnmounted(() => {
   font-weight: var(--fw-normal);
   color: var(--color-text-muted);
   font-variant-numeric: tabular-nums;
+  /* 摘要过长时省略,不挤掉右端箭头 */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ---- 右侧内嵌设置面板 ---- */
