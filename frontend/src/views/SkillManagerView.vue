@@ -205,6 +205,79 @@ const canEdit = computed(
 const isDirty = computed(() => draft.value !== original.value)
 const canSave = computed(() => canEdit.value && isDirty.value && !saving.value)
 
+/** 文件树中处于展开态的文件夹路径(每次 loadFiles 默认全部展开) */
+const expandedFolders = ref<Set<string>>(new Set())
+
+/** 文件树行:扁平文件列表按 '/' 构建树后压平,同层文件夹在前、文件保持后端顺序(SKILL.md 置顶) */
+interface FileTreeRow {
+  /** 展示名(文件夹名 / 文件名) */
+  name: string
+  /** 完整相对路径(文件夹为各级拼接) */
+  path: string
+  /** 层级深度(根为 0) */
+  depth: number
+  kind: 'folder' | 'file'
+  file?: SkillFileEntry
+}
+
+const fileTreeRows = computed<FileTreeRow[]>(() => {
+  interface Dir {
+    dirs: Map<string, Dir>
+    files: SkillFileEntry[]
+  }
+  const root: Dir = { dirs: new Map(), files: [] }
+  for (const f of detailFiles.value) {
+    const parts = f.path.split('/')
+    let dir = root
+    for (let i = 0; i < parts.length - 1; i++) {
+      let next = dir.dirs.get(parts[i])
+      if (!next) {
+        next = { dirs: new Map(), files: [] }
+        dir.dirs.set(parts[i], next)
+      }
+      dir = next
+    }
+    dir.files.push(f)
+  }
+
+  const rows: FileTreeRow[] = []
+  const walk = (dir: Dir, prefix: string, depth: number): void => {
+    const names = [...dir.dirs.keys()].sort((a, b) => a.localeCompare(b))
+    for (const name of names) {
+      const path = prefix ? `${prefix}/${name}` : name
+      rows.push({ name, path, depth, kind: 'folder' })
+      if (expandedFolders.value.has(path)) {
+        walk(dir.dirs.get(name)!, path, depth + 1)
+      }
+    }
+    // 文件保持后端顺序(SKILL.md 置顶),不按字母重排
+    for (const f of dir.files) {
+      rows.push({ name: fileName(f.path), path: f.path, depth, kind: 'file', file: f })
+    }
+  }
+  walk(root, '', 0)
+  return rows
+})
+
+/** 从扁平文件路径收集所有文件夹路径(用于默认全部展开) */
+function collectFolderPaths(files: SkillFileEntry[]): Set<string> {
+  const dirs = new Set<string>()
+  for (const f of files) {
+    const parts = f.path.split('/')
+    for (let i = 1; i < parts.length; i++) {
+      dirs.add(parts.slice(0, i).join('/'))
+    }
+  }
+  return dirs
+}
+
+function toggleFolder(path: string): void {
+  const next = new Set(expandedFolders.value)
+  if (next.has(path)) next.delete(path)
+  else next.add(path)
+  expandedFolders.value = next
+}
+
 /** 预览 HTML(marked 渲染 + DOMPurify 净化,防存储型 XSS) */
 const previewHtml = computed(() => {
   if (!isMd(activePath.value) || !draft.value.trim()) return ''
@@ -220,6 +293,7 @@ async function loadFiles(s: SkillSummary): Promise<void> {
     const files = await getSkillFiles(s.scenario_id, s.name)
     if (seq !== filesReqSeq) return
     detailFiles.value = files
+    expandedFolders.value = collectFolderPaths(files)
     // 列表已就绪,先复位 loading 再联动选中文件(selectFile 会自增 contentReqSeq)
     filesLoading.value = false
     // 默认选中 SKILL.md(后端已置顶),否则选第一个文件
@@ -493,18 +567,40 @@ onMounted(loadSkills)
               <button class="btn-link" @click="loadFiles(activeSkill)">重试</button>
             </div>
             <ul v-else class="file-list">
-              <li v-for="f in detailFiles" :key="f.path">
+              <li v-for="row in fileTreeRows" :key="row.kind + ':' + row.path">
                 <button
+                  v-if="row.kind === 'folder'"
+                  class="file-item folder-item"
+                  :style="{ paddingLeft: (8 + row.depth * 14) + 'px' }"
+                  :title="row.path"
+                  :aria-expanded="expandedFolders.has(row.path)"
+                  @click="toggleFolder(row.path)"
+                >
+                  <svg
+                    class="chevron"
+                    :class="{ expanded: expandedFolders.has(row.path) }"
+                    width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+                  >
+                    <polyline points="9 18 15 12 9 6" />
+                  </svg>
+                  <svg class="folder-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                  </svg>
+                  <span class="file-label">{{ row.name }}</span>
+                </button>
+                <button
+                  v-else
                   class="file-item"
-                  :class="{ active: activePath === f.path }"
-                  :title="f.path"
-                  @click="selectFile(f.path)"
+                  :class="{ active: activePath === row.path }"
+                  :style="{ paddingLeft: (8 + row.depth * 14) + 'px' }"
+                  :title="row.path"
+                  @click="selectFile(row.path)"
                 >
                   <svg class="file-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                     <polyline points="14 2 14 8 20 8" />
                   </svg>
-                  <span class="file-label">{{ fileName(f.path) }}</span>
+                  <span class="file-label">{{ row.name }}</span>
                 </button>
               </li>
             </ul>
@@ -1052,6 +1148,31 @@ onMounted(loadSkills)
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* ---- 文件树:文件夹行 ---- */
+.folder-item {
+  color: var(--color-text-secondary);
+}
+
+.chevron {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+  transition: transform var(--transition-fast);
+}
+
+.chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.folder-icon {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.folder-item:hover .folder-icon,
+.folder-item:hover .chevron {
+  color: var(--color-text);
 }
 
 /* ---- 文件编辑器 ---- */
