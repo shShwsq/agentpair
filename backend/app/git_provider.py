@@ -332,7 +332,9 @@ class GitHubProvider(GitProvider):
         try:
             with httpx.Client(timeout=10) as client:
                 # GitHub 要求 Basic Auth(client_id:client_secret),不能用 Bearer token
-                r = client.delete(
+                # httpx 的 client.delete() 不支持 json body,用 client.request() 代替
+                r = client.request(
+                    "DELETE",
                     url,
                     auth=(settings.GITHUB_OAUTH_CLIENT_ID, settings.GITHUB_OAUTH_CLIENT_SECRET),
                     headers={"Accept": "application/vnd.github+json"},
