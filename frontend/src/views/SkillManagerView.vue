@@ -149,8 +149,12 @@ const fileError = ref('')
 const saving = ref(false)
 const mode = ref<'edit' | 'preview'>('edit')
 
-/** 防止快速切换 skill/文件时旧请求回写新状态 */
-let reqSeq = 0
+/** 防止快速切换 skill/文件时旧请求回写新状态
+ * 列表与内容各自独立计数:loadFiles 内部会 await selectFile,
+ * 若共用同一计数器,selectFile 的自增会让 loadFiles 的 finally
+ * 判定过期,filesLoading 永远无法复位(列表一直转圈)。 */
+let filesReqSeq = 0
+let contentReqSeq = 0
 
 function isMd(path: string): boolean {
   return path.toLowerCase().endsWith('.md')
@@ -176,13 +180,15 @@ const previewHtml = computed(() => {
 })
 
 async function loadFiles(s: SkillSummary): Promise<void> {
-  const seq = ++reqSeq
+  const seq = ++filesReqSeq
   filesLoading.value = true
   filesError.value = ''
   try {
     const files = await getSkillFiles(s.scenario_id, s.name)
-    if (seq !== reqSeq) return
+    if (seq !== filesReqSeq) return
     detailFiles.value = files
+    // 列表已就绪,先复位 loading 再联动选中文件(selectFile 会自增 contentReqSeq)
+    filesLoading.value = false
     // 默认选中 SKILL.md(后端已置顶),否则选第一个文件
     const first = files.find((f) => f.path === 'SKILL.md') ?? files[0]
     if (first) {
@@ -193,17 +199,17 @@ async function loadFiles(s: SkillSummary): Promise<void> {
       original.value = ''
     }
   } catch (e) {
-    if (seq !== reqSeq) return
+    if (seq !== filesReqSeq) return
     filesError.value = extractErrorMessage(e)
   } finally {
-    if (seq === reqSeq) filesLoading.value = false
+    if (seq === filesReqSeq) filesLoading.value = false
   }
 }
 
 async function selectFile(path: string): Promise<void> {
   const s = activeSkill.value
   if (!s) return
-  const seq = ++reqSeq
+  const seq = ++contentReqSeq
   activePath.value = path
   fileLoading.value = true
   fileError.value = ''
@@ -214,14 +220,14 @@ async function selectFile(path: string): Promise<void> {
   mode.value = isMd(path) && !editable ? 'preview' : 'edit'
   try {
     const data = await getSkillFileContent(s.scenario_id, s.name, path)
-    if (seq !== reqSeq) return
+    if (seq !== contentReqSeq) return
     draft.value = data.content
     original.value = data.content
   } catch (e) {
-    if (seq !== reqSeq) return
+    if (seq !== contentReqSeq) return
     fileError.value = extractErrorMessage(e)
   } finally {
-    if (seq === reqSeq) fileLoading.value = false
+    if (seq === contentReqSeq) fileLoading.value = false
   }
 }
 
@@ -237,7 +243,8 @@ function openSkill(s: SkillSummary): void {
 }
 
 function closeSkill(): void {
-  reqSeq++
+  filesReqSeq++
+  contentReqSeq++
   activeSkill.value = null
   detailFiles.value = []
   activePath.value = ''
