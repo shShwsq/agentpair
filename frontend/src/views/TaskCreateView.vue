@@ -1574,12 +1574,18 @@ onUnmounted(() => {
   min-width: 0;
   /* 全宽滚动容器:垂直滚动条贴界面右边,内容在 main-col 内居中 */
   overflow-y: auto;
+  /* flex 列容器:配合 main-col 的 margin auto 实现内容不满屏时垂直居中 */
+  display: flex;
+  flex-direction: column;
 }
 
-/* 内容列:在滚动容器内居中(与技能管理 / CLI 设置 / 协作策略一致) */
+/* 内容列:在滚动容器内水平 + 垂直居中(与技能管理 / CLI 设置 / 协作策略一致);
+   内容超高时 margin auto 退化为 0,自动改为顶部对齐可滚动,不会被裁剪。
+   width: 100% + max-width 保持原块级流的宽度行为(flex 下 auto 边距会取消拉伸) */
 .main-col {
+  width: 100%;
   max-width: 768px;
-  margin: 0 auto;
+  margin: auto;
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
@@ -2105,6 +2111,8 @@ onUnmounted(() => {
 .page-body.panel-open .main-col {
   margin-left: auto;
   margin-right: var(--space-5);
+  /* 宽度先扣掉右侧留白,与原块级流行为一致,避免窄屏时水平溢出 */
+  width: calc(100% - var(--space-5));
 }
 
 /* ---- 小屏适配 ---- */
