@@ -46,8 +46,11 @@ export const useUnsavedGuardStore = defineStore('unsavedGuard', () => {
   function syncDirty(d: boolean, handler: SaveHandler | null = null): void {
     dirty.value = d
     saveHandler.value = d ? handler : null
-    if (!d && dialogOpen.value) {
-      // 脏状态在弹窗打开期间消失(如撤销编辑):按"留在本页"关闭
+    // 弹窗打开期间脏状态消失(如用户撤销了编辑):按"留在本页"关闭。
+    // 保存流程中(saving)除外:保存成功后页面 watch 会先于 saveAndLeave
+    // 后续代码把 dirty 同步为 false,若在此处关闭会把导航取消掉,
+    // 应由 saveAndLeave 以 closeDialog(true) 放行。
+    if (!d && dialogOpen.value && !saving.value) {
       closeDialog(false)
     }
   }
