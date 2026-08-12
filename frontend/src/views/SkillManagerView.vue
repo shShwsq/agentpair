@@ -343,7 +343,7 @@ onMounted(loadSkills)
                 上传 zip 格式的 skill(内含 SKILL.md,支持
                 <code>&lt;skill_name&gt;/SKILL.md</code> 或根目录直接放
                 <code>SKILL.md</code>),上传后 react_agent 的 list_skills / skill
-                工具立即可用。技能仅自己可见,他人无法查看或使用。
+                工具立即可用。技能仅自己可见,他人无法查看或使用。zip 最大 50MB。
               </p>
             </div>
             <div class="upload-row">

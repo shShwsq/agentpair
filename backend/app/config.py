@@ -65,6 +65,20 @@ class Settings(BaseSettings):
     # 内置 skill 始终在代码目录 backend/skills/,不经过此配置
     USER_SKILLS_DIR: str = "./user_skills"
 
+    # 用户 skill 上传限制(单位 MB / 条,安全边界,详见 app/skills/uploader.py)
+    # zip 本体上限(默认 50MB)
+    SKILL_MAX_ZIP_SIZE_MB: int = 50
+    # 解压后总大小上限(默认 200MB,为 50MB zip 预留约 4 倍解压空间,文本类内容压缩率高)
+    SKILL_MAX_EXTRACT_SIZE_MB: int = 200
+    # zip 内单文件上限(默认 20MB)
+    SKILL_MAX_SINGLE_FILE_SIZE_MB: int = 20
+    # 条目数上限(含附加资源,默认 100)
+    SKILL_MAX_FILES: int = 100
+    # 管理界面单文件内容读取预览上限(默认 20MB,与单文件上传上限对齐)
+    SKILL_MAX_READ_SIZE_MB: int = 20
+    # 管理界面文件列表条目数上限(防御异常目录,默认 200)
+    SKILL_MAX_LISTED_FILES: int = 200
+
     # 沙箱配置(阶段 2 起)
     # mode: mock(本地未部署 Server)/ sandbox(连真实 OpenSandbox Server)
     SANDBOX_MODE: str = "mock"

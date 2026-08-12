@@ -22,16 +22,18 @@ import logging
 import zipfile
 from pathlib import Path
 
+from app.config import settings
 from app.skills.loader import parse_skill_md
 from app.skills.schema import ParsedSkill
 
 logger = logging.getLogger(__name__)
 
-# 安全边界
-MAX_ZIP_SIZE = 5 * 1024 * 1024  # zip 本体上限 5MB
-MAX_EXTRACT_SIZE = 20 * 1024 * 1024  # 解压后总大小上限 20MB
-MAX_SINGLE_FILE_SIZE = 2 * 1024 * 1024  # 单文件上限 2MB
-MAX_FILES = 100  # 条目数上限(含附加资源)
+# 安全边界(均可经环境变量覆盖,默认值见 app/config.py Settings)
+# 保留模块级常量名供 routers/skills.py 与测试引用,值由配置注入
+MAX_ZIP_SIZE = settings.SKILL_MAX_ZIP_SIZE_MB * 1024 * 1024
+MAX_EXTRACT_SIZE = settings.SKILL_MAX_EXTRACT_SIZE_MB * 1024 * 1024
+MAX_SINGLE_FILE_SIZE = settings.SKILL_MAX_SINGLE_FILE_SIZE_MB * 1024 * 1024
+MAX_FILES = settings.SKILL_MAX_FILES
 
 # 附加资源允许的扩展名白名单(SKILL.md 不受此限制)
 # 文档/配置/脚本/常见源码,排除可执行文件、压缩包、二进制格式

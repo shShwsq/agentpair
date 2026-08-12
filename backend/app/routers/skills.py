@@ -27,6 +27,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
+from app.config import settings
 from app.deps import get_current_user, get_optional_user
 from app.models.user import User
 from app.skills import loader as skill_loader
@@ -182,10 +183,10 @@ def _require_owned(skill: ParsedSkill, user: User) -> None:
         )
 
 
-# 单文件内容读取上限(与上传单文件上限对齐)
-MAX_READ_SIZE = 2 * 1024 * 1024
-# 文件列表条目数上限(防御异常目录)
-MAX_LISTED_FILES = 200
+# 单文件内容读取上限(与上传单文件上限对齐,可经环境变量覆盖)
+MAX_READ_SIZE = settings.SKILL_MAX_READ_SIZE_MB * 1024 * 1024
+# 文件列表条目数上限(防御异常目录,可经环境变量覆盖)
+MAX_LISTED_FILES = settings.SKILL_MAX_LISTED_FILES
 
 
 def _list_skill_files(skill_dir: Path) -> list[SkillFileEntry]:
