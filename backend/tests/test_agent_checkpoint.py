@@ -61,6 +61,8 @@ def _mock_db_with_user_pref(user_pref=None):
 def test_default_policy_has_all_required_fields():
     """DEFAULT_AGENT_POLICY 应包含所有必需字段,默认值符合设计。"""
     expected_keys = {
+        "user_agent_enabled",
+        "max_rounds",
         "checkpoint_interval",
         "checkpoint_interval_builtin",
         "checkpoint_interval_cli",
@@ -71,6 +73,8 @@ def test_default_policy_has_all_required_fields():
     }
     assert set(DEFAULT_AGENT_POLICY.keys()) == expected_keys
     # 关键默认值(与设计文档 / 前端 DEFAULT_POLICY 对齐)
+    assert DEFAULT_AGENT_POLICY["user_agent_enabled"] is True
+    assert DEFAULT_AGENT_POLICY["max_rounds"] == 4
     assert DEFAULT_AGENT_POLICY["checkpoint_interval"] == 3
     assert DEFAULT_AGENT_POLICY["checkpoint_interval_builtin"] is None
     assert DEFAULT_AGENT_POLICY["checkpoint_interval_cli"] is None

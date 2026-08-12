@@ -48,7 +48,9 @@ def fixed_settings(monkeypatch):
     monkeypatch.setattr(security.settings, "JWT_ALGORITHM", "HS256")
     fernet_key = Fernet.generate_key().decode("utf-8")
     monkeypatch.setattr(security.settings, "GITHUB_TOKEN_SECRET", fernet_key)
-    return fernet_key
+    yield fernet_key
+    # 清 Fernet 单例缓存,避免实例绑定上一个测试的密钥泄漏到下一个测试
+    security._get_fernet.cache_clear()
 
 
 # ============================================================
@@ -253,9 +255,10 @@ def test_decrypt_tampered_ciphertext_raises_value_error(fixed_settings):
 def test_decrypt_with_wrong_key_raises_value_error(fixed_settings, monkeypatch):
     """用不同密钥解密 → ValueError(密钥不匹配)。"""
     ciphertext = encrypt_secret("secret-with-key-A")
-    # 换一把新 key
+    # 换一把新 key(同时清掉 Fernet 单例缓存,让实例按新 key 重建)
     new_key = Fernet.generate_key().decode("utf-8")
     monkeypatch.setattr(security.settings, "GITHUB_TOKEN_SECRET", new_key)
+    security._get_fernet.cache_clear()
     with pytest.raises(ValueError):
         decrypt_secret(ciphertext)
 
