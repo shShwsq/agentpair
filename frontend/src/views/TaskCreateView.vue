@@ -155,11 +155,11 @@ const allSkills = ref<SkillSummary[]>([])
 const skillsError = ref('')
 
 // ============================================================
-// 右侧设置抽屉(协作策略 / 测试环境 / 技能三个分区,手风琴式)
+// 右侧设置抽屉(协作策略 / 技能两个分区;测试环境设置并入协作策略的「允许自行验证」开关下)
 // ============================================================
 
 /** 抽屉分区标识 */
-type DrawerSection = 'policy' | 'testenv' | 'skills'
+type DrawerSection = 'policy' | 'skills'
 
 /** 抽屉是否打开 */
 const drawerOpen = ref(false)
@@ -381,11 +381,10 @@ function onMaxRoundsBlur(e: Event): void {
   }
 }
 
-// ---- 测试环境 / 动态验证配置(在右侧设置抽屉中编辑) ----
+// ---- 测试环境 / 动态验证配置(协作策略抽屉内,开启「允许自行验证」后展示) ----
 // user_agent 可在已部署的测试环境动态验证 react_agent 发现的安全问题。
 // 对用户透明:不出现 verifier_agent 字样,只显示"正在验证"。
-/** 是否启用动态验证 */
-const verifierEnabled = ref(false)
+// 是否启用由 policyAllowVerify(允许 user_agent 自行验证)统一控制。
 /** 测试环境 URL(已部署的应用地址,如 http://localhost:3000) */
 const testEnvUrl = ref('')
 /**
@@ -718,12 +717,12 @@ async function handleSubmit(): Promise<void> {
           : undefined,
       executor: selectedExecutor.value,
       allowed_skills: allowedSkillsPayload,
-      // 测试环境 / 动态验证:仅当启用且填了 URL 时提交
-      test_env_url: verifierEnabled.value ? testEnvUrl.value.trim() || undefined : undefined,
-      verifier_enabled: verifierEnabled.value,
-      verifier_auth_mode: verifierEnabled.value ? verifierAuthMode.value : undefined,
+      // 测试环境 / 动态验证:仅当开启「允许自行验证」时提交(URL 留空则不传)
+      test_env_url: policyAllowVerify.value ? testEnvUrl.value.trim() || undefined : undefined,
+      verifier_enabled: policyAllowVerify.value,
+      verifier_auth_mode: policyAllowVerify.value ? verifierAuthMode.value : undefined,
       // 登录凭证:仅提交 label 和 header_value 都非空的项(过滤未填完的空行)
-      verifier_auth_tokens: verifierEnabled.value
+      verifier_auth_tokens: policyAllowVerify.value
         ? verifierAuthTokens.value
             .filter((t) => t.label.trim() && t.header_value.trim())
             .map((t) => ({
@@ -1114,8 +1113,8 @@ onUnmounted(() => {
               </div>
             </div>
   
-            <!-- 协作策略 + 测试环境入口(内容在右侧设置抽屉) -->
-            <div class="config-row config-row-scenario config-row-dual">
+            <!-- 协作策略入口(内容在右侧设置抽屉;开启「允许自行验证」后内含测试环境设置) -->
+            <div class="config-row config-row-scenario">
               <button
                 type="button"
                 class="drawer-toggle"
@@ -1148,7 +1147,7 @@ onUnmounted(() => {
                 </svg>
                 <span>协作策略</span>
                 <span class="advanced-summary">
-                  {{ !policyUserAgentEnabled ? '单 agent 模式' : (policyAllowInterrupt ? `每${policyInterval}轮评估·可打断` : `每${policyInterval}轮评估·仅观察`) }}
+                  {{ !policyUserAgentEnabled ? '单 agent 模式' : (policyAllowInterrupt ? `每${policyInterval}轮评估·可打断` : `每${policyInterval}轮评估·仅观察`) }}{{ policyAllowVerify ? '·可自行验证' : '' }}
                 </span>
                 <svg
                   class="advanced-chevron"
@@ -1237,6 +1236,87 @@ onUnmounted(() => {
                       <span>允许 user_agent 自行验证 <span class="policy-experimental">(实验性)</span></span>
                     </label>
 
+                    <!-- 测试环境设置:仅当开启「允许自行验证」时展开 -->
+                    <Transition name="collapse">
+                      <div v-show="policyAllowVerify" class="verifier-config">
+                        <label class="policy-field">
+                          <span class="policy-label">测试环境 URL</span>
+                          <input
+                            v-model.trim="testEnvUrl"
+                            type="url"
+                            class="policy-input"
+                            placeholder="http://localhost:3000(已部署的应用地址)"
+                          />
+                          <span class="policy-hint">user_agent 将在此环境动态验证安全发现</span>
+                        </label>
+
+                        <label class="policy-field">
+                          <span class="policy-label">授权模式</span>
+                          <BaseSelect
+                            v-model="verifierAuthMode"
+                            :options="verifierAuthModeOptions"
+                            class="policy-select"
+                            aria-label="授权模式"
+                          />
+                          <span class="policy-hint">控制验证动作执行前是否需要用户确认</span>
+                        </label>
+
+                        <!-- 登录凭证列表(可选):LLM 按 auth_profile=label 选择身份,
+                             工具自动注入对应请求头。用于越权测试(同一端点不同身份访问)。
+                             LLM 只看到 label,看不到 header_value(安全)。 -->
+                        <div class="auth-tokens-section">
+                          <div class="auth-tokens-header">
+                            <span class="policy-label">登录凭证 <span class="policy-optional">(可选)</span></span>
+                            <button type="button" class="auth-token-add-btn" @click="addAuthToken">
+                              + 添加身份
+                            </button>
+                          </div>
+                          <span class="policy-hint">
+                            配置不同身份的认证头,LLM 验证越权时会按需选择(如:管理员 vs 普通用户访问同一端点)
+                          </span>
+
+                          <div
+                            v-for="(token, idx) in verifierAuthTokens"
+                            :key="idx"
+                            class="auth-token-row"
+                          >
+                            <input
+                              v-model.trim="token.label"
+                              type="text"
+                              class="auth-token-input auth-token-label"
+                              placeholder="身份名(如 管理员)"
+                            />
+                            <input
+                              v-model.trim="token.header_name"
+                              type="text"
+                              class="auth-token-input auth-token-header-name"
+                              placeholder="Header 名"
+                              list="auth-header-suggestions"
+                            />
+                            <input
+                              v-model.trim="token.header_value"
+                              type="text"
+                              class="auth-token-input auth-token-header-value"
+                              placeholder="Header 值(如 Bearer xxx)"
+                            />
+                            <button
+                              type="button"
+                              class="auth-token-remove-btn"
+                              aria-label="删除"
+                              @click="removeAuthToken(idx)"
+                            >×</button>
+                          </div>
+
+                          <datalist id="auth-header-suggestions">
+                            <option value="Authorization" />
+                            <option value="Cookie" />
+                            <option value="X-API-Key" />
+                            <option value="X-Auth-Token" />
+                          </datalist>
+                        </div>
+                      </div>
+                    </Transition>
+
                     <!-- 执行智能体命令确认模式(builtin 与 CLI 执行器均生效) -->
                     <label class="policy-field">
                       <span class="policy-label">执行智能体命令确认模式</span>
@@ -1276,144 +1356,6 @@ onUnmounted(() => {
                             :disabled="!policyUserAgentEnabled"
                           />
                         </label>
-                      </div>
-                    </Transition>
-                  </div>
-                </Teleport>
-              <button
-                type="button"
-                class="drawer-toggle"
-                :aria-expanded="drawerOpen && drawerSection === 'testenv'"
-                :title="drawerTitle('testenv', '测试环境')"
-                @click="openDrawer('testenv')"
-              >
-                <svg
-                  class="toggle-icon"
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                >
-                  <!-- 监视器(测试环境) -->
-                  <rect x="2" y="3" width="20" height="14" rx="2" />
-                  <line x1="8" y1="21" x2="16" y2="21" />
-                  <line x1="12" y1="17" x2="12" y2="21" />
-                </svg>
-                <span>测试环境</span>
-                <span class="advanced-summary">
-                  {{ verifierEnabled
-                    ? (verifierAuthMode === 'direct' ? '已启用·直接执行' : '已启用·逐动作授权')
-                      + (verifierAuthTokens.filter(t => t.label.trim() && t.header_value.trim()).length > 0
-                        ? '·' + verifierAuthTokens.filter(t => t.label.trim() && t.header_value.trim()).length + '个凭证'
-                        : '')
-                    : '未启用' }}
-                </span>
-                <svg
-                  class="advanced-chevron"
-                  :class="{ expanded: drawerOpen && drawerSection === 'testenv' }"
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                >
-                  <polyline points="9 18 15 12 9 6" />
-                </svg>
-              </button>
-  
-                <Teleport defer to="#settings-drawer-body">
-                  <div v-show="drawerOpen && drawerSection === 'testenv'" class="drawer-section-body">
-                    <label class="policy-toggle-row">
-                      <input v-model="verifierEnabled" class="switch" type="checkbox" />
-                      <span>启用动态验证 <span class="policy-experimental">(实验性)</span></span>
-                    </label>
-  
-                    <Transition name="collapse">
-                      <div v-show="verifierEnabled" class="verifier-config">
-                        <label class="policy-field">
-                          <span class="policy-label">测试环境 URL</span>
-                          <input
-                            v-model.trim="testEnvUrl"
-                            type="url"
-                            class="policy-input"
-                            placeholder="http://localhost:3000(已部署的应用地址)"
-                          />
-                          <span class="policy-hint">user_agent 将在此环境动态验证安全发现</span>
-                        </label>
-  
-                        <label class="policy-field">
-                          <span class="policy-label">授权模式</span>
-                          <BaseSelect
-                            v-model="verifierAuthMode"
-                            :options="verifierAuthModeOptions"
-                            class="policy-select"
-                            aria-label="授权模式"
-                          />
-                          <span class="policy-hint">控制验证动作执行前是否需要用户确认</span>
-                        </label>
-  
-                        <!-- 登录凭证列表(可选):LLM 按 auth_profile=label 选择身份,
-                             工具自动注入对应请求头。用于越权测试(同一端点不同身份访问)。
-                             LLM 只看到 label,看不到 header_value(安全)。 -->
-                        <div class="auth-tokens-section">
-                          <div class="auth-tokens-header">
-                            <span class="policy-label">登录凭证 <span class="policy-optional">(可选)</span></span>
-                            <button type="button" class="auth-token-add-btn" @click="addAuthToken">
-                              + 添加身份
-                            </button>
-                          </div>
-                          <span class="policy-hint">
-                            配置不同身份的认证头,LLM 验证越权时会按需选择(如:管理员 vs 普通用户访问同一端点)
-                          </span>
-  
-                          <div
-                            v-for="(token, idx) in verifierAuthTokens"
-                            :key="idx"
-                            class="auth-token-row"
-                          >
-                            <input
-                              v-model.trim="token.label"
-                              type="text"
-                              class="auth-token-input auth-token-label"
-                              placeholder="身份名(如 管理员)"
-                            />
-                            <input
-                              v-model.trim="token.header_name"
-                              type="text"
-                              class="auth-token-input auth-token-header-name"
-                              placeholder="Header 名"
-                              list="auth-header-suggestions"
-                            />
-                            <input
-                              v-model.trim="token.header_value"
-                              type="text"
-                              class="auth-token-input auth-token-header-value"
-                              placeholder="Header 值(如 Bearer xxx)"
-                            />
-                            <button
-                              type="button"
-                              class="auth-token-remove-btn"
-                              aria-label="删除"
-                              @click="removeAuthToken(idx)"
-                            >×</button>
-                          </div>
-  
-                          <datalist id="auth-header-suggestions">
-                            <option value="Authorization" />
-                            <option value="Cookie" />
-                            <option value="X-API-Key" />
-                            <option value="X-Auth-Token" />
-                          </datalist>
-                        </div>
                       </div>
                     </Transition>
                   </div>
@@ -1663,18 +1605,6 @@ onUnmounted(() => {
 /* 第 1 行场景:无标签,直接靠左 */
 .config-row-scenario {
   padding-left: 0;
-}
-
-/* 协作策略 + 测试环境并排(两个折叠面板同一行) */
-.config-row-dual {
-  gap: var(--space-4);
-  align-items: flex-start;
-}
-
-/* 协作策略 + 测试环境入口并排:两个入口按钮均分宽度 */
-.config-row-dual .drawer-toggle {
-  flex: 1 1 280px;
-  min-width: 0;
 }
 
 .config-label-group {
@@ -2309,7 +2239,7 @@ onUnmounted(() => {
   flex: 1;
 }
 
-/* ---- 设置抽屉入口按钮(协作策略 / 测试环境 / 技能) ---- */
+/* ---- 设置抽屉入口按钮(协作策略 / 技能) ---- */
 .drawer-toggle {
   display: inline-flex;
   align-items: center;
@@ -2338,7 +2268,7 @@ onUnmounted(() => {
   box-shadow: 0 0 0 3px var(--color-primary-light);
 }
 
-/* 分区专属图标(协作策略=滑块 / 测试环境=监视器 / 技能=星光),强化「点击可设置」的入口感 */
+/* 分区专属图标(协作策略=滑块 / 技能=星光),强化「点击可设置」的入口感 */
 .toggle-icon {
   flex-shrink: 0;
   color: var(--color-text-muted);
