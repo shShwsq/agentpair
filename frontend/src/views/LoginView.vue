@@ -122,7 +122,7 @@ function handleOAuth(provider: GitProvider): void {
       <!-- 品牌区 -->
       <div class="auth-header">
         <div class="logo">
-          <BrandLogo :size="32" />
+          <BrandLogo :size="44" />
         </div>
         <h1>AgentPair</h1>
         <p class="subtitle">双智能体协作系统</p>
@@ -291,7 +291,7 @@ function handleOAuth(provider: GitProvider): void {
   align-items: center;
   justify-content: center;
   min-height: 100vh;
-  padding: var(--space-6) var(--space-4);
+  padding: var(--space-4);
   background: linear-gradient(135deg, #f0f4ff 0%, #f8fafc 50%, #faf5ff 100%);
 }
 
@@ -308,23 +308,23 @@ function handleOAuth(provider: GitProvider): void {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg);
-  padding: var(--space-8) var(--space-8) var(--space-6);
+  padding: 10px var(--space-8);
 }
 
 /* ---- 品牌区 ---- */
 .auth-header {
   text-align: center;
-  margin-bottom: var(--space-6);
+  margin-bottom: var(--space-4);
 }
 
 .logo {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 56px;
-  height: 56px;
+  width: 72px;
+  height: 72px;
   border-radius: var(--radius-lg);
-  margin-bottom: var(--space-3);
+  margin-bottom: var(--space-1);
 }
 
 .auth-header h1 {
@@ -626,7 +626,7 @@ function handleOAuth(provider: GitProvider): void {
 /* ---- 响应式 ---- */
 @media (max-width: 480px) {
   .auth-card {
-    padding: var(--space-6) var(--space-5) var(--space-5);
+    padding: 10px var(--space-5) var(--space-5);
   }
 }
 </style>
