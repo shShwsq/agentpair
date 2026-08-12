@@ -33,6 +33,7 @@ from app.models.user import User
 from app.skills import loader as skill_loader
 from app.skills.loader import (
     DEFAULT_SKILLS_ROOT,
+    USER_SCENARIO_PREFIX,
     get_user_skills_root,
     reload_registry,
     scenario_owner_id,
@@ -331,22 +332,20 @@ def read_skill_file(
 def _check_upload_name_conflict(skill_name: str, user_id: uuid.UUID) -> ParsedSkill | None:
     """上传前重名检查
 
-    规则:
-    - 与内置 skill 同名 → raise 409(内置全局共享,会与自己的 skill 产生去重歧义,不可覆盖)
-    - 与其他用户的 skill 同名 → 允许(运行时 skill 工具按用户隔离,互不可见,不冲突)
-    - 与自己的 skill 同名 → 返回该 skill,由调用方按 force 决定是否覆盖
-    - 无冲突 → 返回 None
+    只查两处(跳过其他用户的目录:运行时按用户隔离,同名不冲突):
+    - 用户自己的场景目录 user_<uuid>:同名 → 返回该 skill,由调用方按 force 决定覆盖
+    - 公共/内置场景(非 user_ 前缀):同名 → raise 409(全局共享,会与自己的 skill 去重歧义)
+    无冲突 → 返回 None
     """
-    existing = None
+    # 1) 自己的目录:O(1) 直接命中
+    existing = skill_loader.REGISTRY.get(_user_scenario_id(user_id), skill_name)
+
+    # 2) 内置场景(非 user_ 前缀,数量极少):同名拒绝
     for sid in skill_loader.REGISTRY.list_scenarios():
+        if sid.startswith(USER_SCENARIO_PREFIX):
+            continue  # 用户目录:只需查自己的(上面已查);他人的隔离不冲突
         hit = skill_loader.REGISTRY.get(sid, skill_name)
-        if not hit:
-            continue
-        owner = scenario_owner_id(sid)
-        if owner == user_id:
-            existing = hit  # 自己的重名(可能跨场景,理论上只有 user_<uid>)
-        elif owner is None:
-            # 内置 skill 全局共享,同名会与自己冲突,拒绝
+        if hit:
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -354,7 +353,6 @@ def _check_upload_name_conflict(skill_name: str, user_id: uuid.UUID) -> ParsedSk
                     f"(请换一个 skill 名称)"
                 ),
             )
-        # owner 为其他用户:运行时按用户隔离,互不可见,允许同名
     return existing
 
 
