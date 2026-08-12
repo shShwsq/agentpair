@@ -1062,8 +1062,8 @@ defineExpose({ openTaskFile })
                 </svg>
                 <svg
                   viewBox="0 0 24 24"
-                  width="14"
-                  height="14"
+                  width="13"
+                  height="13"
                   fill="none"
                   stroke="currentColor"
                   stroke-width="2"
@@ -1077,8 +1077,8 @@ defineExpose({ openTaskFile })
               <svg
                 v-else
                 viewBox="0 0 24 24"
-                width="14"
-                height="14"
+                width="13"
+                height="13"
                 fill="none"
                 stroke="currentColor"
                 stroke-width="2"
@@ -1743,7 +1743,7 @@ defineExpose({ openTaskFile })
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-2);
   color: var(--color-text-secondary);
 }
 
