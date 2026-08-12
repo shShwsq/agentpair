@@ -11,6 +11,8 @@
     GET    /skills                                 列出当前用户可见的 skill
     GET    /skills/{scenario_id}                   列出某场景可见的 skill
     GET    /skills/{scenario_id}/{skill_name}       查看 skill 详情(含 body)
+    GET    /skills/{scenario_id}/{skill_name}/files           列出 skill 目录文件
+    GET    /skills/{scenario_id}/{skill_name}/files/{path}    读取 skill 单文件内容
     POST   /skills/upload                          上传 zip(仅登录用户)
     POST   /skills/{scenario_id}/{skill_name}      更新自己的 skill(仅 owner)
     DELETE /skills/{scenario_id}/{skill_name}      删除 skill(仅 owner)
@@ -92,6 +94,27 @@ class SkillUploadResponse(BaseModel):
     replaced: bool  # True=覆盖了已存在的同名 skill
 
 
+class SkillFileEntry(BaseModel):
+    """skill 目录内的单个文件(列表用)"""
+
+    path: str  # 相对 skill 目录的路径,'/' 分隔
+    size: int  # 字节数
+
+
+class SkillFileListResponse(BaseModel):
+    """skill 文件列表响应"""
+
+    files: list[SkillFileEntry]
+
+
+class SkillFileContentResponse(BaseModel):
+    """skill 单文件内容响应"""
+
+    path: str
+    content: str
+    size: int
+
+
 # ============================================================
 # 辅助
 # ============================================================
@@ -159,6 +182,64 @@ def _require_owned(skill: ParsedSkill, user: User) -> None:
         )
 
 
+# 单文件内容读取上限(与上传单文件上限对齐)
+MAX_READ_SIZE = 2 * 1024 * 1024
+# 文件列表条目数上限(防御异常目录)
+MAX_LISTED_FILES = 200
+
+
+def _list_skill_files(skill_dir: Path) -> list[SkillFileEntry]:
+    """列出 skill 目录内的文件(递归,跳过隐藏文件)
+
+    排序:SKILL.md 置顶,其余按相对路径字典序。超出条目上限时截断。
+    """
+    entries: list[SkillFileEntry] = []
+    for p in skill_dir.rglob("*"):
+        if not p.is_file():
+            continue
+        rel_parts = p.relative_to(skill_dir).parts
+        if any(part.startswith(".") for part in rel_parts):
+            continue
+        try:
+            size = p.stat().st_size
+        except OSError:
+            continue
+        entries.append(SkillFileEntry(path="/".join(rel_parts), size=size))
+    entries.sort(key=lambda e: (e.path != "SKILL.md", e.path))
+    return entries[:MAX_LISTED_FILES]
+
+
+def _read_skill_file(skill_dir: Path, file_path: str) -> SkillFileContentResponse:
+    """读取 skill 目录内单个文件的 UTF-8 文本内容
+
+    安全:resolve 后校验目标仍位于 skill_dir 内,防路径穿越。
+    抛出 HTTPException:404 不存在/越界,400 超限或非 UTF-8 文本。
+    """
+    base = skill_dir.resolve()
+    target = (base / file_path).resolve()
+    if not target.is_file() or not target.is_relative_to(base):
+        raise HTTPException(status_code=404, detail=f"文件不存在: {file_path}")
+
+    size = target.stat().st_size
+    if size > MAX_READ_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"文件超过读取上限 {MAX_READ_SIZE // 1024 // 1024}MB,无法预览",
+        )
+    try:
+        content = target.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise HTTPException(
+            status_code=400,
+            detail="文件不是 UTF-8 文本,无法预览",
+        ) from e
+    return SkillFileContentResponse(
+        path=target.relative_to(base).as_posix(),
+        content=content,
+        size=size,
+    )
+
+
 # ============================================================
 # 路由
 # ============================================================
@@ -203,6 +284,47 @@ def get_skill_detail(
         )
     _require_visible(skill, current_user)
     return _to_detail(skill, current_user)
+
+
+@router.get(
+    "/{scenario_id}/{skill_name}/files",
+    response_model=SkillFileListResponse,
+)
+def list_skill_files(
+    scenario_id: str,
+    skill_name: str,
+    current_user: User | None = Depends(get_optional_user),
+) -> SkillFileListResponse:
+    """列出 skill 目录内的文件(供管理界面文件列表)"""
+    skill = skill_loader.REGISTRY.get(scenario_id, skill_name)
+    if not skill:
+        raise HTTPException(
+            status_code=404,
+            detail=f"skill 不存在: {scenario_id}/{skill_name}",
+        )
+    _require_visible(skill, current_user)
+    return SkillFileListResponse(files=_list_skill_files(skill.skill_dir))
+
+
+@router.get(
+    "/{scenario_id}/{skill_name}/files/{file_path:path}",
+    response_model=SkillFileContentResponse,
+)
+def read_skill_file(
+    scenario_id: str,
+    skill_name: str,
+    file_path: str,
+    current_user: User | None = Depends(get_optional_user),
+) -> SkillFileContentResponse:
+    """读取 skill 目录内单个文件的文本内容(供管理界面文件预览/编辑)"""
+    skill = skill_loader.REGISTRY.get(scenario_id, skill_name)
+    if not skill:
+        raise HTTPException(
+            status_code=404,
+            detail=f"skill 不存在: {scenario_id}/{skill_name}",
+        )
+    _require_visible(skill, current_user)
+    return _read_skill_file(skill.skill_dir, file_path)
 
 
 @router.post("/upload", response_model=SkillUploadResponse)

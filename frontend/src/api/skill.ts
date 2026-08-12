@@ -3,7 +3,7 @@
  *
  * 对应后端 app/routers/skills.py 的端点。
  * - 创建任务时拉取所有可见 skill 供用户多选(allowed_skills)
- * - 技能管理页:上传 zip / 删除 / 详情
+ * - 技能管理页:上传 zip / 删除 / 详情 / 文件列表 / 文件内容读取
  */
 import client from './client'
 
@@ -32,6 +32,21 @@ export interface SkillUploadResult {
   skill: SkillDetail
   /** 是否覆盖了已存在的同名 skill */
   replaced: boolean
+}
+
+/** skill 目录内的单个文件(后端 SkillFileEntry) */
+export interface SkillFileEntry {
+  /** 相对 skill 目录的路径,'/' 分隔 */
+  path: string
+  /** 字节数 */
+  size: number
+}
+
+/** skill 单文件内容(后端 SkillFileContentResponse) */
+export interface SkillFileContent {
+  path: string
+  content: string
+  size: number
 }
 
 /**
@@ -79,4 +94,54 @@ export function deleteSkill(
   return client.delete(
     `/skills/${encodeURIComponent(scenarioId)}/${encodeURIComponent(skillName)}`,
   )
+}
+
+/**
+ * 列出 skill 目录内的文件(SKILL.md 置顶)
+ *
+ * 用于技能管理页右侧栏的文件列表。
+ */
+export function getSkillFiles(
+  scenarioId: string,
+  skillName: string,
+): Promise<SkillFileEntry[]> {
+  return client
+    .get(
+      `/skills/${encodeURIComponent(scenarioId)}/${encodeURIComponent(skillName)}/files`,
+    )
+    .then((r) => r.data.files)
+}
+
+/** 读取 skill 目录内单个文件的 UTF-8 文本内容 */
+export function getSkillFileContent(
+  scenarioId: string,
+  skillName: string,
+  filePath: string,
+): Promise<SkillFileContent> {
+  return client
+    .get(
+      `/skills/${encodeURIComponent(scenarioId)}/${encodeURIComponent(skillName)}/files/${filePath
+        .split('/')
+        .map(encodeURIComponent)
+        .join('/')}`,
+    )
+    .then((r) => r.data)
+}
+
+/**
+ * 更新自己的 skill(直写 SKILL.md 全文,含 frontmatter)
+ *
+ * 仅 owner 可调用;保存后后端自动热刷新注册表。
+ */
+export function updateSkill(
+  scenarioId: string,
+  skillName: string,
+  content: string,
+): Promise<SkillDetail> {
+  return client
+    .post(
+      `/skills/${encodeURIComponent(scenarioId)}/${encodeURIComponent(skillName)}`,
+      { content },
+    )
+    .then((r) => r.data)
 }
