@@ -509,7 +509,7 @@ ExecutorAgent (ABC)
 | `hermes_cli_agent` | [hermes_cli_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/hermes_cli_agent.py) | `_hermes_credential_env_builder`：按 provider 动态映射 API Key 环境变量名；`_hermes_pre_bridge_hook`：写 `~/.hermes/config.yaml`（模型/provider/base_url）；仅 `always_approve` 模式注入 `HERMES_YOLO_MODE=1`，`per_command` 模式不注入让 Hermes 进入审批模式 |
 | `codex_cli_agent` | [codex_cli_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/codex_cli_agent.py) | `_codex_pre_bridge_hook`：写 `~/.codex/config.toml`（模型/provider/approval_policy=never/sandbox_mode=danger-full-access）；使用 `codex_bridge.py`（非默认 `acp_bridge`）；**`per_command` 模式不被 `codex exec --json` 支持（非交互模式），自动降级为 `always_approve` 并警告** |
 
-> **命令确认模式**（`task.params._executor_command_confirm`）：控制 CLI 执行危险命令时是否弹窗确认。`always_approve`（默认）注入 YOLO/never 配置跳过审批；`per_command` 让 CLI 进入审批模式，通过 ACP `request_permission` 请求 → bridge SSE 推 `permission_request` 事件 → 前端 `CommandConfirmDialog` 弹窗 → `POST /tasks/{id}/permission_response` 回写结果。详见 spec.md §3.5.2。
+> **命令确认模式**（`task.params._executor_command_confirm`）：控制执行智能体（内置 react_agent + CLI）执行危险命令时是否弹窗确认。`always_approve`（默认）：内置 react_agent 在 sandbox 下直接执行（沙箱已隔离），CLI 注入 YOLO/never 配置跳过审批；`per_command`：CLI 走 ACP `request_permission` 请求 → bridge SSE 推 `permission_request` 事件 → 前端 `CommandConfirmDialog` 弹窗 → `POST /tasks/{id}/permission_response` 回写结果；内置 react_agent 走 `_PendingCommandConfirm` 机制 → SSE 推 `command_confirm` 事件 → `POST /tasks/{id}/command_confirm` 回写。local 模式下 dangerous 命令始终推确认（无视此字段）。详见 spec.md §3.5.2。
 
 ### 4.6 bridge 脚本
 
@@ -622,7 +622,7 @@ list of `{label, header_name, header_value}`：
 - 前端 `CommandConfirmDialog.vue`：显示完整命令 + 拦截原因（红色高亮）+ 「拒绝 / 同意」按钮
 - 用户拒绝时返回 `{"status_code": 0, "body": "[用户拒绝执行此命令]"}`，agent 收到反馈跳过
 
-> **注意**：此为 local 模式（无沙箱）专用，拦截的是 `sandbox_tools` 的 `run_command` / `write_file` 等宿主机直接执行的工具。CLI 执行智能体（qoder/kimi/hermes/codex）的危险命令确认走 ACP `request_permission` 机制（SSE 事件 `permission_request`、API `POST /tasks/{id}/permission_response`），见 §4.5 与 spec.md §3.5.2。两者复用前端 `CommandConfirmDialog.vue` 组件。
+> **注意**：此为 local 模式（无沙箱）专用，拦截的是 `sandbox_tools` 的 `run_command` / `write_file` 等宿主机直接执行的工具。local 模式下 dangerous 命令始终推确认（无视 `executor_command_confirm`，即使 `always_approve` 也不能跳过）。CLI 执行智能体（qoder/kimi/hermes/codex）的危险命令确认走 ACP `request_permission` 机制（SSE 事件 `permission_request`、API `POST /tasks/{id}/permission_response`），见 §4.5 与 spec.md §3.5.2。**sandbox 模式下内置 react_agent 的 dangerous 命令在 `per_command` 模式时也走此 `_PendingCommandConfirm` 机制**（复用 `command_confirm` SSE 事件 + `POST /tasks/{id}/command_confirm` API），通过 `react_agent.py` → `set_current_task(executor_command_confirm=...)` → `_CURRENT_EXECUTOR_COMMAND_CONFIRM` ContextVar → `execute_tool` 自动注入 `command_confirm_mode` 到 `run_command`。三条路径共用前端 `CommandConfirmDialog.vue` 组件。
 
 ### 6.4 平台原生隔离（`SANDBOX_LOCAL_NATIVE_ISOLATION=true`，可选）
 

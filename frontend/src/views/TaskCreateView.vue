@@ -249,8 +249,20 @@ const policyAllowInterrupt = ref(true)
 const policyMaxInterrupts = ref(2)
 /** user_agent 是否能自己验证(实验性) */
 const policyAllowVerify = ref(false)
-/** CLI 执行智能体命令确认模式(任务级 _executor_command_confirm 覆盖;仅 CLI 执行器生效) */
+/** 执行智能体命令确认模式(任务级 _executor_command_confirm 覆盖;builtin 与 CLI 执行器均生效) */
 const policyExecutorCommandConfirm = ref<'always_approve' | 'per_command'>('always_approve')
+
+/** 执行智能体命令确认模式选项(对齐 BaseSelect {value,label} 结构) */
+const executorConfirmOptions = [
+  { value: 'always_approve' as 'always_approve' | 'per_command', label: '自动批准(不弹窗)' },
+  { value: 'per_command' as 'always_approve' | 'per_command', label: '逐命令确认(危险命令弹窗)' },
+]
+
+/** 验证授权模式选项 */
+const verifierAuthModeOptions = [
+  { value: 'per_action' as 'direct' | 'per_action', label: '逐动作授权(每个请求前确认)' },
+  { value: 'direct' as 'direct' | 'per_action', label: '直接执行(不弹窗)' },
+]
 
 /** 系统默认策略值(与后端 DEFAULT_AGENT_POLICY 对齐,作为未配置用户级默认时的兜底) */
 const DEFAULT_POLICY = {
@@ -635,13 +647,12 @@ async function handleSubmit(): Promise<void> {
       params._agent_policy = agentPolicy
     }
 
-    // CLI 执行智能体命令确认模式(任务级 _executor_command_confirm 覆盖)
+    // 执行智能体命令确认模式(任务级 _executor_command_confirm 覆盖)
     // 与 agent_policy 分离存储:后端 agent_checkpoint.resolve_agent_policy 会把
     // executor_command_confirm_default 映射到 task.params._executor_command_confirm(若未显式设置);
     // 此处仅在用户改了用户级默认时显式提交,优先级最高。
-    // 仅对 CLI 执行器(qoder/kimi/hermes/codex)生效,内置 react_agent 忽略此字段。
-    if (selectedExecutor.value !== 'builtin' &&
-        policyExecutorCommandConfirm.value !== userPolicyDefaults.value.executorCommandConfirm) {
+    // builtin 与 CLI 执行器均生效:builtin 通过 ContextVar 注入到 run_command;CLI 走 ACP request_permission
+    if (policyExecutorCommandConfirm.value !== userPolicyDefaults.value.executorCommandConfirm) {
       params._executor_command_confirm = policyExecutorCommandConfirm.value
     }
 
@@ -1074,10 +1085,10 @@ onUnmounted(() => {
                 </button>
   
                 <Transition name="collapse">
-                  <div v-show="policyOpen" class="advanced-dropdown advanced-dropdown-left">
+                  <div v-show="policyOpen" class="inline-dropdown">
                     <!-- 启用 user_agent 开关(最核心,控制全局) -->
                     <label class="policy-toggle-row">
-                      <input v-model="policyUserAgentEnabled" type="checkbox" />
+                      <input v-model="policyUserAgentEnabled" class="switch" type="checkbox" />
                       <span>启用 user_agent</span>
                     </label>
   
@@ -1134,27 +1145,29 @@ onUnmounted(() => {
                     </div>
   
                     <label class="policy-toggle-row">
-                      <input v-model="policyAllowInterrupt" type="checkbox" :disabled="!policyUserAgentEnabled" />
+                      <input v-model="policyAllowInterrupt" class="switch" type="checkbox" :disabled="!policyUserAgentEnabled" />
                       <span>允许 user_agent 打断 react_agent</span>
                     </label>
   
                     <label class="policy-toggle-row">
-                      <input v-model="policyAllowVerify" type="checkbox" />
+                      <input v-model="policyAllowVerify" class="switch" type="checkbox" />
                       <span>允许 user_agent 自行验证 <span class="policy-experimental">(实验性)</span></span>
                     </label>
 
-                    <!-- CLI 执行智能体命令确认模式(仅选了 CLI 执行器时显示) -->
-                    <label v-show="selectedExecutor !== 'builtin'" class="policy-field">
-                      <span class="policy-label">CLI 命令确认模式</span>
-                      <select v-model="policyExecutorCommandConfirm" class="policy-input">
-                        <option value="always_approve">自动批准(不弹窗)</option>
-                        <option value="per_command">逐命令确认(危险命令弹窗)</option>
-                      </select>
-                      <span class="policy-hint">控制 CLI 执行智能体执行危险命令时是否弹窗确认。Codex 受非交互模式限制,仅支持自动批准。</span>
+                    <!-- 执行智能体命令确认模式(builtin 与 CLI 执行器均生效) -->
+                    <label class="policy-field">
+                      <span class="policy-label">执行智能体命令确认模式</span>
+                      <BaseSelect
+                        v-model="policyExecutorCommandConfirm"
+                        :options="executorConfirmOptions"
+                        class="policy-select"
+                        aria-label="执行智能体命令确认模式"
+                      />
+                      <span class="policy-hint">控制执行智能体(builtin react_agent / CLI)执行危险命令时是否弹窗确认。CLI 中 Codex 受非交互模式限制,仅支持自动批准。</span>
                     </label>
   
                     <label class="policy-toggle-row">
-                      <input v-model="policyAdvanced" type="checkbox" :disabled="!policyUserAgentEnabled" />
+                      <input v-model="policyAdvanced" class="switch" type="checkbox" :disabled="!policyUserAgentEnabled" />
                       <span>分别配置内置 / CLI agent 的 K 值</span>
                     </label>
   
@@ -1214,9 +1227,9 @@ onUnmounted(() => {
                 </button>
   
                 <Transition name="collapse">
-                  <div v-show="verifierOpen" class="advanced-dropdown advanced-dropdown-left">
+                  <div v-show="verifierOpen" class="inline-dropdown">
                     <label class="policy-toggle-row">
-                      <input v-model="verifierEnabled" type="checkbox" />
+                      <input v-model="verifierEnabled" class="switch" type="checkbox" />
                       <span>启用动态验证 <span class="policy-experimental">(实验性)</span></span>
                     </label>
   
@@ -1235,10 +1248,12 @@ onUnmounted(() => {
   
                         <label class="policy-field">
                           <span class="policy-label">授权模式</span>
-                          <select v-model="verifierAuthMode" class="policy-input">
-                            <option value="per_action">逐动作授权(每个请求前确认)</option>
-                            <option value="direct">直接执行(不弹窗)</option>
-                          </select>
+                          <BaseSelect
+                            v-model="verifierAuthMode"
+                            :options="verifierAuthModeOptions"
+                            class="policy-select"
+                            aria-label="授权模式"
+                          />
                           <span class="policy-hint">控制验证动作执行前是否需要用户确认</span>
                         </label>
   
@@ -1545,8 +1560,10 @@ onUnmounted(() => {
   align-items: flex-start;
 }
 
+/* 协作策略 + 测试环境并排:两个面板均分宽度,内联展开时内容不局促 */
 .config-row-dual .advanced-panel {
-  flex: 0 0 auto;
+  flex: 1 1 280px;
+  min-width: 0;
 }
 
 .config-label-group {
@@ -2234,10 +2251,14 @@ onUnmounted(() => {
   box-shadow: var(--shadow-lg, 0 10px 25px rgba(0, 0, 0, 0.12));
 }
 
-/* 左对齐变体:协作策略行无标签靠左,下拉面板与按钮左对齐 */
-.advanced-dropdown-left {
-  right: auto;
-  left: 0;
+/* 内联展开面板:协作策略 / 测试环境(流内展开推下下方内容,不再用绝对定位浮层) */
+.inline-dropdown {
+  margin-top: var(--space-2);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
 }
 
 /* ---- Agent 策略配置面板 ---- */
@@ -2333,19 +2354,29 @@ onUnmounted(() => {
 
 .policy-input {
   width: 100%;
-  height: 34px;
-  padding: 0 var(--space-2);
+  height: 36px;
+  padding: 0 var(--space-3);
   font-size: var(--fs-sm);
   color: var(--color-text);
   background: var(--color-surface);
   border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.policy-input:hover:not(:disabled):not(:focus) {
+  border-color: var(--color-primary-border);
 }
 
 .policy-input:focus {
   outline: none;
   border-color: var(--color-primary);
   box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+
+/* BaseSelect 撑满字段宽度(CLI 命令确认 / 授权模式) */
+.policy-select {
+  width: 100%;
 }
 
 .policy-hint {
@@ -2357,14 +2388,66 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2) 0;
+  padding: var(--space-2) var(--space-2);
+  margin: 0 calc(-1 * var(--space-2));
   font-size: var(--fs-sm);
   color: var(--color-text);
   cursor: pointer;
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast);
+}
+
+.policy-toggle-row:hover {
+  background: var(--color-surface-alt);
 }
 
 .policy-toggle-row input {
   cursor: pointer;
+}
+
+/* ---- Switch 拨动开关(替代原生 checkbox 外观) ---- */
+input.switch {
+  appearance: none;
+  flex-shrink: 0;
+  width: 36px;
+  height: 20px;
+  margin: 0;
+  position: relative;
+  border-radius: var(--radius-full);
+  background: var(--color-border-strong);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+input.switch::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-surface);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.2);
+  transition: transform var(--transition-fast);
+}
+
+input.switch:checked {
+  background: var(--color-primary);
+}
+
+input.switch:checked::before {
+  transform: translateX(16px);
+}
+
+input.switch:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+
+input.switch:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .policy-experimental {
@@ -2385,11 +2468,6 @@ onUnmounted(() => {
 
 .verifier-config .policy-field {
   gap: var(--space-1);
-}
-
-.verifier-config select.policy-input {
-  height: 34px;
-  cursor: pointer;
 }
 
 /* ---- 登录凭证列表(verifier_auth_tokens)---- */
@@ -2438,14 +2516,19 @@ onUnmounted(() => {
 }
 
 .auth-token-input {
-  padding: 4px 8px;
+  height: 32px;
+  padding: 0 var(--space-2);
   font-size: var(--fs-xs);
   font-family: inherit;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--color-surface);
   color: var(--color-text);
-  transition: border-color var(--transition-fast);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.auth-token-input:hover:not(:focus) {
+  border-color: var(--color-border-strong);
 }
 
 .auth-token-input:focus {

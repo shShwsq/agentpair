@@ -155,7 +155,18 @@ def run_react_agent(
     """
     # 设置当前任务上下文(供沙箱工具复用会话 + skill 工具按场景过滤)
     task_id_str = str(task.id)
-    set_current_task(task_id_str, task.scenario, user_id=task.user_id)
+    # 读命令确认模式:task.params._executor_command_confirm(由 agent_checkpoint 回填默认值)
+    # always_approve:危险命令直接执行;per_command:危险命令推前端 CommandConfirmDialog 弹窗确认
+    # 仅影响内置 react_agent 的 run_command 工具;CLI 执行器走 ACP request_permission 独立机制
+    executor_command_confirm = "always_approve"
+    if task.params:
+        executor_command_confirm = task.params.get("_executor_command_confirm", "always_approve")
+    set_current_task(
+        task_id_str,
+        task.scenario,
+        user_id=task.user_id,
+        executor_command_confirm=executor_command_confirm,
+    )
 
     # 场景降级后:用通用 prompt,工具全部开放(不再按场景过滤)
     system_prompt = REACT_AGENT_SYSTEM_PROMPT

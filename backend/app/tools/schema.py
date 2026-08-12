@@ -33,6 +33,13 @@ _CURRENT_TASK_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
 _CURRENT_GIT_TOKENS: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
     "current_git_tokens"
 )
+# 当前任务的执行智能体命令确认模式(从 task.params._executor_command_confirm 读取)
+# "always_approve"(默认):危险命令直接执行不弹窗
+# "per_command":危险命令执行前推前端 CommandConfirmDialog 弹窗确认
+# 仅 run_command 工具读取此值;用于 sandbox 与 local 模式下统一控制危险命令确认行为
+_CURRENT_EXECUTOR_COMMAND_CONFIRM: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_executor_command_confirm", default="always_approve"
+)
 
 
 def set_current_task(
@@ -40,6 +47,7 @@ def set_current_task(
     scenario_id: str = "general",
     allowed_skills: list[str] | None = None,
     user_id: uuid.UUID | None = None,
+    executor_command_confirm: str = "always_approve",
 ) -> None:
     """react_agent 调用工具前,设置当前任务 ID 和允许的 skill 列表
 
@@ -49,11 +57,19 @@ def set_current_task(
     user_id: 任务所属用户 id。用于 skill 工具按用户过滤:
         内置 skill 全局共享,用户上传的 skill 仅 owner 可见。
         None 表示匿名任务(只看内置 skill)。
+    executor_command_confirm: 执行智能体命令确认模式。
+        "always_approve":危险命令直接执行不弹窗(默认)
+        "per_command":危险命令推前端 CommandConfirmDialog 弹窗确认
+        仅对内置 react_agent 的 run_command 工具生效;CLI 执行器走 ACP request_permission 机制独立处理。
     使用 ContextVar,每个后台线程的 set 只影响该线程自身。
     """
     _CURRENT_TASK_ID.set(task_id)
     set_current_allowed_skills(allowed_skills)
     set_current_user_id(user_id)
+    if executor_command_confirm in ("always_approve", "per_command"):
+        _CURRENT_EXECUTOR_COMMAND_CONFIRM.set(executor_command_confirm)
+    else:
+        _CURRENT_EXECUTOR_COMMAND_CONFIRM.set("always_approve")
 
 
 def set_current_git_tokens(tokens: dict[str, str]) -> None:
@@ -518,6 +534,7 @@ def execute_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
 
     自动从 ContextVar 注入 task_id 和 git_tokens,LLM 看不到这两个参数。
     git_tokens 只对 clone_repo 注入(其他工具不接受该参数,避免误传)。
+    command_confirm_mode 只对 run_command 注入(控制危险命令是否弹窗确认)。
     """
     if tool_name not in TOOL_FUNCTIONS:
         raise ValueError(f"未知工具: {tool_name}")
@@ -525,4 +542,6 @@ def execute_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
     arguments["task_id"] = _CURRENT_TASK_ID.get()
     if tool_name == "clone_repo":
         arguments["git_tokens"] = _CURRENT_GIT_TOKENS.get()
+    if tool_name == "run_command":
+        arguments["command_confirm_mode"] = _CURRENT_EXECUTOR_COMMAND_CONFIRM.get()
     return func(**arguments)

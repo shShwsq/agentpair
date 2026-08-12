@@ -16,6 +16,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import AppHeader from '@/components/AppHeader.vue'
+import BaseSelect from '@/components/BaseSelect.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import { getPolicyLimits, getPreferences, saveAgentPolicy } from '@/api/memory'
@@ -72,6 +73,19 @@ const policyAllowVerify = ref(DEFAULT_POLICY.allow_verify)
 const policyVerifierAuthMode = ref<'direct' | 'per_action'>(DEFAULT_POLICY.verifier_auth_mode_default)
 /** 执行智能体命令确认默认模式(任务级 _executor_command_confirm 可覆盖) */
 const policyExecutorCommandConfirm = ref<'always_approve' | 'per_command'>(DEFAULT_POLICY.executor_command_confirm_default)
+
+/** 验证授权模式选项(对齐 BaseSelect {value,label} 结构) */
+const verifierAuthModeOptions = computed(() => [
+  { value: 'per_action' as 'direct' | 'per_action', label: '逐动作授权(每个动作弹窗确认)' },
+  { value: 'direct' as 'direct' | 'per_action', label: '直接执行(不弹窗)' },
+])
+
+/** 执行智能体命令确认模式选项 */
+const executorConfirmOptions = computed(() => [
+  { value: 'always_approve' as 'always_approve' | 'per_command', label: '自动批准(不弹窗,注入 YOLO 模式)' },
+  { value: 'per_command' as 'always_approve' | 'per_command', label: '逐命令确认(危险命令弹窗批准)' },
+])
+
 /** 是否分别配置内置/CLI 的 K 值(高级) */
 const policyAdvanced = ref(false)
 
@@ -296,7 +310,7 @@ const FIELD_HELP: Record<string, string> = {
   verifier_auth_mode:
     '仅在开启「自行验证」时生效。逐动作授权:每个验证动作(HTTP 请求 / PoC 脚本)执行前弹窗让用户确认;直接执行:验证动作自动执行不弹窗。此为用户级默认,任务创建或运行时可单独覆盖。',
   executor_command_confirm:
-    '控制 CLI 执行智能体(qoder/kimi/hermes/codex)执行危险命令时是否弹窗确认。自动批准:注入 YOLO 模式,所有命令直接执行不弹窗(速度快,适合可信任务);逐命令确认:每个危险命令执行前弹窗让用户批准(更安全,防容器破坏/资源耗尽)。此为用户级默认,任务创建时可单独覆盖。注意:Codex CLI 受非交互模式限制,仅支持自动批准,选择「逐命令确认」时会降级并警告。',
+    '控制执行智能体(builtin react_agent / qoder / kimi / hermes / codex)执行危险命令时是否弹窗确认。自动批准:所有命令直接执行不弹窗(速度快,适合可信任务);逐命令确认:每个危险命令执行前弹窗让用户批准(更安全,防容器破坏/资源耗尽)。此为用户级默认,任务创建时可单独覆盖。注意:Codex CLI 受非交互模式限制,仅支持自动批准,选择「逐命令确认」时会降级并警告。',
   policy_advanced:
     '高级选项。内置 react_agent 和外部 CLI agent 的迭代节奏可能不同,可分别设置评估频率。留空则使用统一 K 值。',
 }
@@ -379,7 +393,7 @@ onUnmounted(() => {
           <section v-else class="policy-card">
             <!-- 启用 user_agent 开关(最核心,控制全局) -->
             <label class="policy-toggle-row policy-toggle-primary">
-              <input v-model="policyUserAgentEnabled" type="checkbox" :disabled="saving" />
+              <input v-model="policyUserAgentEnabled" class="switch" type="checkbox" :disabled="saving" />
               <span>启用 user_agent</span>
               <div
                 :ref="(el) => { if (el) fieldHelpRefs.set('user_agent_enabled', el as HTMLElement); else fieldHelpRefs.delete('user_agent_enabled') }"
@@ -472,7 +486,7 @@ onUnmounted(() => {
             </div>
   
             <label class="policy-toggle-row">
-              <input v-model="policyAllowInterrupt" type="checkbox" :disabled="saving || !policyUserAgentEnabled" />
+              <input v-model="policyAllowInterrupt" class="switch" type="checkbox" :disabled="saving || !policyUserAgentEnabled" />
               <span>允许 user_agent 打断 react_agent</span>
               <div
                 :ref="(el) => { if (el) fieldHelpRefs.set('allow_interrupt', el as HTMLElement); else fieldHelpRefs.delete('allow_interrupt') }"
@@ -488,7 +502,7 @@ onUnmounted(() => {
             </label>
   
             <label class="policy-toggle-row">
-              <input v-model="policyAllowVerify" type="checkbox" :disabled="saving || !policyUserAgentEnabled" />
+              <input v-model="policyAllowVerify" class="switch" type="checkbox" :disabled="saving || !policyUserAgentEnabled" />
               <span>允许 user_agent 自行验证 <span class="policy-experimental">(实验性)</span></span>
               <div
                 :ref="(el) => { if (el) fieldHelpRefs.set('allow_verify', el as HTMLElement); else fieldHelpRefs.delete('allow_verify') }"
@@ -520,22 +534,21 @@ onUnmounted(() => {
                       </Transition>
                     </div>
                   </div>
-                  <select
+                  <BaseSelect
                     v-model="policyVerifierAuthMode"
-                    class="policy-input"
+                    :options="verifierAuthModeOptions"
                     :disabled="saving || !policyUserAgentEnabled"
-                  >
-                    <option value="per_action">逐动作授权(每个动作弹窗确认)</option>
-                    <option value="direct">直接执行(不弹窗)</option>
-                  </select>
+                    class="policy-select"
+                    aria-label="验证授权模式"
+                  />
                 </label>
               </div>
             </Transition>
 
-            <!-- CLI 执行智能体命令确认模式(独立于 user_agent,始终可用) -->
+            <!-- 执行智能体命令确认模式(独立于 user_agent,始终可用) -->
             <label class="policy-field policy-field-command-confirm">
               <div class="field-head">
-                <span class="policy-label">CLI 命令确认模式</span>
+                <span class="policy-label">执行智能体命令确认模式</span>
                 <div
                   :ref="(el) => { if (el) fieldHelpRefs.set('executor_command_confirm', el as HTMLElement); else fieldHelpRefs.delete('executor_command_confirm') }"
                   class="field-help-wrap"
@@ -548,18 +561,17 @@ onUnmounted(() => {
                   </Transition>
                 </div>
               </div>
-              <select
+              <BaseSelect
                 v-model="policyExecutorCommandConfirm"
-                class="policy-input"
+                :options="executorConfirmOptions"
                 :disabled="saving"
-              >
-                <option value="always_approve">自动批准(不弹窗,注入 YOLO 模式)</option>
-                <option value="per_command">逐命令确认(危险命令弹窗批准)</option>
-              </select>
+                class="policy-select"
+                aria-label="执行智能体命令确认模式"
+              />
             </label>
 
             <label class="policy-toggle-row">
-              <input v-model="policyAdvanced" type="checkbox" :disabled="saving || !policyUserAgentEnabled" />
+              <input v-model="policyAdvanced" class="switch" type="checkbox" :disabled="saving || !policyUserAgentEnabled" />
               <span>分别配置内置 / CLI agent 的 K 值</span>
               <div
                 :ref="(el) => { if (el) fieldHelpRefs.set('policy_advanced', el as HTMLElement); else fieldHelpRefs.delete('policy_advanced') }"
@@ -804,13 +816,18 @@ onUnmounted(() => {
 
 .policy-input {
   width: 100%;
-  height: 34px;
-  padding: 0 var(--space-2);
+  height: 36px;
+  padding: 0 var(--space-3);
   font-size: var(--fs-sm);
   color: var(--color-text);
   background: var(--color-surface);
   border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.policy-input:hover:not(:disabled):not(:focus) {
+  border-color: var(--color-primary-border);
 }
 
 .policy-input:focus {
@@ -823,6 +840,15 @@ onUnmounted(() => {
   color: var(--color-text-muted);
   background: var(--color-surface-alt);
   cursor: not-allowed;
+}
+
+/* BaseSelect 撑满字段宽度(验证授权 / CLI 命令确认) */
+.policy-select {
+  width: 100%;
+}
+
+.policy-select .base-select-trigger {
+  width: 100%;
 }
 
 /* ---- 字段头部:标签 + 帮助按钮(问号) ---- */
@@ -900,10 +926,17 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2) 0;
+  padding: var(--space-2) var(--space-2);
+  margin: 0 calc(-1 * var(--space-2));
   font-size: var(--fs-sm);
   color: var(--color-text);
   cursor: pointer;
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast);
+}
+
+.policy-toggle-row:hover {
+  background: var(--color-surface-alt);
 }
 
 .policy-toggle-row input {
@@ -911,6 +944,59 @@ onUnmounted(() => {
 }
 
 .policy-toggle-row input:disabled {
+  cursor: not-allowed;
+}
+
+/* 主开关行(启用 user_agent):加强视觉权重 */
+.policy-toggle-primary {
+  padding: var(--space-3) var(--space-3);
+  margin: calc(-1 * var(--space-2)) calc(-1 * var(--space-2)) var(--space-2);
+  background: var(--color-surface-alt);
+  font-weight: var(--fw-medium);
+}
+
+/* ---- Switch 拨动开关(替代原生 checkbox 外观) ---- */
+input.switch {
+  appearance: none;
+  flex-shrink: 0;
+  width: 36px;
+  height: 20px;
+  margin: 0;
+  position: relative;
+  border-radius: var(--radius-full);
+  background: var(--color-border-strong);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+input.switch::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-surface);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.2);
+  transition: transform var(--transition-fast);
+}
+
+input.switch:checked {
+  background: var(--color-primary);
+}
+
+input.switch:checked::before {
+  transform: translateX(16px);
+}
+
+input.switch:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+
+input.switch:disabled {
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
@@ -930,7 +1016,7 @@ onUnmounted(() => {
   max-width: 360px;
 }
 
-/* CLI 命令确认模式(独立于 user_agent,始终可用) */
+/* 执行智能体命令确认模式(独立于 user_agent,始终可用) */
 .policy-field-command-confirm {
   max-width: 360px;
   margin-bottom: var(--space-2);

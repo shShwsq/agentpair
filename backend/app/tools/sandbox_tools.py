@@ -1528,7 +1528,13 @@ def _classify_command(command: str) -> tuple[str, str | None]:
     return ("safe", None) if all_safe else ("normal", None)
 
 
-def run_command(command: str, repo_path: str = "", timeout: int = 60, task_id: str = "") -> dict:
+def run_command(
+    command: str,
+    repo_path: str = "",
+    timeout: int = 60,
+    task_id: str = "",
+    command_confirm_mode: str = "always_approve",
+) -> dict:
     """在沙箱里执行任意 shell 命令(与 CLI 的 bash 工具对齐)
 
     用于跑构建/测试/脚本等,如 ./build.sh、pytest -x、npm test、pip show pkg。
@@ -1539,6 +1545,11 @@ def run_command(command: str, repo_path: str = "", timeout: int = 60, task_id: s
         command: shell 命令字符串(agent 自拟,非用户输入插值,无注入问题)
         repo_path: 可选,clone_repo 返回的 path。提供则在仓库目录下执行(cd repo && command)
         timeout: 超时秒,默认 60,上限 300(构建/测试可能较久)
+        command_confirm_mode: 命令确认模式(execute_tool 从 ContextVar 自动注入)
+            "always_approve":危险命令直接执行不弹窗(默认)
+            "per_command":危险命令推前端 CommandConfirmDialog 弹窗确认
+            local 模式下 dangerous 命令始终推确认(宿主机直接执行,无视此参数);
+            sandbox 模式下仅 per_command 时 dangerous 命令推确认。
 
     返回:{"output": str, "exit_code": int, "truncated": bool}
     """
@@ -1549,11 +1560,13 @@ def run_command(command: str, repo_path: str = "", timeout: int = 60, task_id: s
     exit_code = 0
     truncated = False
 
+    # 命令分类(safe / normal / dangerous),local 与 sandbox 共用
+    level, pattern = _classify_command(command)
+
     if mode == "local":
-        # local 模式:命令安全策略(白名单 + 危险命令前端确认)
-        level, pattern = _classify_command(command)
+        # local 模式:命令在宿主机直接执行,dangerous 命令始终推前端确认(无视 command_confirm_mode)
+        # 因为宿主机无隔离边界,即使 always_approve 也不能跳过危险命令确认
         if level == "dangerous":
-            # 危险命令:推前端确认,阻塞等待用户决议
             command_id = f"cmd_{uuid.uuid4().hex[:8]}"
             request_command_confirm(task_id, {
                 "command_id": command_id,
@@ -1589,7 +1602,26 @@ def run_command(command: str, repo_path: str = "", timeout: int = 60, task_id: s
             output = (output + ("\n" if output else "") + f"[命令执行超时({timeout}s)]").strip()
             exit_code = -1
     else:
-        # sandbox 模式:session.run_command(单通道),2>&1 合并 + 末尾 echo exit code
+        # sandbox 模式:容器内执行,沙箱即隔离边界
+        # per_command 模式下,dangerous 命令推前端确认(对齐 local 模式的 _PendingCommandConfirm 机制)
+        # always_approve 模式下直接执行(沙箱已隔离,危险命令破坏范围限于容器内)
+        if command_confirm_mode == "per_command" and level == "dangerous":
+            command_id = f"cmd_{uuid.uuid4().hex[:8]}"
+            request_command_confirm(task_id, {
+                "command_id": command_id,
+                "command": command,
+                "tool": "run_command",
+                "reason": f"匹配危险命令模式: {pattern}",
+            })
+            approved = wait_for_command_confirm(task_id, command_id)
+            if not approved:
+                return {
+                    "output": "[用户拒绝执行此命令]",
+                    "exit_code": -1,
+                    "truncated": False,
+                }
+
+        # session.run_command(单通道),2>&1 合并 + 末尾 echo exit code
         session: SandboxSession = ctx["session"]
         full = command if not repo_path else f"cd {shlex.quote(repo_path)} && {command}"
         cmd = f"{full} 2>&1; " f'echo "EXIT_CODE:$?"'
