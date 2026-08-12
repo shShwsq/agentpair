@@ -75,6 +75,21 @@ function isBuiltin(s: SkillSummary): boolean {
   return !s.scenario_id.startsWith('user_')
 }
 
+/** 技能名搜索关键词(纯前端过滤,大小写不敏感) */
+const searchQuery = ref('')
+
+const filteredSkills = computed<SkillSummary[]>(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  if (!q) return skills.value
+  return skills.value.filter((s) => s.name.toLowerCase().includes(q))
+})
+
+/** 搜索时展示「匹配数 / 总数」 */
+const listCountText = computed<string>(() => {
+  if (!searchQuery.value.trim()) return `${skills.value.length} 个`
+  return `${filteredSkills.value.length} / ${skills.value.length} 个`
+})
+
 // ============================================================
 // 上传
 // ============================================================
@@ -492,7 +507,33 @@ onMounted(loadSkills)
           <section class="list-card">
             <div class="list-header">
               <h2 class="section-title">技能列表</h2>
-              <span class="list-count">{{ skills.length }} 个</span>
+              <span class="list-count">{{ listCountText }}</span>
+            </div>
+
+            <!-- 技能名搜索框 -->
+            <div v-if="skills.length > 0" class="list-search">
+              <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="8" />
+                <line x1="21" x2="16.65" y1="21" y2="16.65" />
+              </svg>
+              <input
+                v-model="searchQuery"
+                type="text"
+                class="search-input"
+                placeholder="搜索技能名..."
+                aria-label="搜索技能名"
+              />
+              <button
+                v-if="searchQuery"
+                class="search-clear"
+                aria-label="清空搜索"
+                title="清空搜索"
+                @click="searchQuery = ''"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="18" x2="6" y1="6" y2="18" /><line x1="6" x2="18" y1="6" y2="18" />
+                </svg>
+              </button>
             </div>
 
             <div v-if="loading" class="list-placeholder">
@@ -502,13 +543,13 @@ onMounted(loadSkills)
               加载失败: {{ loadError }}
               <button class="btn-link" @click="loadSkills">重试</button>
             </div>
-            <div v-else-if="skills.length === 0" class="list-placeholder">
-              暂无技能,上传一个 zip 开始
+            <div v-else-if="filteredSkills.length === 0" class="list-placeholder">
+              {{ skills.length === 0 ? '暂无技能,上传一个 zip 开始' : '没有匹配的技能' }}
             </div>
 
             <ul v-else class="skill-list">
               <li
-                v-for="s in skills"
+                v-for="s in filteredSkills"
                 :key="`${s.scenario_id}/${s.name}`"
                 class="skill-item"
                 :class="{ active: activeSkill && activeSkill.scenario_id === s.scenario_id && activeSkill.name === s.name }"
@@ -884,6 +925,60 @@ onMounted(loadSkills)
 .list-count {
   font-size: var(--fs-sm);
   color: var(--color-text-secondary);
+}
+
+.list-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin-top: var(--space-3);
+}
+
+.search-icon {
+  position: absolute;
+  left: var(--space-3);
+  color: var(--color-text-muted);
+  pointer-events: none;
+}
+
+.search-input {
+  width: 100%;
+  height: 34px;
+  padding: 0 var(--space-8) 0 34px;
+  font-size: var(--fs-sm);
+  color: var(--color-text);
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.search-input:focus {
+  border-color: var(--color-primary);
+}
+
+.search-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.search-clear {
+  position: absolute;
+  right: var(--space-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-1);
+  color: var(--color-text-muted);
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm, var(--radius-md));
+  cursor: pointer;
+  transition: color var(--transition-fast);
+}
+
+.search-clear:hover {
+  color: var(--color-text);
 }
 
 .list-placeholder {
