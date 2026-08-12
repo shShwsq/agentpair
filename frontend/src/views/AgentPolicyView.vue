@@ -407,7 +407,15 @@ onUnmounted(() => {
                 </Transition>
               </div>
             </label>
-  
+
+            <!-- 单 agent 模式提示:user_agent 关闭时说明下方依赖字段为何隐藏 -->
+            <p v-if="!policyUserAgentEnabled" class="policy-single-hint">
+              当前为单 agent 模式:react_agent 跑 1 轮直接产出结果,不做覆盖度评估、打断与验证。
+            </p>
+
+            <!-- user_agent 依赖字段:关闭时整组隐藏(v-show 保留值,保存 payload 不变) -->
+            <Transition name="collapse">
+              <div v-show="policyUserAgentEnabled" class="policy-dependent">
             <!-- 协作总轮次(仅 user_agent 启用时生效) -->
             <label class="policy-field policy-field-maxrounds">
               <div class="field-head">
@@ -432,7 +440,7 @@ onUnmounted(() => {
                 inputmode="numeric"
                 pattern="[0-9]*"
                 class="policy-input"
-                :disabled="saving || !policyUserAgentEnabled"
+                :disabled="saving"
               />
               <span class="policy-hint">上限 {{ MAX_ROUNDS_LIMIT }}</span>
             </label>
@@ -457,7 +465,7 @@ onUnmounted(() => {
                   v-model.number="policyInterval"
                   type="number" min="1" max="20"
                   class="policy-input"
-                  :disabled="saving || !policyUserAgentEnabled"
+                  :disabled="saving"
                 />
               </label>
   
@@ -480,7 +488,7 @@ onUnmounted(() => {
                   v-model.number="policyMaxInterrupts"
                   type="number" min="0" max="10"
                   class="policy-input"
-                  :disabled="saving || !policyUserAgentEnabled || !policyAllowInterrupt"
+                  :disabled="saving || !policyAllowInterrupt"
                 />
               </label>
             </div>
@@ -537,11 +545,13 @@ onUnmounted(() => {
                   <BaseSelect
                     v-model="policyVerifierAuthMode"
                     :options="verifierAuthModeOptions"
-                    :disabled="saving || !policyUserAgentEnabled"
+                    :disabled="saving"
                     class="policy-select"
                     aria-label="验证授权模式"
                   />
                 </label>
+              </div>
+            </Transition>
               </div>
             </Transition>
 
@@ -570,8 +580,10 @@ onUnmounted(() => {
               />
             </label>
 
+            <Transition name="collapse">
+              <div v-show="policyUserAgentEnabled" class="policy-dependent">
             <label class="policy-toggle-row">
-              <input v-model="policyAdvanced" class="switch" type="checkbox" :disabled="saving || !policyUserAgentEnabled" />
+              <input v-model="policyAdvanced" class="switch" type="checkbox" :disabled="saving" />
               <span>分别配置内置 / CLI agent 的 K 值</span>
               <div
                 :ref="(el) => { if (el) fieldHelpRefs.set('policy_advanced', el as HTMLElement); else fieldHelpRefs.delete('policy_advanced') }"
@@ -595,7 +607,7 @@ onUnmounted(() => {
                     type="number" min="1" max="20"
                     class="policy-input"
                     placeholder="留空用统一值"
-                    :disabled="saving || !policyUserAgentEnabled"
+                    :disabled="saving"
                   />
                 </label>
                 <label class="policy-field">
@@ -605,9 +617,11 @@ onUnmounted(() => {
                     type="number" min="1" max="20"
                     class="policy-input"
                     placeholder="留空用统一值"
-                    :disabled="saving || !policyUserAgentEnabled"
+                    :disabled="saving"
                   />
                 </label>
+              </div>
+            </Transition>
               </div>
             </Transition>
   
@@ -950,6 +964,24 @@ onUnmounted(() => {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   font-weight: var(--fw-medium);
+}
+
+/* 单 agent 模式提示(user_agent 关闭时展示) */
+.policy-single-hint {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-relaxed);
+  color: var(--color-text-secondary);
+  background: var(--color-surface-alt);
+  border-radius: var(--radius-md);
+}
+
+/* user_agent 依赖字段容器:作为 policy-form 的单个 flex 项,需恢复内部字段间距 */
+.policy-dependent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
 }
 
 /* ---- Switch 拨动开关(替代原生 checkbox 外观) ---- */

@@ -705,6 +705,9 @@ async function handleSubmit(): Promise<void> {
       ? undefined
       : Array.from(selectedSkillNames.value)
 
+    // user_agent 关闭(单 agent 模式)时验证相关字段一律不提交(验证是 user_agent 的能力)
+    const verifierOn = policyAllowVerify.value && policyUserAgentEnabled.value
+
     const res = await createTask({
       scenario: selectedScenario.value,
       title: taskTitle.value.trim() || undefined,
@@ -717,12 +720,12 @@ async function handleSubmit(): Promise<void> {
           : undefined,
       executor: selectedExecutor.value,
       allowed_skills: allowedSkillsPayload,
-      // 测试环境 / 动态验证:仅当开启「允许自行验证」时提交(URL 留空则不传)
-      test_env_url: policyAllowVerify.value ? testEnvUrl.value.trim() || undefined : undefined,
-      verifier_enabled: policyAllowVerify.value,
-      verifier_auth_mode: policyAllowVerify.value ? verifierAuthMode.value : undefined,
+      // 测试环境 / 动态验证:仅当开启「允许自行验证」且 user_agent 启用时提交(URL 留空则不传)
+      test_env_url: verifierOn ? testEnvUrl.value.trim() || undefined : undefined,
+      verifier_enabled: verifierOn,
+      verifier_auth_mode: verifierOn ? verifierAuthMode.value : undefined,
       // 登录凭证:仅提交 label 和 header_value 都非空的项(过滤未填完的空行)
-      verifier_auth_tokens: policyAllowVerify.value
+      verifier_auth_tokens: verifierOn
         ? verifierAuthTokens.value
             .filter((t) => t.label.trim() && t.header_value.trim())
             .map((t) => ({
@@ -1173,7 +1176,15 @@ onUnmounted(() => {
                       <input v-model="policyUserAgentEnabled" class="switch" type="checkbox" />
                       <span>启用 user_agent</span>
                     </label>
-  
+
+                    <!-- 单 agent 模式提示:user_agent 关闭时说明下方依赖字段为何隐藏 -->
+                    <p v-if="!policyUserAgentEnabled" class="policy-single-hint">
+                      当前为单 agent 模式:react_agent 跑 1 轮直接产出结果,不做覆盖度评估、打断与验证。
+                    </p>
+
+                    <!-- user_agent 依赖字段:关闭时整组隐藏(v-show 保留值,提交 payload 不变) -->
+                    <Transition name="collapse">
+                      <div v-show="policyUserAgentEnabled" class="policy-dependent">
                     <!-- 协作总轮次(仅 user_agent 启用时生效) -->
                     <label class="policy-field">
                       <div class="field-head">
@@ -1197,7 +1208,6 @@ onUnmounted(() => {
                         inputmode="numeric"
                         pattern="[0-9]*"
                         class="policy-input"
-                        :disabled="!policyUserAgentEnabled"
                       />
                       <span class="policy-hint">上限 {{ MAX_ROUNDS_LIMIT }}</span>
                     </label>
@@ -1209,7 +1219,6 @@ onUnmounted(() => {
                           v-model.number="policyInterval"
                           type="number" min="1" max="20"
                           class="policy-input"
-                          :disabled="!policyUserAgentEnabled"
                         />
                         <span class="policy-hint">每 K 个迭代评估一次</span>
                       </label>
@@ -1220,7 +1229,7 @@ onUnmounted(() => {
                           v-model.number="policyMaxInterrupts"
                           type="number" min="0" max="10"
                           class="policy-input"
-                          :disabled="!policyUserAgentEnabled || !policyAllowInterrupt"
+                          :disabled="!policyAllowInterrupt"
                         />
                         <span class="policy-hint">防死锁上限</span>
                       </label>
@@ -1316,6 +1325,8 @@ onUnmounted(() => {
                         </div>
                       </div>
                     </Transition>
+                      </div>
+                    </Transition>
 
                     <!-- 执行智能体命令确认模式(builtin 与 CLI 执行器均生效) -->
                     <label class="policy-field">
@@ -1329,8 +1340,10 @@ onUnmounted(() => {
                       <span class="policy-hint">控制执行智能体(builtin react_agent / CLI)执行危险命令时是否弹窗确认。CLI 中 Codex 受非交互模式限制,仅支持自动批准。</span>
                     </label>
   
+                    <Transition name="collapse">
+                      <div v-show="policyUserAgentEnabled" class="policy-dependent">
                     <label class="policy-toggle-row">
-                      <input v-model="policyAdvanced" class="switch" type="checkbox" :disabled="!policyUserAgentEnabled" />
+                      <input v-model="policyAdvanced" class="switch" type="checkbox" />
                       <span>分别配置内置 / CLI agent 的 K 值</span>
                     </label>
   
@@ -1343,7 +1356,6 @@ onUnmounted(() => {
                             type="number" min="1" max="20"
                             class="policy-input"
                             placeholder="留空用统一值"
-                            :disabled="!policyUserAgentEnabled"
                           />
                         </label>
                         <label class="policy-field">
@@ -1353,9 +1365,10 @@ onUnmounted(() => {
                             type="number" min="1" max="20"
                             class="policy-input"
                             placeholder="留空用统一值"
-                            :disabled="!policyUserAgentEnabled"
                           />
                         </label>
+                      </div>
+                    </Transition>
                       </div>
                     </Transition>
                   </div>
@@ -2338,6 +2351,24 @@ onUnmounted(() => {
   gap: var(--space-3);
   width: 100%;
   margin: auto 0;
+}
+
+/* 单 agent 模式提示(user_agent 关闭时展示) */
+.policy-single-hint {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-relaxed);
+  color: var(--color-text-secondary);
+  background: var(--color-surface-alt);
+  border-radius: var(--radius-md);
+}
+
+/* user_agent 依赖字段容器:作为 drawer-section-body 的单个 flex 项,需恢复内部字段间距 */
+.policy-dependent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
 }
 
 /* 设置面板内技能列表改单列,卡片更舒展 */
