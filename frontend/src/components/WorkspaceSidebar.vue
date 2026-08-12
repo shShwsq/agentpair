@@ -1519,7 +1519,7 @@ defineExpose({ openTaskFile })
 .task-list {
   flex: 1;
   overflow-y: auto;
-  padding: var(--space-1) 0;
+  padding: var(--space-2);
 }
 
 .task-item {
@@ -1533,11 +1533,11 @@ defineExpose({ openTaskFile })
   isolation: isolate;
 }
 
-/* 圆角背景块(hover/active 共用,缩进显示,带圆角) */
+/* 圆角背景块(hover/active 共用,整行铺满,与技能管理文件树行风格一致) */
 .task-item::before {
   content: '';
   position: absolute;
-  inset: 2px var(--space-2);
+  inset: 0;
   background: transparent;
   border-radius: var(--radius-md);
   z-index: -1;
@@ -1549,37 +1549,16 @@ defineExpose({ openTaskFile })
   background: var(--color-surface-alt);
 }
 
-/* 缩进式分割线:左侧与 padding 对齐,右侧留出操作按钮空间 */
-.task-item::after {
-  content: '';
-  position: absolute;
-  left: var(--space-3);
-  right: 76px; /* 避让右侧 more-btn + workspace-btn 区域 */
-  bottom: 0;
-  height: 1px;
-  background: var(--color-border);
-  pointer-events: none;
-}
-
-/* 最后一个任务项不显示分割线 */
-.task-item:last-child::after {
-  display: none;
-}
-
 /* ---- 正在查看的任务 active 态:圆角主色背景块 ---- */
 .task-item-active::before,
 .task-item-active:hover::before {
   background: var(--color-primary-light);
 }
 
-/* active 态:标题文字变主色 */
+/* active 态:标题文字变主色 + 加粗(与文件树选中态一致) */
 .task-item-active .task-input {
   color: var(--color-primary);
-}
-
-/* active 态:淡化分割线,避免与浅色背景冲突 */
-.task-item-active::after {
-  background: transparent;
+  font-weight: var(--fw-semibold);
 }
 
 .task-item-main {
@@ -1735,7 +1714,7 @@ defineExpose({ openTaskFile })
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-1) var(--space-2);
+  padding: var(--space-2) var(--space-3);
   cursor: pointer;
   font-size: var(--fs-sm);
   color: var(--color-text);
