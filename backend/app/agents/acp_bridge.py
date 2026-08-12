@@ -49,7 +49,13 @@ class ACPCLIProcess:
         self.bin_name = bin_name
         self.args = args or []
         self.proc: subprocess.Popen | None = None
-        self._lock = threading.Lock()  # 保护 stdin 写入(并发请求互斥)
+        # _rpc_lock:保护整个 send+collect 串行(ACP 协议是串行的)
+        # _stdin_lock:保护 stdin 写入(短临界区,用于 request_permission 响应回写)
+        # 拆分原因:POST /rpc 在 wait permission 响应期间持有 _rpc_lock,
+        # 但 POST /permission_response 需要唤醒它,不能死锁;
+        # 响应回写通过 _stdin_lock 与 /rpc 的请求写入互斥。
+        self._rpc_lock = threading.Lock()
+        self._stdin_lock = threading.Lock()
 
     def start(self) -> None:
         """启动 ACP CLI 子进程"""
@@ -83,7 +89,7 @@ class ACPCLIProcess:
         返回行列表,每行是一个 JSON 字符串。最后一行是匹配 id 的最终响应。
         通知(无 id)在最终响应之前返回。
 
-        线程安全:用锁保护 stdin 写入,避免并发请求交叉。
+        线程安全:用 _rpc_lock 保护整个 send+collect 串行(ACP 协议串行)。
         """
         if not self.alive:
             raise RuntimeError("ACP CLI 进程未运行或已退出")
@@ -92,14 +98,12 @@ class ACPCLIProcess:
         request_line = json.dumps(request, ensure_ascii=False)
         collected: list[str] = []
 
-        with self._lock:
+        with self._rpc_lock:
             # 写入请求(加换行符,ACP 用 newline-delimited JSON)
-            assert self.proc is not None
-            assert self.proc.stdin is not None
-            self.proc.stdin.write(request_line + "\n")
-            self.proc.stdin.flush()
+            self._write_stdin(request_line)
 
             # 逐行读取响应,直到收到匹配 id 的最终响应
+            assert self.proc is not None
             assert self.proc.stdout is not None
             for line in self.proc.stdout:
                 line = line.strip()
@@ -115,6 +119,17 @@ class ACPCLIProcess:
                     continue  # 非 JSON 行(如日志),跳过
 
         return collected
+
+    def _write_stdin(self, line: str) -> None:
+        """写一行到 CLI stdin(线程安全,用 _stdin_lock 保护)。
+
+        供 send_and_collect 和 request_permission 响应回写共用。
+        """
+        assert self.proc is not None
+        assert self.proc.stdin is not None
+        with self._stdin_lock:
+            self.proc.stdin.write(line + "\n")
+            self.proc.stdin.flush()
 
     def stop(self) -> None:
         """停止 CLI 子进程"""
@@ -133,6 +148,15 @@ class ACPCLIProcess:
 
 # 全局 CLI 进程实例(所有请求共享)
 _cli: ACPCLIProcess | None = None
+
+# Pending permission 请求管理(CLI 发来的 request_permission 请求,等待用户确认)
+# 结构:{request_id: {"event": threading.Event, "result": dict | None}}
+# 流程:POST /rpc 读到 request_permission → 存入 _pending_permissions →
+#       推 SSE 事件给后端 → 阻塞 event.wait() →
+#       POST /permission_response 设 result + event.set() →
+#       POST /rpc 唤醒,把 result 写回 CLI stdin
+_pending_permissions: dict[str, dict] = {}
+_pending_lock = threading.Lock()
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
@@ -158,13 +182,23 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """POST /rpc:发送 JSON-RPC 请求,流式返回 SSE(每行 stdout 即时推送)
+        POST /permission_response:提交用户对 request_permission 的确认结果
 
-        与批量收集模式不同,这里逐行读取 CLI stdout 并立即推送 SSE,
+        /rpc 与批量收集模式不同,这里逐行读取 CLI stdout 并立即推送 SSE,
         让后端能实时收到 thinking/text/tool_call 增量,实现真正流式体验。
 
-        线程安全:整个读取过程持有 _cli._lock,避免并发请求交叉。
+        线程安全:整个读取过程持有 _cli._rpc_lock,避免并发请求交叉。
         (ACP 是串行协议,同一时刻只处理一个请求,锁不影响吞吐)
+
+        request_permission 处理:
+        CLI 检测到危险命令时会发 JSON-RPC 请求(method=request_permission, 有 id),
+        bridge 在 SSE 流里推 event: permission_request 事件给后端,后端问用户,
+        用户确认后调 POST /permission_response,bridge 把结果写回 CLI stdin。
         """
+        if self.path == "/permission_response":
+            self._handle_permission_response()
+            return
+
         if self.path != "/rpc":
             self._send_json(404, json.dumps({"error": "not found"}))
             return
@@ -188,16 +222,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         print(f"[bridge] >>> 发送到 CLI: method={request_method}, id={request_id}", file=sys.stderr, flush=True)
 
-        # 发送请求 + 流式读取响应(持锁,串行)
+        # 发送请求 + 流式读取响应(持 _rpc_lock,串行)
         try:
-            with _cli._lock:
+            with _cli._rpc_lock:
                 if not _cli.alive:
                     raise RuntimeError("ACP CLI 进程已退出")
 
-                assert _cli.proc is not None
-                assert _cli.proc.stdin is not None
-                _cli.proc.stdin.write(request_line + "\n")
-                _cli.proc.stdin.flush()
+                # 写请求到 stdin(用 _write_stdin,内部持 _stdin_lock)
+                _cli._write_stdin(request_line)
 
                 # 先发 SSE 响应头
                 self.send_response(200)
@@ -208,6 +240,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
                 # 逐行读取 stdout,立即推送 SSE
                 # 使用 readline + 超时检测,避免 CLI 无输出时永久挂起
+                assert _cli.proc is not None
                 assert _cli.proc.stdout is not None
                 import select as _select
                 stdout_fd = _cli.proc.stdout.fileno()
@@ -259,6 +292,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     line_count += 1
                     print(f"[bridge] <<< CLI stdout [{line_count}]: {line[:500]}", file=sys.stderr, flush=True)
 
+                    # 检查是否是 CLI 发来的 request_permission 请求(JSON-RPC 请求,有 id)
+                    # ACP 协议:CLI 检测危险命令 → 发 request_permission → bridge 转发后端 →
+                    # 后端问用户 → POST /permission_response 提交结果 → bridge 写回 CLI stdin
+                    try:
+                        msg = json.loads(line)
+                        if (
+                            isinstance(msg, dict)
+                            and msg.get("method") == "request_permission"
+                            and msg.get("id") is not None
+                        ):
+                            self._handle_request_permission(msg)
+                            continue  # 已处理,继续读 stdout(等待 CLI 后续响应)
+                    except json.JSONDecodeError:
+                        pass
+
                     sse_data = f"data: {line}\n\n"
                     try:
                         self.wfile.write(sse_data.encode("utf-8"))
@@ -283,6 +331,134 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self._send_json(500, json.dumps({"error": str(e)}))
             except Exception:
                 print(f"[bridge] 流式响应异常: {e}", file=sys.stderr, flush=True)
+
+    def _handle_request_permission(self, msg: dict) -> None:
+        """处理 CLI 发来的 request_permission JSON-RPC 请求。
+
+        ACP 协议:CLI 检测到危险命令 → 发 request_permission 请求(有 id)→
+        bridge 通过 SSE 流推 event: permission_request 给后端 →
+        阻塞等待 POST /permission_response 提交结果 →
+        把结果作为 JSON-RPC 响应写回 CLI stdin。
+
+        msg 结构:{
+            "jsonrpc": "2.0",
+            "method": "request_permission",
+            "id": <CLI 分配的 id>,
+            "params": {
+                "session_id": "...",
+                "tool_call": {...},  # ToolCallUpdate,含命令/diff 等
+                "options": [{"option_id": "allow_once", "kind": "allow_once", "name": "..."}, ...]
+            }
+        }
+        """
+        perm_id = str(msg.get("id"))
+        params = msg.get("params", {})
+        tool_call = params.get("tool_call", {})
+        options = params.get("options", [])
+
+        # 提取命令文本(tool_call.content[0].text 或 raw_input.command)
+        command = ""
+        description = ""
+        raw_input = tool_call.get("raw_input", {})
+        if isinstance(raw_input, dict):
+            command = str(raw_input.get("command", ""))
+            description = str(raw_input.get("description", "")) or command
+        # 从 content 提取展示文本(备用)
+        if not command:
+            content_list = tool_call.get("content", [])
+            if isinstance(content_list, list) and content_list:
+                first_content = content_list[0]
+                if isinstance(first_content, dict):
+                    text_block = first_content.get("text", "")
+                    if isinstance(text_block, str):
+                        command = text_block
+
+        # 构造 permission_request 事件载荷(后端用它推 command_confirm SSE 给前端)
+        perm_payload = {
+            "id": perm_id,
+            "tool_call_id": tool_call.get("id", ""),
+            "title": tool_call.get("title", ""),
+            "kind": tool_call.get("kind", ""),
+            "command": command,
+            "description": description,
+            "options": options,
+        }
+
+        # 推 SSE 事件给后端(event: permission_request,后端 ACPClient 识别此事件)
+        sse_event = f"event: permission_request\ndata: {json.dumps(perm_payload, ensure_ascii=False)}\n\n"
+        try:
+            self.wfile.write(sse_event.encode("utf-8"))
+            self.wfile.flush()
+            print(f"[bridge] 推送 permission_request 事件(perm_id={perm_id}, command={command[:100]})", file=sys.stderr, flush=True)
+        except BrokenPipeError:
+            print(f"[bridge] 推送 permission_request 失败:客户端断开(perm_id={perm_id})", file=sys.stderr, flush=True)
+            return
+
+        # 注册 pending permission,阻塞等待 POST /permission_response 唤醒
+        event = threading.Event()
+        with _pending_lock:
+            _pending_permissions[perm_id] = {"event": event, "result": None}
+
+        # 阻塞等待(无超时,用户可能需要很久才确认;CLI 进程退出时会被 select 检测到)
+        # 期间定期检查 CLI 是否还活着,避免 CLI 死了还在等
+        while True:
+            if event.wait(timeout=5.0):
+                break
+            if not _cli or not _cli.alive:
+                print(f"[bridge] 等待 permission 响应时 CLI 退出(perm_id={perm_id})", file=sys.stderr, flush=True)
+                break
+
+        # 取出结果
+        with _pending_lock:
+            entry = _pending_permissions.pop(perm_id, None)
+        result = entry["result"] if entry else None
+
+        # 构造 JSON-RPC 响应写回 CLI stdin
+        if result is None:
+            # 超时/CLI 退出,默认拒绝
+            outcome = {"outcome": "rejected"}
+            print(f"[bridge] permission 无结果,默认拒绝(perm_id={perm_id})", file=sys.stderr, flush=True)
+        else:
+            outcome = result.get("outcome", {"outcome": "rejected"})
+
+        response = {
+            "jsonrpc": "2.0",
+            "id": msg.get("id"),
+            "result": {"outcome": outcome},
+        }
+        response_line = json.dumps(response, ensure_ascii=False)
+        _cli._write_stdin(response_line)
+        print(f"[bridge] permission 响应已写回 CLI(perm_id={perm_id}, outcome={outcome})", file=sys.stderr, flush=True)
+
+    def _handle_permission_response(self) -> None:
+        """POST /permission_response:后端提交用户对 request_permission 的确认结果。
+
+        请求体:{
+            "id": "<perm_id>",  # 对应 request_permission 的 id
+            "outcome": {"outcome": "selected", "option_id": "allow_once"}  # 或 {"outcome": "rejected"}
+        }
+        """
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length).decode("utf-8")
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as e:
+            self._send_json(400, json.dumps({"error": f"invalid JSON: {e}"}))
+            return
+
+        perm_id = str(data.get("id", ""))
+        outcome = data.get("outcome", {"outcome": "rejected"})
+
+        with _pending_lock:
+            entry = _pending_permissions.get(perm_id)
+            if entry is None:
+                self._send_json(404, json.dumps({"error": f"permission id not found: {perm_id}"}))
+                return
+            entry["result"] = {"outcome": outcome}
+            entry["event"].set()
+
+        print(f"[bridge] 收到 permission 响应(perm_id={perm_id}, outcome={outcome})", file=sys.stderr, flush=True)
+        self._send_json(200, json.dumps({"status": "ok"}))
 
     def _send_json(self, status_code: int, body: str) -> None:
         """发送 JSON 响应"""

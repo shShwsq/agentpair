@@ -67,12 +67,25 @@ def _kimi_post_session_setup(
     - mode='yolo':跳过所有权限确认(等价 --yolo,实现自主执行)
     - thinking=<effort>:思考强度(若 task.params.reasoning_effort 有值)
 
+    命令确认模式(task.params._executor_command_confirm):
+    - always_approve(默认):设 mode=yolo,CLI 自主执行所有命令
+    - per_command:不设 mode=yolo,CLI 遇到危险命令发 request_permission → 前端确认
+
     模型选择不在此设置 —— 通过 KIMI_MODEL_NAME 环境变量在 bridge 启动时注入,
     避免与临时 provider 的模型冲突。
     """
+    # 读命令确认模式
+    approval_mode = "always_approve"
+    if task and task.params:
+        approval_mode = task.params.get("_executor_command_confirm", "always_approve")
+
     # 设置 yolo 模式(跳过权限确认,实现自主执行)
-    client.set_config_option(session_id, "mode", "yolo")
-    logger.info("[kimi_cli] 已设置 mode=yolo(跳过权限确认)")
+    # per_command 模式下不设 yolo,让 CLI 发 request_permission 给前端确认
+    if approval_mode == "per_command":
+        logger.info("[kimi_cli] per_command 模式:不设 mode=yolo,危险命令将弹窗确认")
+    else:
+        client.set_config_option(session_id, "mode", "yolo")
+        logger.info("[kimi_cli] 已设置 mode=yolo(跳过权限确认)")
 
     # 若有 task 且 task.params 含 reasoning_effort,设置思考强度
     if task and task.params:

@@ -45,6 +45,7 @@ from app.models.user_agent_config import UserAgentConfig
 from app.security import decrypt_secret
 from app.tools import sandbox_tools
 from app.tools.schema import set_current_task
+from app.user_interaction import request_command_confirm, wait_for_command_confirm
 
 logger = logging.getLogger(__name__)
 
@@ -105,12 +106,19 @@ class ACPClient:
         base_url: str,
         headers: dict[str, str] | None = None,
         recorder: _ACPRecorder | None = None,
+        permission_handler=None,
     ):
         self.base_url = base_url.rstrip("/")
         self.headers = headers or {}
         # 可选的原始响应记录器:在 _rpc 的 SSE 循环里记录每一行原文,
         # 任何解析/过滤之前落盘。None 表示不记录(如 test_credential 流程)。
         self.recorder = recorder
+        # 可选的命令确认处理器:CLI 发来 request_permission 时(经 bridge 转为
+        # permission_request SSE 事件),调用此 handler 让用户确认。
+        # 签名:permission_handler(payload: dict) -> dict
+        # 返回:{"outcome": "selected", "option_id": "allow_once"} 或 {"outcome": "rejected"}
+        # None 表示不处理(默认拒绝,兼容 always_approve 模式下 CLI 仍开 yolo 不会发请求的场景)
+        self.permission_handler = permission_handler
         # read timeout=None:session/prompt 可能长时间流式输出
         self._client = httpx.Client(
             timeout=httpx.Timeout(connect=10, read=None, write=30, pool=30),
@@ -169,6 +177,10 @@ class ACPClient:
                 )
 
             final_result: dict | None = None
+            # 跟踪当前 SSE 事件类型(从 event: 行读取)
+            # bridge 推 event: permission_request 时,后续 data: 行是 permission 载荷,
+            # 不是 ACP 通知,需要走 permission_handler 路径
+            current_event_type: str | None = None
 
             for line in response.iter_lines():
                 # 最先记录原始行(不解析、不过滤、不截断),
@@ -178,11 +190,32 @@ class ACPClient:
                     self.recorder.record_raw(line, kind="line")
 
                 line = line.strip()
-                if not line or not line.startswith("data:"):
+                if not line:
+                    # SSE 事件分隔符(空行),重置事件类型
+                    current_event_type = None
+                    continue
+
+                # event: 行,记录事件类型(如 permission_request)
+                if line.startswith("event:"):
+                    current_event_type = line[6:].strip()
+                    continue
+
+                if not line.startswith("data:"):
                     continue
                 data = line[5:].strip()
                 if not data:
                     continue
+
+                # permission_request 事件:CLI 检测到危险命令,经 bridge 转发,
+                # 调 permission_handler 让用户确认,然后 POST /permission_response 给 bridge
+                if current_event_type == "permission_request":
+                    try:
+                        perm_payload = json.loads(data)
+                    except json.JSONDecodeError:
+                        logger.warning(f"[acp] permission_request 载荷非 JSON: {data[:100]}")
+                        continue
+                    self._handle_permission_request(perm_payload)
+                    continue  # 不走 on_event,继续读后续 SSE
 
                 try:
                     msg = json.loads(data)
@@ -216,6 +249,46 @@ class ACPClient:
         if final_result is None:
             final_result = {}
         return final_result
+
+    def _handle_permission_request(self, payload: dict) -> None:
+        """处理 bridge 发来的 permission_request SSE 事件。
+
+        CLI 检测到危险命令 → 经 bridge 转为 permission_request SSE 事件 →
+        调 permission_handler 让用户确认 → POST /permission_response 提交结果给 bridge →
+        bridge 把结果作为 JSON-RPC 响应写回 CLI stdin。
+
+        payload 结构:{
+            "id": "<perm_id>",
+            "command": "rm -rf /",
+            "description": "...",
+            "options": [{"option_id": "allow_once", ...}, ...]
+        }
+        """
+        perm_id = payload.get("id", "")
+        if not perm_id:
+            logger.warning("[acp] permission_request 载荷无 id,跳过")
+            return
+
+        if self.permission_handler is None:
+            # 无 handler,默认拒绝(不应发生:always_approve 模式下 CLI 开 yolo 不会发请求)
+            logger.warning(f"[acp] 收到 permission_request 但无 handler,默认拒绝(perm_id={perm_id})")
+            outcome = {"outcome": "rejected"}
+        else:
+            try:
+                outcome = self.permission_handler(payload)
+            except Exception as e:
+                logger.warning(f"[acp] permission_handler 异常: {e}", exc_info=True)
+                outcome = {"outcome": "rejected"}
+
+        # POST /permission_response 提交结果给 bridge
+        try:
+            self._client.post(
+                f"{self.base_url}/permission_response",
+                json={"id": perm_id, "outcome": outcome},
+                timeout=30,
+            )
+        except Exception as e:
+            logger.warning(f"[acp] 提交 permission_response 失败(perm_id={perm_id}): {e}")
 
     def initialize(self) -> dict:
         """ACP 握手:交换协议版本和能力
@@ -456,6 +529,8 @@ def _get_acp_args(
         model:            模型名
         reasoning_effort: 思考强度(low/medium/high/xhigh/max)
         context_window:   上下文窗口
+        _executor_command_confirm: 命令确认模式("always_approve"/"per_command")
+            per_command 时移除 --yolo(Qoder),让 CLI 发 request_permission 给前端确认
 
     若 registry 的 sandbox.inject_cli_model_args 为 False(如 kimi CLI
     的 ACP 模式不支持 --model 等 CLI 参数),则不注入 task.params 模型配置
@@ -478,6 +553,15 @@ def _get_acp_args(
         ctx = task.params.get("context_window")
         if ctx:
             args.extend(["--context-window", str(ctx)])
+
+    # 命令确认模式:per_command 时移除 --yolo(Qoder 的 yolo 在 acp_args)
+    # 让 CLI 进入 approval 模式,遇到危险命令发 request_permission 给前端确认
+    # Kimi/Hermes 的 yolo 在 wrapper 层(post_session_setup / env)处理
+    # Codex 用 --dangerously-bypass-approvals-and-sandbox,不支持 per_command,在 wrapper 降级
+    if task and task.params:
+        approval_mode = task.params.get("_executor_command_confirm", "always_approve")
+        if approval_mode == "per_command":
+            args = [a for a in args if a != "--yolo"]
 
     if extra_args:
         args.extend(extra_args)
@@ -1667,7 +1751,34 @@ def run_acp_agent(
 
         # ---- ACP 通信 ----
         recorder = _ACPRecorder(task.id, round_idx)
-        client = ACPClient(endpoint_url, endpoint_headers, recorder=recorder)
+
+        # permission_handler:CLI 发来 request_permission 时(危险命令确认),
+        # 推 SSE 给前端 CommandConfirmDialog,阻塞等待用户确认。
+        # 仅在 CLI 关闭 yolo 模式时才会被调用(always_approve 模式下 CLI 开 yolo 不会发请求)。
+        def _permission_handler(payload: dict) -> dict:
+            """处理 CLI 的 request_permission:推前端确认弹窗,阻塞等用户决议"""
+            command = payload.get("command", "")
+            description = payload.get("description", "") or command
+            perm_id = payload.get("id", "")
+            tool_call_kind = payload.get("kind", "")
+
+            # 构造 command_confirm 事件载荷(与 local 模式一致的字段结构)
+            command_desc = {
+                "command_id": f"acp_{perm_id}",
+                "command": command,
+                "tool": f"cli:{agent_type}" + (f":{tool_call_kind}" if tool_call_kind else ""),
+                "reason": description,
+            }
+            request_command_confirm(task.id, command_desc)
+            approved = wait_for_command_confirm(task.id, command_desc["command_id"])
+            if approved:
+                # 用户同意:返回 allow_once(不记忆,下次再问)
+                return {"outcome": "selected", "option_id": "allow_once"}
+            else:
+                return {"outcome": "rejected"}
+
+        client = ACPClient(endpoint_url, endpoint_headers, recorder=recorder,
+                           permission_handler=_permission_handler)
         try:
             # 握手
             init_result = client.initialize()
