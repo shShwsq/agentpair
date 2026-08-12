@@ -67,7 +67,7 @@ AgentPair/
 - **Python** ≥ 3.13 (dev environment uses 3.14)
 - **Node.js** ≥ 22.0.0 (dev environment uses 24.x)
 - **PostgreSQL** (Alibaba Cloud RDS or self-hosted)
-- **OpenSandbox Server** (optional; when not deployed, set `SANDBOX_MODE=mock` to simulate with the local filesystem)
+- **OpenSandbox Server** (optional; when not deployed, set `SANDBOX_MODE=local` to use local mode (no sandbox))
 
 ## Quick Start
 
@@ -203,13 +203,13 @@ Both GitHub and Gitee are supported; configure as needed. Platforms left empty w
 
 | Variable | Description | Default |
 |---|---|---|
-| `REPO_CLONE_DIR` | Local clone temp directory (used when `SANDBOX_MODE=mock`) | `./_repos` |
+| `REPO_CLONE_DIR` | Local clone temp directory (used when `SANDBOX_MODE=local`) | `./_repos` |
 
 #### Sandbox (OpenSandbox)
 
 | Variable | Description | Default |
 |---|---|---|
-| `SANDBOX_MODE` | `mock` (local filesystem simulation) / `sandbox` (real OpenSandbox Server) | `mock` |
+| `SANDBOX_MODE` | `local` (no sandbox, host filesystem) / `sandbox` (real OpenSandbox Server) | `local` |
 | `SANDBOX_SERVER_URL` | OpenSandbox Server URL, e.g. `http://your-server:8080` | `http://localhost:8080` |
 | `SANDBOX_API_KEY` | Server auth API Key (corresponds to server `[server].api_key`; empty = no auth) | empty |
 | `SANDBOX_IMAGE` | Sandbox image (must have git / ripgrep / python3 / awk / coreutils preinstalled) | `ubuntu` |
@@ -288,7 +288,7 @@ Production requires deploying an OpenSandbox Server to provide an isolated code 
 3. Build a custom image (with git / ripgrep / python3 / Node.js preinstalled) to avoid reinstalling on every task
 4. Set `SANDBOX_MODE=sandbox`, `SANDBOX_SERVER_URL`, and `SANDBOX_USE_SERVER_PROXY=true` on the backend
 
-When the sandbox is not deployed, set `SANDBOX_MODE=mock` to simulate with the local filesystem (dev/debug only — tool calls execute on the host machine).
+When the sandbox is not deployed, set `SANDBOX_MODE=local` to use local mode (no sandbox) (dev/debug only — tool calls execute on the host machine).
 
 ## Build & Deployment
 

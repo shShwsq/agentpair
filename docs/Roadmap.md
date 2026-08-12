@@ -104,7 +104,7 @@ uvicorn app.main:app --reload
 **完成标志**:所有代码执行都在沙箱里,宿主机只做调度。
 
 **实际实现**:
-- `SandboxSession` 封装,支持 sandbox(真实 OpenSandbox)和 mock(本地文件系统模拟)两种模式
+- `SandboxSession` 封装,支持 sandbox(真实 OpenSandbox)和 local(本地模式,不用沙箱)两种模式
 - 使用 OpenSandbox 官方 `SandboxSync` 同步 API,对齐 react_agent 的同步循环
 - 支持 SSH key 挂载(私有仓库 clone)、资源限制(CPU/内存/执行时间)、端口转发
 - 后台命令管理(ACP bridge 等长驻服务)

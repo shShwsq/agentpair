@@ -5,7 +5,8 @@
 
 两种模式:
 - sandbox:连真实 OpenSandbox Server(部署在 Linux 服务器上),走 SandboxSync
-- mock:本地未部署 Server,用本地文件系统模拟,供开发期使用
+- local:本地模式,不用沙箱,在宿主机文件系统直接执行,供开发/调试使用
+  (LLM 生成的代码/命令在宿主机直接运行,无隔离边界,请勿用于生产)
 
 对外接口(同步):
 - create_sandbox() -> SandboxSession
@@ -41,22 +42,33 @@ logger = logging.getLogger(__name__)
 class SandboxSession:
     """沙箱会话,封装对单个沙箱实例的操作
 
-    所有方法都是同步的:sandbox 模式走 SandboxSync 同步 API,mock 模式走本地文件系统
+    所有方法都是同步的:sandbox 模式走 SandboxSync 同步 API,local 模式走本地文件系统
     """
 
     def __init__(self, mode: str, sandbox: Any = None, work_dir: str = "/home/user"):
         self.mode = mode
         self.sandbox = sandbox  # SandboxSync 对象(sandbox 模式)
         self.work_dir = work_dir
-        # mock 模式下的本地临时目录
-        self._mock_dir: Path | None = None
-        if mode == "mock":
-            self._mock_dir = Path(tempfile.mkdtemp(prefix="sandbox_mock_"))
-            # mock 模式下 work_dir 映射到本地目录
-            self.work_dir = str(self._mock_dir)
+        # local 模式下的本地临时目录(单一临时目录,由 session 统一持有,
+        # sandbox_tools 的文件/clone/workspace 操作都复用此目录,避免双份临时目录)
+        self._local_dir: Path | None = None
+        if mode == "local":
+            self._local_dir = Path(tempfile.mkdtemp(prefix="sandbox_local_"))
+            # local 模式下 work_dir 映射到本地目录
+            self.work_dir = str(self._local_dir)
         self._closed = False
-        # mock 模式:后台进程跟踪 {execution_id: (Popen, [stdout_lines])}
-        self._mock_bg_procs: dict[str, tuple[subprocess.Popen, list[str]]] = {}
+        # local 模式:后台进程跟踪 {execution_id: (Popen, [stdout_lines])}
+        self._local_bg_procs: dict[str, tuple[subprocess.Popen, list[str]]] = {}
+
+    @property
+    def local_dir(self) -> Path:
+        """local 模式下的本地临时目录(sandbox_tools 复用,避免重复 mkdtemp)
+
+        sandbox 模式访问会抛 RuntimeError。
+        """
+        if self._local_dir is None:
+            raise RuntimeError("当前模式无 local_dir(sandbox 模式使用沙箱内路径)")
+        return self._local_dir
 
     # ---------- 通用 ----------
 
@@ -64,7 +76,7 @@ class SandboxSession:
         """执行 shell 命令,返回 stdout
 
         sandbox 模式:在沙箱里执行(SandboxSync.commands.run)
-        mock 模式:在本地临时目录里执行(用 subprocess)
+        local 模式:在本地临时目录里执行(用 subprocess)
 
         check=True 时,退出码非零抛 RuntimeError(含 stderr),用于 git clone 等必须成功的命令。
         """
@@ -74,7 +86,7 @@ class SandboxSession:
         if self.mode == "sandbox":
             return self._sandbox_run_command(cmd, timeout, check=check)
         else:
-            return self._mock_run_command(cmd, timeout, check=check)
+            return self._local_run_command(cmd, timeout, check=check)
 
     def write_file(self, path: str, content: str) -> None:
         """写入文件"""
@@ -84,7 +96,7 @@ class SandboxSession:
         if self.mode == "sandbox":
             self._sandbox_write_file(path, content)
         else:
-            self._mock_write_file(path, content)
+            self._local_write_file(path, content)
 
     def read_file(self, path: str) -> str:
         """读取文件"""
@@ -94,13 +106,14 @@ class SandboxSession:
         if self.mode == "sandbox":
             return self._sandbox_read_file(path)
         else:
-            return self._mock_read_file(path)
+            return self._local_read_file(path)
 
     def get_endpoint(self, port: int) -> tuple[str, dict[str, str]]:
         """获取沙箱内端口的外部访问端点(端口转发)
 
         sandbox 模式:通过 SDK 的 get_endpoint(port) 获取转发 URL + 必需 headers
-        mock 模式:返回 localhost:port(本地调试用)
+        local 模式:返回 localhost:port(local 模式下进程直接跑在宿主机,
+                  若 agent 通过 run_command_background 起了监听该端口的服务,可直接访问)
 
         返回 (endpoint_url, headers):
             - endpoint_url:可直接 HTTP 请求的完整 URL(含 scheme)
@@ -118,7 +131,7 @@ class SandboxSession:
                 url = f"http://{url}"
             return url, dict(ep.headers or {})
         else:
-            # mock 模式:直接用 localhost
+            # local 模式:进程在宿主机上,直接用 localhost
             return f"http://127.0.0.1:{port}", {}
 
     def run_command_background(
@@ -141,13 +154,13 @@ class SandboxSession:
         if self.mode == "sandbox":
             return self._sandbox_run_background(cmd, envs, work_dir)
         else:
-            return self._mock_run_background(cmd, envs, work_dir)
+            return self._local_run_background(cmd, envs, work_dir)
 
     def get_background_logs(self, execution_id: str, cursor: int | None = None) -> tuple[str, int | None]:
         """获取后台命令的累积日志
 
         返回 (logs_text, next_cursor)。next_cursor 为 None 表示无更多日志。
-        mock 模式返回 (stdout_so_far, None)。
+        local 模式返回 (stdout_so_far, None)。
         """
         if self._closed:
             raise RuntimeError("沙箱已关闭")
@@ -158,7 +171,7 @@ class SandboxSession:
             )
             return logs.content, logs.cursor
         else:
-            return self._mock_get_background_logs(execution_id)
+            return self._local_get_background_logs(execution_id)
 
     def interrupt_command(self, execution_id: str) -> None:
         """中断后台命令"""
@@ -168,7 +181,7 @@ class SandboxSession:
         if self.mode == "sandbox":
             self.sandbox.commands.interrupt(execution_id)
         else:
-            proc = self._mock_bg_procs.pop(execution_id, None)
+            proc = self._local_bg_procs.pop(execution_id, None)
             if proc:
                 proc.terminate()
 
@@ -177,20 +190,20 @@ class SandboxSession:
 
         sandbox 模式用 destroy()(kill + close 本地资源,避免 httpx 连接泄漏);
         destroy 不可用时回退到 kill()。
-        mock 模式清理临时目录 + 终止后台进程。
+        local 模式清理临时目录 + 终止后台进程(单一临时目录,含 workspace/clone/memory)。
         """
         if self._closed:
             return
         self._closed = True
 
-        # mock 模式:终止所有后台进程
-        if self._mock_bg_procs:
-            for proc in self._mock_bg_procs.values():
+        # local 模式:终止所有后台进程
+        if self._local_bg_procs:
+            for proc in self._local_bg_procs.values():
                 try:
                     proc.terminate()
                 except Exception:
                     pass
-            self._mock_bg_procs.clear()
+            self._local_bg_procs.clear()
 
         if self.mode == "sandbox" and self.sandbox:
             try:
@@ -201,9 +214,9 @@ class SandboxSession:
                     self.sandbox.kill()
             except Exception as e:
                 logger.warning(f"关闭沙箱失败: {e}")
-        elif self._mock_dir:
-            # mock 模式:清理临时目录
-            shutil.rmtree(self._mock_dir, ignore_errors=True)
+        elif self._local_dir:
+            # local 模式:清理临时目录(含 clone / workspace / memory 等全部子目录)
+            shutil.rmtree(self._local_dir, ignore_errors=True)
 
     # ---------- sandbox 模式实现(SandboxSync 同步) ----------
 
@@ -267,17 +280,36 @@ class SandboxSession:
         logger.info(f"[sandbox] 后台命令已启动: execution_id={execution.id}, cmd={cmd[:100]}")
         return execution.id
 
-    # ---------- mock 模式实现(本地文件系统) ----------
+    # ---------- local 模式实现(本地文件系统) ----------
 
-    def _mock_run_command(self, cmd: str, timeout: int, *, check: bool = False) -> str:
-        """mock 模式:用本地 subprocess 执行,把 work_dir 当作沙箱根"""
-        assert self._mock_dir is not None
+    def _local_resolve_path(self, path: str) -> Path:
+        """把传入路径映射到本地临时目录内,并做路径穿越防护
+
+        path 可能是绝对路径(/home/user/xxx)或相对路径,统一映射到 _local_dir 下。
+        解析后不得逃出 _local_dir(防 ../../etc/passwd 之类逃逸)。
+        """
+        assert self._local_dir is not None
+        rel = path.lstrip("/")
+        if rel.startswith("home/user/"):
+            rel = rel[len("home/user/"):]
+        target = (self._local_dir / rel).resolve()
+        if not target.is_relative_to(self._local_dir.resolve()):
+            raise ValueError(f"非法路径:不能超出本地工作目录({path})")
+        return target
+
+    def _local_run_command(self, cmd: str, timeout: int, *, check: bool = False) -> str:
+        """local 模式:用本地 subprocess 执行,把 work_dir 当作沙箱根
+
+        注意:Windows 下 shell=True 走 cmd.exe,Unix 命令(mkdir -p / find / rg 等)会失败。
+        文件类工具在 local 模式下已用 Python 直接实现绕过 shell,此处仅用于 agent 主动 run_command。
+        """
+        assert self._local_dir is not None
         result = subprocess.run(
             cmd,
             shell=True,
             capture_output=True,
             text=True,
-            cwd=self._mock_dir,
+            cwd=self._local_dir,
             timeout=timeout,
         )
         if check and result.returncode != 0:
@@ -286,64 +318,54 @@ class SandboxSession:
             )
         return result.stdout
 
-    def _mock_write_file(self, path: str, content: str) -> None:
-        """mock 模式:直接在本地临时目录写文件"""
-        assert self._mock_dir is not None
-        # path 可能是绝对路径(/home/user/xxx)或相对路径
-        # 在 mock 模式下,统一映射到 _mock_dir 下
-        rel = path.lstrip("/")
-        if rel.startswith("home/user/"):
-            rel = rel[len("home/user/"):]
-        target = self._mock_dir / rel
+    def _local_write_file(self, path: str, content: str) -> None:
+        """local 模式:直接在本地临时目录写文件(带路径穿越防护)"""
+        target = self._local_resolve_path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
-    def _mock_read_file(self, path: str) -> str:
-        """mock 模式:直接读本地临时目录"""
-        assert self._mock_dir is not None
-        rel = path.lstrip("/")
-        if rel.startswith("home/user/"):
-            rel = rel[len("home/user/"):]
-        target = self._mock_dir / rel
+    def _local_read_file(self, path: str) -> str:
+        """local 模式:直接读本地临时目录(带路径穿越防护)"""
+        target = self._local_resolve_path(path)
         return target.read_text(encoding="utf-8")
 
-    def _mock_run_background(
+    def _local_run_background(
         self,
         cmd: str,
         envs: dict[str, str] | None,
         work_dir: str | None,
     ) -> str:
-        """mock 模式:用 subprocess.Popen 后台启动,跟踪进程"""
-        assert self._mock_dir is not None
-        exec_id = f"mock_bg_{uuid.uuid4().hex[:8]}"
+        """local 模式:用 subprocess.Popen 后台启动,跟踪进程"""
+        assert self._local_dir is not None
+        exec_id = f"local_bg_{uuid.uuid4().hex[:8]}"
         merged_env = {**os.environ, **(envs or {})}
-        cwd = work_dir or str(self._mock_dir)
-        # mock 模式下 work_dir 可能是 /home/user/xxx,映射到本地
+        cwd = work_dir or str(self._local_dir)
+        # local 模式下 work_dir 可能是 /home/user/xxx,映射到本地
         if cwd.startswith("/home/user"):
-            cwd = str(self._mock_dir / cwd[len("/home/user/"):])
+            cwd = str(self._local_dir / cwd[len("/home/user/"):])
         proc = subprocess.Popen(
             cmd,
             shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            cwd=cwd if Path(cwd).exists() else str(self._mock_dir),
+            cwd=cwd if Path(cwd).exists() else str(self._local_dir),
             env=merged_env,
         )
-        self._mock_bg_procs[exec_id] = (proc, [])
+        self._local_bg_procs[exec_id] = (proc, [])
         # 启动后台线程持续读取 stdout(避免 pipe 满死锁)
         def _drain():
             try:
                 for line in proc.stdout:
-                    self._mock_bg_procs[exec_id][1].append(line)
+                    self._local_bg_procs[exec_id][1].append(line)
             except Exception:
                 pass
         threading.Thread(target=_drain, daemon=True).start()
         return exec_id
 
-    def _mock_get_background_logs(self, execution_id: str) -> tuple[str, int | None]:
-        """mock 模式:返回已累积的 stdout 行"""
-        entry = self._mock_bg_procs.get(execution_id)
+    def _local_get_background_logs(self, execution_id: str) -> tuple[str, int | None]:
+        """local 模式:返回已累积的 stdout 行"""
+        entry = self._local_bg_procs.get(execution_id)
         if entry is None:
             return "", None
         _proc, lines = entry
@@ -358,13 +380,22 @@ class SandboxSession:
 def create_sandbox() -> SandboxSession:
     """创建一个沙箱会话
 
-    根据 settings.SANDBOX_MODE 决定走真实沙箱还是 mock 模式
+    根据 settings.SANDBOX_MODE 决定走真实沙箱还是 local 模式
     """
     mode = settings.SANDBOX_MODE
 
-    if mode == "mock":
-        logger.info("[sandbox] 使用 mock 模式(本地文件系统模拟)")
-        return SandboxSession(mode="mock")
+    if mode == "local":
+        logger.warning(
+            "[sandbox] 使用 local 模式(本地文件系统,不用沙箱):"
+            "LLM 生成的代码/命令将在宿主机直接执行,无隔离边界,仅适用于开发/调试"
+        )
+        if os.name == "nt":
+            logger.warning(
+                "[sandbox] 检测到 Windows:local 模式下 run_command 走 cmd.exe,"
+                "Unix 命令(mkdir -p / find / rg / test 等)可能失败;"
+                "文件操作(list/read/write/clone)用 Python 直接实现,跨平台可用"
+            )
+        return SandboxSession(mode="local")
     elif mode == "sandbox":
         return _create_real_sandbox()
     else:

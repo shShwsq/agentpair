@@ -23,5 +23,5 @@ cryptography>=43.0.0
 # LLM
 openai>=1.51.0
 # 沙箱(阶段 2 起,Server 部署在 Linux 上)
-# 若本地未部署 OpenSandbox Server,可设 SANDBOX_MODE=mock 跳过实际调用
+# 若本地未部署 OpenSandbox Server,可设 SANDBOX_MODE=local 跳过实际调用(本地模式,不用沙箱)
 opensandbox>=0.1.0

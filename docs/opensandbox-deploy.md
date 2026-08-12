@@ -647,14 +647,14 @@ uvicorn app.main:app --reload
 
 ## 五、验证
 
-提交一个审计任务,看后端日志里是否出现 `[sandbox] git clone` 而不是 `[mock]`:
+提交一个审计任务,看后端日志里是否出现 `[sandbox] git clone` 而不是 `[local]`:
 
 ```
 [sandbox] git clone: git@github.com:xxx/xxx.git
 [sandbox] search: rg --line-number ...
 ```
 
-如果看到 `[mock]`,说明 `SANDBOX_MODE` 没切到 `sandbox`。
+如果看到 `[local]`,说明 `SANDBOX_MODE` 没切到 `sandbox`。
 
 ## 六、常见问题
 

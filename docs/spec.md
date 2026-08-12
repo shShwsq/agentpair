@@ -369,7 +369,7 @@ Result(任务结果项,通用)
 - 用于隔离执行不可信代码,基于 Docker 的隔离机制
 - **双模式支持**:
   - `sandbox` 模式:连真实 OpenSandbox Server(部署在 Linux 服务器),走 SandboxSync 同步 API
-  - `mock` 模式:本地未部署 Server 时用本地文件系统模拟,供开发期使用
+  - `local` 模式:本地未部署 Server 时用本地文件系统执行(不用沙箱),供开发期使用
   - 通过 `SANDBOX_MODE` 环境变量切换
 - SandboxSession 统一接口(两种模式行为一致):
   - `run_command(cmd)` → stdout(同步执行)

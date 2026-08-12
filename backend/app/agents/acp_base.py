@@ -1621,10 +1621,10 @@ def run_acp_agent(
         raise RuntimeError(f"agent 类型未注册: {agent_type}")
 
     # ---- 检查沙箱模式 ----
-    if settings.SANDBOX_MODE == "mock":
+    if settings.SANDBOX_MODE == "local":
         raise RuntimeError(
             "外部 CLI 执行器需要沙箱模式(SANDBOX_MODE=sandbox),"
-            "mock 模式不支持(沙箱内无 CLI)。"
+            "local 模式不支持(沙箱内无 CLI)。"
         )
 
     # ---- 加载凭证 + 映射为环境变量 ----
@@ -1905,8 +1905,8 @@ def test_credential_streaming(
         yield done(False, "凭证映射为空(请检查 registry 配置)")
         return
 
-    if settings.SANDBOX_MODE == "mock":
-        yield done(False, "测试连接需要 SANDBOX_MODE=sandbox(mock 模式无 CLI)")
+    if settings.SANDBOX_MODE == "local":
+        yield done(False, "测试连接需要 SANDBOX_MODE=sandbox(local 模式无 CLI)")
         return
 
     # ---- 创建临时沙箱 ----

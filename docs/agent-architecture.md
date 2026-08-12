@@ -418,7 +418,7 @@ ExecutorAgent (ABC)
 
 ```
 1. set_current_task(task_id_str, task.scenario)
-2. 校验 agent_type 已注册 + SANDBOX_MODE != "mock"
+2. 校验 agent_type 已注册 + SANDBOX_MODE != "local"
 3. _load_credentials(db, user_id, agent_type)
    → 从 UserAgentConfig 加载加密凭证,decrypt_secret 解密
 4. credential_env_builder(credentials) 或 _build_credential_envs(credentials, agent_type)

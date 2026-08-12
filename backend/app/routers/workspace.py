@@ -56,7 +56,7 @@ def get_workspace(
     - available: 工作区是否可浏览(session 存在且已 clone)
     - repo_path: 工作区路径
     - completed: 任务是否已完成
-    - mode: sandbox/mock
+    - mode: sandbox/local
     """
     _check_task_access(task_id, db, current_user)
 

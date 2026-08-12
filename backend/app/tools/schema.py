@@ -456,7 +456,7 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "run_semgrep",
-            "description": "在沙箱里运行 Semgrep 静态分析。mock 模式不可用",
+            "description": "运行 Semgrep 静态分析。local 模式需宿主机已安装 semgrep(否则返回不可用提示),sandbox 模式自动安装",
             "parameters": {
                 "type": "object",
                 "properties": {

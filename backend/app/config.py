@@ -85,8 +85,8 @@ class Settings(BaseSettings):
     SKILL_ALLOWED_EXTENSIONS_EXTRA: str = ".png,.jpg,.jpeg,.webp,.gif"
 
     # 沙箱配置(阶段 2 起)
-    # mode: mock(本地未部署 Server)/ sandbox(连真实 OpenSandbox Server)
-    SANDBOX_MODE: str = "mock"
+    # mode: local(本地模式,不用沙箱,在宿主机文件系统直接执行)/ sandbox(连真实 OpenSandbox Server)
+    SANDBOX_MODE: str = "local"
     # OpenSandbox Server 地址,形如 http://your-server-ip:8080
     SANDBOX_SERVER_URL: str = "http://localhost:8080"
     # Server 鉴权 API Key(对应 server 配置 [server].api_key,留空则不鉴权)

@@ -2,8 +2,8 @@
 
 所有工具都通过 SandboxSession 执行,接口与 local_tools.py 保持一致。
 
-mock 模式:沙箱会话的 run_command 走本地 subprocess,但 Windows 不支持
-         mkdir -p / find / rg 等 Unix 命令,所以 mock 模式下直接用
+local 模式:沙箱会话的 run_command 走本地 subprocess,但 Windows 不支持
+         mkdir -p / find / rg 等 Unix 命令,所以 local 模式下直接用
          Python 实现,绕过 shell
 sandbox 模式:走真实沙箱,在 Linux 容器里执行 Unix 命令
 """
@@ -27,8 +27,8 @@ from app.sandbox.client import SandboxSession, create_sandbox
 logger = logging.getLogger(__name__)
 
 
-# 全局缓存 task_id -> (SandboxSession, repo_path, mock_local_dir, completed_at)
-# mock 模式下,mock_local_dir 是本地临时目录,工具用 Python 直接操作
+# 全局缓存 task_id -> (SandboxSession, repo_path, local_dir, completed_at)
+# local 模式下,local_dir 是本地临时目录(复用 SandboxSession.local_dir),工具用 Python 直接操作
 # sandbox 模式下,repo_path 是沙箱内的路径
 # completed_at: 任务完成时间(用于延迟清理,任务结束后保留 session 供前端浏览工作区)
 _sessions: dict[str, dict[str, Any]] = {}
@@ -47,9 +47,10 @@ def _get_or_create_session(task_id: str) -> dict[str, Any]:
     if task_id not in _sessions:
         session = create_sandbox()
         ctx = {"session": session, "repo_path": "", "mode": settings.SANDBOX_MODE}
-        # mock 模式下额外维护一个本地临时目录
-        if settings.SANDBOX_MODE == "mock":
-            ctx["mock_dir"] = Path(tempfile.mkdtemp(prefix="sandbox_mock_"))
+        # local 模式:复用 SandboxSession 自有的本地临时目录(单一临时目录,
+        # 避免过去 session 一份、ctx 一份的双份临时目录问题)
+        if settings.SANDBOX_MODE == "local":
+            ctx["local_dir"] = session.local_dir
         _sessions[task_id] = ctx
     return _sessions[task_id]
 
@@ -93,13 +94,10 @@ def close_session(task_id: str) -> None:
     ctx = _sessions.pop(task_id)
     session: SandboxSession = ctx["session"]
     try:
+        # local 模式下 session.close() 会清理统一临时目录(含 clone/workspace/memory)
         session.close()
     except Exception as e:
         logger.warning(f"[task={task_id}] 关闭沙箱失败: {e}")
-    # mock 模式清理临时目录
-    mock_dir = ctx.get("mock_dir")
-    if mock_dir:
-        shutil.rmtree(mock_dir, ignore_errors=True)
 
 
 def get_workspace_info(task_id: str) -> dict[str, Any] | None:
@@ -134,10 +132,10 @@ def browse_files(task_id: str, subdir: str = "") -> dict:
     if not repo_path:
         raise RuntimeError("工作区不可用:尚未 clone 仓库")
 
-    # 复用 list_files 的实现(mock / sandbox 分支)
+    # 复用 list_files 的实现(local / sandbox 分支)
     mode = ctx["mode"]
-    if mode == "mock":
-        return _list_files_mock(repo_path, subdir, 500)
+    if mode == "local":
+        return _list_files_local(repo_path, subdir, 500)
     else:
         return _list_files_sandbox(ctx, repo_path, subdir, 500)
 
@@ -159,8 +157,8 @@ def browse_read_file(task_id: str, file_path: str, offset: int = 1, max_lines: i
         raise RuntimeError("工作区不可用:尚未 clone 仓库")
 
     mode = ctx["mode"]
-    if mode == "mock":
-        return _read_file_mock(repo_path, file_path, max_lines, offset, with_line_numbers=False)
+    if mode == "local":
+        return _read_file_local(repo_path, file_path, max_lines, offset, with_line_numbers=False)
     else:
         return _read_file_sandbox(ctx, repo_path, file_path, max_lines, offset, with_line_numbers=False)
 
@@ -185,23 +183,23 @@ def clone_repo(repo_url: str, branch: str | None = None, task_id: str = "", git_
 def _clone_depth_args() -> list[str]:
     """克隆深度参数(据 settings.REPO_CLONE_DEPTH:0=不限制完整克隆,>0=--depth N)
 
-    供 _clone_repo_mock / _clone_repo_sandbox 共用,集中管理避免硬编码分歧。
+    供 _clone_repo_local / _clone_repo_sandbox 共用,集中管理避免硬编码分歧。
     """
     depth = settings.REPO_CLONE_DEPTH
     return ["--depth", str(depth)] if depth > 0 else []
 
 
-def _clone_repo_mock(ctx: dict, clone_url: str, repo_name: str, branch: str | None) -> dict:
-    """mock 模式:本地 git clone"""
-    mock_dir: Path = ctx["mock_dir"]
-    repo_dir = mock_dir / repo_name
+def _clone_repo_local(ctx: dict, clone_url: str, repo_name: str, branch: str | None) -> dict:
+    """local 模式:本地 git clone"""
+    local_dir: Path = ctx["local_dir"]
+    repo_dir = local_dir / repo_name
 
     cmd = ["git", "clone"] + _clone_depth_args()
     if branch:
         cmd.extend(["--branch", branch])
     cmd.extend([clone_url, str(repo_dir)])
 
-    logger.info(f"[mock] git clone: {clone_url}")
+    logger.info(f"[local] git clone: {clone_url}")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=settings.REPO_CLONE_TIMEOUT)
     if result.returncode != 0:
         raise RuntimeError(f"git clone 失败: {result.stderr[:500]}")
@@ -211,7 +209,7 @@ def _clone_repo_mock(ctx: dict, clone_url: str, repo_name: str, branch: str | No
         for _ in repo_dir.rglob("*")
         if _.is_file() and ".git" not in _.parts
     )
-    # mock 模式下,path 返回本地路径(后续 read/search 工具会用 Python 直接读)
+    # local 模式下,path 返回本地路径(后续 read/search 工具会用 Python 直接读)
     return {"path": str(repo_dir), "files_count": files_count}
 
 
@@ -282,14 +280,14 @@ def list_files(
     ctx = _get_or_create_session(task_id)
     mode = ctx["mode"]
 
-    if mode == "mock":
-        return _list_files_mock(repo_path, subdir, max_entries)
+    if mode == "local":
+        return _list_files_local(repo_path, subdir, max_entries)
     else:
         return _list_files_sandbox(ctx, repo_path, subdir, max_entries)
 
 
-def _list_files_mock(repo_path: str, subdir: str, max_entries: int) -> dict:
-    """mock 模式:用 Path.iterdir 直接列"""
+def _list_files_local(repo_path: str, subdir: str, max_entries: int) -> dict:
+    """local 模式:用 Path.iterdir 直接列"""
     root = Path(repo_path).resolve()
     target = (root / subdir).resolve() if subdir else root
 
@@ -391,13 +389,13 @@ def write_project_memory_file(task_id: str, content: str) -> None:
     固定路径 /home/user/.agent_memory/project_memory.md(不分 project_id,每任务启动时
     覆盖为当前项目记忆)。content 为空也写(清空旧文件,避免看到上一个项目的记忆)。
 
-    mock 模式:写 ctx["mock_dir"]/.agent_memory/project_memory.md(Python 直接写)。
+    local 模式:写 ctx["local_dir"]/.agent_memory/project_memory.md(Python 直接写)。
     sandbox 模式:mkdir -p 记忆目录 + session.write_file 写绝对路径。
     """
     ctx = _get_or_create_session(task_id)
     mode = ctx["mode"]
-    if mode == "mock":
-        mem_dir = Path(ctx["mock_dir"]) / ".agent_memory"
+    if mode == "local":
+        mem_dir = Path(ctx["local_dir"]) / ".agent_memory"
         mem_dir.mkdir(parents=True, exist_ok=True)
         (mem_dir / _MEMORY_FILE).write_text(content, encoding="utf-8")
     else:
@@ -419,10 +417,10 @@ def _read_memory_file(
 ) -> dict:
     """读取记忆目录文件(白名单绝对路径,不受 repo_path 限制)
 
-    复用 _read_file_mock / _read_file_sandbox:把"记忆目录"当作虚拟 repo_path,
+    复用 _read_file_local / _read_file_sandbox:把"记忆目录"当作虚拟 repo_path,
     file_path 取记忆目录下的相对 basename。仍带行号 + 分页,与仓库 read_file 一致体验。
 
-    mock 模式:映射到 mock_dir/.agent_memory/<basename>(write_project_memory_file 写入处)。
+    local 模式:映射到 local_dir/.agent_memory/<basename>(write_project_memory_file 写入处)。
     sandbox 模式:直接读沙箱内绝对路径 /home/user/.agent_memory/<basename>。
     """
     # 去掉目录前缀得到 basename,并防穿越(basename 不应含 .. 或绝对路径成分)
@@ -431,10 +429,10 @@ def _read_memory_file(
         raise ValueError(f"非法记忆文件路径: {file_path}")
 
     mode = ctx["mode"]
-    if mode == "mock":
-        # 虚拟 repo_path = 本地 mock 记忆目录
-        repo_path = str(Path(ctx["mock_dir"]) / ".agent_memory")
-        return _read_file_mock(repo_path, basename, max_lines, offset)
+    if mode == "local":
+        # 虚拟 repo_path = 本地 local 记忆目录
+        repo_path = str(Path(ctx["local_dir"]) / ".agent_memory")
+        return _read_file_local(repo_path, basename, max_lines, offset)
     else:
         # 虚拟 repo_path = 沙箱记忆目录绝对路径
         return _read_file_sandbox(ctx, _MEMORY_DIR_SANDBOX, basename, max_lines, offset)
@@ -484,8 +482,8 @@ def read_file(
     if _is_memory_file_path(file_path):
         return _read_memory_file(ctx, file_path, max_lines, offset)
 
-    if mode == "mock":
-        return _read_file_mock(repo_path, file_path, max_lines, offset)
+    if mode == "local":
+        return _read_file_local(repo_path, file_path, max_lines, offset)
     else:
         return _read_file_sandbox(ctx, repo_path, file_path, max_lines, offset)
 
@@ -500,11 +498,11 @@ def _format_numbered_lines(lines: list[str], start_line: int) -> str:
     )
 
 
-def _read_file_mock(
+def _read_file_local(
     repo_path: str, file_path: str, max_lines: int, offset: int,
     with_line_numbers: bool = True,
 ) -> dict:
-    """mock 模式:直接用 Python 读
+    """local 模式:直接用 Python 读
 
     with_line_numbers:
         True(LLM 工具 read_file):content 带 cat -n 风格行号前缀
@@ -641,8 +639,8 @@ def search_code(
     ctx = _get_or_create_session(task_id)
     mode = ctx["mode"]
 
-    if mode == "mock":
-        return _search_code_mock(
+    if mode == "local":
+        return _search_code_local(
             repo_path, pattern, file_glob, case_sensitive,
             max_matches, context_lines, output_mode, offset,
         )
@@ -653,7 +651,7 @@ def search_code(
         )
 
 
-def _search_code_mock(
+def _search_code_local(
     repo_path: str,
     pattern: str,
     file_glob: str | None,
@@ -663,7 +661,7 @@ def _search_code_mock(
     output_mode: str,
     offset: int,
 ) -> dict:
-    """mock 模式:用 Python 实现搜索"""
+    """local 模式:用 Python 实现搜索"""
     import fnmatch
 
     flags = 0 if case_sensitive else re.IGNORECASE
@@ -960,8 +958,8 @@ def find_files(
     ctx = _get_or_create_session(task_id)
     mode = ctx["mode"]
 
-    if mode == "mock":
-        return _find_files_mock(repo_path, pattern, max_results, offset)
+    if mode == "local":
+        return _find_files_local(repo_path, pattern, max_results, offset)
     else:
         return _find_files_sandbox(ctx, repo_path, pattern, max_results, offset)
 
@@ -970,7 +968,7 @@ def _expand_braces(pattern: str) -> list[str]:
     """展开 {a,b} brace expansion 成多个 glob pattern
 
     Python pathlib.glob 不支持 {a,b} 语法(rg --glob 原生支持),
-    mock 模式手动展开以保持与 sandbox 模式行为一致。
+    local 模式手动展开以保持与 sandbox 模式行为一致。
     支持嵌套(递归处理)。无 brace 时返回 [pattern]。
     """
     m = re.search(r"\{([^{}]+)\}", pattern)
@@ -984,10 +982,10 @@ def _expand_braces(pattern: str) -> list[str]:
     return expanded
 
 
-def _find_files_mock(
+def _find_files_local(
     repo_path: str, pattern: str, max_results: int, offset: int,
 ) -> dict:
-    """mock 模式:用 pathlib.Path.glob 递归匹配
+    """local 模式:用 pathlib.Path.glob 递归匹配
 
     Python pathlib.glob 语义:
     - "*.py" 只匹配根目录(不递归)
@@ -1042,7 +1040,7 @@ def _find_files_sandbox(
 
     --no-ignore:不遵守 .gitignore(列出所有文件,含被 ignore 的配置文件)
     --hidden:包含隐藏文件(如 .env.example)
-    然后手动排除噪声目录,保证与 mock 模式行为一致。
+    然后手动排除噪声目录,保证与 local 模式行为一致。
     """
     session: SandboxSession = ctx["session"]
 
@@ -1092,7 +1090,7 @@ def _find_files_sandbox(
 # 工具:write_file / run_python_code(独立工作区,原仓库只读)
 # ============================================================
 
-# 工作区根路径(sandbox 模式);mock 模式用 ctx["mock_dir"]/workspace
+# 工作区根路径(sandbox 模式);local 模式用 ctx["local_dir"]/workspace
 _WORKSPACE_DIR_SANDBOX = "/home/user/workspace"
 # 单次 run_python_code 执行超时(秒)
 _RUN_CODE_TIMEOUT = 60
@@ -1108,12 +1106,12 @@ def _get_workspace_dir(ctx: dict) -> str:
     工作区独立于仓库 clone 路径,react_agent 在这里写 PoC、补丁、报告等产物,
     不污染原仓库(保持审计可追溯)。
 
-    mock 模式:本地临时目录下的 workspace 子目录
+    local 模式:本地临时目录下的 workspace 子目录
     sandbox 模式:/home/user/workspace(沙箱内)
     """
     mode = ctx["mode"]
-    if mode == "mock":
-        ws_dir: Path = ctx["mock_dir"] / "workspace"
+    if mode == "local":
+        ws_dir: Path = ctx["local_dir"] / "workspace"
         ws_dir.mkdir(parents=True, exist_ok=True)
         return str(ws_dir)
     else:
@@ -1179,8 +1177,8 @@ def write_file(
     abs_path = _resolve_workspace_path(ws_dir, file_path)
 
     sandbox_mode = ctx["mode"]
-    if sandbox_mode == "mock":
-        # mock 模式:直接用 Python 写
+    if sandbox_mode == "local":
+        # local 模式:直接用 Python 写
         p = Path(abs_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         if mode == "append" and p.exists():
@@ -1223,7 +1221,7 @@ def run_python_code(
     - 执行仓库测试用例验证假设
 
     执行环境:
-    - 工作目录:工作区根(/home/user/workspace 或 mock 等价目录)
+    - 工作目录:工作区根(/home/user/workspace 或 local 等价目录)
     - Python:沙箱内置的 python3
     - 网络:依赖沙箱配置(默认沙箱禁外网,防数据外泄/C2 回连)
     - 超时:默认 60s,超时强制终止
@@ -1257,8 +1255,8 @@ def run_python_code(
 
     start = time.time()
     timed_out = False
-    if sandbox_mode == "mock":
-        # mock 模式:本地 subprocess 执行
+    if sandbox_mode == "local":
+        # local 模式:本地 subprocess 执行
         try:
             result = subprocess.run(
                 ["python", script_abs],
@@ -1349,7 +1347,7 @@ _GIT_CMD_TIMEOUT = 60
 
 
 def _run_git(repo_path: str, args: list[str], task_id: str = "") -> dict:
-    """在仓库目录里运行 git 只读子命令(mock 本地 subprocess / sandbox session.run_command)
+    """在仓库目录里运行 git 只读子命令(local 本地 subprocess / sandbox session.run_command)
 
     供 git_log / git_blame 共用。所有参数以列表形式传递,repo_path 用 -C 指定,
     文件路径参数由调用方以 "--" 元素分隔(防选项注入),sandbox 模式再逐个 shlex.quote。
@@ -1366,8 +1364,8 @@ def _run_git(repo_path: str, args: list[str], task_id: str = "") -> dict:
     exit_code = 0
     truncated = False
 
-    if mode == "mock":
-        # mock 模式:本地 subprocess,列表形式无需 shell,无注入风险
+    if mode == "local":
+        # local 模式:本地 subprocess,列表形式无需 shell,无注入风险
         cmd = ["git", "-C", repo_path] + args
         try:
             result = subprocess.run(
@@ -1383,7 +1381,7 @@ def _run_git(repo_path: str, args: list[str], task_id: str = "") -> dict:
             output = f"[git 执行超时({_GIT_CMD_TIMEOUT}s)]"
             exit_code = -1
         except FileNotFoundError:
-            output = "[宿主机未安装 git,mock 模式无法运行 git 子命令]"
+            output = "[宿主机未安装 git,local 模式无法运行 git 子命令]"
             exit_code = -1
     else:
         # sandbox 模式:session.run_command(单通道),2>&1 合并 + 末尾 echo exit code
@@ -1506,8 +1504,8 @@ def run_command(command: str, repo_path: str = "", timeout: int = 60, task_id: s
     exit_code = 0
     truncated = False
 
-    if mode == "mock":
-        # mock 模式:本地 subprocess(shell=True)。用 cwd 而非命令里 cd,避开 Windows 盘符问题
+    if mode == "local":
+        # local 模式:本地 subprocess(shell=True)。用 cwd 而非命令里 cd,避开 Windows 盘符问题
         try:
             result = subprocess.run(
                 command, shell=True, cwd=repo_path or None,
@@ -1556,9 +1554,9 @@ def run_command(command: str, repo_path: str = "", timeout: int = 60, task_id: s
 def _resolve_repo_file(repo_path: str, file_path: str, mode: str) -> str:
     """解析仓库内文件为绝对路径,防路径穿越(禁止 .. / 绝对路径)
 
-    供 str_replace_editor 共用。mock 模式额外用 Path.resolve().is_relative_to 复核
-    (同 _read_file_mock);sandbox 模式靠 .. 组件检查(主机无法 resolve 容器路径)。
-    返回 "repo_path/normalized" 字符串(mock 下亦是本地路径)。
+    供 str_replace_editor 共用。local 模式额外用 Path.resolve().is_relative_to 复核
+    (同 _read_file_local);sandbox 模式靠 .. 组件检查(主机无法 resolve 容器路径)。
+    返回 "repo_path/normalized" 字符串(local 下亦是本地路径)。
     """
     if not file_path:
         raise ValueError("file_path 不能为空")
@@ -1570,8 +1568,8 @@ def _resolve_repo_file(repo_path: str, file_path: str, mode: str) -> str:
     if Path(normalized).is_absolute():
         raise ValueError("file_path 必须是相对路径(相对仓库根)")
     abs_path = f"{repo_path.rstrip('/')}/{normalized}"
-    if mode == "mock":
-        # 复核:解析后不得逃出仓库根(同 _read_file_mock)
+    if mode == "local":
+        # 复核:解析后不得逃出仓库根(同 _read_file_local)
         if not Path(abs_path).resolve().is_relative_to(Path(repo_path).resolve()):
             raise ValueError("非法路径:不能超出仓库根目录")
     return abs_path
@@ -1609,7 +1607,7 @@ def str_replace_editor(
 
     # ---- 读写原语(双模式)----
     def _exists() -> bool:
-        if mode == "mock":
+        if mode == "local":
             return Path(abs_path).is_file()
         session: SandboxSession = ctx["session"]
         return "OK" in session.run_command(
@@ -1617,13 +1615,13 @@ def str_replace_editor(
         )
 
     def _read() -> str:
-        if mode == "mock":
+        if mode == "local":
             return Path(abs_path).read_text(encoding="utf-8")
         session: SandboxSession = ctx["session"]
         return session.read_file(abs_path)
 
     def _mkdir_parent() -> None:
-        if mode == "mock":
+        if mode == "local":
             Path(abs_path).parent.mkdir(parents=True, exist_ok=True)
         else:
             # sandbox:用字符串 rsplit 保 Linux 分隔符(避免 Windows Path 把 / 转 \)
@@ -1632,7 +1630,7 @@ def str_replace_editor(
             session.run_command(f"mkdir -p {shlex.quote(parent)}")
 
     def _write(content: str) -> None:
-        if mode == "mock":
+        if mode == "local":
             Path(abs_path).write_text(content, encoding="utf-8")
         else:
             session: SandboxSession = ctx["session"]
@@ -1770,8 +1768,8 @@ def clone_repo_with_fallback(
             logger.info(
                 f"[clone_fallback] task={task_id} 尝试第 {idx + 1} 种协议: {safe_url}"
             )
-            if mode == "mock":
-                result = _clone_repo_mock(ctx, url, repo_name, branch)
+            if mode == "local":
+                result = _clone_repo_local(ctx, url, repo_name, branch)
             else:
                 result = _clone_repo_sandbox(ctx, url, repo_name, branch)
             _set_repo_path(task_id, result["path"])
@@ -1783,10 +1781,10 @@ def clone_repo_with_fallback(
             logger.warning(
                 f"[clone_fallback] task={task_id} 协议 {safe_url} 克隆失败: {err_msg}"
             )
-            # 清理可能残留的半成品目录(mock 模式),避免下次重试撞目录
-            if mode == "mock":
-                mock_dir: Path = ctx["mock_dir"]
-                leftover = mock_dir / repo_name
+            # 清理可能残留的半成品目录(local 模式),避免下次重试撞目录
+            if mode == "local":
+                local_dir: Path = ctx["local_dir"]
+                leftover = local_dir / repo_name
                 if leftover.exists():
                     try:
                         shutil.rmtree(leftover, ignore_errors=True)
@@ -1808,7 +1806,7 @@ def run_semgrep(
     config: str = "auto",
     task_id: str = "",
 ) -> dict:
-    """在沙箱里运行 Semgrep 静态分析
+    """运行 Semgrep 静态分析
 
     参数:
         repo_path: clone_repo 返回的 path
@@ -1830,59 +1828,21 @@ def run_semgrep(
         "truncated": bool
     }
 
-    mock 模式:返回提示让 LLM 知道本工具不可用
-    sandbox 模式:在沙箱里执行 semgrep
+    local 模式:若宿主机已安装 semgrep(shutil.which 检测到)则直接本地执行;
+              否则返回提示让 LLM 知道本工具不可用(可用 pip install semgrep 安装)
+    sandbox 模式:在沙箱里执行 semgrep(未安装时自动 pip 安装)
     """
     ctx = _get_or_create_session(task_id)
     mode = ctx["mode"]
 
-    if mode == "mock":
-        # mock 模式:semgrep 需要沙箱,跳过
-        return {
-            "findings": [],
-            "total": 0,
-            "truncated": False,
-            "note": (
-                "mock 模式不支持 semgrep(需要 Linux 沙箱环境)。"
-                "请通过其他工具(search_code + read_file)进行手动 SAST 检查,"
-                "或切换 SANDBOX_MODE=sandbox 启用此工具。"
-            ),
-        }
+    if mode == "local":
+        return _run_semgrep_local(repo_path, config)
 
     return _run_semgrep_sandbox(ctx, repo_path, config)
 
 
-def _run_semgrep_sandbox(ctx: dict, repo_path: str, config: str) -> dict:
-    """sandbox 模式:在沙箱里运行 semgrep"""
-    session: SandboxSession = ctx["session"]
-
-    # 先检查 semgrep 是否已安装
-    check = session.run_command("which semgrep || echo MISSING")
-    if "MISSING" in check:
-        # 尝试 pip 安装
-        logger.info("[sandbox] semgrep 未安装,尝试 pip install semgrep")
-        install_result = session.run_command(
-            "pip install semgrep 2>&1 | tail -5", timeout=180
-        )
-        # 再次检查
-        check2 = session.run_command("which semgrep || echo MISSING")
-        if "MISSING" in check2:
-            return {
-                "findings": [],
-                "total": 0,
-                "truncated": False,
-                "error": "semgrep 安装失败,请检查沙箱镜像或手动安装",
-            }
-
-    # 运行 semgrep,输出 JSON
-    # --json 输出到 stdout
-    # --quiet 只输出结果,不输出 banner
-    # --config auto 自动选规则
-    cmd = f"semgrep --json --quiet --config {shlex.quote(config)} {shlex.quote(repo_path)}"
-    logger.info(f"[sandbox] semgrep: {cmd}")
-    output = session.run_command(cmd, timeout=300)  # semgrep 可能慢,5 分钟超时
-
-    # 解析 JSON
+def _parse_semgrep_json(output: str, repo_path: str) -> dict:
+    """解析 semgrep --json 的 stdout,提取 findings(供 local / sandbox 共用)"""
     try:
         data = json.loads(output)
     except json.JSONDecodeError as e:
@@ -1916,6 +1876,76 @@ def _run_semgrep_sandbox(ctx: dict, repo_path: str, config: str) -> dict:
         "total": total,
         "truncated": total >= 100,
     }
+
+
+def _run_semgrep_local(repo_path: str, config: str) -> dict:
+    """local 模式:检测宿主机 semgrep,有则本地执行,无则返回不可用提示"""
+    semgrep_bin = shutil.which("semgrep")
+    if not semgrep_bin:
+        return {
+            "findings": [],
+            "total": 0,
+            "truncated": False,
+            "note": (
+                "local 模式未检测到 semgrep。可执行 `pip install semgrep` 安装后重试,"
+                "或通过 search_code + read_file 进行手动 SAST 检查,"
+                "或切换 SANDBOX_MODE=sandbox(沙箱会自动安装 semgrep)。"
+            ),
+        }
+
+    cmd = [semgrep_bin, "--json", "--quiet", "--config", config, repo_path]
+    logger.info(f"[local] semgrep: {' '.join(cmd)}")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        return {
+            "findings": [],
+            "total": 0,
+            "truncated": False,
+            "error": "semgrep 本地执行超时(300s)",
+        }
+    if result.returncode not in (0, 1):
+        # semgrep 退出码 0=无发现/1=有发现/其他=报错
+        return {
+            "findings": [],
+            "total": 0,
+            "truncated": False,
+            "error": f"semgrep 执行失败(退出码 {result.returncode}): {result.stderr[:300]}",
+        }
+    return _parse_semgrep_json(result.stdout, repo_path)
+
+
+def _run_semgrep_sandbox(ctx: dict, repo_path: str, config: str) -> dict:
+    """sandbox 模式:在沙箱里运行 semgrep"""
+    session: SandboxSession = ctx["session"]
+
+    # 先检查 semgrep 是否已安装
+    check = session.run_command("which semgrep || echo MISSING")
+    if "MISSING" in check:
+        # 尝试 pip 安装
+        logger.info("[sandbox] semgrep 未安装,尝试 pip install semgrep")
+        install_result = session.run_command(
+            "pip install semgrep 2>&1 | tail -5", timeout=180
+        )
+        # 再次检查
+        check2 = session.run_command("which semgrep || echo MISSING")
+        if "MISSING" in check2:
+            return {
+                "findings": [],
+                "total": 0,
+                "truncated": False,
+                "error": "semgrep 安装失败,请检查沙箱镜像或手动安装",
+            }
+
+    # 运行 semgrep,输出 JSON
+    # --json 输出到 stdout
+    # --quiet 只输出结果,不输出 banner
+    # --config auto 自动选规则
+    cmd = f"semgrep --json --quiet --config {shlex.quote(config)} {shlex.quote(repo_path)}"
+    logger.info(f"[sandbox] semgrep: {cmd}")
+    output = session.run_command(cmd, timeout=300)  # semgrep 可能慢,5 分钟超时
+
+    return _parse_semgrep_json(output, repo_path)
 
 
 def _map_semgrep_severity(sev: str) -> str:

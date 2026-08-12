@@ -70,7 +70,7 @@ REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行�
 - find_files:按文件名 glob 模式递归查找文件(如 **/*.py、**/test_*.py),返回路径列表
 - read_file:读取文件内容(带行号,支持 offset 翻页)
 - search_code:正则搜索代码,支持 content/files_with_matches/count 三种输出模式
-- run_semgrep:运行 Semgrep 静态分析(仅 sandbox 模式可用,mock 模式不可用)
+- run_semgrep:运行 Semgrep 静态分析(local 模式需宿主机已装 semgrep,sandbox 模式自动安装)
 - query_cve:查询指定包+版本的已知 CVE 漏洞(OSV API,按依赖逐个查)
 - write_file:在工作区写产物(PoC 脚本、报告等);改仓库代码用 str_replace_editor
 - run_python_code:在沙箱执行 Python 代码,验证 PoC / 跑分析脚本 / 执行测试

@@ -197,7 +197,7 @@ def _execute_in_sandbox(
 ) -> dict[str, Any]:
     """在沙箱里执行 HTTP 请求脚本,解析 JSON 输出返回结果
 
-    mock 模式:本地 subprocess 执行(开发用,安全性低)
+    local 模式:本地 subprocess 执行(开发/调试用,脚本在宿主机直接运行,无隔离边界)
     sandbox 模式:沙箱容器内执行(生产用,隔离边界)
     """
     from app.tools.sandbox_tools import _get_or_create_session, _get_workspace_dir, _resolve_workspace_path, write_file
@@ -214,8 +214,8 @@ def _execute_in_sandbox(
     timeout_total = int(_HTTP_TIMEOUT) + 10
     start = time.time()
 
-    if mode == "mock":
-        # mock 模式:本地 subprocess 执行
+    if mode == "local":
+        # local 模式:本地 subprocess 执行
         try:
             result = subprocess.run(
                 ["python", script_abs],

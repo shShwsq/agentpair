@@ -67,7 +67,7 @@ AgentPair/
 - **Python** ≥ 3.13(开发环境使用 3.14)
 - **Node.js** ≥ 22.0.0(开发环境使用 24.x)
 - **PostgreSQL**(阿里云 RDS 或自建均可)
-- **OpenSandbox Server**(可选,未部署时可设 `SANDBOX_MODE=mock` 用本地文件系统模拟)
+- **OpenSandbox Server**(可选,未部署时可设 `SANDBOX_MODE=local` 用本地模式(不用沙箱))
 
 ## 快速开始
 
@@ -203,13 +203,13 @@ GitHub 和 Gitee 二者均支持,按需配置。留空的平台对应路由会�
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
-| `REPO_CLONE_DIR` | 本地 clone 临时目录(`SANDBOX_MODE=mock` 时使用) | `./_repos` |
+| `REPO_CLONE_DIR` | 本地 clone 临时目录(`SANDBOX_MODE=local` 时使用) | `./_repos` |
 
 #### 沙箱(OpenSandbox)
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
-| `SANDBOX_MODE` | `mock`(本地文件系统模拟)/ `sandbox`(连真实 OpenSandbox Server) | `mock` |
+| `SANDBOX_MODE` | `local`(本地模式,不用沙箱)/ `sandbox`(连真实 OpenSandbox Server) | `local` |
 | `SANDBOX_SERVER_URL` | OpenSandbox Server 地址,形如 `http://your-server:8080` | `http://localhost:8080` |
 | `SANDBOX_API_KEY` | Server 鉴权 API Key(对应 server `[server].api_key`,留空不鉴权) | 空 |
 | `SANDBOX_IMAGE` | 沙箱镜像(必须预装 git / ripgrep / python3 / awk / coreutils) | `ubuntu` |
@@ -288,7 +288,7 @@ GitHub 和 Gitee 二者均支持,按需配置。留空的平台对应路由会�
 3. 构建自定义镜像(预装 git / ripgrep / python3 / Node.js 等),避免每次任务重复安装
 4. 后端设置 `SANDBOX_MODE=sandbox`、`SANDBOX_SERVER_URL`、`SANDBOX_USE_SERVER_PROXY=true`
 
-未部署沙箱时,可设 `SANDBOX_MODE=mock` 用本地文件系统模拟(仅用于开发调试,工具调用在本机执行)。
+未部署沙箱时,可设 `SANDBOX_MODE=local` 用本地模式(不用沙箱)(仅用于开发调试,工具调用在本机执行)。
 
 ## 构建与部署
 
