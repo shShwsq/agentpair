@@ -816,103 +816,165 @@ onUnmounted(() => {
       <WorkspaceSidebar v-if="!workspaceCollapsed" />
 
       <main class="main">
-        <!-- 顶部配置区:三行布局(场景 / user_agent 模型 / react_agent 设置) -->
-        <div class="topbar">
-          <!-- 第 1 行:场景(无标签,直接靠左) -->
-          <div class="config-row config-row-scenario">
-            <div
-              class="scenario-segmented"
-              role="tablist"
-              aria-label="场景选择"
-              data-onboarding="create-scenario"
-            >
-              <button
-                v-for="s in scenarios"
-                :key="s.id"
-                type="button"
-                :class="['seg-btn', { active: selectedScenario === s.id }]"
-                role="tab"
-                :aria-selected="selectedScenario === s.id"
-                @click="selectedScenario = s.id"
-              >{{ s.name }}</button>
-              <span v-if="scenarios.length === 0" class="seg-loading">场景加载中...</span>
+        <div class="main-col">
+          <!-- 顶部配置区:三行布局(场景 / user_agent 模型 / react_agent 设置) -->
+          <div class="topbar">
+            <!-- 第 1 行:场景(无标签,直接靠左) -->
+            <div class="config-row config-row-scenario">
+              <div
+                class="scenario-segmented"
+                role="tablist"
+                aria-label="场景选择"
+                data-onboarding="create-scenario"
+              >
+                <button
+                  v-for="s in scenarios"
+                  :key="s.id"
+                  type="button"
+                  :class="['seg-btn', { active: selectedScenario === s.id }]"
+                  role="tab"
+                  :aria-selected="selectedScenario === s.id"
+                  @click="selectedScenario = s.id"
+                >{{ s.name }}</button>
+                <span v-if="scenarios.length === 0" class="seg-loading">场景加载中...</span>
+              </div>
             </div>
-          </div>
-
-          <!-- 第 2 行:user_agent 模型 -->
-          <div class="config-row" data-onboarding="create-user-model">
-            <div class="config-label-group">
-              <span class="agent-avatar avatar-user-agent" aria-hidden="true">
-                <BrandLogo :size="22" variant="user-agent" />
-              </span>
-              <span class="config-label">user_agent</span>
-            </div>
-            <div class="model-select">
-              <BaseSelect
-                v-model="selectedLlmConfigId"
-                :options="llmConfigOptions"
-                :disabled="loadingModels"
-                :aria-label="modelSelectLabel"
-              />
-              <RouterLink
-                v-if="llmConfigs.length === 0 && !loadingModels"
-                to="/models"
-                class="model-empty-link"
-              >配置 →</RouterLink>
-            </div>
-          </div>
-
-          <!-- 第 3 行:react_agent 设置(执行器 + CLI 模型配置 / 技能) -->
-          <div class="config-row">
-            <div class="config-label-group">
-              <span class="agent-avatar avatar-react-agent" aria-hidden="true">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                  <!-- 机器人头部 -->
-                  <rect x="4" y="7" width="16" height="12" rx="3" />
-                  <!-- 天线 -->
-                  <line x1="12" y1="3" x2="12" y2="7" />
-                  <circle cx="12" cy="3" r="1.2" fill="currentColor" stroke="none" />
-                  <!-- 双眼 -->
-                  <circle cx="9" cy="13" r="1.2" fill="currentColor" stroke="none" />
-                  <circle cx="15" cy="13" r="1.2" fill="currentColor" stroke="none" />
-                  <!-- 底部支架/底座 -->
-                  <line x1="8" y1="19" x2="8" y2="21" />
-                  <line x1="16" y1="19" x2="16" y2="21" />
-                </svg>
-              </span>
-              <span class="config-label">react_agent</span>
-            </div>
-            <div class="react-controls" data-onboarding="create-react-executor">
-              <!-- 执行器选择(下拉框):内置 + 用户已配置且启用的 agent CLI -->
-              <div class="executor-select">
+  
+            <!-- 第 2 行:user_agent 模型 -->
+            <div class="config-row" data-onboarding="create-user-model">
+              <div class="config-label-group">
+                <span class="agent-avatar avatar-user-agent" aria-hidden="true">
+                  <BrandLogo :size="22" variant="user-agent" />
+                </span>
+                <span class="config-label">user_agent</span>
+              </div>
+              <div class="model-select">
                 <BaseSelect
-                  v-model="selectedExecutor"
-                  :options="executorOptions"
-                  aria-label="执行器选择"
+                  v-model="selectedLlmConfigId"
+                  :options="llmConfigOptions"
+                  :disabled="loadingModels"
+                  :aria-label="modelSelectLabel"
+                />
+                <RouterLink
+                  v-if="llmConfigs.length === 0 && !loadingModels"
+                  to="/models"
+                  class="model-empty-link"
+                >配置 →</RouterLink>
+              </div>
+            </div>
+  
+            <!-- 第 3 行:react_agent 设置(执行器 + CLI 模型配置 / 技能) -->
+            <div class="config-row">
+              <div class="config-label-group">
+                <span class="agent-avatar avatar-react-agent" aria-hidden="true">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <!-- 机器人头部 -->
+                    <rect x="4" y="7" width="16" height="12" rx="3" />
+                    <!-- 天线 -->
+                    <line x1="12" y1="3" x2="12" y2="7" />
+                    <circle cx="12" cy="3" r="1.2" fill="currentColor" stroke="none" />
+                    <!-- 双眼 -->
+                    <circle cx="9" cy="13" r="1.2" fill="currentColor" stroke="none" />
+                    <circle cx="15" cy="13" r="1.2" fill="currentColor" stroke="none" />
+                    <!-- 底部支架/底座 -->
+                    <line x1="8" y1="19" x2="8" y2="21" />
+                    <line x1="16" y1="19" x2="16" y2="21" />
+                  </svg>
+                </span>
+                <span class="config-label">react_agent</span>
+              </div>
+              <div class="react-controls" data-onboarding="create-react-executor">
+                <!-- 执行器选择(下拉框):内置 + 用户已配置且启用的 agent CLI -->
+                <div class="executor-select">
+                  <BaseSelect
+                    v-model="selectedExecutor"
+                    :options="executorOptions"
+                    aria-label="执行器选择"
+                  />
+                </div>
+  
+              <!-- react_agent 模型(仅 builtin:可与 user_agent 用不同模型;空=同评估模型) -->
+              <div v-if="!useAgentExecutor" class="model-select react-model-select">
+                <BaseSelect
+                  v-model="selectedReactLlmConfigId"
+                  :options="reactLlmConfigOptions"
+                  :disabled="loadingModels"
+                  aria-label="react_agent 模型"
                 />
               </div>
-
-            <!-- react_agent 模型(仅 builtin:可与 user_agent 用不同模型;空=同评估模型) -->
-            <div v-if="!useAgentExecutor" class="model-select react-model-select">
-              <BaseSelect
-                v-model="selectedReactLlmConfigId"
-                :options="reactLlmConfigOptions"
-                :disabled="loadingModels"
-                aria-label="react_agent 模型"
-              />
-            </div>
-
-              <!-- Qoder CLI 模型配置(仅 qoder_cli / qoder_cli_cn 执行器显示) -->
-              <div v-if="selectedExecutor.startsWith('qoder_cli')" class="qoder-config-panel">
+  
+                <!-- Qoder CLI 模型配置(仅 qoder_cli / qoder_cli_cn 执行器显示) -->
+                <div v-if="selectedExecutor.startsWith('qoder_cli')" class="qoder-config-panel">
+                  <button
+                    type="button"
+                    class="qoder-config-toggle"
+                    :aria-expanded="qoderConfigOpen"
+                    @click="qoderConfigOpen = !qoderConfigOpen"
+                  >
+                    <svg
+                      class="qoder-chevron"
+                      :class="{ expanded: qoderConfigOpen }"
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <polyline points="9 18 15 12 9 6" />
+                    </svg>
+                    <span>Qoder 模型</span>
+                    <span class="qoder-config-summary">
+                      {{ qoderModel || 'Auto' }} · {{ qoderReasoningEffort || '默认' }} · {{ qoderContextWindow ? (qoderContextWindow >= 1000000 ? '1M' : (qoderContextWindow / 1000) + 'K') : '默认' }}
+                    </span>
+                  </button>
+  
+                  <Transition name="collapse">
+                    <div v-show="qoderConfigOpen" class="qoder-config-dropdown">
+                      <div class="qoder-config-row">
+                        <label class="qoder-config-label">模型</label>
+                        <BaseSelect
+                          v-model="qoderModel"
+                          :options="qoderModelOptions"
+                          size="sm"
+                          class="qoder-config-select"
+                        />
+                      </div>
+                      <div class="qoder-config-row">
+                        <label class="qoder-config-label">思考强度</label>
+                        <BaseSelect
+                          v-model="qoderReasoningEffort"
+                          :options="qoderEffortOptions"
+                          size="sm"
+                          class="qoder-config-select"
+                        />
+                      </div>
+                      <div class="qoder-config-row">
+                        <label class="qoder-config-label">上下文窗口</label>
+                        <BaseSelect
+                          v-model.number="qoderContextWindow"
+                          :options="qoderContextOptions"
+                          size="sm"
+                          class="qoder-config-select"
+                        />
+                      </div>
+                    </div>
+                  </Transition>
+                </div>
+  
+                <!-- 技能多选(仅内置执行器显示:CLI 用自身工具系统,本地 skill 无效) -->
+                <div v-if="!useAgentExecutor && allSkills.length > 0" class="advanced-panel">
                 <button
                   type="button"
-                  class="qoder-config-toggle"
-                  :aria-expanded="qoderConfigOpen"
-                  @click="qoderConfigOpen = !qoderConfigOpen"
+                  class="advanced-toggle"
+                  :aria-expanded="advancedOpen"
+                  @click="advancedOpen = !advancedOpen"
                 >
                   <svg
-                    class="qoder-chevron"
-                    :class="{ expanded: qoderConfigOpen }"
+                    class="advanced-chevron"
+                    :class="{ expanded: advancedOpen }"
                     width="12"
                     height="12"
                     viewBox="0 0 24 24"
@@ -924,58 +986,417 @@ onUnmounted(() => {
                   >
                     <polyline points="9 18 15 12 9 6" />
                   </svg>
-                  <span>Qoder 模型</span>
-                  <span class="qoder-config-summary">
-                    {{ qoderModel || 'Auto' }} · {{ qoderReasoningEffort || '默认' }} · {{ qoderContextWindow ? (qoderContextWindow >= 1000000 ? '1M' : (qoderContextWindow / 1000) + 'K') : '默认' }}
+                  <span>技能</span>
+                  <span class="advanced-summary">
+                    {{ selectedSkillCount }}/{{ allSkills.length }}
                   </span>
                 </button>
-
+  
                 <Transition name="collapse">
-                  <div v-show="qoderConfigOpen" class="qoder-config-dropdown">
-                    <div class="qoder-config-row">
-                      <label class="qoder-config-label">模型</label>
-                      <BaseSelect
-                        v-model="qoderModel"
-                        :options="qoderModelOptions"
-                        size="sm"
-                        class="qoder-config-select"
-                      />
+                  <div v-show="advancedOpen" class="advanced-dropdown">
+                    <div class="skill-header">
+                      <label class="skill-select-all">
+                        <input
+                          type="checkbox"
+                          :checked="allSkillsSelected"
+                          @change="toggleAllSkills"
+                        />
+                        <span>全选 / 全不选</span>
+                      </label>
+                      <p class="skill-hint">
+                        勾选的技能将作为 react_agent 可调用的专家知识。
+                        全选=不限制(默认);部分勾选=仅允许选中的;全不选=不启用任何技能。
+                      </p>
                     </div>
-                    <div class="qoder-config-row">
-                      <label class="qoder-config-label">思考强度</label>
-                      <BaseSelect
-                        v-model="qoderReasoningEffort"
-                        :options="qoderEffortOptions"
-                        size="sm"
-                        class="qoder-config-select"
-                      />
-                    </div>
-                    <div class="qoder-config-row">
-                      <label class="qoder-config-label">上下文窗口</label>
-                      <BaseSelect
-                        v-model.number="qoderContextWindow"
-                        :options="qoderContextOptions"
-                        size="sm"
-                        class="qoder-config-select"
-                      />
+  
+                    <div class="skill-list">
+                      <label
+                        v-for="skill in allSkills"
+                        :key="skill.name"
+                        class="skill-item"
+                        :class="{ checked: selectedSkillNames.has(skill.name) }"
+                      >
+                        <input
+                          type="checkbox"
+                          :checked="selectedSkillNames.has(skill.name)"
+                          @change="toggleSkill(skill.name)"
+                        />
+                        <div class="skill-info">
+                          <span class="skill-name">{{ skill.name }}</span>
+                          <span class="skill-desc">{{ skill.description }}</span>
+                        </div>
+                      </label>
                     </div>
                   </div>
                 </Transition>
+                </div>
               </div>
-
-              <!-- 技能多选(仅内置执行器显示:CLI 用自身工具系统,本地 skill 无效) -->
-              <div v-if="!useAgentExecutor && allSkills.length > 0" class="advanced-panel">
+            </div>
+  
+            <!-- 协作策略 + 测试环境(同一行,两个折叠面板并排) -->
+            <div class="config-row config-row-scenario config-row-dual">
+              <div class="advanced-panel">
+                <button
+                  type="button"
+                  class="advanced-toggle"
+                  :aria-expanded="policyOpen"
+                  @click="policyOpen = !policyOpen"
+                >
+                  <svg
+                    class="advanced-chevron"
+                    :class="{ expanded: policyOpen }"
+                    width="16" height="16" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                  >
+                    <polyline points="9 18 15 12 9 6" />
+                  </svg>
+                  <span>协作策略</span>
+                  <span class="advanced-summary">
+                    {{ !policyUserAgentEnabled ? '单 agent 模式' : (policyAllowInterrupt ? `每${policyInterval}轮评估·可打断` : `每${policyInterval}轮评估·仅观察`) }}
+                  </span>
+                </button>
+  
+                <Transition name="collapse">
+                  <div v-show="policyOpen" class="advanced-dropdown advanced-dropdown-left">
+                    <!-- 启用 user_agent 开关(最核心,控制全局) -->
+                    <label class="policy-toggle-row">
+                      <input v-model="policyUserAgentEnabled" type="checkbox" />
+                      <span>启用 user_agent</span>
+                    </label>
+  
+                    <!-- 协作总轮次(仅 user_agent 启用时生效) -->
+                    <label class="policy-field">
+                      <div class="field-head">
+                        <span class="policy-label">协作总轮次</span>
+                        <div class="field-help-wrap">
+                          <button type="button" class="field-help-btn" aria-label="查看说明" @click="toggleMaxRoundsHelp">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+                          </button>
+                          <Transition name="help-fade">
+                            <div v-if="showMaxRoundsHelp" class="field-help-popover" role="tooltip">
+                              user_agent 与 react_agent 之间的协作总轮次。每轮含 react_agent 执行 + user_agent 评估。轮次越多覆盖越全面但耗时越长。仅 user_agent 启用时生效。上限为 {{ MAX_ROUNDS_LIMIT }}。
+                            </div>
+                          </Transition>
+                        </div>
+                      </div>
+                      <input
+                        :value="policyMaxRounds"
+                        @input="onMaxRoundsInput"
+                        @blur="onMaxRoundsBlur"
+                        type="text"
+                        inputmode="numeric"
+                        pattern="[0-9]*"
+                        class="policy-input"
+                        :disabled="!policyUserAgentEnabled"
+                      />
+                      <span class="policy-hint">上限 {{ MAX_ROUNDS_LIMIT }}</span>
+                    </label>
+  
+                    <div class="policy-grid">
+                      <label class="policy-field">
+                        <span class="policy-label">评估频率 K</span>
+                        <input
+                          v-model.number="policyInterval"
+                          type="number" min="1" max="20"
+                          class="policy-input"
+                          :disabled="!policyUserAgentEnabled"
+                        />
+                        <span class="policy-hint">每 K 个迭代评估一次</span>
+                      </label>
+  
+                      <label class="policy-field">
+                        <span class="policy-label">每轮最大打断</span>
+                        <input
+                          v-model.number="policyMaxInterrupts"
+                          type="number" min="0" max="10"
+                          class="policy-input"
+                          :disabled="!policyUserAgentEnabled || !policyAllowInterrupt"
+                        />
+                        <span class="policy-hint">防死锁上限</span>
+                      </label>
+                    </div>
+  
+                    <label class="policy-toggle-row">
+                      <input v-model="policyAllowInterrupt" type="checkbox" :disabled="!policyUserAgentEnabled" />
+                      <span>允许 user_agent 打断 react_agent</span>
+                    </label>
+  
+                    <label class="policy-toggle-row">
+                      <input v-model="policyAllowVerify" type="checkbox" />
+                      <span>允许 user_agent 自行验证 <span class="policy-experimental">(实验性)</span></span>
+                    </label>
+  
+                    <label class="policy-toggle-row">
+                      <input v-model="policyAdvanced" type="checkbox" :disabled="!policyUserAgentEnabled" />
+                      <span>分别配置内置 / CLI agent 的 K 值</span>
+                    </label>
+  
+                    <Transition name="collapse">
+                      <div v-show="policyAdvanced" class="policy-grid">
+                        <label class="policy-field">
+                          <span class="policy-label">内置 react_agent K</span>
+                          <input
+                            v-model.number="policyIntervalBuiltin"
+                            type="number" min="1" max="20"
+                            class="policy-input"
+                            placeholder="留空用统一值"
+                            :disabled="!policyUserAgentEnabled"
+                          />
+                        </label>
+                        <label class="policy-field">
+                          <span class="policy-label">CLI agent K</span>
+                          <input
+                            v-model.number="policyIntervalCli"
+                            type="number" min="1" max="20"
+                            class="policy-input"
+                            placeholder="留空用统一值"
+                            :disabled="!policyUserAgentEnabled"
+                          />
+                        </label>
+                      </div>
+                    </Transition>
+                  </div>
+                </Transition>
+              </div>
+  
+              <!-- 测试环境 / 动态验证(可折叠,默认折叠) -->
+              <div class="advanced-panel">
+                <button
+                  type="button"
+                  class="advanced-toggle"
+                  :aria-expanded="verifierOpen"
+                  @click="verifierOpen = !verifierOpen"
+                >
+                  <svg
+                    class="advanced-chevron"
+                    :class="{ expanded: verifierOpen }"
+                    width="16" height="16" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                  >
+                    <polyline points="9 18 15 12 9 6" />
+                  </svg>
+                  <span>测试环境</span>
+                  <span class="advanced-summary">
+                    {{ verifierEnabled
+                      ? (verifierAuthMode === 'direct' ? '已启用·直接执行' : '已启用·逐动作授权')
+                        + (verifierAuthTokens.filter(t => t.label.trim() && t.header_value.trim()).length > 0
+                          ? '·' + verifierAuthTokens.filter(t => t.label.trim() && t.header_value.trim()).length + '个凭证'
+                          : '')
+                      : '未启用' }}
+                  </span>
+                </button>
+  
+                <Transition name="collapse">
+                  <div v-show="verifierOpen" class="advanced-dropdown advanced-dropdown-left">
+                    <label class="policy-toggle-row">
+                      <input v-model="verifierEnabled" type="checkbox" />
+                      <span>启用动态验证 <span class="policy-experimental">(实验性)</span></span>
+                    </label>
+  
+                    <Transition name="collapse">
+                      <div v-show="verifierEnabled" class="verifier-config">
+                        <label class="policy-field">
+                          <span class="policy-label">测试环境 URL</span>
+                          <input
+                            v-model.trim="testEnvUrl"
+                            type="url"
+                            class="policy-input"
+                            placeholder="http://localhost:3000(已部署的应用地址)"
+                          />
+                          <span class="policy-hint">user_agent 将在此环境动态验证安全发现</span>
+                        </label>
+  
+                        <label class="policy-field">
+                          <span class="policy-label">授权模式</span>
+                          <select v-model="verifierAuthMode" class="policy-input">
+                            <option value="per_action">逐动作授权(每个请求前确认)</option>
+                            <option value="direct">直接执行(不弹窗)</option>
+                          </select>
+                          <span class="policy-hint">控制验证动作执行前是否需要用户确认</span>
+                        </label>
+  
+                        <!-- 登录凭证列表(可选):LLM 按 auth_profile=label 选择身份,
+                             工具自动注入对应请求头。用于越权测试(同一端点不同身份访问)。
+                             LLM 只看到 label,看不到 header_value(安全)。 -->
+                        <div class="auth-tokens-section">
+                          <div class="auth-tokens-header">
+                            <span class="policy-label">登录凭证 <span class="policy-optional">(可选)</span></span>
+                            <button type="button" class="auth-token-add-btn" @click="addAuthToken">
+                              + 添加身份
+                            </button>
+                          </div>
+                          <span class="policy-hint">
+                            配置不同身份的认证头,LLM 验证越权时会按需选择(如:管理员 vs 普通用户访问同一端点)
+                          </span>
+  
+                          <div
+                            v-for="(token, idx) in verifierAuthTokens"
+                            :key="idx"
+                            class="auth-token-row"
+                          >
+                            <input
+                              v-model.trim="token.label"
+                              type="text"
+                              class="auth-token-input auth-token-label"
+                              placeholder="身份名(如 管理员)"
+                            />
+                            <input
+                              v-model.trim="token.header_name"
+                              type="text"
+                              class="auth-token-input auth-token-header-name"
+                              placeholder="Header 名"
+                              list="auth-header-suggestions"
+                            />
+                            <input
+                              v-model.trim="token.header_value"
+                              type="text"
+                              class="auth-token-input auth-token-header-value"
+                              placeholder="Header 值(如 Bearer xxx)"
+                            />
+                            <button
+                              type="button"
+                              class="auth-token-remove-btn"
+                              aria-label="删除"
+                              @click="removeAuthToken(idx)"
+                            >×</button>
+                          </div>
+  
+                          <datalist id="auth-header-suggestions">
+                            <option value="Authorization" />
+                            <option value="Cookie" />
+                            <option value="X-API-Key" />
+                            <option value="X-Auth-Token" />
+                          </datalist>
+                        </div>
+                      </div>
+                    </Transition>
+                  </div>
+                </Transition>
+              </div>
+            </div>
+          </div>
+  
+          <!-- 错误提示 -->
+          <Transition name="fade">
+            <div v-if="error" class="alert alert-error" role="alert">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+              <span>{{ error }}</span>
+            </div>
+          </Transition>
+  
+          <!-- 对话式输入框 -->
+          <div class="chat-card">
+            <!-- 任务标题(可选) -->
+            <div class="title-row">
+              <input
+                v-model.trim="taskTitle"
+                type="text"
+                class="title-input"
+                maxlength="255"
+                placeholder="任务标题(可选,便于在历史列表识别)"
+                aria-label="任务标题"
+              />
+            </div>
+  
+            <!-- 分隔线 -->
+            <div class="chat-divider" />
+  
+            <!-- 主体:大 textarea -->
+            <textarea
+              ref="textareaRef"
+              v-model="userInput"
+              class="chat-input"
+              rows="3"
+              :placeholder="chatPlaceholder"
+              data-onboarding="create-input"
+              @keydown="onTextareaKeydown"
+            />
+  
+            <!-- 分隔线 -->
+            <div class="chat-divider" />
+  
+            <!-- 底部:仓库地址 + 分支 + 提交按钮 -->
+            <div class="chat-footer">
+              <!-- 仓库输入/选择区:可输入下拉框(已绑定任一平台时可从仓库列表选;否则纯输入) -->
+              <div class="repo-area">
+                <div class="repo-input-row">
+                  <!-- 已绑定任一平台:可输入 + 下拉选择仓库(含 GitHub / Gitee 私有仓库) -->
+                  <ModelCombobox
+                    v-if="anyProviderBound"
+                    :model-value="repoUrl"
+                    :options="repoComboboxOptions"
+                    :disabled="reposLoading"
+                    :placeholder="reposLoading ? '加载仓库列表...' : '选择或输入仓库地址(GitHub / Gitee)'"
+                    @update:model-value="repoUrl = $event"
+                  />
+                  <!-- 未绑定:纯输入框 -->
+                  <input
+                    v-else
+                    v-model.trim="repoUrl"
+                    type="url"
+                    class="repo-input"
+                    :class="{ invalid: repoUrlError }"
+                    placeholder="https://github.com/owner/repo"
+                    aria-label="仓库地址"
+                  />
+                  <!-- 刷新仓库列表按钮(强制跳过后端缓存,用于在平台上新建仓库后立即拉取) -->
+                  <button
+                    v-if="anyProviderBound"
+                    type="button"
+                    class="repo-refresh-btn"
+                    :disabled="reposLoading"
+                    :title="reposLoading ? '加载中...' : '刷新仓库列表'"
+                    aria-label="刷新仓库列表"
+                    @click="refreshRepos"
+                  >
+                    <!-- 旋转动画:loading 时加 .spinning class -->
+                    <svg
+                      class="refresh-icon"
+                      :class="{ spinning: reposLoading }"
+                      width="16"
+                      height="16"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                      <path d="M3 3v5h5" />
+                      <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                      <path d="M16 16h5v5" />
+                    </svg>
+                  </button>
+                  <input
+                    v-model.trim="branch"
+                    type="text"
+                    class="branch-input"
+                    placeholder="默认分支"
+                    aria-label="分支"
+                  />
+                </div>
+              </div>
+  
+              <!-- 发送按钮 -->
               <button
                 type="button"
-                class="advanced-toggle"
-                :aria-expanded="advancedOpen"
-                @click="advancedOpen = !advancedOpen"
+                class="send-btn"
+                :disabled="!canSubmit"
+                :title="loading ? '处理中...' : '开始任务 (Enter)'"
+                data-onboarding="create-send"
+                aria-label="开始任务"
+                @click="handleSubmit"
               >
+                <span v-if="loading" class="spinner" />
                 <svg
-                  class="advanced-chevron"
-                  :class="{ expanded: advancedOpen }"
-                  width="12"
-                  height="12"
+                  v-else
+                  width="18"
+                  height="18"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -983,443 +1404,24 @@ onUnmounted(() => {
                   stroke-linecap="round"
                   stroke-linejoin="round"
                 >
-                  <polyline points="9 18 15 12 9 6" />
+                  <line x1="22" y1="2" x2="11" y2="13" />
+                  <polygon points="22 2 15 22 11 13 2 9 22 2" />
                 </svg>
-                <span>技能</span>
-                <span class="advanced-summary">
-                  {{ selectedSkillCount }}/{{ allSkills.length }}
-                </span>
               </button>
-
-              <Transition name="collapse">
-                <div v-show="advancedOpen" class="advanced-dropdown">
-                  <div class="skill-header">
-                    <label class="skill-select-all">
-                      <input
-                        type="checkbox"
-                        :checked="allSkillsSelected"
-                        @change="toggleAllSkills"
-                      />
-                      <span>全选 / 全不选</span>
-                    </label>
-                    <p class="skill-hint">
-                      勾选的技能将作为 react_agent 可调用的专家知识。
-                      全选=不限制(默认);部分勾选=仅允许选中的;全不选=不启用任何技能。
-                    </p>
-                  </div>
-
-                  <div class="skill-list">
-                    <label
-                      v-for="skill in allSkills"
-                      :key="skill.name"
-                      class="skill-item"
-                      :class="{ checked: selectedSkillNames.has(skill.name) }"
-                    >
-                      <input
-                        type="checkbox"
-                        :checked="selectedSkillNames.has(skill.name)"
-                        @change="toggleSkill(skill.name)"
-                      />
-                      <div class="skill-info">
-                        <span class="skill-name">{{ skill.name }}</span>
-                        <span class="skill-desc">{{ skill.description }}</span>
-                      </div>
-                    </label>
-                  </div>
-                </div>
-              </Transition>
-              </div>
             </div>
           </div>
-
-          <!-- 协作策略 + 测试环境(同一行,两个折叠面板并排) -->
-          <div class="config-row config-row-scenario config-row-dual">
-            <div class="advanced-panel">
-              <button
-                type="button"
-                class="advanced-toggle"
-                :aria-expanded="policyOpen"
-                @click="policyOpen = !policyOpen"
-              >
-                <svg
-                  class="advanced-chevron"
-                  :class="{ expanded: policyOpen }"
-                  width="16" height="16" viewBox="0 0 24 24" fill="none"
-                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-                >
-                  <polyline points="9 18 15 12 9 6" />
-                </svg>
-                <span>协作策略</span>
-                <span class="advanced-summary">
-                  {{ !policyUserAgentEnabled ? '单 agent 模式' : (policyAllowInterrupt ? `每${policyInterval}轮评估·可打断` : `每${policyInterval}轮评估·仅观察`) }}
-                </span>
-              </button>
-
-              <Transition name="collapse">
-                <div v-show="policyOpen" class="advanced-dropdown advanced-dropdown-left">
-                  <!-- 启用 user_agent 开关(最核心,控制全局) -->
-                  <label class="policy-toggle-row">
-                    <input v-model="policyUserAgentEnabled" type="checkbox" />
-                    <span>启用 user_agent</span>
-                  </label>
-
-                  <!-- 协作总轮次(仅 user_agent 启用时生效) -->
-                  <label class="policy-field">
-                    <div class="field-head">
-                      <span class="policy-label">协作总轮次</span>
-                      <div class="field-help-wrap">
-                        <button type="button" class="field-help-btn" aria-label="查看说明" @click="toggleMaxRoundsHelp">
-                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
-                        </button>
-                        <Transition name="help-fade">
-                          <div v-if="showMaxRoundsHelp" class="field-help-popover" role="tooltip">
-                            user_agent 与 react_agent 之间的协作总轮次。每轮含 react_agent 执行 + user_agent 评估。轮次越多覆盖越全面但耗时越长。仅 user_agent 启用时生效。上限为 {{ MAX_ROUNDS_LIMIT }}。
-                          </div>
-                        </Transition>
-                      </div>
-                    </div>
-                    <input
-                      :value="policyMaxRounds"
-                      @input="onMaxRoundsInput"
-                      @blur="onMaxRoundsBlur"
-                      type="text"
-                      inputmode="numeric"
-                      pattern="[0-9]*"
-                      class="policy-input"
-                      :disabled="!policyUserAgentEnabled"
-                    />
-                    <span class="policy-hint">上限 {{ MAX_ROUNDS_LIMIT }}</span>
-                  </label>
-
-                  <div class="policy-grid">
-                    <label class="policy-field">
-                      <span class="policy-label">评估频率 K</span>
-                      <input
-                        v-model.number="policyInterval"
-                        type="number" min="1" max="20"
-                        class="policy-input"
-                        :disabled="!policyUserAgentEnabled"
-                      />
-                      <span class="policy-hint">每 K 个迭代评估一次</span>
-                    </label>
-
-                    <label class="policy-field">
-                      <span class="policy-label">每轮最大打断</span>
-                      <input
-                        v-model.number="policyMaxInterrupts"
-                        type="number" min="0" max="10"
-                        class="policy-input"
-                        :disabled="!policyUserAgentEnabled || !policyAllowInterrupt"
-                      />
-                      <span class="policy-hint">防死锁上限</span>
-                    </label>
-                  </div>
-
-                  <label class="policy-toggle-row">
-                    <input v-model="policyAllowInterrupt" type="checkbox" :disabled="!policyUserAgentEnabled" />
-                    <span>允许 user_agent 打断 react_agent</span>
-                  </label>
-
-                  <label class="policy-toggle-row">
-                    <input v-model="policyAllowVerify" type="checkbox" />
-                    <span>允许 user_agent 自行验证 <span class="policy-experimental">(实验性)</span></span>
-                  </label>
-
-                  <label class="policy-toggle-row">
-                    <input v-model="policyAdvanced" type="checkbox" :disabled="!policyUserAgentEnabled" />
-                    <span>分别配置内置 / CLI agent 的 K 值</span>
-                  </label>
-
-                  <Transition name="collapse">
-                    <div v-show="policyAdvanced" class="policy-grid">
-                      <label class="policy-field">
-                        <span class="policy-label">内置 react_agent K</span>
-                        <input
-                          v-model.number="policyIntervalBuiltin"
-                          type="number" min="1" max="20"
-                          class="policy-input"
-                          placeholder="留空用统一值"
-                          :disabled="!policyUserAgentEnabled"
-                        />
-                      </label>
-                      <label class="policy-field">
-                        <span class="policy-label">CLI agent K</span>
-                        <input
-                          v-model.number="policyIntervalCli"
-                          type="number" min="1" max="20"
-                          class="policy-input"
-                          placeholder="留空用统一值"
-                          :disabled="!policyUserAgentEnabled"
-                        />
-                      </label>
-                    </div>
-                  </Transition>
-                </div>
-              </Transition>
-            </div>
-
-            <!-- 测试环境 / 动态验证(可折叠,默认折叠) -->
-            <div class="advanced-panel">
-              <button
-                type="button"
-                class="advanced-toggle"
-                :aria-expanded="verifierOpen"
-                @click="verifierOpen = !verifierOpen"
-              >
-                <svg
-                  class="advanced-chevron"
-                  :class="{ expanded: verifierOpen }"
-                  width="16" height="16" viewBox="0 0 24 24" fill="none"
-                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-                >
-                  <polyline points="9 18 15 12 9 6" />
-                </svg>
-                <span>测试环境</span>
-                <span class="advanced-summary">
-                  {{ verifierEnabled
-                    ? (verifierAuthMode === 'direct' ? '已启用·直接执行' : '已启用·逐动作授权')
-                      + (verifierAuthTokens.filter(t => t.label.trim() && t.header_value.trim()).length > 0
-                        ? '·' + verifierAuthTokens.filter(t => t.label.trim() && t.header_value.trim()).length + '个凭证'
-                        : '')
-                    : '未启用' }}
-                </span>
-              </button>
-
-              <Transition name="collapse">
-                <div v-show="verifierOpen" class="advanced-dropdown advanced-dropdown-left">
-                  <label class="policy-toggle-row">
-                    <input v-model="verifierEnabled" type="checkbox" />
-                    <span>启用动态验证 <span class="policy-experimental">(实验性)</span></span>
-                  </label>
-
-                  <Transition name="collapse">
-                    <div v-show="verifierEnabled" class="verifier-config">
-                      <label class="policy-field">
-                        <span class="policy-label">测试环境 URL</span>
-                        <input
-                          v-model.trim="testEnvUrl"
-                          type="url"
-                          class="policy-input"
-                          placeholder="http://localhost:3000(已部署的应用地址)"
-                        />
-                        <span class="policy-hint">user_agent 将在此环境动态验证安全发现</span>
-                      </label>
-
-                      <label class="policy-field">
-                        <span class="policy-label">授权模式</span>
-                        <select v-model="verifierAuthMode" class="policy-input">
-                          <option value="per_action">逐动作授权(每个请求前确认)</option>
-                          <option value="direct">直接执行(不弹窗)</option>
-                        </select>
-                        <span class="policy-hint">控制验证动作执行前是否需要用户确认</span>
-                      </label>
-
-                      <!-- 登录凭证列表(可选):LLM 按 auth_profile=label 选择身份,
-                           工具自动注入对应请求头。用于越权测试(同一端点不同身份访问)。
-                           LLM 只看到 label,看不到 header_value(安全)。 -->
-                      <div class="auth-tokens-section">
-                        <div class="auth-tokens-header">
-                          <span class="policy-label">登录凭证 <span class="policy-optional">(可选)</span></span>
-                          <button type="button" class="auth-token-add-btn" @click="addAuthToken">
-                            + 添加身份
-                          </button>
-                        </div>
-                        <span class="policy-hint">
-                          配置不同身份的认证头,LLM 验证越权时会按需选择(如:管理员 vs 普通用户访问同一端点)
-                        </span>
-
-                        <div
-                          v-for="(token, idx) in verifierAuthTokens"
-                          :key="idx"
-                          class="auth-token-row"
-                        >
-                          <input
-                            v-model.trim="token.label"
-                            type="text"
-                            class="auth-token-input auth-token-label"
-                            placeholder="身份名(如 管理员)"
-                          />
-                          <input
-                            v-model.trim="token.header_name"
-                            type="text"
-                            class="auth-token-input auth-token-header-name"
-                            placeholder="Header 名"
-                            list="auth-header-suggestions"
-                          />
-                          <input
-                            v-model.trim="token.header_value"
-                            type="text"
-                            class="auth-token-input auth-token-header-value"
-                            placeholder="Header 值(如 Bearer xxx)"
-                          />
-                          <button
-                            type="button"
-                            class="auth-token-remove-btn"
-                            aria-label="删除"
-                            @click="removeAuthToken(idx)"
-                          >×</button>
-                        </div>
-
-                        <datalist id="auth-header-suggestions">
-                          <option value="Authorization" />
-                          <option value="Cookie" />
-                          <option value="X-API-Key" />
-                          <option value="X-Auth-Token" />
-                        </datalist>
-                      </div>
-                    </div>
-                  </Transition>
-                </div>
-              </Transition>
-            </div>
-          </div>
+  
+          <!-- 操作提示 -->
+          <p class="chat-tip">
+            <kbd>Enter</kbd> 发送 ·
+            <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行
+          </p>
+  
+          <!-- skill 加载错误提示(静默,不阻塞) -->
+          <p v-if="skillsError" class="skill-load-error">
+            技能列表加载失败:{{ skillsError }}(不影响任务提交)
+          </p>
         </div>
-
-        <!-- 错误提示 -->
-        <Transition name="fade">
-          <div v-if="error" class="alert alert-error" role="alert">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="10" />
-              <line x1="12" y1="8" x2="12" y2="12" />
-              <line x1="12" y1="16" x2="12.01" y2="16" />
-            </svg>
-            <span>{{ error }}</span>
-          </div>
-        </Transition>
-
-        <!-- 对话式输入框 -->
-        <div class="chat-card">
-          <!-- 任务标题(可选) -->
-          <div class="title-row">
-            <input
-              v-model.trim="taskTitle"
-              type="text"
-              class="title-input"
-              maxlength="255"
-              placeholder="任务标题(可选,便于在历史列表识别)"
-              aria-label="任务标题"
-            />
-          </div>
-
-          <!-- 分隔线 -->
-          <div class="chat-divider" />
-
-          <!-- 主体:大 textarea -->
-          <textarea
-            ref="textareaRef"
-            v-model="userInput"
-            class="chat-input"
-            rows="3"
-            :placeholder="chatPlaceholder"
-            data-onboarding="create-input"
-            @keydown="onTextareaKeydown"
-          />
-
-          <!-- 分隔线 -->
-          <div class="chat-divider" />
-
-          <!-- 底部:仓库地址 + 分支 + 提交按钮 -->
-          <div class="chat-footer">
-            <!-- 仓库输入/选择区:可输入下拉框(已绑定任一平台时可从仓库列表选;否则纯输入) -->
-            <div class="repo-area">
-              <div class="repo-input-row">
-                <!-- 已绑定任一平台:可输入 + 下拉选择仓库(含 GitHub / Gitee 私有仓库) -->
-                <ModelCombobox
-                  v-if="anyProviderBound"
-                  :model-value="repoUrl"
-                  :options="repoComboboxOptions"
-                  :disabled="reposLoading"
-                  :placeholder="reposLoading ? '加载仓库列表...' : '选择或输入仓库地址(GitHub / Gitee)'"
-                  @update:model-value="repoUrl = $event"
-                />
-                <!-- 未绑定:纯输入框 -->
-                <input
-                  v-else
-                  v-model.trim="repoUrl"
-                  type="url"
-                  class="repo-input"
-                  :class="{ invalid: repoUrlError }"
-                  placeholder="https://github.com/owner/repo"
-                  aria-label="仓库地址"
-                />
-                <!-- 刷新仓库列表按钮(强制跳过后端缓存,用于在平台上新建仓库后立即拉取) -->
-                <button
-                  v-if="anyProviderBound"
-                  type="button"
-                  class="repo-refresh-btn"
-                  :disabled="reposLoading"
-                  :title="reposLoading ? '加载中...' : '刷新仓库列表'"
-                  aria-label="刷新仓库列表"
-                  @click="refreshRepos"
-                >
-                  <!-- 旋转动画:loading 时加 .spinning class -->
-                  <svg
-                    class="refresh-icon"
-                    :class="{ spinning: reposLoading }"
-                    width="16"
-                    height="16"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  >
-                    <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                    <path d="M3 3v5h5" />
-                    <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
-                    <path d="M16 16h5v5" />
-                  </svg>
-                </button>
-                <input
-                  v-model.trim="branch"
-                  type="text"
-                  class="branch-input"
-                  placeholder="默认分支"
-                  aria-label="分支"
-                />
-              </div>
-            </div>
-
-            <!-- 发送按钮 -->
-            <button
-              type="button"
-              class="send-btn"
-              :disabled="!canSubmit"
-              :title="loading ? '处理中...' : '开始任务 (Enter)'"
-              data-onboarding="create-send"
-              aria-label="开始任务"
-              @click="handleSubmit"
-            >
-              <span v-if="loading" class="spinner" />
-              <svg
-                v-else
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <line x1="22" y1="2" x2="11" y2="13" />
-                <polygon points="22 2 15 22 11 13 2 9 22 2" />
-              </svg>
-            </button>
-          </div>
-        </div>
-
-        <!-- 操作提示 -->
-        <p class="chat-tip">
-          <kbd>Enter</kbd> 发送 ·
-          <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行
-        </p>
-
-        <!-- skill 加载错误提示(静默,不阻塞) -->
-        <p v-if="skillsError" class="skill-load-error">
-          技能列表加载失败:{{ skillsError }}(不影响任务提交)
-        </p>
       </main>
     </div>
 
@@ -1475,12 +1477,17 @@ onUnmounted(() => {
 .main {
   flex: 1;
   min-width: 0;
+  /* 全宽滚动容器:垂直滚动条贴界面右边,内容在 main-col 内居中 */
+  overflow-y: auto;
+}
+
+/* 内容列:在滚动容器内居中(与技能管理 / CLI 设置 / 协作策略一致) */
+.main-col {
   max-width: 768px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
-  overflow-y: auto;
   padding: var(--space-6) var(--space-6) var(--space-8);
 }
 
