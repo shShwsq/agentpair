@@ -22,7 +22,11 @@ from typing import Any
 
 from app.config import settings
 from app.git_provider import get_provider_for_url
-from app.sandbox.client import SandboxSession, create_sandbox
+from app.sandbox.client import SandboxSession, check_local_write_permission, create_sandbox
+from app.user_interaction import (
+    request_command_confirm,
+    wait_for_command_confirm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1178,8 +1182,9 @@ def write_file(
 
     sandbox_mode = ctx["mode"]
     if sandbox_mode == "local":
-        # local 模式:直接用 Python 写
+        # local 模式:直接用 Python 写(带写权限检查:.git/只读目录保护)
         p = Path(abs_path)
+        check_local_write_permission(p.resolve(), Path(ws_dir), file_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         if mode == "append" and p.exists():
             existing = p.read_text(encoding="utf-8")
@@ -1483,6 +1488,46 @@ def git_blame(
 # ============================================================
 
 
+def _classify_command(command: str) -> tuple[str, str | None]:
+    """分类 local 模式命令安全等级
+
+    返回 (level, matched_pattern):
+    - ("safe", None): 安全命令,所有子命令都匹配安全前缀,直接执行
+    - ("dangerous", pattern): 危险命令,某个子命令匹配危险正则,需用户确认
+    - ("normal", None): 普通命令,执行但记录日志
+
+    对复合命令(用 && / ; / | 连接),按分隔符拆分逐个检查,
+    任一子命令危险则整个命令危险。
+    """
+    safe_prefixes = [
+        s.strip() for s in settings.SANDBOX_LOCAL_SAFE_COMMANDS.split(",") if s.strip()
+    ]
+    dangerous_patterns = [
+        p.strip() for p in settings.SANDBOX_LOCAL_DANGEROUS_COMMANDS.split(",") if p.strip()
+    ]
+    # 按 && / ; / | 分割(简单分割,不处理引号内分隔符——LLM 生成的命令极少含引号包裹的分隔符)
+    sub_commands = re.split(r"\s*(?:&&|;|\|)\s*", command)
+    sub_commands = [s.strip() for s in sub_commands if s.strip()]
+
+    # 先检查危险(优先级最高)
+    for sub in sub_commands:
+        for pattern in dangerous_patterns:
+            try:
+                if re.search(pattern, sub):
+                    return ("dangerous", pattern)
+            except re.error:
+                continue  # 配置的正则无效,跳过
+
+    # 再检查是否全部安全
+    if not sub_commands:
+        return ("normal", None)
+    all_safe = all(
+        any(sub.startswith(prefix) for prefix in safe_prefixes)
+        for sub in sub_commands
+    )
+    return ("safe", None) if all_safe else ("normal", None)
+
+
 def run_command(command: str, repo_path: str = "", timeout: int = 60, task_id: str = "") -> dict:
     """在沙箱里执行任意 shell 命令(与 CLI 的 bash 工具对齐)
 
@@ -1505,7 +1550,29 @@ def run_command(command: str, repo_path: str = "", timeout: int = 60, task_id: s
     truncated = False
 
     if mode == "local":
-        # local 模式:本地 subprocess(shell=True)。用 cwd 而非命令里 cd,避开 Windows 盘符问题
+        # local 模式:命令安全策略(白名单 + 危险命令前端确认)
+        level, pattern = _classify_command(command)
+        if level == "dangerous":
+            # 危险命令:推前端确认,阻塞等待用户决议
+            command_id = f"cmd_{uuid.uuid4().hex[:8]}"
+            request_command_confirm(task_id, {
+                "command_id": command_id,
+                "command": command,
+                "tool": "run_command",
+                "reason": f"匹配危险命令模式: {pattern}",
+            })
+            approved = wait_for_command_confirm(task_id, command_id)
+            if not approved:
+                return {
+                    "output": "[用户拒绝执行此命令]",
+                    "exit_code": -1,
+                    "truncated": False,
+                }
+        elif level == "normal":
+            logger.info(f"[task={task_id}] local 模式执行普通命令: {command[:100]}")
+        # safe 命令直接执行,不记录
+
+        # 本地 subprocess(shell=True)。用 cwd 而非命令里 cd,避开 Windows 盘符问题
         try:
             result = subprocess.run(
                 command, shell=True, cwd=repo_path or None,
@@ -1631,6 +1698,7 @@ def str_replace_editor(
 
     def _write(content: str) -> None:
         if mode == "local":
+            check_local_write_permission(Path(abs_path).resolve(), Path(repo_path), file_path)
             Path(abs_path).write_text(content, encoding="utf-8")
         else:
             session: SandboxSession = ctx["session"]

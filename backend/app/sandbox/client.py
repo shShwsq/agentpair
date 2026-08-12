@@ -19,8 +19,10 @@
 """
 import logging
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import uuid
@@ -59,6 +61,21 @@ class SandboxSession:
         self._closed = False
         # local 模式:后台进程跟踪 {execution_id: (Popen, [stdout_lines])}
         self._local_bg_procs: dict[str, tuple[subprocess.Popen, list[str]]] = {}
+        # local 模式:平台原生沙箱工具("sandbox-exec" / "bwrap" / None)
+        self._native_sandbox: str | None = None
+        if mode == "local" and settings.SANDBOX_LOCAL_NATIVE_ISOLATION:
+            if sys.platform == "darwin":
+                if shutil.which("sandbox-exec"):
+                    self._native_sandbox = "sandbox-exec"
+                    logger.info("[sandbox] macOS 原生隔离已启用(sandbox-exec)")
+                else:
+                    logger.warning("[sandbox] macOS 未找到 sandbox-exec,跳过原生隔离")
+            elif sys.platform.startswith("linux"):
+                if shutil.which("bwrap"):
+                    self._native_sandbox = "bwrap"
+                    logger.info("[sandbox] Linux 原生隔离已启用(bubblewrap)")
+                else:
+                    logger.warning("[sandbox] Linux 未找到 bwrap,跳过原生隔离(可 apt install bubblewrap)")
 
     @property
     def local_dir(self) -> Path:
@@ -297,15 +314,101 @@ class SandboxSession:
             raise ValueError(f"非法路径:不能超出本地工作目录({path})")
         return target
 
+    def _local_check_write(self, target: Path, original_path: str) -> None:
+        """写操作权限检查:.git 目录保护 + 配置的只读路径保护(对齐 TRAE 路径策略)
+
+        target: 已 resolve 的目标路径
+        original_path: 原始传入路径(用于错误信息)
+        """
+        check_local_write_permission(target, self._local_dir, original_path)
+
+    def _wrap_native_sandbox(self, cmd: str) -> str:
+        """用平台原生沙箱包装命令(macOS: sandbox-exec / Linux: bwrap)
+
+        系统目录只读,工作区 + 临时目录读写,禁止 sudo/su。
+        未检测到工具或已禁用时返回原始命令。
+        """
+        if not self._native_sandbox or self._local_dir is None:
+            return cmd
+        if self._native_sandbox == "sandbox-exec":
+            return self._wrap_macos_sandbox_exec(cmd)
+        elif self._native_sandbox == "bwrap":
+            return self._wrap_linux_bwrap(cmd)
+        return cmd
+
+    def _wrap_macos_sandbox_exec(self, cmd: str) -> str:
+        """macOS:用 sandbox-exec 包装命令,系统目录只读
+
+        profile 策略(对齐 TRAE 路径策略):
+        - 默认允许(网络/进程/文件读)
+        - 系统目录写保护(/etc /usr /bin /sbin /System /Library)
+        - 工作区 + 临时目录显式允许写
+        - 禁止执行 sudo/su
+        """
+        assert self._local_dir is not None
+        work_dir = str(self._local_dir.resolve())
+        tmp_dir = tempfile.gettempdir()
+        profile = (
+            "(version 1)\n"
+            "(allow default)\n"
+            "(deny file-write*\n"
+            '    (subpath "/etc")\n'
+            '    (subpath "/usr")\n'
+            '    (subpath "/bin")\n'
+            '    (subpath "/sbin")\n'
+            '    (subpath "/System")\n'
+            '    (subpath "/Library")\n'
+            '    (subpath "/private/etc")\n'
+            ")\n"
+            "(deny process-exec\n"
+            '    (path "/usr/bin/sudo")\n'
+            '    (path "/usr/bin/su")\n'
+            '    (path "/bin/su")\n'
+            ")\n"
+            f'(allow file-write* (subpath "{work_dir}"))\n'
+            f'(allow file-write* (subpath "{tmp_dir}"))\n'
+        )
+        # profile 写到临时文件(避免 -p 参数的引号转义问题)
+        profile_path = self._local_dir / ".sandbox_profile.sb"
+        profile_path.write_text(profile, encoding="utf-8")
+        escaped_cmd = cmd.replace("'", "'\\''")
+        return f"sandbox-exec -f {shlex.quote(str(profile_path))} sh -c '{escaped_cmd}'"
+
+    def _wrap_linux_bwrap(self, cmd: str) -> str:
+        """Linux:用 bwrap(bubblewrap)包装命令,系统目录只读
+
+        策略(对齐 TRAE 路径策略):
+        - 根目录只读挂载(--ro-bind / /)
+        - 工作区 + 临时目录读写挂载
+        - 独立的 /dev /proc(隔离设备/进程视图)
+        - 不共享网络命名空间(local 模式需 git clone/pip install)
+        """
+        assert self._local_dir is not None
+        work_dir = str(self._local_dir.resolve())
+        tmp_dir = tempfile.gettempdir()
+        escaped_cmd = cmd.replace("'", "'\\''")
+        parts = [
+            "bwrap",
+            "--ro-bind", "/", "/",
+            "--bind", work_dir, work_dir,
+            "--bind", tmp_dir, tmp_dir,
+            "--dev", "/dev",
+            "--proc", "/proc",
+            "sh", "-c", f"'{escaped_cmd}'",
+        ]
+        return " ".join(parts)
+
     def _local_run_command(self, cmd: str, timeout: int, *, check: bool = False) -> str:
         """local 模式:用本地 subprocess 执行,把 work_dir 当作沙箱根
 
-        注意:Windows 下 shell=True 走 cmd.exe,Unix 命令(mkdir -p / find / rg 等)会失败。
-        文件类工具在 local 模式下已用 Python 直接实现绕过 shell,此处仅用于 agent 主动 run_command。
+        macOS/Linux 下自动用平台原生沙箱(sandbox-exec/bwrap)包装命令:
+        系统目录只读,工作区读写,禁止 sudo/su。
+        Windows 无原生沙箱,直接执行(shell=True 走 cmd.exe,Unix 命令可能失败)。
         """
         assert self._local_dir is not None
+        wrapped_cmd = self._wrap_native_sandbox(cmd)
         result = subprocess.run(
-            cmd,
+            wrapped_cmd,
             shell=True,
             capture_output=True,
             text=True,
@@ -319,8 +422,9 @@ class SandboxSession:
         return result.stdout
 
     def _local_write_file(self, path: str, content: str) -> None:
-        """local 模式:直接在本地临时目录写文件(带路径穿越防护)"""
+        """local 模式:直接在本地临时目录写文件(带路径穿越防护 + 写权限检查)"""
         target = self._local_resolve_path(path)
+        self._local_check_write(target, path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
@@ -375,6 +479,37 @@ class SandboxSession:
 # ============================================================
 # 沙箱工厂
 # ============================================================
+
+
+def check_local_write_permission(target: Path, base_dir: Path, original_path: str) -> None:
+    """写操作权限检查(模块级函数,供 client.py 和 sandbox_tools.py 共用)
+
+    对齐 TRAE 沙箱路径策略:
+    - .git 目录写保护(防 LLM 篡改 git 历史)
+    - 配置的只读路径(.vscode / .trae / .idea 等)写保护
+
+    target: 已 resolve 的目标路径
+    base_dir: 工作区根目录(local_dir 或 repo_path)
+    original_path: 原始传入路径(用于错误信息)
+    """
+    if not settings.SANDBOX_LOCAL_PROTECT_GIT:
+        return
+    # 计算相对于 base_dir 的相对路径,提取路径组件
+    try:
+        rel = target.relative_to(base_dir.resolve())
+    except ValueError:
+        return  # 不在 base_dir 内,由调用方的逃逸检查处理
+    parts = rel.parts
+    # .git 目录保护
+    if ".git" in parts:
+        raise ValueError(f"非法路径:.git 目录受保护,禁止写入({original_path})")
+    # 配置的只读路径保护
+    readonly = settings.SANDBOX_LOCAL_READONLY_PATHS
+    if readonly:
+        for ro in readonly.split(","):
+            ro = ro.strip()
+            if ro and ro in parts:
+                raise ValueError(f"非法路径:{ro} 目录受保护,禁止写入({original_path})")
 
 
 def create_sandbox() -> SandboxSession:

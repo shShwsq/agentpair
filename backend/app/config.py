@@ -108,6 +108,42 @@ class Settings(BaseSettings):
     SANDBOX_CPU: str = ""
     SANDBOX_MEMORY: str = ""
 
+    # ---- local 模式安全策略(路径权限 + 命令白名单) ----
+    # local 模式下 .git 目录写保护(防 LLM 篡改 git 历史),对齐 TRAE 沙箱路径策略
+    SANDBOX_LOCAL_PROTECT_GIT: bool = True
+    # local 模式下额外的只读路径(逗号分隔,写操作拒绝,读操作允许)
+    # 默认保护 .vscode / .trae / .idea 等编辑器配置目录
+    SANDBOX_LOCAL_READONLY_PATHS: str = ".vscode,.trae,.idea"
+    # local 模式下命令安全策略:
+    #   safe: 安全命令前缀列表(逗号分隔,直接执行不拦截)
+    #   dangerous: 危险命令正则列表(逗号分隔,匹配时推前端确认)
+    #   其他命令: 执行但记录 INFO 日志
+    SANDBOX_LOCAL_SAFE_COMMANDS: str = (
+        "git status,git diff,git log,git show,git branch,git remote,"
+        "ls,cat,head,tail,wc,grep,find,rg,fd,"
+        "python,python3,pip,pip3,node,npm,npx,"
+        "echo,printf,test,"
+        "mkdir -p,touch,cp -r,mv"
+    )
+    SANDBOX_LOCAL_DANGEROUS_COMMANDS: str = (
+        r"rm\s+-rf\s+/,"
+        r"rm\s+-rf\s+~,"
+        r"rm\s+-rf\s+\*,"
+        r"mkfs,dd\s+if=,"
+        r":\(\)\{\s*:\|:\s*&\s*\};:",  # fork bomb
+        r"curl\s+.*\|\s*(ba)?sh,"
+        r"wget\s+.*\|\s*(ba)?sh,"
+        r"chmod\s+777\s+/,"
+        r"netcat|nc\s+-l,"
+        r"sudo\s+,"
+        r"shutdown|reboot|halt|poweroff"
+    )
+    # local 模式下是否启用平台原生隔离(macOS: sandbox-exec / Linux: bwrap)
+    # True=检测到工具时自动包装命令(只读系统目录 + 读写工作区 + 禁外网)
+    # False=不做原生隔离,仅靠路径策略 + 命令白名单(软隔离)
+    # Windows 无原生沙箱,此配置项无效
+    SANDBOX_LOCAL_NATIVE_ISOLATION: bool = True
+
     # Qoder CLI 配置(qoder_cli executor 用,国际版)
     # qodercli 可执行文件名/路径(沙箱内 PATH 查找或绝对路径)
     QODER_CLI_BIN: str = "qodercli"

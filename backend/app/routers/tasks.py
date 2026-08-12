@@ -45,6 +45,8 @@ from app.schemas.task import (
     PendingQuestion,
     ScenarioInfo,
     SendMessageRequest,
+    CommandConfirmRequest,
+    CommandConfirmResponse,
     SendMessageResponse,
     TaskCreateRequest,
     TaskCreateResponse,
@@ -62,10 +64,12 @@ from app.user_interaction import (
     clear_pending_question,
     clear_pending_verify_action,
     get_pending_checklist,
+    get_pending_command_confirm,
     get_pending_question,
     get_pending_verify_action,
     submit_answers,
     submit_checklist,
+    submit_command_confirm,
     submit_verify_authorization,
 )
 from app.user_messages import push_user_message
@@ -554,6 +558,69 @@ def submit_task_verify_action(
     return VerifyActionResponse(
         accepted=True,
         message=f"已{'同意' if req.approved else '拒绝'}该验证动作",
+    )
+
+
+@router.get("/tasks/{task_id}/pending_command_confirm")
+def get_task_pending_command_confirm(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> dict[str, Any] | None:
+    """查询任务当前待确认的危险命令(刷新页面后恢复弹窗用)
+
+    无待确认命令返回 None。有则返回命令描述(command_id/command/tool/reason)。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权访问此任务")
+
+    if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+        return None
+
+    return get_pending_command_confirm(task_id)
+
+
+@router.post("/tasks/{task_id}/command_confirm", response_model=CommandConfirmResponse)
+def submit_task_command_confirm(
+    task_id: uuid.UUID,
+    req: CommandConfirmRequest,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> CommandConfirmResponse:
+    """提交用户对危险命令的确认决议
+
+    唤醒阻塞等待的后台线程:
+    - approved=true:继续执行该命令
+    - approved=false:跳过该命令,LLM 收到"用户拒绝"反馈
+
+    返回 accepted=false 表示当前无待确认命令(可能已答复或任务已结束)。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    if task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.PAUSED):
+        return CommandConfirmResponse(
+            accepted=False,
+            message=f"任务已结束({task.status.value}),无法提交确认",
+        )
+
+    ok = submit_command_confirm(task_id, req.command_id, req.approved)
+    if not ok:
+        return CommandConfirmResponse(
+            accepted=False,
+            message="当前没有待确认的命令(可能已答复或任务已结束)",
+        )
+    return CommandConfirmResponse(
+        accepted=True,
+        message=f"已{'同意' if req.approved else '拒绝'}执行该命令",
     )
 
 

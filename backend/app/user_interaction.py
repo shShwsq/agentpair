@@ -450,3 +450,130 @@ def has_pending_verify_action(task_id: str | UUID) -> bool:
         return False
     with pv.lock:
         return pv.action_payload is not None
+
+
+# ============================================================
+# 危险命令确认(local 模式安全策略)
+# ============================================================
+
+
+class _PendingCommandConfirm:
+    """单个 task 的待确认危险命令状态
+
+    local 模式下,LLM 调用 run_command / run_python_code 执行的危险命令:
+    1. request_command_confirm:把命令描述存起来 + 推 SSE 事件给前端弹窗
+    2. wait_for_command_confirm:阻塞等用户确认
+    3. 用户确认 → submit_command_confirm(approved=True) → 唤醒,继续执行
+       用户拒绝 → submit_command_confirm(approved=False) → 唤醒,返回拒绝信息
+    """
+
+    def __init__(self) -> None:
+        self.event: threading.Event = threading.Event()
+        self.resolution: bool | None = None
+        self.command_payload: dict[str, Any] | None = None
+        self.lock = threading.Lock()
+
+
+_pending_command: dict[str, _PendingCommandConfirm] = {}
+_pending_command_lock = threading.Lock()
+
+
+def _get_or_create_command(task_id: str) -> _PendingCommandConfirm:
+    with _pending_command_lock:
+        if task_id not in _pending_command:
+            _pending_command[task_id] = _PendingCommandConfirm()
+        return _pending_command[task_id]
+
+
+def request_command_confirm(
+    task_id: str | UUID,
+    command_desc: dict[str, Any],
+) -> None:
+    """设置待确认的危险命令并推 SSE 事件(后台线程调用)
+
+    command_desc: {"command_id": str, "command": str, "tool": str, "reason": str}
+    """
+    task_id_str = str(task_id)
+    pc = _get_or_create_command(task_id_str)
+    with pc.lock:
+        pc.event = threading.Event()
+        pc.resolution = None
+        pc.command_payload = command_desc
+    from app.event_bus import publish
+    publish(task_id_str, "command_confirm", command_desc)
+    logger.info(f"[task={task_id_str}] 等待用户确认危险命令: {command_desc.get('command', '?')[:80]}")
+
+
+def wait_for_command_confirm(task_id: str | UUID, command_id: str) -> bool:
+    """阻塞等待用户确认决议(后台线程调用)
+
+    返回 True=用户同意执行,False=用户拒绝或任务被取消。
+    """
+    task_id_str = str(task_id)
+    pc = _get_or_create_command(task_id_str)
+    pc.event.wait()
+    with pc.lock:
+        approved = pc.resolution is True
+        pc.command_payload = None
+    return approved
+
+
+def submit_command_confirm(
+    task_id: str | UUID,
+    command_id: str,
+    approved: bool,
+) -> bool:
+    """提交用户确认决议,唤醒后台线程(API 端点调用)
+
+    返回 True 表示成功唤醒;False 表示当前 task 没有待确认命令。
+    """
+    task_id_str = str(task_id)
+    with _pending_command_lock:
+        pc = _pending_command.get(task_id_str)
+    if pc is None:
+        return False
+    with pc.lock:
+        if pc.command_payload is None:
+            return False
+        if pc.event.is_set():
+            return False
+        pc.resolution = approved
+    pc.event.set()
+    logger.info(f"[task={task_id_str}] 用户{'同意' if approved else '拒绝'}执行命令 {command_id}")
+    return True
+
+
+def get_pending_command_confirm(task_id: str | UUID) -> dict[str, Any] | None:
+    """查询 task 当前的待确认命令(前端恢复弹窗用)"""
+    task_id_str = str(task_id)
+    with _pending_command_lock:
+        pc = _pending_command.get(task_id_str)
+    if pc is None:
+        return None
+    with pc.lock:
+        if pc.command_payload is None:
+            return None
+        return dict(pc.command_payload)
+
+
+def clear_pending_command_confirm(task_id: str | UUID) -> None:
+    """清除 task 的待确认命令(任务结束/失败时调用)"""
+    task_id_str = str(task_id)
+    with _pending_command_lock:
+        pc = _pending_command.pop(task_id_str, None)
+    if pc is not None:
+        with pc.lock:
+            pc.command_payload = None
+            pc.resolution = False
+        pc.event.set()
+
+
+def has_pending_command_confirm(task_id: str | UUID) -> bool:
+    """task 是否有待确认的危险命令(快速判断)"""
+    task_id_str = str(task_id)
+    with _pending_command_lock:
+        pc = _pending_command.get(task_id_str)
+    if pc is None:
+        return False
+    with pc.lock:
+        return pc.command_payload is not None

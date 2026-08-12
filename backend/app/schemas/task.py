@@ -309,6 +309,20 @@ class VerifyActionResponse(BaseModel):
     message: str = ""
 
 
+class CommandConfirmRequest(BaseModel):
+    """用户对危险命令的确认决议(POST /tasks/{id}/command_confirm)"""
+
+    command_id: str
+    approved: bool
+
+
+class CommandConfirmResponse(BaseModel):
+    """提交命令确认决议的响应"""
+
+    accepted: bool
+    message: str = ""
+
+
 class VerifyConfigUpdateRequest(BaseModel):
     """更新验证器配置请求(PATCH /tasks/{id}/verifier_config)
 

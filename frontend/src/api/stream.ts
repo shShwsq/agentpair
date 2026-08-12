@@ -17,6 +17,7 @@ import { getAccessToken } from './client'
 import type {
   AgentCheckpointEventData,
   ChecklistReviewEventData,
+  CommandConfirmEventData,
   ConnectedData,
   ConversationEventData,
   ConversationUpdateEventData,
@@ -47,6 +48,8 @@ export interface StreamCallbacks {
   onChecklistReview?: (data: ChecklistReviewEventData) => void
   /** 动态验证动作授权(verifier_agent per_action 模式,每个 HTTP/PoC 动作需用户确认) */
   onVerifyAction?: (data: VerifyActionEventData) => void
+  /** 危险命令确认(local 模式安全策略,LLM 执行危险命令时需用户确认) */
+  onCommandConfirm?: (data: CommandConfirmEventData) => void
   /** user_agent 检查点评估结果(迭代边界轻量评估,interrupt=true 时已注入追问) */
   onAgentCheckpoint?: (data: AgentCheckpointEventData) => void
   onDone?: (data: DoneEventData) => void
@@ -80,6 +83,7 @@ export function subscribeTaskStream(
     'question',
     'checklist_review',
     'verify_action',
+    'command_confirm',
     'agent_checkpoint',
     'done',
     'error',
@@ -118,6 +122,9 @@ export function subscribeTaskStream(
             break
           case 'verify_action':
             callbacks.onVerifyAction?.(data as unknown as VerifyActionEventData)
+            break
+          case 'command_confirm':
+            callbacks.onCommandConfirm?.(data as unknown as CommandConfirmEventData)
             break
           case 'agent_checkpoint':
             callbacks.onAgentCheckpoint?.(data as unknown as AgentCheckpointEventData)

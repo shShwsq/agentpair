@@ -28,6 +28,7 @@ import ChecklistReviewDialog from '@/components/ChecklistReviewDialog.vue'
 import ConversationMessage from '@/components/ConversationMessage.vue'
 import QuestionDialog from '@/components/QuestionDialog.vue'
 import UserMessageInput from '@/components/UserMessageInput.vue'
+import CommandConfirmDialog from '@/components/CommandConfirmDialog.vue'
 import VerifyActionDialog from '@/components/VerifyActionDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
@@ -36,6 +37,7 @@ import {
   getPendingChecklist,
   getPendingQuestion,
   getPendingVerifyAction,
+  getPendingCommandConfirm,
   getTask,
   getTaskCoverage,
   getTaskReportHtml,
@@ -44,6 +46,7 @@ import {
   submitTaskAnswer,
   submitTaskChecklist,
   submitVerifyAction,
+  submitCommandConfirm,
   updateTaskVerifierConfig,
 } from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
@@ -66,6 +69,7 @@ import type {
   TaskStatus,
   ThinkingDeltaEventData,
   VerifyActionEventData,
+  CommandConfirmEventData,
 } from '@/types/task'
 import type { TaskArtifact } from '@/types/taskArtifact'
 
@@ -320,6 +324,12 @@ const verifyActionOpen = ref(false)
 const verifyActionData = ref<VerifyActionEventData | null>(null)
 const submittingVerifyAction = ref(false)
 
+// ---- 危险命令确认弹窗(command_confirm 事件)----
+// local 模式下,LLM 调 run_command 执行的危险命令(如 rm -rf /)会推送
+// command_confirm 事件,前端弹出 CommandConfirmDialog 让用户确认/拒绝。
+const commandConfirmData = ref<CommandConfirmEventData | null>(null)
+const submittingCommandConfirm = ref(false)
+
 /** 从 VerifyActionEventData 填充弹窗数据并打开 */
 function openVerifyActionDialog(action: VerifyActionEventData): void {
   verifyActionData.value = action
@@ -379,6 +389,46 @@ async function restorePendingVerifyAction(taskId: string): Promise<void> {
     }
   } catch {
     // 无 pending verify action 或任务已结束,静默忽略
+  }
+}
+
+/** 用户同意执行危险命令 */
+async function handleApproveCommand(commandId: string) {
+  if (!task.value || submittingCommandConfirm.value) return
+  submittingCommandConfirm.value = true
+  try {
+    await submitCommandConfirm(task.value.id, { command_id: commandId, approved: true })
+    commandConfirmData.value = null
+  } catch (e) {
+    console.error('同意命令确认失败:', e)
+  } finally {
+    submittingCommandConfirm.value = false
+  }
+}
+
+/** 用户拒绝执行危险命令 */
+async function handleRejectCommand(commandId: string) {
+  if (!task.value || submittingCommandConfirm.value) return
+  submittingCommandConfirm.value = true
+  try {
+    await submitCommandConfirm(task.value.id, { command_id: commandId, approved: false })
+    commandConfirmData.value = null
+  } catch (e) {
+    console.error('拒绝命令确认失败:', e)
+  } finally {
+    submittingCommandConfirm.value = false
+  }
+}
+
+/** 恢复危险命令确认弹窗(页面刷新后,若后端有 pending command confirm) */
+async function restorePendingCommandConfirm(taskId: string): Promise<void> {
+  try {
+    const pendingCmd = await getPendingCommandConfirm(taskId)
+    if (pendingCmd) {
+      commandConfirmData.value = pendingCmd
+    }
+  } catch (e) {
+    console.error('获取待确认命令失败:', e)
   }
 }
 
@@ -471,6 +521,8 @@ async function initTask(): Promise<void> {
       void restorePendingChecklist(taskId)
       // 恢复可能存在的待授权验证动作弹窗(per_action 模式刷新页面后)
       void restorePendingVerifyAction(taskId)
+      // 恢复可能存在的待确认危险命令弹窗(local 模式刷新页面后)
+      void restorePendingCommandConfirm(taskId)
     }
 
     // 3. 加载覆盖度看板(task.checklist 存在才拉取)
@@ -637,6 +689,9 @@ function connectSSE(taskId: string): void {
     onVerifyAction: (data: VerifyActionEventData) => {
       // 动态验证动作需要授权(per_action 模式):弹出 VerifyActionDialog
       openVerifyActionDialog(data)
+    },
+    onCommandConfirm: (data) => {
+      commandConfirmData.value = data
     },
     onAgentCheckpoint: (data: AgentCheckpointEventData) => {
       // user_agent 检查点评估结果:存储结构化数据
@@ -2220,6 +2275,15 @@ function parseCheckpoint(item: DisplayItem): {
       :submitting="submittingVerifyAction"
       @approve="handleApproveVerifyAction"
       @reject="handleRejectVerifyAction"
+    />
+
+    <!-- 危险命令确认弹窗(local 模式,危险命令需用户确认) -->
+    <CommandConfirmDialog
+      :open="!!commandConfirmData"
+      :command="commandConfirmData"
+      :submitting="submittingCommandConfirm"
+      @approve="handleApproveCommand"
+      @reject="handleRejectCommand"
     />
   </div>
 </template>

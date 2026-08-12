@@ -277,6 +277,7 @@ export type SSEEventType =
   | 'question'
   | 'checklist_review'
   | 'verify_action'
+  | 'command_confirm'
   | 'done'
   | 'error'
   | 'agent_checkpoint'
@@ -491,6 +492,30 @@ export interface VerifyActionRequest {
 /** 验证动作授权响应 */
 export interface VerifyActionResponse {
   /** 是否成功唤醒后台线程(false=无待授权动作或任务已结束) */
+  accepted: boolean
+  message?: string
+}
+
+/** 危险命令确认事件数据(SSE command_confirm 事件 payload) */
+export interface CommandConfirmEventData {
+  /** 命令唯一 ID(提交确认决议时回传) */
+  command_id: string
+  /** 待确认的命令内容 */
+  command: string
+  /** 触发工具:run_command / run_python_code */
+  tool: string
+  /** 拦截原因(匹配的危险命令模式) */
+  reason: string
+}
+
+/** 危险命令确认请求(POST /tasks/{id}/command_confirm) */
+export interface CommandConfirmRequest {
+  command_id: string
+  approved: boolean
+}
+
+/** 危险命令确认响应 */
+export interface CommandConfirmResponse {
   accepted: boolean
   message?: string
 }

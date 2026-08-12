@@ -15,6 +15,9 @@ import type {
   SendMessageResponse,
   TaskCoverage,
   TaskCreateRequest,
+  CommandConfirmEventData,
+  CommandConfirmRequest,
+  CommandConfirmResponse,
   TaskCreateResponse,
   TaskDetail,
   TaskListItem,
@@ -256,6 +259,32 @@ export function submitVerifyAction(
   req: VerifyActionRequest,
 ): Promise<VerifyActionResponse> {
   return client.post(`/tasks/${taskId}/verify_action`, req).then((r) => r.data)
+}
+
+/**
+ * 查询任务当前待确认的危险命令(刷新页面后恢复弹窗用)
+ *
+ * local 模式下,LLM 调用 run_command 执行的危险命令会推送 command_confirm SSE 事件,
+ * 若 SSE 事件在连接前已错过,通过此接口拉取当前待确认命令。
+ */
+export function getPendingCommandConfirm(taskId: string): Promise<CommandConfirmEventData | null> {
+  return client.get(`/tasks/${taskId}/pending_command_confirm`).then((r) => r.data)
+}
+
+/**
+ * 提交用户对危险命令的确认决议
+ *
+ * 唤醒阻塞等待的后台线程:
+ * - approved=true:继续执行该命令
+ * - approved=false:跳过该命令,LLM 收到"用户拒绝"反馈
+ *
+ * 返回 accepted=false 表示当前无待确认命令(可能已答复或任务已结束)。
+ */
+export function submitCommandConfirm(
+  taskId: string,
+  req: CommandConfirmRequest,
+): Promise<CommandConfirmResponse> {
+  return client.post(`/tasks/${taskId}/command_confirm`, req).then((r) => r.data)
 }
 
 /**

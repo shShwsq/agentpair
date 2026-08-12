@@ -53,7 +53,7 @@ from app.user_interaction import (
 from app.agent_checkpoint import resolve_agent_policy
 from app.agent_interrupt import clear_interrupt_count, clear_interrupts
 from app.user_messages import clear_user_messages
-from app.user_interaction import clear_pending_verify_action
+from app.user_interaction import clear_pending_command_confirm, clear_pending_verify_action
 
 logger = logging.getLogger(__name__)
 
@@ -483,6 +483,11 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             clear_pending_verify_action(task.id)
         except Exception as cleanup_err:
             logger.warning(f"[task={task.id}] 清理验证待授权状态失败: {cleanup_err}")
+        # 清理危险命令待确认状态(防止任务结束时仍有阻塞的命令确认)
+        try:
+            clear_pending_command_confirm(task.id)
+        except Exception as cleanup_err:
+            logger.warning(f"[task={task.id}] 清理命令待确认状态失败: {cleanup_err}")
         # 清理 user_agent 中断队列 + 打断计数(防止任务结束时仍有 in-memory 残留)
         try:
             clear_interrupts(task.id)
