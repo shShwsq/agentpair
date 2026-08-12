@@ -80,9 +80,11 @@ function isBuiltin(s: SkillSummary): boolean {
 // ============================================================
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const selectedFile = ref<File | null>(null)
-/** 同名冲突时强制覆盖(需后端 409 提示后勾选) */
-const forceOverwrite = ref(false)
 const uploading = ref(false)
+/** 同名覆盖确认弹窗是否打开 */
+const overwriteConfirmOpen = ref(false)
+/** 待确认覆盖的技能名(弹窗展示用) */
+const pendingOverwriteName = ref('')
 
 function triggerPick(): void {
   fileInputRef.value?.click()
@@ -100,9 +102,19 @@ async function handleUpload(): Promise<void> {
     showToast('请先选择 .zip 文件', 'error')
     return
   }
+  await doUpload(false)
+}
+
+/**
+ * 执行上传;409 同名冲突时区分两种情况:
+ * - 自己的同名 skill(可覆盖)→ 弹窗让用户选择是否覆盖
+ * - 全局冲突(内置/他人 skill 同名,不可覆盖)→ 直接报错
+ */
+async function doUpload(force: boolean): Promise<void> {
+  if (!selectedFile.value) return
   uploading.value = true
   try {
-    const result = await uploadSkill(selectedFile.value, forceOverwrite.value)
+    const result = await uploadSkill(selectedFile.value, force)
     showToast(
       result.replaced
         ? `已覆盖技能「${result.skill.name}」`
@@ -110,7 +122,6 @@ async function handleUpload(): Promise<void> {
       'success',
     )
     selectedFile.value = null
-    forceOverwrite.value = false
     await loadSkills()
     // 上传成功后直接打开新技能的文件浏览
     openSkill({
@@ -121,16 +132,38 @@ async function handleUpload(): Promise<void> {
     })
   } catch (e) {
     const msg = extractErrorMessage(e)
-    // 409 同名冲突:提示勾选覆盖后重试
-    if (msg.includes('已存在') || msg.includes('冲突')) {
-      forceOverwrite.value = true
-      showToast(`${msg}——已自动勾选「覆盖同名技能」,再次点击上传即可`, 'error')
-    } else {
+    // 全局冲突(内置/他人 skill 同名):不可覆盖,直接报错
+    if (msg.includes('无法覆盖')) {
       showToast(msg, 'error')
+      return
     }
+    // 自己的同名 skill 冲突:弹窗让用户选择是否覆盖
+    if (msg.includes('已存在')) {
+      pendingOverwriteName.value = extractSkillNameFromMsg(msg)
+      overwriteConfirmOpen.value = true
+      return
+    }
+    showToast(msg, 'error')
   } finally {
     uploading.value = false
   }
+}
+
+/** 从后端 409 文案中提取技能名(形如 skill「xxx」已存在) */
+function extractSkillNameFromMsg(msg: string): string {
+  const m = msg.match(/「(.+?)」/)
+  return m ? m[1] : ''
+}
+
+/** 用户确认覆盖:带 force=true 重新上传 */
+function confirmOverwrite(): void {
+  overwriteConfirmOpen.value = false
+  void doUpload(true)
+}
+
+/** 用户取消覆盖 */
+function cancelOverwrite(): void {
+  overwriteConfirmOpen.value = false
 }
 
 // ============================================================
@@ -369,10 +402,6 @@ onMounted(loadSkills)
                   {{ selectedFile ? selectedFile.name : '点击选择 .zip 文件' }}
                 </span>
               </button>
-              <label class="force-check">
-                <input v-model="forceOverwrite" type="checkbox" :disabled="uploading" />
-                覆盖同名技能
-              </label>
               <!-- 右侧上传按钮 -->
               <button
                 class="btn-upload"
@@ -551,6 +580,36 @@ onMounted(loadSkills)
       </aside>
     </div>
 
+    <!-- 同名覆盖确认弹窗 -->
+    <Transition name="dialog-fade">
+      <div
+        v-if="overwriteConfirmOpen"
+        class="dialog-mask"
+        @click.self="cancelOverwrite"
+      >
+        <div
+          class="dialog-card"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="overwrite-dialog-title"
+        >
+          <header class="dialog-header">
+            <h3 id="overwrite-dialog-title">技能已存在</h3>
+            <button class="dialog-close" aria-label="关闭" @click="cancelOverwrite">×</button>
+          </header>
+          <div class="dialog-body">
+            <p>
+              已存在同名技能<span v-if="pendingOverwriteName">「{{ pendingOverwriteName }}」</span>,是否覆盖?覆盖后原技能将被替换。
+            </p>
+          </div>
+          <footer class="dialog-footer">
+            <button class="dialog-btn dialog-btn-cancel" @click="cancelOverwrite">取消</button>
+            <button class="dialog-btn dialog-btn-confirm" @click="confirmOverwrite">覆盖</button>
+          </footer>
+        </div>
+      </div>
+    </Transition>
+
     <!-- Toast -->
     <div v-if="toast" class="toast" :class="`toast-${toast.type}`">
       {{ toast.msg }}
@@ -680,17 +739,6 @@ onMounted(loadSkills)
   text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.force-check {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: var(--fs-sm);
-  color: var(--color-text-secondary);
-  cursor: pointer;
   white-space: nowrap;
 }
 
@@ -1322,5 +1370,119 @@ onMounted(loadSkills)
   to {
     transform: rotate(360deg);
   }
+}
+
+/* ============ 同名覆盖确认弹窗 ============ */
+.dialog-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: var(--space-4);
+}
+
+.dialog-card {
+  background: var(--color-surface);
+  border-radius: var(--radius-xl);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.dialog-header h3 {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  margin: 0;
+  color: var(--color-text);
+}
+
+.dialog-close {
+  background: none;
+  border: none;
+  font-size: 24px;
+  line-height: 1;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.dialog-close:hover {
+  background: var(--color-surface-alt);
+  color: var(--color-text);
+}
+
+.dialog-body {
+  padding: var(--space-5);
+  font-size: var(--fs-sm);
+  color: var(--color-text);
+  line-height: 1.6;
+}
+
+.dialog-body p {
+  margin: 0;
+}
+
+.dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-5);
+  border-top: 1px solid var(--color-border);
+}
+
+.dialog-btn {
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all var(--transition-fast);
+}
+
+.dialog-btn-cancel {
+  background: var(--color-surface-alt);
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+
+.dialog-btn-cancel:hover {
+  background: var(--color-border);
+}
+
+.dialog-btn-confirm {
+  background: var(--color-danger);
+  color: var(--color-text-inverse);
+}
+
+.dialog-btn-confirm:hover {
+  filter: brightness(1.08);
+}
+
+/* 弹窗淡入淡出 */
+.dialog-fade-enter-active,
+.dialog-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.dialog-fade-enter-from,
+.dialog-fade-leave-to {
+  opacity: 0;
 }
 </style>

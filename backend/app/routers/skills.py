@@ -385,9 +385,7 @@ async def upload_skill_zip(
         if existing and not force:
             raise HTTPException(
                 status_code=409,
-                detail=(
-                    f"skill「{skill_name}」已存在,如需覆盖请勾选「覆盖同名技能」"
-                ),
+                detail=f"skill「{skill_name}」已存在",
             )
 
         # 落地(目录实现:拷贝到 USER_SKILLS_DIR;覆盖时由存储后端清旧数据)
