@@ -1,4 +1,6 @@
 fastapi>=0.115.0
+# multipart 表单(UploadFile/Form 解析,skills zip 上传用)
+python-multipart>=0.0.9
 uvicorn[standard]>=0.30.6
 sqlalchemy>=2.0.35
 alembic>=1.13.3

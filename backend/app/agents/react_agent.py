@@ -155,7 +155,7 @@ def run_react_agent(
     """
     # 设置当前任务上下文(供沙箱工具复用会话 + skill 工具按场景过滤)
     task_id_str = str(task.id)
-    set_current_task(task_id_str, task.scenario)
+    set_current_task(task_id_str, task.scenario, user_id=task.user_id)
 
     # 场景降级后:用通用 prompt,工具全部开放(不再按场景过滤)
     system_prompt = REACT_AGENT_SYSTEM_PROMPT

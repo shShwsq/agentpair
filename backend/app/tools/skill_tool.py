@@ -14,10 +14,15 @@
 - allowed_skills 为 None/空 表示全部 skill 可用(默认)。
 - skill 目录改为全局可见(skills/ 下所有子目录),不再按场景前缀组织。
 
+用户隔离:按当前任务所属用户过滤可见 skill。
+- 内置 skill(场景目录非 user_ 前缀):所有用户可见
+- 用户上传的 skill(user_<uuid> 前缀):仅 owner 可见
+
 并发安全:用 contextvars 替代全局变量,每个后台线程有独立上下文。
 """
 import contextvars
 import logging
+import uuid
 
 from app.skills import loader as skill_loader
 
@@ -30,6 +35,11 @@ _CURRENT_ALLOWED_SKILLS: contextvars.ContextVar[list[str] | None] = contextvars.
     "current_allowed_skills", default=None
 )
 
+# 当前任务所属用户 id(由 react_agent 每轮开始时注入,用于过滤用户上传的私有 skill)
+_CURRENT_USER_ID: contextvars.ContextVar[uuid.UUID | None] = contextvars.ContextVar(
+    "current_user_id", default=None
+)
+
 
 def set_current_allowed_skills(allowed_skills: list[str] | None) -> None:
     """react_agent 调用工具前,注入当前任务允许的 skill 列表
@@ -40,20 +50,28 @@ def set_current_allowed_skills(allowed_skills: list[str] | None) -> None:
     _CURRENT_ALLOWED_SKILLS.set(allowed_skills if allowed_skills else None)
 
 
-def _get_all_skills():
-    """获取所有已注册的 skill(跨所有场景目录,全局可见)
+def set_current_user_id(user_id: uuid.UUID | None) -> None:
+    """react_agent 调用工具前,注入当前任务所属用户 id
 
-    场景降级后:skill 不再按场景过滤,遍历 SkillRegistry 所有 scenario 汇总。
+    用于过滤用户上传的私有 skill:仅 owner 可见。None 表示匿名任务,
+    此时只看内置 skill。使用 ContextVar,每个后台线程独立。
+    """
+    _CURRENT_USER_ID.set(user_id)
+
+
+def _get_all_skills():
+    """获取当前用户可见的 skill(内置全局共享 + 自己上传的)
+
     同名 skill 跨场景去重(保留首个)。
     """
-    all_skills = []
+    all_skills = skill_loader.list_visible_skills(_CURRENT_USER_ID.get())
     seen_names: set[str] = set()
-    for scenario_id in skill_loader.REGISTRY.list_scenarios():
-        for skill in skill_loader.REGISTRY.list_for_scenario(scenario_id):
-            if skill.name not in seen_names:
-                all_skills.append(skill)
-                seen_names.add(skill.name)
-    return all_skills
+    result = []
+    for skill in all_skills:
+        if skill.name not in seen_names:
+            result.append(skill)
+            seen_names.add(skill.name)
+    return result
 
 
 # ============================================================

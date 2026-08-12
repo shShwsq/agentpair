@@ -2,9 +2,9 @@
 /**
  * 应用顶栏(登录后的页面共用)
  *
- * 左侧品牌 + 导航(首页/提交任务/模型设置/CLI 设置/协作策略/记忆管理),右侧用户信息 + 问号(帮助文档)+ 齿轮(账号设置)+ 登出。
+ * 左侧品牌 + 导航(首页/提交任务/模型设置/CLI 设置/协作策略/技能管理/记忆管理),右侧用户信息 + 问号(帮助文档)+ 齿轮(账号设置)+ 登出。
  *
- * 导航为 slot 的默认内容:所有界面默认显示这 6 项,无需每个视图重复声明;
+ * 导航为 slot 的默认内容:所有界面默认显示这 7 项,无需每个视图重复声明;
  * 当前页高亮依赖 Vue Router 自动添加的 router-link-exact-active。
  * 个别视图若需自定义导航,仍可用 <template #nav> 覆盖默认内容。
  *
@@ -94,6 +94,7 @@ function handleCloseHelp(): void {
             <RouterLink to="/models">模型设置</RouterLink>
             <RouterLink to="/cli">CLI 设置</RouterLink>
             <RouterLink to="/agent-policy">协作策略</RouterLink>
+            <RouterLink to="/skills">技能管理</RouterLink>
             <RouterLink to="/memory">记忆管理</RouterLink>
           </slot>
         </nav>

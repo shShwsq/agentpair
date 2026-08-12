@@ -64,6 +64,12 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
   },
   {
+    path: '/skills',
+    name: 'skills',
+    component: () => import('@/views/SkillManagerView.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/login',
     name: 'login',
     component: () => import('@/views/LoginView.vue'),

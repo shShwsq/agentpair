@@ -13,6 +13,7 @@
 """
 import logging
 import re
+import uuid
 from pathlib import Path
 
 import yaml
@@ -153,6 +154,41 @@ def reload_registry(skills_root: Path | None = None) -> SkillRegistry:
 # ============================================================
 # 查询接口(供 skill_tool / routers/skills 使用)
 # ============================================================
+
+# 用户上传 skill 的场景前缀:user_<uuid>。内置 skill 的场景目录无此前缀。
+USER_SCENARIO_PREFIX = "user_"
+
+
+def scenario_owner_id(scenario_id: str) -> uuid.UUID | None:
+    """解析场景目录的 owner
+
+    用户上传的 skill 落在 <root>/user_<uuid>/<skill_name>/,scenario_id 即 user_<uuid>。
+    返回 owner 的 UUID;非 user_ 前缀或后缀不是合法 UUID 时返回 None(视为内置 skill)。
+    """
+    if not scenario_id.startswith(USER_SCENARIO_PREFIX):
+        return None
+    try:
+        return uuid.UUID(scenario_id[len(USER_SCENARIO_PREFIX):])
+    except ValueError:
+        return None
+
+
+def list_visible_skills(user_id: uuid.UUID | None) -> list[ParsedSkill]:
+    """列出某用户可见的 skill
+
+    可见性规则:
+    - 内置 skill(场景目录非 user_ 前缀):全局共享,所有用户可见
+    - 用户上传的 skill:仅 owner 可见(用户隔离)
+
+    返回跨场景平铺的列表(与 skill_tool 的全局视角一致,同名去重由调用方处理)。
+    """
+    result: list[ParsedSkill] = []
+    for scenario_id in REGISTRY.list_scenarios():
+        owner = scenario_owner_id(scenario_id)
+        if owner is not None and owner != user_id:
+            continue  # 他人的 skill,不可见
+        result.extend(REGISTRY.list_for_scenario(scenario_id))
+    return result
 
 
 def get_skill(scenario_id: str, skill_name: str) -> ParsedSkill | None:

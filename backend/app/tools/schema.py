@@ -10,11 +10,17 @@ skill 过滤改为按 task.allowed_skills(用户创建任务时选择)。
 避免多任务并发执行时 task_id / allowed_skills / git_tokens 互相覆盖。
 """
 import contextvars
+import uuid
 from typing import Any
 
 from app.tools import sandbox_tools
 from app.tools.cve_tools import query_cve
-from app.tools.skill_tool import list_available_skills, run_skill, set_current_allowed_skills
+from app.tools.skill_tool import (
+    list_available_skills,
+    run_skill,
+    set_current_allowed_skills,
+    set_current_user_id,
+)
 
 
 # 当前任务的上下文(每个线程独立,避免并发任务互相覆盖)
@@ -33,16 +39,21 @@ def set_current_task(
     task_id: str,
     scenario_id: str = "general",
     allowed_skills: list[str] | None = None,
+    user_id: uuid.UUID | None = None,
 ) -> None:
     """react_agent 调用工具前,设置当前任务 ID 和允许的 skill 列表
 
     allowed_skills: 用户创建任务时选择的 skill 名称列表。
         None 或空列表表示全部 skill 可用(默认);
         非空时 skill 工具按此过滤。
+    user_id: 任务所属用户 id。用于 skill 工具按用户过滤:
+        内置 skill 全局共享,用户上传的 skill 仅 owner 可见。
+        None 表示匿名任务(只看内置 skill)。
     使用 ContextVar,每个后台线程的 set 只影响该线程自身。
     """
     _CURRENT_TASK_ID.set(task_id)
     set_current_allowed_skills(allowed_skills)
+    set_current_user_id(user_id)
 
 
 def set_current_git_tokens(tokens: dict[str, str]) -> None:

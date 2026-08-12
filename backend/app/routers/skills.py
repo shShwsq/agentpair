@@ -1,26 +1,40 @@
-"""SKILL 管理后台 API(阶段 5)
+"""SKILL 管理后台 API
 
-阶段 5 暂不鉴权,阶段 6 加 JWT 后限制为管理员。
+鉴权与归属(阶段 6 起):
+- 读操作(列表/详情):可选登录(get_optional_user)。匿名仅见内置 skill。
+- 写操作(upload / upsert / delete / reload):必须登录(get_current_user)。
+- 内置 skill(场景目录非 user_ 前缀):全局共享,只读,任何用户不可改删。
+- 用户上传的 skill:落地到 <skills_root>/user_<uuid>/<skill_name>/,
+  仅 owner 可见、可改、可删(用户隔离)。
+
 路径设计:
-    GET    /skills                                   列出所有场景的 skill
-    GET    /skills/{scenario_id}                     列出某场景的 skill
-    GET    /skills/{scenario_id}/{skill_name}         查看 skill 详情(含 body)
-    POST   /skills/{scenario_id}/{skill_name}        创建/更新 skill(body 传 SKILL.md 全文)
-    DELETE /skills/{scenario_id}/{skill_name}        删除 skill(删磁盘文件)
-    POST   /skills/reload                             重新扫描磁盘(刷新注册表)
+    GET    /skills                                 列出当前用户可见的 skill
+    GET    /skills/{scenario_id}                   列出某场景可见的 skill
+    GET    /skills/{scenario_id}/{skill_name}       查看 skill 详情(含 body)
+    POST   /skills/upload                          上传 zip(仅登录用户)
+    POST   /skills/{scenario_id}/{skill_name}      更新自己的 skill(仅 owner)
+    DELETE /skills/{scenario_id}/{skill_name}      删除 skill(仅 owner)
+    POST   /skills/reload                          重新扫描磁盘(登录用户)
 """
 import logging
+import shutil
+import tempfile
+import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
+from app.deps import get_current_user, get_optional_user
+from app.models.user import User
+from app.skills import loader as skill_loader
 from app.skills.loader import (
     DEFAULT_SKILLS_ROOT,
     reload_registry,
+    scenario_owner_id,
 )
-from app.skills import loader as skill_loader
 from app.skills.schema import ParsedSkill
+from app.skills.uploader import MAX_ZIP_SIZE, extract_skill_zip
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +47,10 @@ router = APIRouter(prefix="/skills", tags=["skills"])
 
 
 class SkillCreateRequest(BaseModel):
-    """创建/更新 skill 的请求
+    """更新 skill 的请求
 
     body 直接传 SKILL.md 全文(frontmatter + 正文)。
-    若 name/description 与 frontmatter 不一致以 frontmatter 为准。
+    仅允许更新自己上传的 skill(owner 校验)。
     """
 
     content: str
@@ -50,6 +64,7 @@ class SkillResponse(BaseModel):
     scenario_id: str
     body: str
     source_path: str
+    owned: bool
 
     model_config = {"from_attributes": True}
 
@@ -60,11 +75,31 @@ class SkillSummaryResponse(BaseModel):
     name: str
     description: str
     scenario_id: str
+    owned: bool
+
+
+class SkillUploadResponse(BaseModel):
+    """zip 上传结果"""
+
+    skill: SkillResponse
+    replaced: bool  # True=覆盖了已存在的同名 skill
 
 
 # ============================================================
 # 辅助
 # ============================================================
+
+
+def _user_scenario_id(user_id: uuid.UUID) -> str:
+    """当前用户上传 skill 的场景 id(user_<uuid>)"""
+    return f"user_{user_id}"
+
+
+def _is_owned(skill: ParsedSkill, user: User | None) -> bool:
+    """skill 是否归当前用户所有(可管理)"""
+    if user is None:
+        return False
+    return scenario_owner_id(skill.scenario_id) == user.id
 
 
 def _skill_path(scenario_id: str, skill_name: str) -> Path:
@@ -78,22 +113,43 @@ def _skill_path(scenario_id: str, skill_name: str) -> Path:
     return DEFAULT_SKILLS_ROOT / scenario_id / skill_name / "SKILL.md"
 
 
-def _to_summary(skill: ParsedSkill) -> SkillSummaryResponse:
+def _to_summary(skill: ParsedSkill, user: User | None) -> SkillSummaryResponse:
     return SkillSummaryResponse(
         name=skill.name,
         description=skill.description,
         scenario_id=skill.scenario_id,
+        owned=_is_owned(skill, user),
     )
 
 
-def _to_detail(skill: ParsedSkill) -> SkillResponse:
+def _to_detail(skill: ParsedSkill, user: User | None) -> SkillResponse:
     return SkillResponse(
         name=skill.name,
         description=skill.description,
         scenario_id=skill.scenario_id,
         body=skill.body,
         source_path=str(skill.source_path),
+        owned=_is_owned(skill, user),
     )
+
+
+def _require_visible(skill: ParsedSkill, user: User | None) -> None:
+    """可见性校验:他人上传的私有 skill 视同不存在(404,不泄露存在性)"""
+    owner = scenario_owner_id(skill.scenario_id)
+    if owner is not None and owner != (user.id if user else None):
+        raise HTTPException(
+            status_code=404,
+            detail=f"skill 不存在: {skill.scenario_id}/{skill.name}",
+        )
+
+
+def _require_owned(skill: ParsedSkill, user: User) -> None:
+    """owner 校验:仅用户上传的 skill 可改删,内置/他人 skill 一律 403"""
+    if not _is_owned(skill, user):
+        raise HTTPException(
+            status_code=403,
+            detail="仅 skill 的上传者可以修改/删除(内置 skill 只读)",
+        )
 
 
 # ============================================================
@@ -102,24 +158,35 @@ def _to_detail(skill: ParsedSkill) -> SkillResponse:
 
 
 @router.get("", response_model=list[SkillSummaryResponse])
-def list_all_skills() -> list[SkillSummaryResponse]:
-    """列出所有场景的所有 skill"""
-    result = []
-    for scenario_id in skill_loader.REGISTRY.list_scenarios():
-        for skill in skill_loader.REGISTRY.list_for_scenario(scenario_id):
-            result.append(_to_summary(skill))
-    return result
+def list_all_skills(
+    current_user: User | None = Depends(get_optional_user),
+) -> list[SkillSummaryResponse]:
+    """列出当前用户可见的 skill(内置全局共享 + 自己上传的)"""
+    skills = skill_loader.list_visible_skills(
+        current_user.id if current_user else None
+    )
+    return [_to_summary(s, current_user) for s in skills]
 
 
 @router.get("/{scenario_id}", response_model=list[SkillSummaryResponse])
-def list_scenario_skills(scenario_id: str) -> list[SkillSummaryResponse]:
-    """列出某场景的所有 skill"""
+def list_scenario_skills(
+    scenario_id: str,
+    current_user: User | None = Depends(get_optional_user),
+) -> list[SkillSummaryResponse]:
+    """列出某场景的 skill(他人的私有场景返回空列表,不泄露存在性)"""
+    owner = scenario_owner_id(scenario_id)
+    if owner is not None and owner != (current_user.id if current_user else None):
+        return []
     skills = skill_loader.REGISTRY.list_for_scenario(scenario_id)
-    return [_to_summary(s) for s in skills]
+    return [_to_summary(s, current_user) for s in skills]
 
 
 @router.get("/{scenario_id}/{skill_name}", response_model=SkillResponse)
-def get_skill_detail(scenario_id: str, skill_name: str) -> SkillResponse:
+def get_skill_detail(
+    scenario_id: str,
+    skill_name: str,
+    current_user: User | None = Depends(get_optional_user),
+) -> SkillResponse:
     """查看 skill 详情(含 body)"""
     skill = skill_loader.REGISTRY.get(scenario_id, skill_name)
     if not skill:
@@ -127,19 +194,121 @@ def get_skill_detail(scenario_id: str, skill_name: str) -> SkillResponse:
             status_code=404,
             detail=f"skill 不存在: {scenario_id}/{skill_name}",
         )
-    return _to_detail(skill)
+    _require_visible(skill, current_user)
+    return _to_detail(skill, current_user)
+
+
+@router.post("/upload", response_model=SkillUploadResponse)
+async def upload_skill_zip(
+    file: UploadFile = File(...),
+    force: bool = Form(False),
+    current_user: User = Depends(get_current_user),
+) -> SkillUploadResponse:
+    """上传 zip 格式的 skill
+
+    zip 结构(二选一):
+        <skill_name>/SKILL.md   # 标准结构,可携带附加资源
+        SKILL.md                # 简化结构,单文件
+
+    - skill 名以 SKILL.md frontmatter.name 为准
+    - 落地到 <skills_root>/user_<uid>/<skill_name>/,仅上传者可见可用
+    - 与全局(含内置/他人)skill 重名 → 409;与自己的 skill 重名时
+      传 force=true 可覆盖,否则 409
+    """
+    zip_bytes = await file.read()
+    if len(zip_bytes) > MAX_ZIP_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"zip 文件超过大小上限 {MAX_ZIP_SIZE // 1024 // 1024}MB",
+        )
+
+    scenario_id = _user_scenario_id(current_user.id)
+    target_dir = DEFAULT_SKILLS_ROOT / scenario_id
+
+    # 解压到临时目录并校验(结构 / frontmatter / 大小 / 扩展名白名单)
+    tmp_root = Path(tempfile.mkdtemp(prefix="skill_upload_"))
+    try:
+        try:
+            skill = extract_skill_zip(zip_bytes, tmp_root)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+        skill_name = skill.name
+        skill_dest = target_dir / skill_name
+
+        # 全局重名检查:与内置/他人 skill 重名不可覆盖;与自己重名需 force
+        existing = skill_loader.REGISTRY.get(scenario_id, skill_name)
+        replaced = False
+        for sid in skill_loader.REGISTRY.list_scenarios():
+            hit = skill_loader.REGISTRY.get(sid, skill_name)
+            if not hit:
+                continue
+            owner = scenario_owner_id(sid)
+            if owner == current_user.id:
+                existing = hit  # 自己的重名(可能跨场景,理论上只有 user_<uid>)
+            else:
+                # 内置或其他用户的 skill:同名会遮蔽,拒绝
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"skill 名称与全局已存在的「{hit.name}」冲突"
+                        f"(该 skill 由系统内置或其他用户上传),无法覆盖"
+                    ),
+                )
+        if existing and not force:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"skill「{skill_name}」已存在,如需覆盖请勾选「覆盖同名技能」"
+                ),
+            )
+        if existing:
+            replaced = True
+
+        # 落地:先清旧(force 覆盖),再拷贝
+        target_dir.mkdir(parents=True, exist_ok=True)
+        if replaced:
+            shutil.rmtree(skill_dest, ignore_errors=True)
+        shutil.copytree(skill.skill_dir, skill_dest)
+        logger.info(
+            f"upload skill: user={current_user.id} name={skill_name} "
+            f"replaced={replaced} ({skill_dest})"
+        )
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+    # 重新扫描注册表,使新 skill 立即生效
+    reload_registry()
+    uploaded = skill_loader.REGISTRY.get(scenario_id, skill_name)
+    if not uploaded:
+        raise HTTPException(
+            status_code=400,
+            detail="SKILL.md frontmatter 解析失败,请检查 name/description 字段",
+        )
+
+    return SkillUploadResponse(
+        skill=_to_detail(uploaded, current_user),
+        replaced=replaced,
+    )
 
 
 @router.post("/{scenario_id}/{skill_name}", response_model=SkillResponse)
 def upsert_skill(
-    scenario_id: str, skill_name: str, req: SkillCreateRequest
+    scenario_id: str,
+    skill_name: str,
+    req: SkillCreateRequest,
+    current_user: User = Depends(get_current_user),
 ) -> SkillResponse:
-    """创建或更新 skill(直接写 SKILL.md 全文)
+    """更新自己的 skill(直接写 SKILL.md 全文)
 
-    - 目录不存在会自动创建
-    - 写完后调用 reload_registry 刷新注册表
-    - 若 frontmatter 解析失败返回 400
+    仅允许写入自己上传的 skill 空间(user_<uid> 场景);内置/他人 skill 不可改。
+    写完后调用 reload_registry 刷新注册表。
     """
+    if scenario_id != _user_scenario_id(current_user.id):
+        raise HTTPException(
+            status_code=403,
+            detail="仅允许更新自己上传的 skill",
+        )
     skill_md = _skill_path(scenario_id, skill_name)
     skill_md.parent.mkdir(parents=True, exist_ok=True)
     skill_md.write_text(req.content, encoding="utf-8")
@@ -160,34 +329,38 @@ def upsert_skill(
         )
 
     logger.info(f"upsert skill: {scenario_id}/{skill_name} ({skill_md})")
-    return _to_detail(skill)
+    return _to_detail(skill, current_user)
 
 
 @router.delete("/{scenario_id}/{skill_name}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_skill(scenario_id: str, skill_name: str) -> None:
-    """删除 skill(删整个 skill 目录)"""
+def delete_skill(
+    scenario_id: str,
+    skill_name: str,
+    current_user: User = Depends(get_current_user),
+) -> None:
+    """删除自己的 skill(删整个 skill 目录)"""
     skill = skill_loader.REGISTRY.get(scenario_id, skill_name)
     if not skill:
         raise HTTPException(
             status_code=404,
             detail=f"skill 不存在: {scenario_id}/{skill_name}",
         )
+    _require_owned(skill, current_user)
 
     # 删整个 skill 目录(SKILL.md + 可能的附加资源)
-    skill_dir = skill.skill_dir
-    import shutil
-
-    shutil.rmtree(skill_dir, ignore_errors=True)
+    shutil.rmtree(skill.skill_dir, ignore_errors=True)
     reload_registry()
-    logger.info(f"delete skill: {scenario_id}/{skill_name} ({skill_dir})")
+    logger.info(f"delete skill: {scenario_id}/{skill_name} ({skill.skill_dir})")
 
 
 @router.post("/reload", response_model=list[SkillSummaryResponse])
-def reload_skills() -> list[SkillSummaryResponse]:
+def reload_skills(
+    current_user: User = Depends(get_current_user),
+) -> list[SkillSummaryResponse]:
     """重新扫描磁盘,刷新注册表"""
     registry = reload_registry()
     result = []
     for scenario_id in registry.list_scenarios():
         for skill in registry.list_for_scenario(scenario_id):
-            result.append(_to_summary(skill))
+            result.append(_to_summary(skill, current_user))
     return result
