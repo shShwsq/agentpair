@@ -31,7 +31,7 @@ import {
   listGitProviderRepos,
 } from '@/api/git_provider'
 import { getSkills, type SkillSummary } from '@/api/skill'
-import { getPolicyLimits } from '@/api/memory'
+import { getPolicyLimits, getPreferences } from '@/api/memory'
 import { extractErrorMessage } from '@/utils/error'
 import type { Scenario } from '@/types/task'
 import type { LLMConfigItemOut } from '@/types/model_configs'
@@ -250,7 +250,7 @@ const policyMaxInterrupts = ref(2)
 /** user_agent 是否能自己验证(实验性) */
 const policyAllowVerify = ref(false)
 
-/** 默认策略值(与后端 DEFAULT_AGENT_POLICY 对齐,用于判断是否需要提交) */
+/** 系统默认策略值(与后端 DEFAULT_AGENT_POLICY 对齐,作为未配置用户级默认时的兜底) */
 const DEFAULT_POLICY = {
   user_agent_enabled: true,
   max_rounds: 4,
@@ -259,6 +259,23 @@ const DEFAULT_POLICY = {
   max_interrupts_per_round: 2,
   allow_verify: false,
 }
+
+/**
+ * 用户级默认策略(比较基准,用于判断是否需要提交任务级覆盖)。
+ * - 初始为系统默认值;onMounted 加载用户偏好(协作策略设置页保存的)后替换为实际值。
+ * - 加载失败/未配置时保持系统默认,与后端 resolve_agent_policy 的合并结果一致。
+ */
+const userPolicyDefaults = ref({
+  userAgentEnabled: DEFAULT_POLICY.user_agent_enabled,
+  maxRounds: DEFAULT_POLICY.max_rounds,
+  interval: DEFAULT_POLICY.checkpoint_interval,
+  intervalBuiltin: null as number | null,
+  intervalCli: null as number | null,
+  allowInterrupt: DEFAULT_POLICY.allow_interrupt,
+  maxInterrupts: DEFAULT_POLICY.max_interrupts_per_round,
+  allowVerify: DEFAULT_POLICY.allow_verify,
+  verifierAuthMode: 'per_action' as 'direct' | 'per_action',
+})
 
 // 协作总轮次上限:从后端 GET /memory/policy-limits 动态拉取(默认 10 兜底)
 const MAX_ROUNDS_LIMIT = ref(10)
@@ -578,34 +595,37 @@ async function handleSubmit(): Promise<void> {
       if (qoderContextWindow.value) params.context_window = qoderContextWindow.value
     }
 
-    // Agent 策略配置(仅当用户改了默认值时才提交,作为任务级覆盖)
-    // 后端 resolve_agent_policy 会合并用户级默认 + 此任务级覆盖
+    // Agent 策略配置(仅当用户改了用户级默认值时才提交,作为任务级覆盖)
+    // 后端 resolve_agent_policy 会合并用户级默认 + 此任务级覆盖;
+    // 比较基准 userPolicyDefaults 已在 onMounted 加载用户偏好,未配置时即系统默认
     const agentPolicy: Record<string, unknown> = {}
-    if (policyUserAgentEnabled.value !== DEFAULT_POLICY.user_agent_enabled) {
+    if (policyUserAgentEnabled.value !== userPolicyDefaults.value.userAgentEnabled) {
       agentPolicy.user_agent_enabled = policyUserAgentEnabled.value
     }
-    if (policyMaxRounds.value !== DEFAULT_POLICY.max_rounds) {
+    if (policyMaxRounds.value !== userPolicyDefaults.value.maxRounds) {
       agentPolicy.max_rounds = policyMaxRounds.value
     }
-    if (policyInterval.value !== DEFAULT_POLICY.checkpoint_interval) {
+    if (policyInterval.value !== userPolicyDefaults.value.interval) {
       agentPolicy.checkpoint_interval = policyInterval.value
     }
-    if (policyAllowInterrupt.value !== DEFAULT_POLICY.allow_interrupt) {
+    if (policyAllowInterrupt.value !== userPolicyDefaults.value.allowInterrupt) {
       agentPolicy.allow_interrupt = policyAllowInterrupt.value
     }
-    if (policyMaxInterrupts.value !== DEFAULT_POLICY.max_interrupts_per_round) {
+    if (policyMaxInterrupts.value !== userPolicyDefaults.value.maxInterrupts) {
       agentPolicy.max_interrupts_per_round = policyMaxInterrupts.value
     }
-    if (policyAllowVerify.value !== DEFAULT_POLICY.allow_verify) {
+    if (policyAllowVerify.value !== userPolicyDefaults.value.allowVerify) {
       agentPolicy.allow_verify = policyAllowVerify.value
     }
-    if (policyAdvanced.value) {
-      if (policyIntervalBuiltin.value !== null) {
-        agentPolicy.checkpoint_interval_builtin = policyIntervalBuiltin.value
-      }
-      if (policyIntervalCli.value !== null) {
-        agentPolicy.checkpoint_interval_cli = policyIntervalCli.value
-      }
+    // 关闭高级模式时,专用 K 值强制为 null(用统一值),与协作策略设置页保存逻辑一致;
+    // 提交 null 可覆盖用户级默认的专用 K 值
+    const intervalBuiltinVal = policyAdvanced.value ? policyIntervalBuiltin.value : null
+    const intervalCliVal = policyAdvanced.value ? policyIntervalCli.value : null
+    if (intervalBuiltinVal !== userPolicyDefaults.value.intervalBuiltin) {
+      agentPolicy.checkpoint_interval_builtin = intervalBuiltinVal
+    }
+    if (intervalCliVal !== userPolicyDefaults.value.intervalCli) {
+      agentPolicy.checkpoint_interval_cli = intervalCliVal
     }
     if (Object.keys(agentPolicy).length > 0) {
       params._agent_policy = agentPolicy
@@ -696,7 +716,7 @@ onMounted(async () => {
   try {
     // 并行拉取场景、模型、各 git provider 状态、技能、agent 配置
     // git provider 状态静默失败:未绑定不影响任务提交
-    const [scenarioList, models, ghStatus, giteeStatus, skills, agentCfgs, limits] = await Promise.all([
+    const [scenarioList, models, ghStatus, giteeStatus, skills, agentCfgs, limits, prefs] = await Promise.all([
       getScenarios(),
       getMyModels().catch(() => null),
       getGitProviderStatus('github').catch(() => null),
@@ -704,8 +724,38 @@ onMounted(async () => {
       getSkills().catch(() => null as SkillSummary[] | null), // 静默失败,无 skill 不阻塞提交
       getAgentConfigs().catch(() => null), // 静默失败,无 agent 配置不影响提交
       getPolicyLimits().catch(() => null), // 静默失败:拿不到限制时保留默认 10
+      getPreferences().catch(() => null), // 静默失败:未配置/未登录时用系统默认策略
     ])
     if (limits) MAX_ROUNDS_LIMIT.value = limits.max_rounds
+    // 用户级默认策略(协作策略设置页保存的):填充为协作策略表单初始值,
+    // 并同步为提交时的比较基准(未配置时表单保持系统默认,行为不变)
+    if (prefs?.agent_policy) {
+      const p = prefs.agent_policy
+      policyUserAgentEnabled.value = p.user_agent_enabled
+      policyMaxRounds.value = p.max_rounds
+      policyInterval.value = p.checkpoint_interval
+      policyIntervalBuiltin.value = p.checkpoint_interval_builtin
+      policyIntervalCli.value = p.checkpoint_interval_cli
+      policyAllowInterrupt.value = p.allow_interrupt
+      policyMaxInterrupts.value = p.max_interrupts_per_round
+      policyAllowVerify.value = p.allow_verify
+      // 高级模式:仅当任一专用 K 值非 null 时展开(与协作策略设置页一致)
+      policyAdvanced.value = p.checkpoint_interval_builtin !== null || p.checkpoint_interval_cli !== null
+      // 测试环境授权模式默认值(任务级可单独覆盖)
+      verifierAuthMode.value = p.verifier_auth_mode_default
+      // 同步比较基准
+      userPolicyDefaults.value = {
+        userAgentEnabled: policyUserAgentEnabled.value,
+        maxRounds: policyMaxRounds.value,
+        interval: policyInterval.value,
+        intervalBuiltin: policyIntervalBuiltin.value,
+        intervalCli: policyIntervalCli.value,
+        allowInterrupt: policyAllowInterrupt.value,
+        maxInterrupts: policyMaxInterrupts.value,
+        allowVerify: policyAllowVerify.value,
+        verifierAuthMode: verifierAuthMode.value,
+      }
+    }
     scenarios.value = scenarioList
     if (scenarioList.length > 0) {
       selectedScenario.value = scenarioList[0].id
