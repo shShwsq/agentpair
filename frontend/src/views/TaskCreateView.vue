@@ -249,6 +249,8 @@ const policyAllowInterrupt = ref(true)
 const policyMaxInterrupts = ref(2)
 /** user_agent 是否能自己验证(实验性) */
 const policyAllowVerify = ref(false)
+/** CLI 执行智能体命令确认模式(任务级 _executor_command_confirm 覆盖;仅 CLI 执行器生效) */
+const policyExecutorCommandConfirm = ref<'always_approve' | 'per_command'>('always_approve')
 
 /** 系统默认策略值(与后端 DEFAULT_AGENT_POLICY 对齐,作为未配置用户级默认时的兜底) */
 const DEFAULT_POLICY = {
@@ -258,6 +260,7 @@ const DEFAULT_POLICY = {
   allow_interrupt: true,
   max_interrupts_per_round: 2,
   allow_verify: false,
+  executor_command_confirm_default: 'always_approve' as 'always_approve' | 'per_command',
 }
 
 /**
@@ -275,6 +278,7 @@ const userPolicyDefaults = ref({
   maxInterrupts: DEFAULT_POLICY.max_interrupts_per_round,
   allowVerify: DEFAULT_POLICY.allow_verify,
   verifierAuthMode: 'per_action' as 'direct' | 'per_action',
+  executorCommandConfirm: DEFAULT_POLICY.executor_command_confirm_default,
 })
 
 // 协作总轮次上限:从后端 GET /memory/policy-limits 动态拉取(默认 10 兜底)
@@ -631,6 +635,16 @@ async function handleSubmit(): Promise<void> {
       params._agent_policy = agentPolicy
     }
 
+    // CLI 执行智能体命令确认模式(任务级 _executor_command_confirm 覆盖)
+    // 与 agent_policy 分离存储:后端 agent_checkpoint.resolve_agent_policy 会把
+    // executor_command_confirm_default 映射到 task.params._executor_command_confirm(若未显式设置);
+    // 此处仅在用户改了用户级默认时显式提交,优先级最高。
+    // 仅对 CLI 执行器(qoder/kimi/hermes/codex)生效,内置 react_agent 忽略此字段。
+    if (selectedExecutor.value !== 'builtin' &&
+        policyExecutorCommandConfirm.value !== userPolicyDefaults.value.executorCommandConfirm) {
+      params._executor_command_confirm = policyExecutorCommandConfirm.value
+    }
+
     // user_input 优先用用户主输入;若为空但仓库地址已填,自动兜底生成
     let finalUserInput = userInput.value.trim()
     if (!finalUserInput && repoUrlVal) {
@@ -743,6 +757,8 @@ onMounted(async () => {
       policyAdvanced.value = p.checkpoint_interval_builtin !== null || p.checkpoint_interval_cli !== null
       // 测试环境授权模式默认值(任务级可单独覆盖)
       verifierAuthMode.value = p.verifier_auth_mode_default
+      // CLI 命令确认模式默认值(任务级 _executor_command_confirm 可单独覆盖)
+      policyExecutorCommandConfirm.value = p.executor_command_confirm_default ?? DEFAULT_POLICY.executor_command_confirm_default
       // 同步比较基准
       userPolicyDefaults.value = {
         userAgentEnabled: policyUserAgentEnabled.value,
@@ -754,6 +770,7 @@ onMounted(async () => {
         maxInterrupts: policyMaxInterrupts.value,
         allowVerify: policyAllowVerify.value,
         verifierAuthMode: verifierAuthMode.value,
+        executorCommandConfirm: policyExecutorCommandConfirm.value,
       }
     }
     scenarios.value = scenarioList
@@ -1124,6 +1141,16 @@ onUnmounted(() => {
                     <label class="policy-toggle-row">
                       <input v-model="policyAllowVerify" type="checkbox" />
                       <span>允许 user_agent 自行验证 <span class="policy-experimental">(实验性)</span></span>
+                    </label>
+
+                    <!-- CLI 执行智能体命令确认模式(仅选了 CLI 执行器时显示) -->
+                    <label v-show="selectedExecutor !== 'builtin'" class="policy-field">
+                      <span class="policy-label">CLI 命令确认模式</span>
+                      <select v-model="policyExecutorCommandConfirm" class="policy-input">
+                        <option value="always_approve">自动批准(不弹窗)</option>
+                        <option value="per_command">逐命令确认(危险命令弹窗)</option>
+                      </select>
+                      <span class="policy-hint">控制 CLI 执行智能体执行危险命令时是否弹窗确认。Codex 受非交互模式限制,仅支持自动批准。</span>
                     </label>
   
                     <label class="policy-toggle-row">

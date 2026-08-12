@@ -47,6 +47,7 @@ DEFAULT_AGENT_POLICY: dict[str, Any] = {
     "max_interrupts_per_round": 2,  # 每轮最多打断次数(防死锁)
     "allow_verify": False,  # user_agent 是否能调用 verifier_agent(需任务配了 test_env_url)
     "verifier_auth_mode_default": "per_action",  # 验证授权默认模式(任务级可覆盖)
+    "executor_command_confirm_default": "always_approve",  # 执行智能体命令确认默认模式(任务级 _executor_command_confirm 可覆盖)
 }
 
 
@@ -85,6 +86,15 @@ def resolve_agent_policy(task: Task, db: Session) -> dict[str, Any]:
         merged["max_rounds"] = max(1, min(mr, MAX_MAX_ROUNDS))
     except (TypeError, ValueError):
         merged["max_rounds"] = 4
+
+    # 把 executor_command_confirm_default 映射到 task.params._executor_command_confirm
+    # (若任务级未显式设置 _executor_command_confirm),让 4 个 CLI agent wrapper 能读到
+    # 优先级:task.params._executor_command_confirm > executor_command_confirm_default > "always_approve"
+    if task.params is not None and not task.params.get("_executor_command_confirm"):
+        default_mode = merged.get("executor_command_confirm_default", "always_approve")
+        if default_mode in ("always_approve", "per_command"):
+            task.params["_executor_command_confirm"] = default_mode
+
     return merged
 
 

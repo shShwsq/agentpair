@@ -87,7 +87,7 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
     placement: 'bottom',
     title: '主导航',
     content:
-      '顶栏可切换:模型设置(配置 LLM)、CLI 设置(外部 CLI 凭据)、协作策略(评估频率与验证权限)、技能管理(上传自定义技能)、记忆管理(用户偏好 / 全局 / 项目记忆)。',
+      '顶栏可切换:模型设置(配置 LLM)、CLI 设置(外部 CLI 凭据)、协作策略(评估频率 / 验证权限 / CLI 命令确认)、技能管理(上传自定义技能)、记忆管理(用户偏好 / 全局 / 项目记忆)。',
   },
   {
     id: 'home-settings',

@@ -30,7 +30,7 @@
 - **Qoder CLI Agent**:通过 ACP 协议调用 Qoder CLI(国际版 + 国内版)作为 react 角色,模型由 CLI 账号配额管理,不走后端 LLM 配置。
 - **Kimi Code CLI Agent**:通过 ACP 协议调用开源 Kimi Code CLI 作为 react 角色,模型经 `KIMI_MODEL_*` 环境变量注入(支持自部署 LLM 端点),凭证由用户在智能体配置页填写。
 - **Hermes CLI Agent**:通过 ACP 协议调用开源 Hermes CLI(NousResearch),支持 7 种 LLM 供应商(OpenRouter / Anthropic / OpenAI / z.ai / Kimi / MiniMax / Gemini),按 provider 动态映射 API Key 环境变量,通过 `~/.hermes/config.yaml` 注入模型配置。
-- **Codex CLI Agent**:通过 ACP 协议调用 OpenAI Codex CLI。Codex 不原生支持 ACP,通过专用的 `codex_bridge.py` 翻译 `codex exec --json` 的 JSONL 事件流为 ACP 通知。凭证经 `CODEX_API_KEY` 环境变量注入,`~/.codex/config.toml` 写入 `approval_policy=never` + `sandbox_mode=danger-full-access` 支持非交互模式。
+- **Codex CLI Agent**:通过 ACP 协议调用 OpenAI Codex CLI。Codex 不原生支持 ACP,通过专用的 `codex_bridge.py` 翻译 `codex exec --json` 的 JSONL 事件流为 ACP 通知。凭证经 `CODEX_API_KEY` 环境变量注入,`~/.codex/config.toml` 写入 `approval_policy=never` + `sandbox_mode=danger-full-access` 支持非交互模式。**注意**:`codex exec --json` 是非交互模式,不支持 `per_command` 命令确认(会自动降级为 `always_approve` 并警告)。
 - **codex_bridge.py**:Codex 专用桥接脚本,处理 Codex 特有的事件流语义(ErrorItem 通知翻译为 thought_chunk 而非 error、stderr 累积到错误消息等),所有 POST `/rpc` 响应以 SSE 流式返回。
 
 #### 双智能体协作增强
@@ -42,7 +42,8 @@
 - **循环检测**:滑动窗口检测重复工具调用(连续相同 + 交替循环),打破死循环。
 - **Plan 状态管理**:react_agent 在思考中输出 `<plan>` 清单,代码维护状态,跨轮续接避免重复规划。
 - **verifier_agent(实验性)**:独立的验证智能体,user_agent 在评估覆盖度后可调用它在已部署测试环境动态验证 react_agent 的发现(如确认 SQL 注入是否真实可利用)。独立 ReAct 循环 + 独立工具集(`http_request` 在沙箱内 urllib 执行 + `run_python_code`),支持 `per_action`(每个动作弹窗确认)/ `direct`(直接执行)两种授权模式。支持登录 token 注入(auth_profile,label 选择身份,LLM 永不见 token 明文)。
-- **协作策略设置页**:用户可配置评估频率(每轮 / 每两轮 / 仅最后)与验证权限(是否允许 user_agent 自行验证 + 授权模式默认值 + verifier 测试环境 URL + 多个登录 token)。
+- **协作策略设置页**:用户可配置评估频率(每轮 / 每两轮 / 仅最后)、验证权限(是否允许 user_agent 自行验证 + 授权模式默认值 + verifier 测试环境 URL + 多个登录 token)、CLI 执行智能体命令确认模式(自动批准 / 逐命令确认)。
+- **CLI 执行智能体命令确认**(executor_command_confirm):控制 CLI 执行智能体(qoder/kimi/hermes/codex)执行危险命令时是否弹窗确认,防容器破坏与资源耗尽。基于 ACP `request_permission` 机制:CLI 检测危险命令 → bridge SSE 推 `permission_request` 事件 → 前端 `CommandConfirmDialog` 弹窗 → `POST /tasks/{id}/permission_response` 回写结果。`always_approve`(默认)注入 YOLO/never 配置跳过审批;`per_command` 让 CLI 进入审批模式。Codex 受非交互模式限制仅支持 `always_approve`,`per_command` 时自动降级并警告。用户级默认在协作策略页设置,任务级可在新建任务页覆盖。
 - **用户澄清提问(ask_user)**:round 0 user_agent 可向用户提问(选择题 + 填空题,最多 2 轮),前端弹窗交互,后端阻塞等待答案。
 
 #### 记忆与技能系统
@@ -75,7 +76,7 @@
   - `QuestionDialog`:user_agent round 0 澄清提问(选择题 + 填空题)
   - `ChecklistReviewDialog`:checklist 编辑确认
   - `VerifyActionDialog`:verifier_agent 的 per_action 授权确认(显示 auth_profile 徽标)
-  - `CommandConfirmDialog`:local 模式危险命令确认(红色高亮拦截原因)
+  - `CommandConfirmDialog`:危险命令确认(local 模式 `command_confirm` 事件 + CLI `per_command` 模式 `permission_request` 事件,红色高亮拦截原因)
 
 ---
 
@@ -308,10 +309,10 @@ uvicorn app.main:app --reload
 - **主题切换**:浅色 / 深色 / 跟随系统三档,顶栏主题切换按钮
 - **帮助文档弹窗**:顶栏问号按钮打开 help.md 渲染的帮助弹窗
 - **账号设置入口收敛**:账号设置只从顶栏齿轮按钮进入,不在主导航
-- **任务运行中弹窗**:QuestionDialog(澄清提问)/ ChecklistReviewDialog(checklist 确认)/ VerifyActionDialog(verifier 授权)/ CommandConfirmDialog(local 模式危险命令确认)
+- **任务运行中弹窗**:QuestionDialog(澄清提问)/ ChecklistReviewDialog(checklist 确认)/ VerifyActionDialog(verifier 授权)/ CommandConfirmDialog(local 模式危险命令确认 + CLI `per_command` 命令确认)
 - **技能管理页**:SkillManagementView,用户上传 / 编辑自定义 skill(SKILL.md),隔离存储
 - **记忆管理页**:MemoryManagementView,管理用户偏好 / 全局记忆 / 项目记忆三类长期记忆
-- **协作策略页**:CollaborationPolicyView,配置评估频率 + 验证权限 + verifier 测试环境 + 登录 token
+- **协作策略页**:CollaborationPolicyView,配置评估频率 + 验证权限 + verifier 测试环境 + 登录 token + CLI 命令确认模式
 
 ---
 

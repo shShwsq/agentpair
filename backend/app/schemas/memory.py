@@ -51,6 +51,8 @@ class SaveAgentPolicyRequest(BaseModel):
     - max_interrupts_per_round: 每轮最多打断次数
     - allow_verify: user_agent 是否能调用 verifier_agent 验证(需任务配了 test_env_url)
     - verifier_auth_mode_default: 验证授权默认模式("direct"直接执行 / "per_action"逐动作授权)
+    - executor_command_confirm_default: 执行智能体命令确认默认模式
+        "always_approve" 自动批准所有命令 / "per_command" 每个危险命令弹窗确认
     """
 
     user_agent_enabled: bool = True
@@ -63,6 +65,9 @@ class SaveAgentPolicyRequest(BaseModel):
     max_interrupts_per_round: int = Field(default=2, ge=0, le=10)
     allow_verify: bool = False
     verifier_auth_mode_default: str = Field(default="per_action", pattern="^(direct|per_action)$")
+    executor_command_confirm_default: str = Field(
+        default="always_approve", pattern="^(always_approve|per_command)$"
+    )
 
 
 class PolicyLimitsOut(BaseModel):

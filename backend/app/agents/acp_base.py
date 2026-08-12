@@ -1668,8 +1668,8 @@ def run_acp_agent(
     agent_policy: dict[str, Any] | None = None,
     *,
     post_session_setup: Callable[[ACPClient, str, Task], None] | None = None,
-    credential_env_builder: Callable[[dict[str, str]], dict[str, str]] | None = None,
-    pre_bridge_hook: Callable[[Any, dict[str, str], str], None] | None = None,
+    credential_env_builder: Callable[[dict[str, str], Task | None], dict[str, str]] | None = None,
+    pre_bridge_hook: Callable[[Any, dict[str, str], str, Task | None], None] | None = None,
 ) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
     """跑一轮 ACP CLI 执行器(通用流程)
 
@@ -1682,15 +1682,17 @@ def run_acp_agent(
         qoder 不需要(启动参数已含 --yolo)。
 
     credential_env_builder: 动态构建凭证环境变量的回调
-        (credentials: dict[str, str]) -> dict[str, str]。
+        (credentials: dict[str, str], task: Task | None) -> dict[str, str]。
         若提供,替代默认的 _build_credential_envs 静态映射。
         hermes 用此回调按 provider 选择动态映射 API key 环境变量名
-        (如 OPENROUTER_API_KEY / ANTHROPIC_API_KEY 等)。
+        (如 OPENROUTER_API_KEY / ANTHROPIC_API_KEY 等),
+        并按 task.params._executor_command_confirm 决定是否注入 HERMES_YOLO_MODE。
 
     pre_bridge_hook: bridge 启动前的沙箱准备回调
-        (session, credentials, agent_type) -> None。
+        (session, credentials, agent_type, task) -> None。
         在 _ensure_cli_env 之后、_start_acp_bridge 之前执行,
         用于向沙箱写入 CLI 需要的配置文件(如 ~/.hermes/config.yaml)。
+        task 为 None 时(测试连接场景)默认 always_approve。
 
     返回:(results, summary, final_plan)
         results: 始终为空 list(结构化结果由 user_agent 在 done 时提取)
@@ -1715,7 +1717,8 @@ def run_acp_agent(
     credentials = _load_credentials(db, task.user_id, agent_type)
     if credential_env_builder:
         # 动态构建(如 hermes 按 provider 选择映射不同的 API key 环境变量名)
-        credential_envs = credential_env_builder(credentials)
+        # 同时注入 task.params._executor_command_confirm 决定的环境变量(如 HERMES_YOLO_MODE)
+        credential_envs = credential_env_builder(credentials, task)
     else:
         credential_envs = _build_credential_envs(credentials, agent_type)
     if not credential_envs:
@@ -1736,8 +1739,9 @@ def run_acp_agent(
 
     # ---- wrapper 层钩子:bridge 启动前的沙箱文件准备 ----
     # hermes 用此回调写入 ~/.hermes/config.yaml(模型/provider/base_url 配置)
+    # codex 用此回调写入 ~/.codex/config.toml(按 task.params 决定 approval_policy)
     if pre_bridge_hook:
-        pre_bridge_hook(session, credentials, agent_type)
+        pre_bridge_hook(session, credentials, agent_type, task)
 
     # ---- 启动 ACP bridge ----
     bridge_exec_id = _start_acp_bridge(session, credential_envs, task, agent_type=agent_type)
@@ -1973,8 +1977,8 @@ def test_credential_streaming(
     *,
     post_session_setup: Callable[[ACPClient, str, Task | None], None] | None = None,
     test_acp_args: list[str] | None = None,
-    credential_env_builder: Callable[[dict[str, str]], dict[str, str]] | None = None,
-    pre_bridge_hook: Callable[[Any, dict[str, str], str], None] | None = None,
+    credential_env_builder: Callable[[dict[str, str], Task | None], dict[str, str]] | None = None,
+    pre_bridge_hook: Callable[[Any, dict[str, str], str, Task | None], None] | None = None,
 ) -> Generator[dict, None, None]:
     """流式版测试凭证:yield SSE 事件 dict(供路由层格式化为 SSE)
 
@@ -1990,8 +1994,10 @@ def test_credential_streaming(
 
     post_session_setup: 测试场景的 session/new 后回调(kimi 用此设置 yolo 模式)
     test_acp_args: 测试时额外的 CLI 参数(qoder 用 ["--model","Qwen3.6-Flash",...])
-    credential_env_builder: 动态构建凭证环境变量的回调(hermes 用此按 provider 映射)
-    pre_bridge_hook: bridge 启动前的沙箱准备回调(hermes 用此写 ~/.hermes/config.yaml)
+    credential_env_builder: 动态构建凭证环境变量的回调(hermes 用此按 provider 映射);
+        task=None(测试场景),wrapper 应默认 always_approve。
+    pre_bridge_hook: bridge 启动前的沙箱准备回调(hermes 用此写 ~/.hermes/config.yaml);
+        task=None(测试场景),wrapper 应默认 always_approve。
 
     done/error 为终止事件,生成器在此后结束。
     """
@@ -2009,7 +2015,7 @@ def test_credential_streaming(
         return
 
     if credential_env_builder:
-        credential_envs = credential_env_builder(credentials)
+        credential_envs = credential_env_builder(credentials, None)
     else:
         credential_envs = _build_credential_envs(credentials, agent_type)
     if not credential_envs:
@@ -2043,9 +2049,11 @@ def test_credential_streaming(
 
         # ---- wrapper 层钩子:bridge 启动前的沙箱文件准备 ----
         # hermes 用此回调写入 ~/.hermes/config.yaml(模型/provider/base_url 配置)
+        # codex 用此回调写入 ~/.codex/config.toml(模型/审批策略配置)
+        # task=None(测试场景):wrapper 默认 always_approve
         if pre_bridge_hook:
             try:
-                pre_bridge_hook(session, credentials, agent_type)
+                pre_bridge_hook(session, credentials, agent_type, None)
             except Exception as e:
                 yield done(False, f"沙箱配置文件准备失败: {e}")
                 return

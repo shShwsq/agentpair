@@ -9,7 +9,9 @@
 与 Kimi/Qoder 的关键差异:
 1. ACP 启动命令:`hermes acp`(子命令,非 --acp 标志)
 2. 权限绕过:Hermes 在模块导入时读取 HERMES_YOLO_MODE 环境变量并冻结,
-   设为 1 即跳过所有危险命令审批(等价 --yolo),无需 post_session_setup
+   设为 1 即跳过所有危险命令审批(等价 --yolo),无需 post_session_setup。
+   per_command 模式不注入此环境变量,Hermes 进入审批模式,
+   危险命令通过 acp_adapter/permissions.py 发 ACP request_permission 给前端确认。
 3. 模型/Provider 配置:Hermes 从 ~/.hermes/config.yaml 读取模型名、provider、
    base_url(LLM_MODEL 环境变量已废弃),通过 pre_bridge_hook 在 bridge 启动前
    写入沙箱
@@ -130,16 +132,20 @@ _PROVIDERS_NEEDING_ANTHROPIC_PKG = {"anthropic", "minimax"}
 # ============================================================
 
 
-def _hermes_credential_env_builder(credentials: dict[str, str]) -> dict[str, str]:
+def _hermes_credential_env_builder(
+    credentials: dict[str, str], task: Task | None = None
+) -> dict[str, str]:
     """按 provider 选择动态构建凭证环境变量
 
     Hermes 按 provider 读取不同的 <PROVIDER>_API_KEY 环境变量名,
     无法用 registry 的静态 credential_env 映射,需在此动态构建。
 
-    始终注入:
-    - HERMES_YOLO_MODE=1:跳过所有危险命令审批(等价 --yolo)
+    命令确认模式(task.params._executor_command_confirm):
+    - always_approve(默认 / task=None 测试场景):注入 HERMES_YOLO_MODE=1
       Hermes 在模块导入时读取并冻结此变量(tools/approval.py:_YOLO_MODE_FROZEN),
       必须在 bridge 进程启动前设置(经 envs 注入,子进程继承)
+    - per_command:不注入 HERMES_YOLO_MODE,Hermes 进入审批模式,
+      遇到危险命令通过 acp_adapter/permissions.py 发 ACP request_permission 给前端确认
 
     按 provider 注入:
     - <PROVIDER>_API_KEY:API Key(如 OPENROUTER_API_KEY / ANTHROPIC_API_KEY)
@@ -154,9 +160,18 @@ def _hermes_credential_env_builder(credentials: dict[str, str]) -> dict[str, str
         cfg = _PROVIDER_CONFIG[_DEFAULT_PROVIDER]
         provider = _DEFAULT_PROVIDER
 
-    envs: dict[str, str] = {
-        "HERMES_YOLO_MODE": "1",  # 跳过权限审批(冻结于导入时)
-    }
+    # 读命令确认模式:task=None(测试连接)时默认 always_approve
+    approval_mode = "always_approve"
+    if task and task.params:
+        approval_mode = task.params.get("_executor_command_confirm", "always_approve")
+
+    envs: dict[str, str] = {}
+    if approval_mode == "per_command":
+        # 不注入 HERMES_YOLO_MODE:Hermes 进入审批模式,危险命令发 request_permission
+        logger.info("[hermes_cli] per_command 模式:不注入 HERMES_YOLO_MODE,危险命令将弹窗确认")
+    else:
+        # always_approve:注入 HERMES_YOLO_MODE=1 跳过权限审批(冻结于导入时)
+        envs["HERMES_YOLO_MODE"] = "1"
 
     # API Key
     api_key = credentials.get("api_key", "")
@@ -174,6 +189,7 @@ def _hermes_credential_env_builder(credentials: dict[str, str]) -> dict[str, str
         f"[hermes_cli] 凭证环境变量构建: provider={provider}, "
         f"api_key_env={cfg['api_key_env']}, "
         f"base_url_env={cfg.get('base_url_env') or '(none)'}, "
+        f"approval_mode={approval_mode}, "
         f"env_keys={list(envs.keys())}"
     )
     return envs
@@ -268,7 +284,9 @@ def run_hermes_cli_agent(
     与 run_react_agent 签名对齐(不含 client 参数,Hermes CLI 自带模型配置)。
 
     Hermes 特有:
-    - HERMES_YOLO_MODE=1 经环境变量注入(跳过权限审批,无需 post_session_setup)
+    - 命令确认模式(task.params._executor_command_confirm):
+      - always_approve(默认):注入 HERMES_YOLO_MODE=1,跳过权限审批,无需 post_session_setup
+      - per_command:不注入 HERMES_YOLO_MODE,Hermes 遇到危险命令发 ACP request_permission 给前端确认
     - 模型/provider/base_url 经 ~/.hermes/config.yaml 注入(经 pre_bridge_hook 写入)
     - API Key 按 provider 动态映射到对应环境变量名(经 credential_env_builder)
 
@@ -284,7 +302,9 @@ def run_hermes_cli_agent(
         agent_policy=agent_policy,
         credential_env_builder=_hermes_credential_env_builder,
         pre_bridge_hook=_hermes_pre_bridge_hook,
-        # 无需 post_session_setup:HERMES_YOLO_MODE 已处理权限绕过
+        # 无需 post_session_setup:
+        # - always_approve:HERMES_YOLO_MODE 经 env 注入,导入时冻结
+        # - per_command:不注入 HERMES_YOLO_MODE,Hermes 自动走 ACP request_permission
     )
 
 

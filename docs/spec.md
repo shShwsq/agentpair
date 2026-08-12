@@ -151,6 +151,27 @@ user_agent 对照**动态生成的 checklist**评估每轮:
 - **登录 token**(`task.params._verifier.auth_tokens`):list of `{label, header_name, header_value}`,LLM 调 `http_request` 时传 `auth_profile=label` 选择身份,工具自动注入 `header_name: header_value` 到请求头。LLM 永不见 token 明文(安全)。前端 TaskCreateView 允许添加多个 token,TaskDetailView 只读展示(`maskTokenValue`:首 8 + 尾 4 字符)
 - **输出**:验证完成后输出自然语言总结——每个验证目标的结论(已确认可利用 / 无法确认 / 确认为误报)+ 关键证据(状态码、响应片段)+ 严重级别建议。系统提示强调「不要对生产环境造成破坏性影响」「优先用最小化 PoC(如 `' OR 1=1--` 比 `DROP TABLE` 更合适)」
 
+### 3.5.2 CLI 执行智能体命令确认(executor_command_confirm)
+
+控制 CLI 执行智能体(qoder_cli / kimi_cli / hermes_cli / codex_cli)执行危险命令时是否弹窗确认,防容器破坏与资源耗尽。基于 ACP 协议的 `request_permission` JSON-RPC 机制实现。
+
+- **配置字段**:
+  - 用户级默认:`agent_policy.executor_command_confirm_default`("always_approve" / "per_command"),在「协作策略」页设置
+  - 任务级覆盖:`task.params._executor_command_confirm`,在「新建任务」页设置(仅选了 CLI 执行器时显示)
+  - 优先级:`task.params._executor_command_confirm` > `executor_command_confirm_default` > "always_approve"
+  - 后端 `agent_checkpoint.resolve_agent_policy` 把 `executor_command_confirm_default` 映射到 `task.params._executor_command_confirm`(若任务级未显式设置)
+- **always_approve 模式**(默认):
+  - Qoder:启动参数带 `--yolo`,跳过所有审批
+  - Kimi:`set_config_option` 设置 `mode=auto`(或 yolo)
+  - Hermes:注入 `HERMES_YOLO_MODE=1` 环境变量
+  - Codex:config.toml 设 `approval_policy=never` + `sandbox_mode=danger-full-access`(非交互模式必需)
+- **per_command 模式**:
+  - CLI 检测到危险命令时通过 ACP 发送 `request_permission` 请求
+  - `acp_bridge.py` 解析请求 → SSE 推 `permission_request` 事件到后端 → 前端 `CommandConfirmDialog` 弹窗
+  - 用户确认后 `POST /tasks/{id}/permission_response` → bridge 写回 ACP 响应 → CLI 继续/中止
+  - **Codex 限制**:`codex exec --json` 是非交互模式,`approval_policy` 必须为 `never`,不支持 `per_command`。选 per_command 时自动降级为 always_approve 并警告(建议改用 qoder/kimi/hermes)
+- **前端复用**:复用 local 模式的 `CommandConfirmDialog.vue` 组件(红色高亮拦截原因),SSE 事件类型为 `permission_request`(与 local 模式的 `command_confirm` 区分)
+
 ### 3.6 终止条件(硬性,避免死循环)
 满足以下**全部**条件后输出最终报告:
 1. checklist 所有适用维度均有明确结论(有 / 无 / 无法确定)
@@ -308,6 +329,7 @@ Result(任务结果项,通用)
    - API 新增 `GET /tasks/{id}/pending_command_confirm` + `POST /tasks/{id}/command_confirm`
    - 前端 `CommandConfirmDialog.vue` 组件:显示完整命令 + 拦截原因(红色高亮)+ 「拒绝 / 同意」按钮
    - 用户拒绝时返回 `{"status_code": 0, "body": "[用户拒绝执行此命令]"}`,agent 收到反馈跳过
+   - **注意**:此为 local 模式(无沙箱)专用;CLI 执行智能体(qoder/kimi/hermes/codex)的危险命令确认走 ACP `request_permission` 机制,见 §3.5.2(SSE 事件 `permission_request`、API `POST /tasks/{id}/permission_response`)
 
 4. **平台原生隔离**(`SANDBOX_LOCAL_NATIVE_ISOLATION=true`,可选):
    - macOS:`sandbox-exec`(系统目录只读 + 工作区读写 + 禁 `sudo` / `su`)
@@ -601,6 +623,7 @@ react_agent 维护跨轮 plan 状态:
 | `plan` | 计划清单状态更新(跨轮续接) |
 | `verify_action` | 验证动作授权请求(verifier_agent 的 `per_action` 模式,前端 VerifyActionDialog) |
 | `command_confirm` | 危险命令确认(local 模式,前端 CommandConfirmDialog) |
+| `permission_request` | CLI 执行智能体命令确认(CLI `per_command` 模式,前端 CommandConfirmDialog;ACP `request_permission` 事件转译) |
 | `done` | 任务完成 |
 | `error` | 任务失败/异常 |
 
@@ -615,7 +638,7 @@ react_agent 维护跨轮 plan 状态:
 | `/tasks/:id` | TaskDetailView | 任务详情(SSE 实时流 + 对话 + 报告) |
 | `/models` | ModelSettingsView | LLM 模型配置(多厂商列表式管理) |
 | `/cli` | CliSettingsView | 外部 CLI 凭据配置(Qoder / Kimi / Hermes / Codex) |
-| `/agent-policy` | AgentPolicyView | 协作策略(user_agent 启用 / 轮次 / 评估频率 / 验证授权模式) |
+| `/agent-policy` | AgentPolicyView | 协作策略(user_agent 启用 / 轮次 / 评估频率 / 验证授权模式 / CLI 命令确认模式) |
 | `/skills` | SkillManagerView | 技能管理(上传 zip / 列表 / 在线编辑 SKILL.md / 删除) |
 | `/memory` | MemoryView | 记忆管理(用户偏好 / 全局记忆 / 项目记忆) |
 | `/settings` | SettingsView | 用户设置(改密码/Git 平台绑定 GitHub+Gitee/删除账号) |

@@ -45,7 +45,9 @@ _DEFAULT_MODEL = "gpt-5"
 # 用户端点必须支持 /v1/responses(OpenAI Responses API)
 
 
-def _codex_pre_bridge_hook(session, credentials: dict[str, str], agent_type: str) -> None:
+def _codex_pre_bridge_hook(
+    session, credentials: dict[str, str], agent_type: str, task: Task | None = None
+) -> None:
     """bridge 启动前:向沙箱写入 ~/.codex/config.toml
 
     Codex 从 ~/.codex/config.toml 读取模型/provider 配置,
@@ -60,6 +62,11 @@ def _codex_pre_bridge_hook(session, credentials: dict[str, str], agent_type: str
       - base_url:API 端点(必须支持 /v1/responses)
       - wire_api:通信协议(固定 "responses",chat 已被 codex 移除)
       - env_key:读取哪个环境变量的 API Key
+
+    命令确认模式(task.params._executor_command_confirm):
+    - always_approve(默认 / task=None 测试场景):approval_policy="never"
+    - per_command:codex exec --json 是非交互模式,无法暂停等待用户审批,
+      强制降级为 approval_policy="never" 并警告(codex exec 不支持 request_permission 透传)
     """
     api_key = credentials.get("api_key", "")
     base_url = (credentials.get("base_url") or "").strip()
@@ -68,6 +75,21 @@ def _codex_pre_bridge_hook(session, credentials: dict[str, str], agent_type: str
     # 仅 Responses 一个 variant),用户凭证里若存了旧的 "chat" 会导致 config.toml
     # 加载失败。端点必须支持 /v1/responses(OpenAI Responses API)。
     wire_api = "responses"
+
+    # 读命令确认模式:task=None(测试连接)时默认 always_approve
+    approval_mode = "always_approve"
+    if task and task.params:
+        approval_mode = task.params.get("_executor_command_confirm", "always_approve")
+
+    # codex exec --json 是非交互模式,approval_policy 必须为 "never"
+    # (on-request/on-failure/untrusted/granular 需要交互式审批通道,codex exec 不支持)
+    # per_command 模式下强制降级为 always_approve 并警告
+    if approval_mode == "per_command":
+        logger.warning(
+            "[codex_cli] per_command 模式不被 codex exec --json 支持(非交互模式),"
+            "已降级为 always_approve。如需命令确认,请改用 qoder_cli/kimi_cli/hermes_cli。"
+        )
+        approval_mode = "always_approve"
 
     # 构建 config.toml
     # 注意:base_url 留空时不写 model_provider,让 Codex 用默认 OpenAI provider
@@ -111,7 +133,7 @@ sandbox_mode = "danger-full-access"
     session.run_command("mkdir -p ~/.codex", timeout=5)
     session.write_file("~/.codex/config.toml", config_toml)
     logger.info(
-        f"[codex_cli] config.toml 已写入(model={model}, base_url={'自定义' if base_url else 'OpenAI默认'}, wire_api={wire_api})"
+        f"[codex_cli] config.toml 已写入(model={model}, base_url={'自定义' if base_url else 'OpenAI默认'}, wire_api={wire_api}, approval_mode={approval_mode})"
     )
 
 

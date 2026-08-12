@@ -46,6 +46,7 @@ const DEFAULT_POLICY = {
   max_interrupts_per_round: 2,
   allow_verify: false,
   verifier_auth_mode_default: 'per_action' as 'direct' | 'per_action',
+  executor_command_confirm_default: 'always_approve' as 'always_approve' | 'per_command',
 }
 
 // ============================================================
@@ -69,6 +70,8 @@ const policyMaxInterrupts = ref(DEFAULT_POLICY.max_interrupts_per_round)
 const policyAllowVerify = ref(DEFAULT_POLICY.allow_verify)
 /** 验证授权默认模式(任务级可覆盖) */
 const policyVerifierAuthMode = ref<'direct' | 'per_action'>(DEFAULT_POLICY.verifier_auth_mode_default)
+/** 执行智能体命令确认默认模式(任务级 _executor_command_confirm 可覆盖) */
+const policyExecutorCommandConfirm = ref<'always_approve' | 'per_command'>(DEFAULT_POLICY.executor_command_confirm_default)
 /** 是否分别配置内置/CLI 的 K 值(高级) */
 const policyAdvanced = ref(false)
 
@@ -83,6 +86,7 @@ const originalPolicy = ref({
   maxInterrupts: DEFAULT_POLICY.max_interrupts_per_round,
   allowVerify: DEFAULT_POLICY.allow_verify,
   verifierAuthMode: DEFAULT_POLICY.verifier_auth_mode_default,
+  executorCommandConfirm: DEFAULT_POLICY.executor_command_confirm_default,
 })
 
 /** agent 策略是否有未保存改动 */
@@ -96,7 +100,8 @@ const policyDirty = computed(() => {
     policyAllowInterrupt.value !== originalPolicy.value.allowInterrupt ||
     policyMaxInterrupts.value !== originalPolicy.value.maxInterrupts ||
     policyAllowVerify.value !== originalPolicy.value.allowVerify ||
-    policyVerifierAuthMode.value !== originalPolicy.value.verifierAuthMode
+    policyVerifierAuthMode.value !== originalPolicy.value.verifierAuthMode ||
+    policyExecutorCommandConfirm.value !== originalPolicy.value.executorCommandConfirm
   )
 })
 
@@ -111,6 +116,7 @@ function resetPolicyToDefault(): void {
   policyMaxInterrupts.value = DEFAULT_POLICY.max_interrupts_per_round
   policyAllowVerify.value = DEFAULT_POLICY.allow_verify
   policyVerifierAuthMode.value = DEFAULT_POLICY.verifier_auth_mode_default
+  policyExecutorCommandConfirm.value = DEFAULT_POLICY.executor_command_confirm_default
   policyAdvanced.value = false
 }
 
@@ -181,6 +187,7 @@ async function loadPolicy(): Promise<void> {
     policyMaxInterrupts.value = policy?.max_interrupts_per_round ?? DEFAULT_POLICY.max_interrupts_per_round
     policyAllowVerify.value = policy?.allow_verify ?? DEFAULT_POLICY.allow_verify
     policyVerifierAuthMode.value = policy?.verifier_auth_mode_default ?? DEFAULT_POLICY.verifier_auth_mode_default
+    policyExecutorCommandConfirm.value = policy?.executor_command_confirm_default ?? DEFAULT_POLICY.executor_command_confirm_default
     // 高级模式:仅当任一专用 K 值非 null 时展开
     policyAdvanced.value = policyIntervalBuiltin.value !== null || policyIntervalCli.value !== null
     // 同步原始值(脏检查基准)
@@ -194,6 +201,7 @@ async function loadPolicy(): Promise<void> {
       maxInterrupts: policyMaxInterrupts.value,
       allowVerify: policyAllowVerify.value,
       verifierAuthMode: policyVerifierAuthMode.value,
+      executorCommandConfirm: policyExecutorCommandConfirm.value,
     }
   } catch (err) {
     loadError.value = extractErrorMessage(err)
@@ -217,6 +225,7 @@ async function handleSave(): Promise<void> {
       max_interrupts_per_round: policyAllowInterrupt.value ? policyMaxInterrupts.value : 0,
       allow_verify: policyAllowVerify.value,
       verifier_auth_mode_default: policyVerifierAuthMode.value,
+      executor_command_confirm_default: policyExecutorCommandConfirm.value,
     }
     const data = await saveAgentPolicy(body)
     updatedAt.value = data.updated_at ?? null
@@ -232,6 +241,7 @@ async function handleSave(): Promise<void> {
       policyMaxInterrupts.value = policy.max_interrupts_per_round
       policyAllowVerify.value = policy.allow_verify
       policyVerifierAuthMode.value = policy.verifier_auth_mode_default
+      policyExecutorCommandConfirm.value = policy.executor_command_confirm_default
       policyAdvanced.value = policyIntervalBuiltin.value !== null || policyIntervalCli.value !== null
     }
     originalPolicy.value = {
@@ -244,6 +254,7 @@ async function handleSave(): Promise<void> {
       maxInterrupts: policyMaxInterrupts.value,
       allowVerify: policyAllowVerify.value,
       verifierAuthMode: policyVerifierAuthMode.value,
+      executorCommandConfirm: policyExecutorCommandConfirm.value,
     }
     showToast('协作策略已保存', 'success')
   } catch (err) {
@@ -284,6 +295,8 @@ const FIELD_HELP: Record<string, string> = {
     '开启后,user_agent 可自行调用工具验证 react_agent 的产出。目前为实验性开关,默认关闭。任务还需在提交时配置测试环境 URL 才会真正触发验证。',
   verifier_auth_mode:
     '仅在开启「自行验证」时生效。逐动作授权:每个验证动作(HTTP 请求 / PoC 脚本)执行前弹窗让用户确认;直接执行:验证动作自动执行不弹窗。此为用户级默认,任务创建或运行时可单独覆盖。',
+  executor_command_confirm:
+    '控制 CLI 执行智能体(qoder/kimi/hermes/codex)执行危险命令时是否弹窗确认。自动批准:注入 YOLO 模式,所有命令直接执行不弹窗(速度快,适合可信任务);逐命令确认:每个危险命令执行前弹窗让用户批准(更安全,防容器破坏/资源耗尽)。此为用户级默认,任务创建时可单独覆盖。注意:Codex CLI 受非交互模式限制,仅支持自动批准,选择「逐命令确认」时会降级并警告。',
   policy_advanced:
     '高级选项。内置 react_agent 和外部 CLI agent 的迭代节奏可能不同,可分别设置评估频率。留空则使用统一 K 值。',
 }
@@ -518,7 +531,33 @@ onUnmounted(() => {
                 </label>
               </div>
             </Transition>
-  
+
+            <!-- CLI 执行智能体命令确认模式(独立于 user_agent,始终可用) -->
+            <label class="policy-field policy-field-command-confirm">
+              <div class="field-head">
+                <span class="policy-label">CLI 命令确认模式</span>
+                <div
+                  :ref="(el) => { if (el) fieldHelpRefs.set('executor_command_confirm', el as HTMLElement); else fieldHelpRefs.delete('executor_command_confirm') }"
+                  class="field-help-wrap"
+                >
+                  <button type="button" class="field-help-btn" aria-label="查看说明" @click.stop="toggleFieldHelp('executor_command_confirm')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+                  </button>
+                  <Transition name="help-fade">
+                    <div v-if="openHelpKey === 'executor_command_confirm'" class="field-help-popover" role="tooltip">{{ FIELD_HELP.executor_command_confirm }}</div>
+                  </Transition>
+                </div>
+              </div>
+              <select
+                v-model="policyExecutorCommandConfirm"
+                class="policy-input"
+                :disabled="saving"
+              >
+                <option value="always_approve">自动批准(不弹窗,注入 YOLO 模式)</option>
+                <option value="per_command">逐命令确认(危险命令弹窗批准)</option>
+              </select>
+            </label>
+
             <label class="policy-toggle-row">
               <input v-model="policyAdvanced" type="checkbox" :disabled="saving || !policyUserAgentEnabled" />
               <span>分别配置内置 / CLI agent 的 K 值</span>
@@ -889,6 +928,12 @@ onUnmounted(() => {
 
 .verifier-config .policy-field {
   max-width: 360px;
+}
+
+/* CLI 命令确认模式(独立于 user_agent,始终可用) */
+.policy-field-command-confirm {
+  max-width: 360px;
+  margin-bottom: var(--space-2);
 }
 
 /* ---- 操作区 ---- */

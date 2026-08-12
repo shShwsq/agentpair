@@ -70,6 +70,7 @@ def test_default_policy_has_all_required_fields():
         "max_interrupts_per_round",
         "allow_verify",
         "verifier_auth_mode_default",
+        "executor_command_confirm_default",
     }
     assert set(DEFAULT_AGENT_POLICY.keys()) == expected_keys
     # 关键默认值(与设计文档 / 前端 DEFAULT_POLICY 对齐)
@@ -82,6 +83,7 @@ def test_default_policy_has_all_required_fields():
     assert DEFAULT_AGENT_POLICY["max_interrupts_per_round"] == 2
     assert DEFAULT_AGENT_POLICY["allow_verify"] is False
     assert DEFAULT_AGENT_POLICY["verifier_auth_mode_default"] == "per_action"
+    assert DEFAULT_AGENT_POLICY["executor_command_confirm_default"] == "always_approve"
 
 
 # ============================================================
