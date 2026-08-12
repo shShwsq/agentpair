@@ -53,6 +53,7 @@ import { subscribeTaskStream } from '@/api/stream'
 import { listArtifacts } from '@/api/taskArtifacts'
 import { extractErrorMessage } from '@/utils/error'
 import { renderMarkdown } from '@/utils/markdown'
+import { buildToolSegments, buildToolSummary } from '@/utils/toolSummary'
 import type {
   AgentCheckpointEventData,
   AnswerItem,
@@ -998,8 +999,10 @@ interface RoundGroup {
 const expandedSteps = reactive<Set<string>>(new Set())
 /** 用户手动展开过的迭代 id(流式结束后保留展开状态,不被自动折叠) */
 const expandedIterations = reactive<Set<string>>(new Set())
-/** 用户手动展开过的工具组 id(格式 `${iterId}-tools`) */
+/** 用户手动展开过的工具组 id(普通工具组,key 形如 `${iterId}-plain-${idx}`) */
 const expandedToolGroups = reactive<Set<string>>(new Set())
+/** 用户展开过原始结果的紧凑工具行(读文件/搜索等单行摘要的轻量展开),存 tool_call id */
+const expandedCompactResults = reactive<Set<string>>(new Set())
 
 /** 判断 DisplayItem 是否为 react_agent 的 thinking(迭代起点) */
 function isReactThinkingItem(item: DisplayItem): boolean {
@@ -1339,16 +1342,28 @@ function toggleIteration(seg: IterationSegment): void {
 }
 
 /** 工具组是否展开(默认折叠,仅由用户控制) */
-function isToolGroupExpanded(iterId: string): boolean {
-  return expandedToolGroups.has(`${iterId}-tools`)
+function isToolGroupExpanded(key: string): boolean {
+  return expandedToolGroups.has(key)
 }
 
-function toggleToolGroup(iterId: string): void {
-  const key = `${iterId}-tools`
+function toggleToolGroup(key: string): void {
   if (expandedToolGroups.has(key)) {
     expandedToolGroups.delete(key)
   } else {
     expandedToolGroups.add(key)
+  }
+}
+
+/** 紧凑工具行的原始结果是否展开(轻量展开,默认折叠) */
+function isCompactExpanded(callId: string): boolean {
+  return expandedCompactResults.has(callId)
+}
+
+function toggleCompact(callId: string): void {
+  if (expandedCompactResults.has(callId)) {
+    expandedCompactResults.delete(callId)
+  } else {
+    expandedCompactResults.add(callId)
   }
 }
 
@@ -1366,6 +1381,57 @@ function toolCallCount(seg: IterationSegment): number {
   return seg.toolItems.filter(
     (i) => !i.is_streaming && i.type === 'tool_call',
   ).length
+}
+
+/** 工具渲染行:紧凑行(单行摘要)或普通折叠组行,字段扁平化避免模板内联合类型收窄 */
+interface ToolRenderRow {
+  key: string
+  kind: 'compact' | 'plain'
+  /** compact:tool_call id(展开状态 key) */
+  callId: string
+  /** compact:单行摘要文案 */
+  summary: string
+  /** compact:是否已有结果(执行中为 false) */
+  hasResult: boolean
+  /** compact:原始结果内容(轻量展开用) */
+  resultContent: string
+  /** plain:该段内的工具项(保持原折叠卡片渲染) */
+  items: DisplayItem[]
+}
+
+/**
+ * 迭代内工具项拆分为渲染行:
+ * 紧凑工具(读文件/搜索/列目录)与紧邻的 result 配对成单行摘要,
+ * 其余工具按原顺序归入普通折叠组,保持原渲染。
+ */
+function toolRowsOf(iter: IterationSegment): ToolRenderRow[] {
+  return buildToolSegments(iter.toolItems).map((seg, idx) => {
+    if (seg.kind === 'compact') {
+      return {
+        key: seg.call.id,
+        kind: 'compact' as const,
+        callId: seg.call.id,
+        summary: buildToolSummary(seg.call, seg.result),
+        hasResult: !!seg.result,
+        resultContent: seg.result?.content || '',
+        items: [] as DisplayItem[],
+      }
+    }
+    return {
+      key: `${iter.id}-plain-${idx}`,
+      kind: 'plain' as const,
+      callId: '',
+      summary: '',
+      hasResult: false,
+      resultContent: '',
+      items: seg.items,
+    }
+  })
+}
+
+/** 普通渲染段内的工具调用数(只数 tool_call,用于折叠组标题) */
+function plainToolCallCount(items: DisplayItem[]): number {
+  return items.filter((i) => !i.is_streaming && i.type === 'tool_call').length
 }
 
 /**
@@ -1993,26 +2059,43 @@ function parseCheckpoint(item: DisplayItem): {
                           :item="t"
                           @toggle-reasoning="toggleReasoning"
                         />
-                        <!-- 工具调用折叠组(一个迭代内的所有 tool_call/tool_result 合并) -->
-                        <div
-                          v-if="iter.toolItems.length > 0"
-                          class="tool-group"
-                          :class="{ 'tool-group-expanded': isToolGroupExpanded(iter.id) }"
-                        >
-                          <div class="tool-group-header" @click="toggleToolGroup(iter.id)">
-                            <span class="tool-group-toggle">{{ isToolGroupExpanded(iter.id) ? '▼' : '▶' }}</span>
-                            <span class="tool-group-label">🔧 工具调用 ({{ toolCallCount(iter) }})</span>
+                        <!-- 工具调用渲染行:紧凑工具(读文件/搜索/列目录)单行摘要,
+                             其余工具保持原折叠组渲染 -->
+                        <template v-for="row in toolRowsOf(iter)" :key="row.key">
+                          <!-- 紧凑工具:单行摘要,点击轻量展开原始结果 -->
+                          <div v-if="row.kind === 'compact'" class="tool-compact">
+                            <div class="tool-compact-row" @click="toggleCompact(row.callId)">
+                              <span class="tool-group-toggle">
+                                {{ row.hasResult ? (isCompactExpanded(row.callId) ? '▼' : '▶') : '' }}
+                              </span>
+                              <span class="tool-compact-summary">{{ row.summary }}</span>
+                            </div>
+                            <div
+                              v-if="row.hasResult && isCompactExpanded(row.callId)"
+                              class="tool-compact-result"
+                            >{{ row.resultContent }}</div>
                           </div>
-                          <div v-if="isToolGroupExpanded(iter.id)" class="tool-group-body">
-                            <ConversationMessage
-                              v-for="(ti, idx) in iter.toolItems"
-                              :key="ti.id"
-                              :item="ti"
-                              :is-sub-agent="isSubAgentToolItem(ti, iter.toolItems, idx)"
-                              @toggle-reasoning="toggleReasoning"
-                            />
+                          <!-- 普通工具折叠组(该行内的非紧凑工具) -->
+                          <div
+                            v-if="row.kind === 'plain' && row.items.length > 0"
+                            class="tool-group"
+                            :class="{ 'tool-group-expanded': isToolGroupExpanded(row.key) }"
+                          >
+                            <div class="tool-group-header" @click="toggleToolGroup(row.key)">
+                              <span class="tool-group-toggle">{{ isToolGroupExpanded(row.key) ? '▼' : '▶' }}</span>
+                              <span class="tool-group-label">🔧 工具调用 ({{ plainToolCallCount(row.items) }})</span>
+                            </div>
+                            <div v-if="isToolGroupExpanded(row.key)" class="tool-group-body">
+                              <ConversationMessage
+                                v-for="(ti, idx) in row.items"
+                                :key="ti.id"
+                                :item="ti"
+                                :is-sub-agent="isSubAgentToolItem(ti, row.items, idx)"
+                                @toggle-reasoning="toggleReasoning"
+                              />
+                            </div>
                           </div>
-                        </div>
+                        </template>
                         <!-- 其他项(submit 等) -->
                         <ConversationMessage
                           v-for="o in iter.otherItems"
@@ -3209,6 +3292,49 @@ function parseCheckpoint(item: DisplayItem): {
   flex-direction: column;
   gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
+}
+
+/* ---- 紧凑工具行(读文件/搜索/列目录:单行摘要 + 轻量展开原始结果) ---- */
+.tool-compact {
+  display: flex;
+  flex-direction: column;
+}
+
+.tool-compact-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s ease;
+}
+
+.tool-compact-row:hover {
+  background: var(--color-surface-alt);
+}
+
+.tool-compact-summary {
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-compact-result {
+  margin: var(--space-1) var(--space-2) var(--space-1) calc(var(--space-2) + 14px + var(--space-2));
+  padding: var(--space-2);
+  background: var(--color-surface-alt);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
 }
 
 /* ---- 对话区头部 + 实时指示器(标题已移除,仅在运行时右对齐显示实时徽标) ---- */
