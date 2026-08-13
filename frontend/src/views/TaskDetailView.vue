@@ -934,14 +934,15 @@ watch(
 // 迭代识别:遇到 react_agent 的 thinking 项(实时流式或历史 type=thinking)就开新迭代,
 // 后续 react_agent 的 tool_call/tool_result/submit 归入当前迭代,
 // 直到遇到下一个 thinking(开新迭代)或非 react_agent 消息(关闭迭代,平铺该消息)。
+// 缺失 thinking 锚点时开无 thinking 的兜底迭代承接工具项,不退化为 plain 段。
 //
 // step 归属推断:用迭代内首个工具调用的工具名匹配 plan step 关键词
 // (复用后端 _TOOL_STEP_KEYWORDS 映射,与 plan 状态推进逻辑一致)
 //
 // 折叠策略:
-// - step 组:默认折叠(完成后)或展开(含流式中)。文字=step.text。
-// - 迭代块:默认折叠。包含正在流式中的 thinking 时自动展开。
-// - 工具调用组:默认折叠(一个迭代内的所有 tool_call/tool_result 合并为一个折叠块)。
+// - step 组:默认折叠(完成后)或展开(含流式中)。文字=step.text,唯一折叠单位。
+// - 迭代:不再单独折叠,内容在 step-body 内直接平铺(无摘要行、无边框包装)。
+// - 工具行:默认折叠(compact 单行 / agent、toolpair 卡片,按 tool_call id 记录展开)。
 
 interface DisplayItem {
   /** 正式对话用 UUID,流式项用 `stream:${conv_id}` */
@@ -975,7 +976,7 @@ interface IterationSegment {
   iterationIdx: number
   /** 唯一标识:`${roundIdx}-${iterationIdx}` */
   id: string
-  /** 该迭代的 thinking 项(流式或历史,通常 1 条) */
+  /** 该迭代的 thinking 项(流式或历史,通常 1 条;锚点缺失的兜底迭代可为空) */
   thinkingItems: DisplayItem[]
   /** 该迭代内的工具调用项(tool_call + tool_result),按时间顺序 */
   toolItems: DisplayItem[]
@@ -1133,7 +1134,22 @@ function segmentRoundItems(
         otherItems: [],
         hasStreaming: isStreamingActive(item),
       }
-    } else if (current && isReactAgentItem(item)) {
+    } else if (isReactAgentItem(item)) {
+      if (!current) {
+        // 缺失 thinking 锚点(空 thinking 未落库 / CLI agent 未发文本直接工具调用 /
+        // 前面的非 react 消息关闭了迭代):开一个无 thinking 的兜底迭代承接,
+        // 避免工具项退化为 plain 段被追加到"执行过程"折叠块末尾
+        iterCounter++
+        current = {
+          kind: 'iteration',
+          iterationIdx: iterCounter,
+          id: `${roundIdx}-${iterCounter}`,
+          thinkingItems: [],
+          toolItems: [],
+          otherItems: [],
+          hasStreaming: false,
+        }
+      }
       if (item.is_streaming) {
         current.thinkingItems.push(item)
       } else if (item.type === 'tool_call' || item.type === 'tool_result') {
@@ -1409,22 +1425,6 @@ function toggleRow(key: string): void {
   }
 }
 
-/** 从工具调用 content 中提取工具名(用于折叠摘要预览) */
-function extractToolName(content: string): string {
-  // 新格式:"人类可读意图 [tool_name]\n{参数JSON}"
-  // 匹配首行末尾的 [tool_name] 标签
-  const firstLine = content.split('\n', 1)[0]
-  const m = firstLine.match(/\[(\w+)\]$/)
-  return m ? m[1] : firstLine.slice(0, 30)
-}
-
-/** 迭代内的工具调用数(只数 tool_call,不数 tool_result) */
-function toolCallCount(seg: IterationSegment): number {
-  return seg.toolItems.filter(
-    (i) => !i.is_streaming && i.type === 'tool_call',
-  ).length
-}
-
 /** 工具渲染行:compact 单行摘要 / agent 子智能体卡片 / toolpair 普通工具卡片 / plain 兜底。
  * 字段扁平化避免模板内联合类型收窄 */
 interface ToolRenderRow {
@@ -1529,27 +1529,6 @@ function toolRowsOf(iter: IterationSegment): ToolRenderRow[] {
       resultContent: seg.result?.content || '',
     }
   })
-}
-
-/** 迭代摘要:工具数量 + 工具名预览(最多 3 个) */
-function iterationSummary(seg: IterationSegment): string {
-  // 流式中:显示正在思考(验证流显示"正在验证")
-  if (seg.hasStreaming) {
-    const isVerifying = seg.thinkingItems.some((i) => i.streaming?.verify)
-    return isVerifying ? '正在验证...' : '正在思考...'
-  }
-  const count = toolCallCount(seg)
-  if (count === 0) {
-    // 没有工具调用,可能只有 thinking(纯回答)
-    return '思考完成'
-  }
-  const names = seg.toolItems
-    .filter((i) => !i.is_streaming && i.type === 'tool_call')
-    .map((i) => extractToolName(i.content || ''))
-    .slice(0, 3)
-  const preview = names.join(', ')
-  const extra = count > 3 ? ` 等 ${count} 个` : ''
-  return `${count} 个工具调用: ${preview}${extra}`
 }
 
 /** plan 进度文本:已完成 / 总数 */
@@ -2147,16 +2126,9 @@ function toggleResult(id: string): void {
                       :class="checkpointDividerClass(cp)"
                     />
                     <template v-for="iter in seg.iterations" :key="iter.id">
-                    <div
-                      class="iteration-block"
-                      :class="{ 'iteration-streaming': iter.hasStreaming }"
-                    >
-                      <div class="iteration-divider">
-                        <span class="iteration-summary">{{ iterationSummary(iter) }}</span>
-                        <span v-if="iter.hasStreaming" class="iteration-streaming-tag">
-                          <span class="typing-dots"><span></span><span></span><span></span></span>
-                        </span>
-                      </div>
+                    <!-- 迭代内容直接平铺:无摘要行、无边框包装(wrapper 仅作结构容器,
+                         保留它以免 step-body 加 gap 影响零高度检查点横线) -->
+                    <div class="iteration-block">
                       <div class="iteration-body">
                         <!-- thinking 项(流式或历史) -->
                         <ConversationMessage
@@ -3500,44 +3472,9 @@ function toggleResult(id: string): void {
   padding-bottom: var(--space-1);
 }
 
-/* ---- 迭代块(react_agent 一次 ReAct 循环,可折叠) ---- */
+/* ---- 迭代块(react_agent 一次 ReAct 循环,结构容器:无摘要行、无边框包装) ---- */
 .iteration-block {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: var(--color-surface-alt);
-  overflow: hidden;
-}
-
-.iteration-streaming {
-  /* 包含正在流式 thinking 的迭代:加绿色光晕提示 */
-  border-color: var(--color-msg-streaming-dot);
-  box-shadow: 0 0 0 2px var(--color-msg-pulse-soft);
-}
-
-/* 迭代分隔线:迭代不再折叠,仅保留轻量摘要行作为结构分隔 */
-.iteration-divider {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-1) var(--space-3);
-}
-
-.iteration-summary {
-  font-size: var(--fs-xs);
-  color: var(--color-text-secondary);
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.iteration-streaming-tag {
-  display: inline-flex;
-  align-items: center;
-}
-
-.iteration-streaming-tag .typing-dots span {
-  background: var(--color-msg-streaming-dot);
+  /* 透明容器,仅承载 iteration-body 的间距 */
 }
 
 .iteration-body {
