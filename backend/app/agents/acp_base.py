@@ -1940,7 +1940,14 @@ def run_acp_agent(
     else:
         bridge_exec_id = reused["bridge_exec_id"]
 
-    endpoint_url, endpoint_headers = session.get_endpoint(ACP_BRIDGE_PORT)
+    if reused is not None:
+        # 复用路径:缓存的 endpoint 已被 _bridge_alive 健康检查验证可用,
+        # 跳过 get_endpoint(SDK 端口转发调用,resume 场景实测最长 ~70s)
+        endpoint_url, endpoint_headers = reused["endpoint_url"], reused["endpoint_headers"]
+    else:
+        _t0 = time.perf_counter()
+        endpoint_url, endpoint_headers = session.get_endpoint(ACP_BRIDGE_PORT)
+        perf_log(task.id, "acp_get_endpoint", time.perf_counter() - _t0, agent_type=agent_type)
 
     try:
         if reused is None:
