@@ -190,6 +190,27 @@ class SandboxSession:
         else:
             return self._local_get_background_logs(execution_id)
 
+    def get_command_status(self, execution_id: str) -> tuple[bool, int | None]:
+        """查询命令运行状态,返回 (running, exit_code)
+
+        running=True 表示还在跑(exit_code 为 None);
+        结束后 exit_code 为实际退出码。
+        local 模式:进程已退出返回 (False, returncode),否则 (True, None)。
+        """
+        if self._closed:
+            raise RuntimeError("沙箱已关闭")
+
+        if self.mode == "sandbox":
+            st = self.sandbox.commands.get_command_status(execution_id)
+            return bool(st.running), st.exit_code
+        else:
+            entry = self._local_bg_procs.get(execution_id)
+            if entry is None:
+                return False, None
+            proc, _ = entry
+            ret = proc.poll()
+            return (ret is None), ret
+
     def interrupt_command(self, execution_id: str) -> None:
         """中断后台命令"""
         if self._closed:

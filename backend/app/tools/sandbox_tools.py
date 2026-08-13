@@ -310,21 +310,74 @@ def _parse_git_progress(line: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _clone_repo_sandbox(ctx: dict, clone_url: str, repo_name: str, branch: str | None) -> dict:
-    """sandbox 模式:在沙箱里 git clone"""
+def _clone_repo_sandbox(ctx: dict, clone_url: str, repo_name: str, branch: str | None, task_id: str = "") -> dict:
+    """sandbox 模式:在沙箱里 git clone(后台命令 + 轮询日志流式推进度)
+
+    对齐 local 模式 _clone_repo_local 的流式体验:clone 命令后台运行,
+    轮询 get_command_status / get_background_logs(cursor 增量),解析
+    "Receiving objects: X%" 后通过 event_bus 推 clone_progress 事件
+    (节流:百分比变化 >=5 或距上次推送 >=2s)。超时 interrupt + 抛异常。
+    """
     session: SandboxSession = ctx["session"]
     repo_dir = f"/home/user/repos/{repo_name}"
     # 清理可能残留的半成品目录(上次失败/中断残留),
     # 避免 git clone 报 "destination path already exists" 直接失败
     session.run_command(f"rm -rf {shlex.quote(repo_dir)} && mkdir -p {shlex.quote(repo_dir)}")
 
-    cmd = "git clone " + " ".join(_clone_depth_args())
+    # --progress 强制非 tty(后台命令无 tty)也输出进度到 stderr
+    cmd = "git clone --progress " + " ".join(_clone_depth_args())
     if branch:
         cmd += f" --branch {shlex.quote(branch)}"
     cmd += f" {shlex.quote(clone_url)} {shlex.quote(repo_dir)}"
 
     logger.info(f"[sandbox] git clone: {clone_url}")
-    session.run_command(cmd, timeout=settings.REPO_CLONE_TIMEOUT, check=True)
+    exec_id = session.run_command_background(cmd)
+
+    timeout = settings.REPO_CLONE_TIMEOUT
+    deadline = time.monotonic() + timeout
+    cursor: int | None = None
+    last_percent = -1
+    last_push_ts = time.monotonic()
+    tail_lines: list[str] = []
+
+    while True:
+        # 增量读日志,解析进度行推前端(节流逻辑同 local 模式)
+        logs_text, new_cursor = session.get_background_logs(exec_id, cursor=cursor)
+        if new_cursor is not None:
+            cursor = new_cursor
+        if logs_text:
+            for line in logs_text.splitlines():
+                tail_lines.append(line)
+                percent = _parse_git_progress(line)
+                if percent is None or not task_id:
+                    continue
+                now = time.monotonic()
+                if percent > last_percent and (
+                    percent - last_percent >= 5 or now - last_push_ts >= 2.0
+                ):
+                    publish_event(task_id, "clone_progress", {
+                        "percent": percent,
+                        "message": line.strip()[:200],
+                    })
+                    last_percent = percent
+                    last_push_ts = now
+
+        running, exit_code = session.get_command_status(exec_id)
+        if not running:
+            # exit_code 为 None 时无法区分,视为成功(防御性处理)
+            if exit_code not in (None, 0):
+                stderr_text = "\n".join(tail_lines)[-500:]
+                raise RuntimeError(
+                    f"git clone 失败(退出码 {exit_code}): {stderr_text}"
+                )
+            break
+        if time.monotonic() > deadline:
+            try:
+                session.interrupt_command(exec_id)
+            except Exception:
+                pass
+            raise RuntimeError(f"git clone 超时({timeout}s)")
+        time.sleep(0.5)
 
     count_cmd = f"find {shlex.quote(repo_dir)} -type f -not -path '*/.git/*' | wc -l"
     files_count = int(session.run_command(count_cmd).strip() or "0")
@@ -2003,7 +2056,9 @@ def clone_repo_with_fallback(
                         ctx, url, repo_name, attempt_branch, task_id=task_id,
                     )
                 else:
-                    result = _clone_repo_sandbox(ctx, url, repo_name, attempt_branch)
+                    result = _clone_repo_sandbox(
+                        ctx, url, repo_name, attempt_branch, task_id=task_id,
+                    )
                 _set_repo_path(task_id, result["path"])
                 logger.info(f"[clone_fallback] task={task_id} 克隆成功(协议 {safe_url})")
                 return result
