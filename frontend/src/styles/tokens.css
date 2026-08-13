@@ -52,6 +52,17 @@
   --color-sev-low-border: #fef08a;
   --color-sev-info-border: #bfdbfe;
 
+  /* ---- 色彩:计划清单卡片(TaskDetailView plan-card) ---- */
+  --color-plan-bg: linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%);
+  --color-plan-border: #a7f3d0;
+  --color-plan-title: #047857;
+  --color-plan-progress: #059669;
+  --color-plan-progress-bg: rgba(255, 255, 255, 0.7);
+  /* in_progress 步骤的行底色与图标色(琥珀色系) */
+  --color-plan-active-bg: rgba(245, 158, 11, 0.08);
+  --color-plan-active-icon: #f59e0b;
+  --color-plan-active-icon-bg: rgba(245, 158, 11, 0.15);
+
   /* ---- 色彩:检查点打断卡片(user_agent interrupt) ---- */
   --color-checkpoint-interrupt-bg: #fff7ed;
   --color-checkpoint-interrupt-border: #fdba74;
@@ -184,6 +195,16 @@
   --color-sev-low-fg: #fde047;
   --color-sev-low-border: #713f12;
   --color-sev-info-border: #1e3a8a;
+
+  /* ---- 色彩:计划清单卡片(深底加深背景、调亮前景) ---- */
+  --color-plan-bg: linear-gradient(135deg, #052e16 0%, #083344 100%);
+  --color-plan-border: #14532d;
+  --color-plan-title: #34d399;
+  --color-plan-progress: #4ade80;
+  --color-plan-progress-bg: rgba(255, 255, 255, 0.08);
+  --color-plan-active-bg: rgba(251, 191, 36, 0.1);
+  --color-plan-active-icon: #fbbf24;
+  --color-plan-active-icon-bg: rgba(251, 191, 36, 0.18);
 
   /* ---- 色彩:检查点打断卡片 ---- */
   --color-checkpoint-interrupt-bg: #431407;

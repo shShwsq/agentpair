@@ -3263,8 +3263,8 @@ function toggleResult(id: string): void {
 .plan-card {
   margin-bottom: var(--space-3);
   padding: var(--space-3) var(--space-4);
-  background: linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%);
-  border: 1px solid #a7f3d0;
+  background: var(--color-plan-bg);
+  border: 1px solid var(--color-plan-border);
   border-radius: var(--radius-lg);
 }
 
@@ -3278,7 +3278,7 @@ function toggleResult(id: string): void {
 .plan-title {
   font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
-  color: #047857;
+  color: var(--color-plan-title);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -3286,9 +3286,9 @@ function toggleResult(id: string): void {
 .plan-progress {
   font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
-  color: #059669;
+  color: var(--color-plan-progress);
   padding: var(--space-1) var(--space-2);
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--color-plan-progress-bg);
   border-radius: var(--radius-full);
 }
 
@@ -3336,12 +3336,12 @@ function toggleResult(id: string): void {
 
 .plan-step-in_progress {
   color: var(--color-text);
-  background: rgba(245, 158, 11, 0.08);
+  background: var(--color-plan-active-bg);
 }
 
 .plan-step-in_progress .plan-step-icon {
-  color: #f59e0b;
-  background: rgba(245, 158, 11, 0.15);
+  color: var(--color-plan-active-icon);
+  background: var(--color-plan-active-icon-bg);
   animation: plan-step-pulse 1.5s ease-in-out infinite;
 }
 
