@@ -2272,33 +2272,47 @@ def _run_semgrep_local(repo_path: str, config: str) -> dict:
     return _parse_semgrep_json(result.stdout, repo_path)
 
 
+# Ubuntu 24.04 系统 Python 是 PEP 668 externally-managed,直接 pip install 会被拒;
+# 沙箱以非 root user 运行,用 --user 装到 ~/.local/bin,--break-system-packages 绕过 PEP 668
+# (沙箱是一次性环境,污染系统包的风险可接受)
+_SEMGREP_PATH_PREFIX = 'export PATH="$HOME/.local/bin:$PATH"; '
+
+
 def _run_semgrep_sandbox(ctx: dict, repo_path: str, config: str) -> dict:
     """sandbox 模式:在沙箱里运行 semgrep"""
     session: SandboxSession = ctx["session"]
 
-    # 先检查 semgrep 是否已安装
-    check = session.run_command("which semgrep || echo MISSING")
+    # 先检查 semgrep 是否已安装(带 ~/.local/bin,兜底 --user 安装的场景)
+    check = session.run_command(_SEMGREP_PATH_PREFIX + "command -v semgrep || echo MISSING")
     if "MISSING" in check:
-        # 尝试 pip 安装
+        # 尝试 pip 安装(semgrep wheel 几十 MB,国内直连 PyPI 慢,超时给足)
         logger.info("[sandbox] semgrep 未安装,尝试 pip install semgrep")
         install_result = session.run_command(
-            "pip install semgrep 2>&1 | tail -5", timeout=180
+            "pip install --user --break-system-packages semgrep 2>&1 | tail -5",
+            timeout=300,
         )
+        logger.info(f"[sandbox] semgrep 安装输出: {install_result.strip()[-300:]}")
         # 再次检查
-        check2 = session.run_command("which semgrep || echo MISSING")
+        check2 = session.run_command(_SEMGREP_PATH_PREFIX + "command -v semgrep || echo MISSING")
         if "MISSING" in check2:
             return {
                 "findings": [],
                 "total": 0,
                 "truncated": False,
-                "error": "semgrep 安装失败,请检查沙箱镜像或手动安装",
+                "error": (
+                    "semgrep 安装失败,请检查沙箱镜像或手动安装。"
+                    f"安装输出: {install_result.strip()[-300:]}"
+                ),
             }
 
     # 运行 semgrep,输出 JSON
     # --json 输出到 stdout
     # --quiet 只输出结果,不输出 banner
     # --config auto 自动选规则
-    cmd = f"semgrep --json --quiet --config {shlex.quote(config)} {shlex.quote(repo_path)}"
+    cmd = (
+        _SEMGREP_PATH_PREFIX
+        + f"semgrep --json --quiet --config {shlex.quote(config)} {shlex.quote(repo_path)}"
+    )
     logger.info(f"[sandbox] semgrep: {cmd}")
     output = session.run_command(cmd, timeout=300)  # semgrep 可能慢,5 分钟超时
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 构建 AgentPair 沙箱镜像(预装 git / ripgrep / python3 / awk / find)
+# 构建 AgentPair 沙箱镜像(预装 git / ripgrep / python3 / awk / find / semgrep)
 #
 # 默认同时预装五款 CLI 执行器:
 #   - Qoder CLI(国际版):Node.js + @qoder-ai/qodercli,需 qoder.com 账号
@@ -302,6 +302,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3 /usr/bin/python
+
+# ---- Semgrep(内置 react_agent 的 run_semgrep 工具依赖)----
+# 预装进镜像,避免首次任务运行时 pip install(慢 + 非 root 用户撞 PEP 668)。
+# 未预装时 run_semgrep 也会兜底自动安装(--user --break-system-packages),但首次耗时长。
+RUN pip install --no-cache-dir --break-system-packages semgrep \
+    && semgrep --version
 EOF
 
     # ---- 追加 Node.js(若任一 Node 类 CLI 启用)----
@@ -482,7 +488,7 @@ echo "[OK] 镜像构建完成"
 # ---------- 验证镜像内工具 ----------
 echo "[INFO] 验证镜像内必要工具 ..."
 MISSING=0
-for cmd in git rg python3 awk find curl; do
+for cmd in git rg python3 awk find curl semgrep; do
     if docker run --rm "$IMAGE_NAME:$IMAGE_TAG" bash -lc "command -v $cmd" >/dev/null 2>&1; then
         echo "  [OK]   $cmd"
     else
