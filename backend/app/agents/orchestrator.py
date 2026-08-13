@@ -22,6 +22,7 @@
 """
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -39,6 +40,7 @@ from app.models.task import Conversation, Result, Task, TaskStatus
 from app.models.user import User
 from app.models.user_llm_config import UserLLMConfig
 from app.pause_controller import clear_pause_state, wait_if_paused
+from app.perf import perf_log
 from app.security import decrypt_secret
 from app.tools import sandbox_tools
 from app.tools.schema import set_current_git_tokens, set_current_task
@@ -81,6 +83,12 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
     max_rounds = int(agent_policy.get("max_rounds", MAX_ROUNDS))
     logger.info(
         f"[task={task.id}] user_agent_enabled={ua_enabled}, max_rounds={max_rounds}"
+    )
+    # [perf] 任务启动锚点(含 ua 启停 + 执行器类型,供四次对照实验分组)
+    perf_log(
+        task.id, "task_start",
+        ua_enabled=ua_enabled, executor=(task.executor or "builtin"),
+        max_rounds=max_rounds,
     )
 
     task.status = TaskStatus.RUNNING
@@ -145,7 +153,12 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         # 修复 9:repo_context 不再拼到 effective_intent(避免膨胀所有轮次的
         #   user_agent 输入),改为单独传参给 round 0 的 user_agent 调用
         # clone 失败(https+ssh 都不行)抛异常,由外层 except 捕获 → 任务 failed
+        _t0 = time.perf_counter()
         repo_path, repo_context = _prepare_repo_context(task, db, task_id_str, git_tokens)
+        perf_log(
+            task.id, "prepare_repo_context", time.perf_counter() - _t0,
+            has_repo=bool((task.params or {}).get("repo_url")),
+        )
 
         # ===== 单 agent 模式:user_agent 已禁用,跳过评估/打断/验证 =====
         # react_agent 只跑 1 轮,用 summary 作为唯一结构化结果(无 covered/missing 提取)
@@ -155,6 +168,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             db.commit()
             _publish_status(task)
 
+            _t0 = time.perf_counter()
             _results, summary, _plan = executor.run(
                 task, db,
                 round_idx=1,
@@ -164,6 +178,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 previous_plan=None,
                 agent_policy=agent_policy,
             )
+            perf_log(task.id, "executor_run", time.perf_counter() - _t0, round_idx=1, executor=executor.name)
             react_summaries.append({"round": 1, "summary": summary})
 
             # 用 summary 作为唯一结构化结果(user_agent 已禁用,不做结构化提取)
@@ -218,6 +233,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         ua_result_0: dict | None = None
         ask_round = 0
         while True:
+            _t0 = time.perf_counter()
             ua_result_0 = run_user_agent(
                 effective_intent, [],
                 task_id=task.id, db=db, round_idx=0,
@@ -230,6 +246,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 task=task,
                 agent_policy=agent_policy,
             )
+            perf_log(task.id, "ua_eval", time.perf_counter() - _t0, round_idx=0)
 
             # user_agent 没请求提问 → 提问循环结束,进入协作阶段
             if not ua_result_0.get("ask_user"):
@@ -334,6 +351,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             # 执行器抽象:按 task.executor 选择 builtin / 外部 CLI provider
             # client=react_client:builtin 用它执行;CLI 忽略
             is_first = round_idx == 1
+            _t0 = time.perf_counter()
             _results, summary, current_plan = executor.run(
                 task, db,
                 round_idx=round_idx,
@@ -343,6 +361,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 previous_plan=current_plan if not is_first else None,
                 agent_policy=agent_policy,
             )
+            perf_log(task.id, "executor_run", time.perf_counter() - _t0, round_idx=round_idx, executor=executor.name)
 
             react_summaries.append({
                 "round": round_idx,
@@ -357,6 +376,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             db.commit()
             _publish_status(task)
 
+            _t0 = time.perf_counter()
             ua_result = run_user_agent(
                 effective_intent, react_summaries,
                 task_id=task.id, db=db, round_idx=round_idx,
@@ -369,6 +389,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 task=task,
                 agent_policy=agent_policy,
             )
+            perf_log(task.id, "ua_eval", time.perf_counter() - _t0, round_idx=round_idx)
             _record_user_agent(db, task, round_idx, ua_result)
 
             if ua_result.get("done"):
@@ -1068,12 +1089,20 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
     # 起始 round = max(Conversation.round_idx) + 1,最多再跑 MAX_RESUME_ROUNDS 轮
     start_round_idx = _get_next_round_idx(db, task.id)
     max_rounds = start_round_idx + MAX_RESUME_ROUNDS - 1
+    # [perf] resume 锚点(用户追加消息后重启;与 user_message 锚点配对算总延迟)
+    perf_log(
+        task.id, "resume_start",
+        ua_enabled=ua_enabled, executor=executor.name,
+        start_round=start_round_idx,
+    )
 
     # 重启路径不走 _prepare_repo_context,补写记忆文件(幂等:会话存活时覆盖同内容,
     # 会话已被回收时重建文件,保证执行侧 read_file 能查到全量记忆)
+    _t0 = time.perf_counter()
     _write_memory_files_for_task(
         task, db, task_id_str, (task.params or {}).get("repo_url"),
     )
+    perf_log(task.id, "write_memory_files", time.perf_counter() - _t0)
 
     # 把用户消息拼到 user_intent 后面,让 user_agent 把它视为新的检查方向
     effective_intent = task.user_input + f"\n\n[用户追加消息]\n{user_message}"
@@ -1086,6 +1115,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
             db.commit()
             _publish_status(task)
 
+            _t0 = time.perf_counter()
             _results, summary, current_plan = executor.run(
                 task, db,
                 round_idx=start_round_idx,
@@ -1095,6 +1125,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
                 previous_plan=None,
                 agent_policy=agent_policy,
             )
+            perf_log(task.id, "executor_run", time.perf_counter() - _t0, round_idx=start_round_idx, executor=executor.name)
             react_summaries.append({"round": start_round_idx, "summary": summary})
 
             # 用 summary 作为唯一结构化结果
@@ -1118,6 +1149,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
         db.commit()
         _publish_status(task)
 
+        _t0 = time.perf_counter()
         ua_result = run_user_agent(
             effective_intent, react_summaries,
             task_id=task.id, db=db, round_idx=start_round_idx,
@@ -1129,6 +1161,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
             task=task,
             agent_policy=agent_policy,
         )
+        perf_log(task.id, "ua_eval", time.perf_counter() - _t0, round_idx=start_round_idx, phase="analyze_message")
         _record_user_agent(db, task, start_round_idx, ua_result)
 
         # user_agent 认为用户消息无需新检查,直接结束
@@ -1147,6 +1180,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
             db.commit()
             _publish_status(task)
 
+            _t0 = time.perf_counter()
             _results, summary, current_plan = executor.run(
                 task, db,
                 round_idx=round_idx,
@@ -1156,6 +1190,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
                 previous_plan=current_plan if round_idx > start_round_idx + 1 else None,
                 agent_policy=agent_policy,
             )
+            perf_log(task.id, "executor_run", time.perf_counter() - _t0, round_idx=round_idx, executor=executor.name)
             react_summaries.append({"round": round_idx, "summary": summary})
 
             # 暂停检查点:react_agent 跑完后、user_agent 评估前
@@ -1165,6 +1200,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
             db.commit()
             _publish_status(task)
 
+            _t0 = time.perf_counter()
             ua_result = run_user_agent(
                 effective_intent, react_summaries,
                 task_id=task.id, db=db, round_idx=round_idx,
@@ -1176,6 +1212,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
                 task=task,
                 agent_policy=agent_policy,
             )
+            perf_log(task.id, "ua_eval", time.perf_counter() - _t0, round_idx=round_idx)
             _record_user_agent(db, task, round_idx, ua_result)
 
             if ua_result.get("done"):

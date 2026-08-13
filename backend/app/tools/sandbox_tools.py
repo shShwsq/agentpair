@@ -24,6 +24,7 @@ from typing import Any
 from app.config import settings
 from app.event_bus import publish as publish_event
 from app.git_provider import get_provider_for_url
+from app.perf import perf_log, perf_timer
 from app.sandbox.client import SandboxSession, check_local_write_permission, create_sandbox
 from app.user_interaction import (
     request_command_confirm,
@@ -53,13 +54,18 @@ _GLOBAL_MEMORY_FILE = "global_memory.md"
 def _get_or_create_session(task_id: str) -> dict[str, Any]:
     """获取或创建任务的沙箱上下文"""
     if task_id not in _sessions:
-        session = create_sandbox()
+        # [perf] 新建沙箱会话(拉镜像/启容器/等 healthy,可能是大耗时点)
+        with perf_timer(task_id, "sandbox_session", reused=False, mode=settings.SANDBOX_MODE):
+            session = create_sandbox()
         ctx = {"session": session, "repo_path": "", "mode": settings.SANDBOX_MODE}
         # local 模式:复用 SandboxSession 自有的本地临时目录(单一临时目录,
         # 避免过去 session 一份、ctx 一份的双份临时目录问题)
         if settings.SANDBOX_MODE == "local":
             ctx["local_dir"] = session.local_dir
         _sessions[task_id] = ctx
+    else:
+        # [perf] 复用已有会话(无容器创建开销)
+        perf_log(task_id, "sandbox_session", reused=True)
     return _sessions[task_id]
 
 

@@ -36,6 +36,7 @@ from app.pause_controller import (
     pause_task,
     resume_task,
 )
+from app.perf import perf_log
 from app.scenarios.base import list_scenarios
 from app.schemas.task import (
     AnswerRequest,
@@ -764,6 +765,9 @@ def submit_task_message(
     content = (req.content or "").strip()
     if not content:
         raise HTTPException(status_code=422, detail="消息内容不能为空")
+
+    # [perf] 用户发消息锚点(与 resume_start / llm_ttft / acp_first_event 配对算端到端延迟)
+    perf_log(task_id, "user_message", status=task.status.value, msg_chars=len(content))
 
     # 拒绝 pending / failed 状态
     if task.status in (TaskStatus.PENDING, TaskStatus.FAILED):

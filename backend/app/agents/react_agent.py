@@ -16,6 +16,7 @@
 import json
 import logging
 import re
+import time
 import uuid
 from typing import Any
 
@@ -26,6 +27,7 @@ from app.event_bus import publish
 from app.llm.client import LLMClient
 from app.models.task import Conversation, Task
 from app.pause_controller import wait_if_paused
+from app.perf import perf_log
 from app.tools.schema import execute_tool, get_all_tools, set_current_task
 from app.user_messages import drain_user_messages
 
@@ -168,6 +170,12 @@ def run_react_agent(
         executor_command_confirm=executor_command_confirm,
     )
 
+    # [perf] react_agent 进入锚点(与 executor_run / llm_ttft 串起时间线)
+    perf_log(
+        task.id, "react_agent_enter",
+        round_idx=round_idx, followup=followup_query is not None,
+    )
+
     # 场景降级后:用通用 prompt,工具全部开放(不再按场景过滤)
     system_prompt = REACT_AGENT_SYSTEM_PROMPT
     tools = get_all_tools()
@@ -229,7 +237,13 @@ def run_react_agent(
         # 三级压缩:Level 0(完整) → Level 1(丢工具摘要) → Level 2(LLM 压缩早期轮次)
         # client 提前构造,供 LLM 压缩使用(若传入的 client 为 None,临时构造一个)
         history_client = client or LLMClient()
+        # [perf] 历史记忆构造(Level 2 会同步调 LLM 压缩,可能是大耗时点)
+        _t0 = time.perf_counter()
         history_prefix = _build_history_context(db, task.id, round_idx, client=history_client)
+        perf_log(
+            task.id, "build_history", time.perf_counter() - _t0,
+            round_idx=round_idx, chars=len(history_prefix),
+        )
 
         user_msg = (
             f"基于之前的审计结果,现在请针对以下问题继续检查(不需要重新 clone 仓库):"
@@ -749,7 +763,18 @@ def _stream_llm_response(
     })
 
     try:
+        # [perf] 首 token 延迟(TTFT):从发起流式调用到收到第一个 chunk)
+        _perf_t0 = time.perf_counter()
+        _perf_first_chunk = True
         for chunk in client.chat_stream(messages, tools=tools, tool_choice="auto", max_tokens=4096):
+            if _perf_first_chunk:
+                _perf_first_chunk = False
+                perf_log(
+                    task_id, "llm_ttft", time.perf_counter() - _perf_t0,
+                    round_idx=round_idx, iteration=iteration,
+                    prompt_chars=sum(len(str(m.get("content") or "")) for m in messages),
+                    tools=len(tools) if tools else 0,
+                )
             # 思考链增量
             if chunk.reasoning_delta:
                 reasoning_full += chunk.reasoning_delta
@@ -803,6 +828,12 @@ def _stream_llm_response(
                     f"reasoning={len(reasoning_full)}字符, content={len(content_full)}字符, "
                     f"tool_calls={len(tool_calls_acc)}"
                 )
+        # [perf] 单次流式调用总耗时(含全部 token 生成)
+        perf_log(
+            task_id, "llm_stream_total", time.perf_counter() - _perf_t0,
+            round_idx=round_idx, iteration=iteration,
+            finish=finish_reason or "unknown",
+        )
     except Exception as e:
         logger.exception(f"[task={task.id}] react_agent 流式调用失败")
         # 推送错误 delta
@@ -1410,6 +1441,8 @@ def _llm_compress_history(
         client.enable_thinking = False
         try:
             collected: list[str] = []
+            # [perf] Level 2 历史压缩的 LLM 调用(阻塞在首个可见响应之前)
+            _t0 = time.perf_counter()
             for chunk in client.chat_stream(
                 [{"role": "user", "content": prompt}],
                 max_tokens=2048,
@@ -1419,6 +1452,11 @@ def _llm_compress_history(
                 if chunk.finish_reason in ("stop", "length"):
                     break
             compressed = "".join(collected).strip()
+            perf_log(
+                "-", "history_compress", time.perf_counter() - _t0,
+                incremental=bool(old_summary),
+                input_chars=len(history_text), output_chars=len(compressed),
+            )
             if compressed:
                 return compressed
         finally:

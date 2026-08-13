@@ -42,6 +42,7 @@ from app.config import settings
 from app.event_bus import publish
 from app.models.task import Conversation, Task
 from app.models.user_agent_config import UserAgentConfig
+from app.perf import perf_log
 from app.security import decrypt_secret
 from app.tools import sandbox_tools
 from app.tools.schema import set_current_task
@@ -944,6 +945,9 @@ class _ACPCollector:
         # 最近工具调用快照(供检查点评估使用)
         self._last_tool_intent = "(无工具调用)"
         self._last_tool_result = "(无工具结果)"
+        # [perf] 首个 ACP 事件到达时间(collector 创建 ≈ prompt 发送前一刻)
+        self._perf_t0 = time.perf_counter()
+        self._perf_first_logged = False
 
     def _ensure_iter_started(self) -> None:
         """懒启动:首个 delta 到达时推送 phase=start"""
@@ -1045,6 +1049,14 @@ class _ACPCollector:
 
     def __call__(self, msg: dict) -> None:
         """处理一条 ACP 通知"""
+        # [perf] 首个 ACP 事件 = CLI 侧首 token 到达(前端可见响应的起点)
+        if not self._perf_first_logged:
+            self._perf_first_logged = True
+            perf_log(
+                self.task.id, "acp_first_event",
+                time.perf_counter() - self._perf_t0,
+                round_idx=self.round_idx, agent_type=self._agent_type,
+            )
         params_preview = msg.get("params") or {}
         update_preview = params_preview.get("update") or {}
         logger.debug(
@@ -1771,6 +1783,13 @@ def run_acp_agent(
     task_id_str = str(task.id)
     set_current_task(task_id_str, task.scenario)
 
+    # [perf] CLI 执行器进入锚点
+    perf_log(
+        task.id, "acp_enter",
+        agent_type=agent_type, round_idx=round_idx,
+        followup=followup_query is not None,
+    )
+
     # ---- 校验 agent 类型已注册 ----
     if get_agent_meta(agent_type) is None:
         raise RuntimeError(f"agent 类型未注册: {agent_type}")
@@ -1804,23 +1823,31 @@ def run_acp_agent(
     global_memory = _load_global_memory(db, task)
 
     # ---- 准备 CLI 环境 ----
+    _t0 = time.perf_counter()
     _ensure_cli_env(session, agent_type)
+    perf_log(task.id, "acp_ensure_cli_env", time.perf_counter() - _t0, agent_type=agent_type)
 
     # ---- wrapper 层钩子:bridge 启动前的沙箱文件准备 ----
     # hermes 用此回调写入 ~/.hermes/config.yaml(模型/provider/base_url 配置)
     # codex 用此回调写入 ~/.codex/config.toml(按 task.params 决定 approval_policy)
     if pre_bridge_hook:
+        _t0 = time.perf_counter()
         pre_bridge_hook(session, credentials, agent_type, task)
+        perf_log(task.id, "acp_pre_bridge_hook", time.perf_counter() - _t0, agent_type=agent_type)
 
     # ---- 启动 ACP bridge ----
+    _t0 = time.perf_counter()
     bridge_exec_id = _start_acp_bridge(session, credential_envs, task, agent_type=agent_type)
+    perf_log(task.id, "acp_start_bridge", time.perf_counter() - _t0, agent_type=agent_type)
 
     endpoint_url, endpoint_headers = session.get_endpoint(ACP_BRIDGE_PORT)
 
     try:
+        _t0 = time.perf_counter()
         _wait_for_bridge_ready(
             session, bridge_exec_id, endpoint_url, endpoint_headers, agent_type
         )
+        perf_log(task.id, "acp_wait_bridge_ready", time.perf_counter() - _t0, agent_type=agent_type)
 
         # ---- ACP 通信 ----
         recorder = _ACPRecorder(task.id, round_idx)
@@ -1854,7 +1881,9 @@ def run_acp_agent(
                            permission_handler=_permission_handler)
         try:
             # 握手
+            _t0 = time.perf_counter()
             init_result = client.initialize()
+            perf_log(task.id, "acp_initialize", time.perf_counter() - _t0, agent_type=agent_type)
 
             # 跳过 authenticate,直接 session/new
             # 凭证经环境变量注入后内部已自动认证,session/new 可直接成功。
@@ -1868,6 +1897,7 @@ def run_acp_agent(
 
             # 创建会话(cwd 设为仓库路径)
             cwd = repo_path or BRIDGE_WORK_DIR
+            _t0 = time.perf_counter()
             try:
                 acp_session_id = client.new_session(cwd=cwd)
             except RuntimeError as e:
@@ -1880,11 +1910,14 @@ def run_acp_agent(
                 if bridge_detail:
                     raise RuntimeError(f"{e}\n\n[CLI 日志]\n{bridge_detail}") from e
                 raise
+            perf_log(task.id, "acp_new_session", time.perf_counter() - _t0, agent_type=agent_type)
 
             # ---- wrapper 层钩子:session/new 后的自定义设置 ----
             # kimi 在此调 set_config_option(mode=yolo) 等
             if post_session_setup:
+                _t0 = time.perf_counter()
                 post_session_setup(client, acp_session_id, task)
+                perf_log(task.id, "acp_post_session_setup", time.perf_counter() - _t0, agent_type=agent_type)
 
             # ---- 构造 prompt 消息 ----
             # 落库只存纯指令(前端展示不含记忆注入段);实际发送拼上记忆段
@@ -1952,6 +1985,8 @@ def run_acp_agent(
                 # 若有中断则用追问指令发起新 prompt(同 session,CLI 保留对话历史)
                 current_msg = user_msg
                 while True:
+                    # [perf] prompt 发送锚点(CLI 侧 TTFT 由 acp_first_event 记录)
+                    perf_log(task.id, "acp_prompt_send", round_idx=round_idx, msg_chars=len(current_msg))
                     result = client.prompt(
                         acp_session_id,
                         [{"type": "text", "text": current_msg}],
