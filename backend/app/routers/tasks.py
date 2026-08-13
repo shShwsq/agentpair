@@ -1473,7 +1473,6 @@ def _append_result_html(
 def stream_task_events(
     task_id: uuid.UUID,
     request: Request,
-    db: Session = Depends(get_db),
     current_user: User | None = Depends(get_optional_user_sse),
 ) -> StreamingResponse:
     """SSE 端点:实时推送任务事件
@@ -1486,19 +1485,30 @@ def stream_task_events(
     - error: 任务失败(终止事件)
 
     前端用 EventSource 连接,每条事件 data 字段是 JSON。
+
+    注意:不用 Depends(get_db) —— 其会话要等流式响应完全结束才释放,
+    而 SSE 连接贯穿整个任务生命周期(可达数十分钟),长占连接会耗尽
+    连接池(pool_size=5 + overflow=10),导致其它请求(切路由加载列表等)
+    全部排队卡死。这里改用短会话:鉴权/取状态快照后立即关闭。
     """
-    # 鉴权 + 任务存在性检查
-    task = db.get(Task, task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    if task.user_id is not None:
-        if current_user is None or current_user.id != task.user_id:
-            raise HTTPException(status_code=403, detail="无权访问此任务")
+    # 鉴权 + 任务存在性检查(短会话,取完快照立即归还连接)
+    db = SessionLocal()
+    try:
+        task = db.get(Task, task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        if task.user_id is not None:
+            if current_user is None or current_user.id != task.user_id:
+                raise HTTPException(status_code=403, detail="无权访问此任务")
+        initial_status = task.status
+        initial_stage = task.current_stage
+    finally:
+        db.close()
 
     task_id_str = str(task_id)
 
     def event_generator() -> Generator[str, None, None]:
-        """SSE 事件生成器"""
+        """SSE 事件生成器(不碰数据库,只用上面的状态快照)"""
         q = subscribe(task_id_str)
         try:
             # 先推送一个 connected 事件(带当前状态,前端可据此判断是否已结束)
@@ -1506,19 +1516,19 @@ def stream_task_events(
                 "type": "connected",
                 "task_id": task_id_str,
                 "data": {
-                    "status": task.status.value if hasattr(task.status, 'value') else str(task.status),
-                    "current_stage": task.current_stage,
+                    "status": initial_status.value if hasattr(initial_status, 'value') else str(initial_status),
+                    "current_stage": initial_stage,
                 },
                 "timestamp": "",
             }
             yield _format_sse(connected_event)
 
             # 若任务已结束,直接推一个终止事件然后关闭
-            if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+            if initial_status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
                 done_event = {
-                    "type": "done" if task.status == TaskStatus.COMPLETED else "error",
+                    "type": "done" if initial_status == TaskStatus.COMPLETED else "error",
                     "task_id": task_id_str,
-                    "data": {"status": task.status.value},
+                    "data": {"status": initial_status.value},
                     "timestamp": "",
                 }
                 yield _format_sse(done_event)

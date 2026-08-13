@@ -24,6 +24,7 @@ from typing import Any
 from app.config import settings
 from app.event_bus import publish as publish_event
 from app.git_provider import get_provider_for_url
+from app.pause_controller import wait_if_paused
 from app.perf import perf_log, perf_timer
 from app.sandbox.client import SandboxSession, check_local_write_permission, create_sandbox
 from app.user_interaction import (
@@ -210,6 +211,22 @@ def _clone_depth_args() -> list[str]:
     return ["--depth", str(depth)] if depth > 0 else []
 
 
+def _pause_checkpoint(task_id: str, deadline: float) -> float:
+    """clone 轮询循环的暂停检查点:已暂停则阻塞到恢复,返回顺延后的 deadline
+
+    暂停期间不计入克隆超时(否则卡住的 clone 会在暂停中吃满 timeout,
+    恢复即报超时)。未暂停时立即返回原 deadline,几乎零开销。
+    """
+    if not task_id:
+        return deadline
+    t0 = time.monotonic()
+    wait_if_paused(task_id)
+    paused_for = time.monotonic() - t0
+    if paused_for > 0.1:
+        logger.info(f"[clone] task={task_id} 暂停 {paused_for:.0f}s 后恢复克隆轮询")
+    return deadline + paused_for
+
+
 def _clone_repo_local(ctx: dict, clone_url: str, repo_name: str, branch: str | None, task_id: str = "") -> dict:
     """local 模式:本地 git clone(Popen 流式读进度 + 推 SSE)
 
@@ -273,6 +290,8 @@ def _clone_repo_local(ctx: dict, clone_url: str, repo_name: str, branch: str | N
             ret = proc.poll()
             if ret is not None:
                 break
+            # 暂停检查点:已暂停则阻塞到恢复,暂停时长不计入超时
+            deadline = _pause_checkpoint(task_id, deadline)
             if time.monotonic() > deadline:
                 proc.kill()
                 reader.join(timeout=2)
@@ -358,6 +377,10 @@ def _clone_repo_sandbox(ctx: dict, clone_url: str, repo_name: str, branch: str |
 
     try:
         while True:
+            # 暂停检查点:已暂停则阻塞到恢复(放在轮询顶部,暂停期间
+            # 不发 HTTP 请求),暂停时长不计入超时
+            deadline = _pause_checkpoint(task_id, deadline)
+
             # 1) 进度:读进度文件,按 \r/\n 拆行取最新进度行推前端
             try:
                 last_content = session.read_file(progress_file)
