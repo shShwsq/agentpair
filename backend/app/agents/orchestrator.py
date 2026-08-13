@@ -437,16 +437,12 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         db.commit()
         _publish_status(task)
 
-        # user_agent 最终总结
+        # user_agent 最终总结:只展示最终评估本身
+        # (轮次/结果数等元信息在任务概览与结果清单已可见,不在对话流重复)
         _add_conversation(
             db, task, round_idx=len(react_summaries),
             role="user_agent", type="summary",
-            content=(
-                f"双智能体协作完成。\n"
-                f"协作轮次: {len(react_summaries)}\n"
-                f"结果总数: {all_results_count}\n"
-                f"user_agent 最终评估: {ua_result.get('reasoning', '')}"
-            ),
+            content=ua_result.get("reasoning") or "(未给出最终评估)",
         )
 
         # 提前推送 done 事件:results 已落库,让前端立即拉取展示
@@ -1317,14 +1313,11 @@ def _finish_resume(
     db.commit()
     _publish_status(task)
     if ua_result is not None:
+        # 与主流程一致:总结只展示最终评估本身
         _add_conversation(
             db, task, round_idx=len(react_summaries),
             role="user_agent", type="summary",
-            content=(
-                f"重启执行完成。\n"
-                f"协作轮次: {len(react_summaries)}\n"
-                f"user_agent 最终评估: {ua_result.get('reasoning', '')}"
-            ),
+            content=ua_result.get("reasoning") or "(未给出最终评估)",
         )
 
     # 提前推送 done 事件:results 已落库,让前端立即拉取展示
