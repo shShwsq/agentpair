@@ -991,7 +991,7 @@ interface StepGroup {
   kind: 'step'
   /** step 唯一标识:`${roundIdx}-step-${stepId}` 或 `${roundIdx}-nostep` */
   id: string
-  /** step 文字(无 plan 时为"审计过程") */
+  /** step 文字(无 plan 时为"执行过程") */
   text: string
   /** step 状态(无 plan 时为 in_progress) */
   status: PlanStep['status'] | 'none'
@@ -1139,13 +1139,13 @@ function segmentRoundItems(
   closeCurrent()
 
   // 第二阶段:按 plan step 分组迭代
-  // 无 plan 时,所有迭代归入单个"审计过程"组(保持折叠体验一致)
+  // 无 plan 时,所有迭代归入单个"执行过程"组(保持折叠体验一致)
   const segments: RoundSegment[] = []
   const stepGroupsMap = new Map<number, StepGroup>()
   const noStepGroup: StepGroup = {
     kind: 'step',
     id: `${roundIdx}-nostep`,
-    text: '审计过程',
+    text: '执行过程',
     status: 'none',
     iterations: [],
     hasStreaming: false,
@@ -1802,7 +1802,7 @@ function handleMessageSent(_resp: SendMessageResponse): void {
   if (task.value?.status === 'completed') {
     // 后端 resume 线程已把状态改回 RUNNING,本地同步 + 重连 SSE
     task.value.status = 'running'
-    task.value.current_stage = '用户追加消息,重启审计'
+    task.value.current_stage = '用户追加消息,重启执行'
     connectSSE(String(task.value.id))
   }
   nextTick(scrollToBottom)
@@ -2047,7 +2047,7 @@ function parseCheckpoint(item: DisplayItem): {
                   </div>
                 </div>
 
-                <!-- step 分组:plan step 下含多个迭代(无 plan 时为单个"审计过程"组) -->
+                <!-- step 分组:plan step 下含多个迭代(无 plan 时为单个"执行过程"组) -->
                 <div
                   v-else-if="seg.kind === 'step'"
                   class="step-block"

@@ -996,7 +996,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
     task_id_str = str(task.id)
 
     task.status = TaskStatus.RUNNING
-    task.current_stage = "用户追加消息,重启审计"
+    task.current_stage = "用户追加消息,重启执行"
     task.error_message = None  # 清除之前的错误信息(若有)
     db.commit()
     _publish_status(task)
@@ -1197,13 +1197,13 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
 def _finish_resume(
     task: Task, db: Session, react_summaries: list[dict], ua_result: dict | None,
 ) -> None:
-    """重启审计完成:标记 task 状态 + 写最终总结对话
+    """重启执行完成:标记 task 状态 + 写最终总结对话
 
     ua_result=None 表示单 agent 模式(user_agent 已禁用):
     无 user_agent 评估可展示,不写总结对话。
     """
     task.status = TaskStatus.COMPLETED
-    task.current_stage = f"重启审计完成,共 {len(react_summaries)} 轮"
+    task.current_stage = f"重启执行完成,共 {len(react_summaries)} 轮"
     task.completed_at = datetime.now(timezone.utc)
     db.commit()
     _publish_status(task)
@@ -1212,7 +1212,7 @@ def _finish_resume(
             db, task, round_idx=len(react_summaries),
             role="user_agent", type="summary",
             content=(
-                f"重启审计完成。\n"
+                f"重启执行完成。\n"
                 f"协作轮次: {len(react_summaries)}\n"
                 f"user_agent 最终评估: {ua_result.get('reasoning', '')}"
             ),

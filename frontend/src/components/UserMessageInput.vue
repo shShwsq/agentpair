@@ -53,7 +53,7 @@ const placeholder = computed(() => {
     case 'paused':
       return '已暂停,可在此输入消息,恢复后智能体会处理...'
     case 'completed':
-      return '继续追问或追加要求,将启动新一轮审计...'
+      return '继续追问或追加要求,将启动新一轮执行...'
     case 'pending':
       return '任务尚未开始,暂不可发送消息'
     case 'failed':

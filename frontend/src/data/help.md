@@ -197,7 +197,7 @@ user_agent 第 0 轮根据你的任务说明动态生成覆盖度清单(3-8 个�
 
 到「CLI 设置」配置外部 CLI 凭据并启用,回到提交任务页即可看到新选项。
 
-### 想让 react_agent 自动按固定步骤审计?
+### 想让 react_agent 自动按固定步骤执行?
 
 到「技能管理」上传或使用内置技能(如 `check_sql_injection`),react_agent 会在合适时机主动调用。
 
