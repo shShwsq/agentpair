@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 构建 AgentPair 沙箱镜像(预装 git / ripgrep / python3 / awk / find / semgrep)
+# 构建 AgentPair 沙箱镜像(预装 git / ripgrep / python3 / awk / find,Semgrep 默认预装可 --no-semgrep 省略)
 #
 # 默认同时预装五款 CLI 执行器:
 #   - Qoder CLI(国际版):Node.js + @qoder-ai/qodercli,需 qoder.com 账号
@@ -23,6 +23,7 @@
 #   bash scripts/build-sandbox-image.sh --no-codex-cli                        # 不装 codex
 #   bash scripts/build-sandbox-image.sh --no-qoder-cli --no-kimi-cli          # 仅国内版 + hermes + codex
 #   bash scripts/build-sandbox-image.sh --no-qoder-cli --no-qoder-cli-cn --no-kimi-cli --no-codex-cli  # 仅 hermes
+#   bash scripts/build-sandbox-image.sh --no-semgrep                          # 不预装 Semgrep
 #
 # 国内镜像加速(服务器在国内时推荐,避免 docker.io 拉取超时):
 #   bash scripts/build-sandbox-image.sh --cn-mirror                           # 一键国内源(Docker+apt+npm+PyPI)
@@ -49,6 +50,8 @@ WITH_QODER_CLI_CN=1
 WITH_KIMI_CLI=1
 WITH_HERMES_CLI=1
 WITH_CODEX_CLI=1
+# Semgrep(内置 react_agent 的 run_semgrep 工具依赖),默认也装,可用 --no-semgrep 省略
+WITH_SEMGREP=1
 # 镜像源(国内加速),默认空 = 用官方源
 # - REGISTRY:Docker 基础镜像源前缀,如 docker.m.daocloud.io(非空时 FROM $REGISTRY/ubuntu:24.04)
 # - APT_MIRROR:apt 源,目前支持 aliyun(空 = 不换)
@@ -101,6 +104,14 @@ while [ $# -gt 0 ]; do
             WITH_CODEX_CLI=0
             shift
             ;;
+        --with-semgrep)
+            WITH_SEMGREP=1
+            shift
+            ;;
+        --no-semgrep)
+            WITH_SEMGREP=0
+            shift
+            ;;
         --registry)
             # 下一个参数为镜像源前缀
             if [ $# -lt 2 ]; then
@@ -132,6 +143,8 @@ while [ $# -gt 0 ]; do
             echo "  --no-hermes-cli        不装 hermes"
             echo "  --with-codex-cli       预装 Codex CLI(Node.js + npm,OpenAI 官方,需 LLM API Key)"
             echo "  --no-codex-cli         不装 codex"
+            echo "  --with-semgrep         预装 Semgrep(内置 react_agent 的 run_semgrep 工具用,默认装)"
+            echo "  --no-semgrep           不装 semgrep(不预装时 run_semgrep 首次运行会兜底自动安装,但耗时长)"
             echo ""
             echo "镜像源(服务器在国内时推荐,避免 docker.io 拉取超时):"
             echo "  --cn-mirror            一键国内加速(Docker DaoCloud + apt 阿里云 + npm npmmirror + PyPI 阿里云)"
@@ -191,6 +204,7 @@ expect_pypi_mirror_marker="${PYPI_MIRROR:-default}"
 #   # @kimi-cli:yes / # @kimi-cli:no          kimi 状态
 #   # @hermes-cli:yes / # @hermes-cli:no      hermes 状态
 #   # @codex-cli:yes / # @codex-cli:no        codex 状态
+#   # @semgrep:yes / # @semgrep:no            semgrep 状态
 NEED_REGEN=0
 REGEN_REASON=""
 expect_qoder_cli_marker=$([ "$WITH_QODER_CLI" -eq 1 ] && echo "yes" || echo "no")
@@ -198,6 +212,7 @@ expect_qoder_cli_cn_marker=$([ "$WITH_QODER_CLI_CN" -eq 1 ] && echo "yes" || ech
 expect_kimi_cli_marker=$([ "$WITH_KIMI_CLI" -eq 1 ] && echo "yes" || echo "no")
 expect_hermes_cli_marker=$([ "$WITH_HERMES_CLI" -eq 1 ] && echo "yes" || echo "no")
 expect_codex_cli_marker=$([ "$WITH_CODEX_CLI" -eq 1 ] && echo "yes" || echo "no")
+expect_semgrep_marker=$([ "$WITH_SEMGREP" -eq 1 ] && echo "yes" || echo "no")
 
 if [ ! -f "$DOCKERFILE" ]; then
     NEED_REGEN=1
@@ -208,6 +223,7 @@ else
     cur_kimi_cli=$(grep -E "^# @kimi-cli:" "$DOCKERFILE" | head -1 | sed 's/.*://' || echo "")
     cur_hermes_cli=$(grep -E "^# @hermes-cli:" "$DOCKERFILE" | head -1 | sed 's/.*://' || echo "")
     cur_codex_cli=$(grep -E "^# @codex-cli:" "$DOCKERFILE" | head -1 | sed 's/.*://' || echo "")
+    cur_semgrep=$(grep -E "^# @semgrep:" "$DOCKERFILE" | head -1 | sed 's/.*://' || echo "")
     cur_registry=$(grep -E "^# @registry:" "$DOCKERFILE" | head -1 | sed 's/^# @registry://' || echo "")
     cur_pypi_mirror=$(grep -E "^# @pypi-mirror:" "$DOCKERFILE" | head -1 | sed 's/^# @pypi-mirror://' || echo "")
     if [ "$cur_registry" != "$expect_registry_marker" ]; then
@@ -231,6 +247,10 @@ else
     elif [ "$cur_codex_cli" != "$expect_codex_cli_marker" ]; then
         NEED_REGEN=1
         REGEN_REASON="Codex 配置变更($cur_codex_cli → $expect_codex_cli_marker)"
+    elif [ "$cur_semgrep" != "$expect_semgrep_marker" ]; then
+        # 旧版 Dockerfile 无 @semgrep marker(cur_semgrep 为空)也会命中这里,自动重生成补上/去掉 semgrep
+        NEED_REGEN=1
+        REGEN_REASON="Semgrep 配置变更(${cur_semgrep:-无标记} → $expect_semgrep_marker)"
     elif [ "$WITH_QODER_CLI" -eq 1 ] && ! grep -q "qodercli" "$DOCKERFILE"; then
         NEED_REGEN=1
         REGEN_REASON="标记为含国际版但缺 qodercli 安装行,需重新生成"
@@ -246,6 +266,9 @@ else
     elif [ "$WITH_CODEX_CLI" -eq 1 ] && ! grep -q "@openai/codex" "$DOCKERFILE"; then
         NEED_REGEN=1
         REGEN_REASON="标记为含 Codex 但缺 @openai/codex 安装行,需重新生成"
+    elif [ "$WITH_SEMGREP" -eq 1 ] && ! grep -q "pip install.*semgrep" "$DOCKERFILE"; then
+        NEED_REGEN=1
+        REGEN_REASON="标记为含 Semgrep 但缺 semgrep 安装行,需重新生成"
     fi
 fi
 
@@ -266,6 +289,7 @@ if [ "$NEED_REGEN" -eq 1 ]; then
 # @kimi-cli:__KIMI_CLI_MARKER__
 # @hermes-cli:__HERMES_CLI_MARKER__
 # @codex-cli:__CODEX_CLI_MARKER__
+# @semgrep:__SEMGREP_MARKER__
 # @registry:__REGISTRY_MARKER__
 # @pypi-mirror:__PYPI_MIRROR_MARKER__
 FROM __BASE_IMAGE__
@@ -302,6 +326,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3 /usr/bin/python
+EOF
+
+    # ---- 追加 Semgrep(内置 react_agent 的 run_semgrep 工具依赖,默认装,--no-semgrep 可省略)----
+    if [ "$WITH_SEMGREP" -eq 1 ]; then
+        cat >> "$DOCKERFILE" <<'EOF'
 
 # ---- Semgrep(内置 react_agent 的 run_semgrep 工具依赖)----
 # 预装进镜像,避免首次任务运行时 pip install(慢 + 非 root 用户撞 PEP 668)。
@@ -309,6 +338,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir --break-system-packages semgrep \
     && semgrep --version
 EOF
+    fi
 
     # ---- 追加 Node.js(若任一 Node 类 CLI 启用)----
     # 统一装 Node 22.x:qodercli 要求 >= 20.0.0,kimi 要求 >= 22.19,22.x 两者都兼容
@@ -458,6 +488,7 @@ EOF
         -e "s/__KIMI_CLI_MARKER__/$expect_kimi_cli_marker/" \
         -e "s/__HERMES_CLI_MARKER__/$expect_hermes_cli_marker/" \
         -e "s/__CODEX_CLI_MARKER__/$expect_codex_cli_marker/" \
+        -e "s/__SEMGREP_MARKER__/$expect_semgrep_marker/" \
         -e "s/__REGISTRY_MARKER__/$expect_registry_marker/" \
         -e "s/__PYPI_MIRROR_MARKER__/$expect_pypi_mirror_marker/" \
         -e "s#__BASE_IMAGE__#$BASE_IMAGE#" \
@@ -469,6 +500,7 @@ EOF
     echo "     Kimi(kimi):$([ "$WITH_KIMI_CLI" -eq 1 ] && echo '装' || echo '不装')"
     echo "     Hermes(hermes):$([ "$WITH_HERMES_CLI" -eq 1 ] && echo '装' || echo '不装')"
     echo "     Codex(codex):$([ "$WITH_CODEX_CLI" -eq 1 ] && echo '装' || echo '不装')"
+    echo "     Semgrep(semgrep):$([ "$WITH_SEMGREP" -eq 1 ] && echo '装' || echo '不装')"
     echo "     镜像源:${REGISTRY:-默认(docker.io)}${APT_MIRROR:+ / apt=$APT_MIRROR}${NPM_MIRROR:+ / npm=$NPM_MIRROR}${PYPI_MIRROR:+ / pypi=$PYPI_MIRROR}"
 else
     echo "[INFO] $DOCKERFILE 已存在且符合要求,直接使用(如需重新生成请先删除)"
@@ -481,6 +513,7 @@ echo "       国内版(qoderclicn):$([ "$WITH_QODER_CLI_CN" -eq 1 ] && echo '含
 echo "       Kimi(kimi):$([ "$WITH_KIMI_CLI" -eq 1 ] && echo '含' || echo '不含')"
 echo "       Hermes(hermes):$([ "$WITH_HERMES_CLI" -eq 1 ] && echo '含' || echo '不含')"
 echo "       Codex(codex):$([ "$WITH_CODEX_CLI" -eq 1 ] && echo '含' || echo '不含')"
+echo "       Semgrep(semgrep):$([ "$WITH_SEMGREP" -eq 1 ] && echo '含' || echo '不含')"
 echo "       镜像源:${REGISTRY:-默认(docker.io)}${APT_MIRROR:+ / apt=$APT_MIRROR}${NPM_MIRROR:+ / npm=$NPM_MIRROR}${PYPI_MIRROR:+ / pypi=$PYPI_MIRROR}"
 docker build -f "$DOCKERFILE" -t "$IMAGE_NAME:$IMAGE_TAG" .
 echo "[OK] 镜像构建完成"
@@ -488,7 +521,7 @@ echo "[OK] 镜像构建完成"
 # ---------- 验证镜像内工具 ----------
 echo "[INFO] 验证镜像内必要工具 ..."
 MISSING=0
-for cmd in git rg python3 awk find curl semgrep; do
+for cmd in git rg python3 awk find curl; do
     if docker run --rm "$IMAGE_NAME:$IMAGE_TAG" bash -lc "command -v $cmd" >/dev/null 2>&1; then
         echo "  [OK]   $cmd"
     else
@@ -496,6 +529,15 @@ for cmd in git rg python3 awk find curl semgrep; do
         MISSING=1
     fi
 done
+
+if [ "$WITH_SEMGREP" -eq 1 ]; then
+    if docker run --rm "$IMAGE_NAME:$IMAGE_TAG" bash -lc "command -v semgrep" >/dev/null 2>&1; then
+        echo "  [OK]   semgrep"
+    else
+        echo "  [FAIL] semgrep 缺失"
+        MISSING=1
+    fi
+fi
 
 # Node 类 CLI 共享 Node.js 运行时,任一启用就验证 node/npm
 if [ "$NEED_NODE" -eq 1 ]; then
