@@ -182,14 +182,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             db.commit()
             _publish_status(task)
 
-            _add_conversation(
-                db, task, round_idx=len(react_summaries),
-                role="user_agent", type="summary",
-                content=(
-                    f"单 agent 模式执行完成(user_agent 已禁用)。\n"
-                    f"结果总数: {all_results_count}"
-                ),
-            )
+            # 单 agent 模式不写 user_agent 总结对话(无评估可展示,避免误导)
 
             # 提前推送 done 事件:results 已落库,让前端立即拉取展示
             publish(task.id, "done", {"status": "completed"})
@@ -1207,26 +1200,23 @@ def _finish_resume(
     """重启审计完成:标记 task 状态 + 写最终总结对话
 
     ua_result=None 表示单 agent 模式(user_agent 已禁用):
-    无 user_agent 评估可展示,只写一句简洁的完成提示。
+    无 user_agent 评估可展示,不写总结对话。
     """
     task.status = TaskStatus.COMPLETED
     task.current_stage = f"重启审计完成,共 {len(react_summaries)} 轮"
     task.completed_at = datetime.now(timezone.utc)
     db.commit()
     _publish_status(task)
-    if ua_result is None:
-        summary_content = "重启执行完成(单 agent 模式,user_agent 已禁用)。"
-    else:
-        summary_content = (
-            f"重启审计完成。\n"
-            f"协作轮次: {len(react_summaries)}\n"
-            f"user_agent 最终评估: {ua_result.get('reasoning', '')}"
+    if ua_result is not None:
+        _add_conversation(
+            db, task, round_idx=len(react_summaries),
+            role="user_agent", type="summary",
+            content=(
+                f"重启审计完成。\n"
+                f"协作轮次: {len(react_summaries)}\n"
+                f"user_agent 最终评估: {ua_result.get('reasoning', '')}"
+            ),
         )
-    _add_conversation(
-        db, task, round_idx=len(react_summaries),
-        role="user_agent", type="summary",
-        content=summary_content,
-    )
 
     # 提前推送 done 事件:results 已落库,让前端立即拉取展示
     # (归纳记忆和 git diff 是后台兜底任务,不阻塞前端结果清单展示)
