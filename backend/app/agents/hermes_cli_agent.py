@@ -200,7 +200,9 @@ def _hermes_credential_env_builder(
 # ============================================================
 
 
-def _hermes_pre_bridge_hook(session, credentials: dict[str, str], agent_type: str) -> None:
+def _hermes_pre_bridge_hook(
+    session, credentials: dict[str, str], agent_type: str, task: Task | None = None
+) -> None:
     """在 bridge 启动前向沙箱写入 ~/.hermes/config.yaml
 
     Hermes 的模型/provider/base_url 配置只能从 ~/.hermes/config.yaml 读取
@@ -213,6 +215,10 @@ def _hermes_pre_bridge_hook(session, credentials: dict[str, str], agent_type: st
           base_url: "<base_url>"   # 仅在有值时写入
 
     同时创建 ~/.hermes 目录(Hermes 启动时 load_hermes_dotenv 需要)。
+
+    task 形参当前未使用:命令确认模式(always_approve/per_command)经
+    credential_env_builder 中的 HERMES_YOLO_MODE 环境变量注入,无需在此读取。
+    保留参数以与 _codex_pre_bridge_hook 签名对齐(acp_base 调用约定为 4 参数)。
     """
     provider = (credentials.get("provider") or _DEFAULT_PROVIDER).strip()
     cfg = _PROVIDER_CONFIG.get(provider) or _PROVIDER_CONFIG[_DEFAULT_PROVIDER]
