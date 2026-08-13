@@ -998,11 +998,13 @@ class _ACPCollector:
         """检查点评估触发:每 K 个迭代边界做轻量评估
 
         在 _start_new_iteration 开头调用(此时 iteration 还是刚结束的迭代序号)。
-        只在配置了 agent_policy 且 allow_interrupt=true 时触发。
+        只在 user_agent 启用、配置了 agent_policy 且 allow_interrupt=true 时触发。
         前 2 个迭代不评估(给 CLI agent 启动时间)。
         """
         if not self._agent_policy or not self._checkpoint_callback:
             return
+        if not self._agent_policy.get("user_agent_enabled", True):
+            return  # 检查点评估是 user_agent 的能力,单 agent 模式完全关闭
         if not self._agent_policy.get("allow_interrupt", True):
             return
         if self.iteration < 2:
@@ -1866,7 +1868,9 @@ def run_acp_agent(
             # 在 _ACPCollector 的 _start_new_iteration 中被调用,
             # 评估结果若 interrupt=true 会写入中断队列,当前 prompt 结束后检查
             def _checkpoint_callback(iteration: int, snapshot: dict[str, Any]) -> None:
-                if not agent_policy or not agent_policy.get("allow_interrupt", True):
+                if not agent_policy or not agent_policy.get("user_agent_enabled", True):
+                    return  # user_agent 已禁用(单 agent 模式),不做检查点评估
+                if not agent_policy.get("allow_interrupt", True):
                     return
                 from app.agent_checkpoint import run_user_agent_checkpoint
                 from app.agent_interrupt import (

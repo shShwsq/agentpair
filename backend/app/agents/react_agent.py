@@ -500,9 +500,14 @@ def run_react_agent(
                     messages.append({"role": "system", "content": reminder})
 
         # user_agent 检查点评估:每 K 个迭代做轻量评估,判断方向是否跑偏
-        # 只在 allow_interrupt=true 且达到评估间隔时触发
+        # 只在 user_agent 启用、allow_interrupt=true 且达到评估间隔时触发
+        # (单 agent 模式下 user_agent 已禁用,检查点评估/打断完全关闭)
         # 前 2 个迭代不评估(给 react_agent 启动时间)
-        if agent_policy and agent_policy.get("allow_interrupt", True):
+        if (
+            agent_policy
+            and agent_policy.get("user_agent_enabled", True)
+            and agent_policy.get("allow_interrupt", True)
+        ):
             from app.agent_checkpoint import get_effective_interval, run_user_agent_checkpoint
             from app.agent_interrupt import (
                 get_interrupt_count,

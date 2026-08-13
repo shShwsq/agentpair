@@ -187,7 +187,6 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 role="user_agent", type="summary",
                 content=(
                     f"单 agent 模式执行完成(user_agent 已禁用)。\n"
-                    f"协作轮次: {len(react_summaries)}\n"
                     f"结果总数: {all_results_count}"
                 ),
             )
@@ -1079,10 +1078,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
                 db.add(result)
             db.commit()
 
-            ua_result = {
-                "reasoning": "user_agent 已禁用,直接产出 react_agent 执行结果",
-                "done": True,
-            }
+            ua_result = None  # 单 agent 模式无 user_agent 评估,_finish_resume 据此写简洁总结
             _finish_resume(task, db, react_summaries, ua_result)
             return  # finally 块仍会执行清理
 
@@ -1206,22 +1202,30 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
 
 
 def _finish_resume(
-    task: Task, db: Session, react_summaries: list[dict], ua_result: dict,
+    task: Task, db: Session, react_summaries: list[dict], ua_result: dict | None,
 ) -> None:
-    """重启审计完成:标记 task 状态 + 写最终总结对话"""
+    """重启审计完成:标记 task 状态 + 写最终总结对话
+
+    ua_result=None 表示单 agent 模式(user_agent 已禁用):
+    无 user_agent 评估可展示,只写一句简洁的完成提示。
+    """
     task.status = TaskStatus.COMPLETED
     task.current_stage = f"重启审计完成,共 {len(react_summaries)} 轮"
     task.completed_at = datetime.now(timezone.utc)
     db.commit()
     _publish_status(task)
-    _add_conversation(
-        db, task, round_idx=len(react_summaries),
-        role="user_agent", type="summary",
-        content=(
+    if ua_result is None:
+        summary_content = "重启执行完成(单 agent 模式,user_agent 已禁用)。"
+    else:
+        summary_content = (
             f"重启审计完成。\n"
             f"协作轮次: {len(react_summaries)}\n"
             f"user_agent 最终评估: {ua_result.get('reasoning', '')}"
-        ),
+        )
+    _add_conversation(
+        db, task, round_idx=len(react_summaries),
+        role="user_agent", type="summary",
+        content=summary_content,
     )
 
     # 提前推送 done 事件:results 已落库,让前端立即拉取展示
