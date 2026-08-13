@@ -58,6 +58,9 @@ MAX_ASKS = 2
 MAX_HISTORY_MSG_CHARS = 3000
 MAX_HISTORY_TOTAL_CHARS = 12000
 
+# 解析失败兜底时,展示在最终总结里的 user_agent 输出原文截断上限
+MAX_RAW_OUTPUT_CHARS = 3000
+
 # 固定追加的"是否有其他补充"问题(由后端追加,LLM 不负责生成)
 SUPPLEMENT_QUESTION_ID = "_supplement"
 SUPPLEMENT_QUESTION = {
@@ -465,17 +468,21 @@ def run_user_agent(
     except Exception as e:
         logger.error(f"user_agent 输出解析失败: {e},raw: {content[:500]}")
         # 兜底:直接宣布完成,避免无意义重跑把所有类别再来一遍(浪费 token)
-        # results 留空,orchestrator 落库 0 个结果;reasoning 记录失败原因供回查
-        last_summary = (
-            react_agent_summaries[-1].get("summary", "")
-            if react_agent_summaries else ""
-        )
+        # results 留空,orchestrator 落库 0 个结果。
+        # reasoning 展示 user_agent 输出原文(截断),供用户在最终总结里回查
+        # 实际产出——比只留一句"解析失败"更可追溯。
+        raw_output = (content or "").strip()
+        if len(raw_output) > MAX_RAW_OUTPUT_CHARS:
+            raw_output = (
+                raw_output[:MAX_RAW_OUTPUT_CHARS]
+                + f"\n...(原文过长已截断,共 {len(content)} 字符)"
+            )
         result = {
             "covered": [],
             "missing": [],
             "reasoning": (
                 f"user_agent 输出解析失败({e}),直接结束避免无意义重跑。"
-                f"最后一条 react_agent 总结:\n{last_summary[:500]}"
+                f"\n\n[user_agent 输出原文]\n{raw_output or '(空输出)'}"
             ),
             "followup_query": "",
             "done": True,

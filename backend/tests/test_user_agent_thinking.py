@@ -111,3 +111,40 @@ def test_no_db_no_task_still_returns_result():
         client=_mk_client(chunks), ask_round=0, task=None,
     )
     assert result["followup_query"] == "请检查 backend 目录"
+
+
+def test_parse_failure_fallback_shows_raw_output():
+    """JSON 解析失败 → 强制 done,reasoning 含输出原文(最终总结展示用)。"""
+    raw = "这段不是 JSON:审计发现三个高危问题……"
+    chunks = [
+        _MockChunk(content_delta=raw, finish_reason="stop"),
+    ]
+    result = run_user_agent(
+        "审查这个仓库", [{"round": 1, "summary": "第一轮总结"}],
+        task_id="task-1", db=None, round_idx=1,
+        client=_mk_client(chunks), ask_round=2, task=None,
+    )
+    assert result["done"] is True
+    assert result["ask_user"] is False
+    assert "user_agent 输出解析失败" in result["reasoning"]
+    assert "[user_agent 输出原文]" in result["reasoning"]
+    assert raw in result["reasoning"]
+
+
+def test_parse_failure_raw_output_truncated():
+    """原文超长 → 截断到上限并带截断提示,避免总结卡片过大。"""
+    from app.agents.user_agent import MAX_RAW_OUTPUT_CHARS
+
+    raw = "长" * (MAX_RAW_OUTPUT_CHARS + 2000)
+    chunks = [
+        _MockChunk(content_delta=raw, finish_reason="stop"),
+    ]
+    result = run_user_agent(
+        "审查这个仓库", [],
+        task_id="task-1", db=None, round_idx=1,
+        client=_mk_client(chunks), ask_round=2, task=None,
+    )
+    reasoning = result["reasoning"]
+    assert "原文过长已截断" in reasoning
+    # 截断后不再携带全量原文
+    assert raw not in reasoning
