@@ -985,6 +985,14 @@ interface IterationSegment {
   hasStreaming: boolean
 }
 
+/** 检查点标记:user_agent 迭代边界轻量评估,不渲染消息卡片,
+ * 定位时在对应迭代边界处浮现横线 */
+interface CheckpointMarker {
+  /** 显示在哪次迭代的 iteration-block 之后(该迭代的 iterationIdx);0 = 首个迭代之前 */
+  afterIterationIdx: number
+  item: DisplayItem
+}
+
 /** plan step 分组:把归属同一 step 的迭代合并 */
 interface StepGroup {
   kind: 'step'
@@ -998,6 +1006,8 @@ interface StepGroup {
   iterations: IterationSegment[]
   /** 是否含流式中(任一迭代流式则为 true) */
   hasStreaming: boolean
+  /** 该 step 内的检查点标记(渲染在对应迭代边界处) */
+  checkpoints: CheckpointMarker[]
 }
 
 type RoundSegment = PlainSegment | StepGroup
@@ -1097,7 +1107,9 @@ function segmentRoundItems(
 ): RoundSegment[] {
   // 第一阶段:按 thinking 起点切迭代(原逻辑)
   const iterations: IterationSegment[] = []
-  const plains: { idx: number; seg: PlainSegment }[] = []
+  const plains: PlainSegment[] = []
+  /** 检查点评估:不渲染消息卡片,记录其发生在第几次迭代之后,供第二阶段挂到对应迭代边界 */
+  const checkpointMarkers: CheckpointMarker[] = []
   let current: IterationSegment | null = null
   let iterCounter = 0
 
@@ -1132,7 +1144,13 @@ function segmentRoundItems(
       if (isStreamingActive(item)) current.hasStreaming = true
     } else {
       closeCurrent()
-      plains.push({ idx: iterations.length + plains.length, seg: { kind: 'plain', item } })
+      if (isCheckpointItem(item)) {
+        // 检查点发生在迭代边界:记录当时已完成的迭代数,
+        // 第二阶段把横线插到 step 组内对应迭代边界处
+        checkpointMarkers.push({ afterIterationIdx: iterCounter, item })
+      } else {
+        plains.push({ kind: 'plain', item })
+      }
     }
   }
   closeCurrent()
@@ -1148,7 +1166,11 @@ function segmentRoundItems(
     status: 'none',
     iterations: [],
     hasStreaming: false,
+    checkpoints: [],
   }
+
+  /** 迭代序号 → 所属 step 组(用于把检查点标记挂到对应组) */
+  const groupByIterIdx = new Map<number, StepGroup>()
 
   for (const iter of iterations) {
     const stepId = inferStepFromIteration(iter, planSteps)
@@ -1164,15 +1186,33 @@ function segmentRoundItems(
           status: step?.status || 'pending',
           iterations: [],
           hasStreaming: false,
+          checkpoints: [],
         }
         stepGroupsMap.set(stepId, group)
       }
       group.iterations.push(iter)
       if (iter.hasStreaming) group.hasStreaming = true
+      groupByIterIdx.set(iter.iterationIdx, group)
     } else {
       // 无法归属(无 plan 或工具名无匹配)→ 归入无 step 组
       noStepGroup.iterations.push(iter)
       if (iter.hasStreaming) noStepGroup.hasStreaming = true
+      groupByIterIdx.set(iter.iterationIdx, noStepGroup)
+    }
+  }
+
+  // 把检查点标记分配到所属 step 组:按"前一次迭代"的序号查找;
+  // 序号为 0(边界在首个迭代之前)时兜底到含首个迭代的组;
+  // 轮内尚无任何迭代时降级为 plain 段追加到末尾(极端兜底)
+  for (const marker of checkpointMarkers) {
+    const target =
+      marker.afterIterationIdx > 0
+        ? groupByIterIdx.get(marker.afterIterationIdx)
+        : groupByIterIdx.get(1)
+    if (target) {
+      target.checkpoints.push(marker)
+    } else {
+      plains.push({ kind: 'plain', item: marker.item })
     }
   }
 
@@ -1189,8 +1229,8 @@ function segmentRoundItems(
   if (noStepGroup.iterations.length > 0) {
     segments.push(noStepGroup)
   }
-  // 追加 plain 段(保持原顺序——plains 在迭代之后,简化处理)
-  for (const { seg } of plains) {
+  // 追加 plain 段(检查点标记已挂到 step 组内迭代边界,此处只剩普通平铺段)
+  for (const seg of plains) {
     segments.push(seg)
   }
 
@@ -1885,8 +1925,40 @@ const checkpointList = computed<CheckpointEntry[]>(() => {
   return list
 })
 
-/** 点击右侧栏检查点条目:滚动到对话流中该检查点位置,横线浮现闪烁后淡出 */
-function locateCheckpoint(id: string): void {
+/** 筛选 step 组内应显示在迭代 iterIdx 之后的检查点标记(0 = 首个迭代之前) */
+function checkpointsAfter(group: StepGroup, iterIdx: number): CheckpointMarker[] {
+  return group.checkpoints.filter((c) => c.afterIterationIdx === iterIdx)
+}
+
+/** 检查点横线 class 列表(打断评估为橙色、继续为主题色) */
+function checkpointDividerClass(marker: CheckpointMarker): (string | Record<string, boolean>)[] {
+  return [
+    'checkpoint-divider',
+    { 'checkpoint-divider-interrupt': parseCheckpointContent(marker.item.content || '').isInterrupt },
+  ]
+}
+
+/** 查找检查点条目所在的 step 组(定位前需先展开它) */
+function findCheckpointGroup(id: string): StepGroup | null {
+  for (const round of roundGroups.value) {
+    for (const seg of round.segments) {
+      if (seg.kind === 'step' && seg.checkpoints.some((c) => c.item.id === id)) {
+        return seg
+      }
+    }
+  }
+  return null
+}
+
+/** 点击右侧栏检查点条目:展开其所在 step 组,滚动到对话流中该检查点位置,横线浮现闪烁后淡出 */
+async function locateCheckpoint(id: string): Promise<void> {
+  // 横线渲染在 step-body 内迭代边界处:step 折叠时锚点不存在,先展开对应 step 组
+  const group = findCheckpointGroup(id)
+  if (group) {
+    collapsedSteps.delete(group.id)
+    expandedSteps.add(group.id)
+    await nextTick()
+  }
   const el = document.getElementById(`checkpoint-anchor-${id}`)
   if (!el) return
   // 重复点击同一检查点时重启浮现动画
@@ -2067,9 +2139,15 @@ function toggleResult(id: string): void {
                   <div v-if="isStepExpanded(seg)" class="step-body">
                     <!-- 该 step 下的所有迭代:不再折叠,内容直接平铺
                          (折叠单位上移到 step 组,浏览型工具已单行化) -->
+                    <!-- 检查点横线:渲染在迭代边界处(afterIterationIdx=0 表示首个迭代之前) -->
                     <div
-                      v-for="iter in seg.iterations"
-                      :key="iter.id"
+                      v-for="cp in checkpointsAfter(seg, 0)"
+                      :key="`cp-${cp.item.id}`"
+                      :id="`checkpoint-anchor-${cp.item.id}`"
+                      :class="checkpointDividerClass(cp)"
+                    />
+                    <template v-for="iter in seg.iterations" :key="iter.id">
+                    <div
                       class="iteration-block"
                       :class="{ 'iteration-streaming': iter.hasStreaming }"
                     >
@@ -2169,6 +2247,14 @@ function toggleResult(id: string): void {
                         />
                       </div>
                     </div>
+                    <!-- 检查点横线:该迭代为评估边界,平时隐藏,定位时浮现 -->
+                    <div
+                      v-for="cp in checkpointsAfter(seg, iter.iterationIdx)"
+                      :key="`cp-${cp.item.id}`"
+                      :id="`checkpoint-anchor-${cp.item.id}`"
+                      :class="checkpointDividerClass(cp)"
+                    />
+                    </template>
                   </div>
                 </div>
               </template>
@@ -3162,6 +3248,11 @@ function toggleResult(id: string): void {
   /* .messages 为带 gap 的纵向 flex,零高项作为子项前后仍各吃一份 gap,
      用负 margin 精确抵消,保证浮现时布局零变化 */
   margin: calc(var(--space-3) / -2) 0;
+}
+
+/* step-body 内迭代块相邻无 gap,零高项无需负 margin 抵消(兜底 plain 场景仍用上方规则) */
+.step-body .checkpoint-divider-active {
+  margin: 0;
 }
 
 .checkpoint-divider-active::after {
