@@ -2,7 +2,7 @@
 
 覆盖:
 - _ACPCollector._maybe_trigger_checkpoint:K 值触发条件、前 2 迭代跳过、
-  allow_interrupt=false 禁用、max_interrupts 上限拒绝
+  仅观察模式(allow_interrupt=false)照常按 K 触发、max_interrupts 上限拒绝
 - 触发时机接线:tool_call 落库后不触发,tool_result 落库后才触发
   (保证落库顺序 tool_call → tool_result → 检查点评估,
   前端检查点横线不会把工具结果切到折叠块外)
@@ -268,14 +268,17 @@ def test_collector_disabled_when_no_policy(mock_task, mock_db, checkpoint_callba
     assert checkpoint_callback.calls == []
 
 
-def test_collector_disabled_when_allow_interrupt_false(mock_task, mock_db, checkpoint_callback):
-    """allow_interrupt=False 时,检查点不触发(但仍可观察,本测试验证完全不触发)。"""
+def test_collector_still_triggers_when_allow_interrupt_false(mock_task, mock_db, checkpoint_callback):
+    """仅观察模式(allow_interrupt=False):评估照常按 K 触发(只记录不干预),
+    且打断上限不拦评估。"""
     collector = _make_collector(
         mock_task, mock_db, checkpoint_callback,
-        agent_policy={**DEFAULT_AGENT_POLICY, "checkpoint_interval": 3, "allow_interrupt": False},
+        agent_policy={**DEFAULT_AGENT_POLICY, "checkpoint_interval": 3,
+                      "allow_interrupt": False, "max_interrupts_per_round": 0},
     )
     _advance_iterations(collector, 10)
-    assert checkpoint_callback.calls == []
+    # max_interrupts=0 也拦不住:仅观察模式不 push 中断,评估不被上限拦截
+    assert checkpoint_callback.calls == [3, 6, 9]
 
 
 def test_collector_disabled_when_no_callback(mock_task, mock_db):

@@ -1153,27 +1153,29 @@ class _ACPCollector:
         tool_call → tool_result → 检查点评估,前端检查点横线不会把工具
         结果切到折叠块外;评估快照也能看到当前工具的真实结果)。
         iteration 为被评估的迭代序号(即产生该工具结果的迭代)。
-        只在 user_agent 启用、配置了 agent_policy 且 allow_interrupt=true 时触发。
+        只在 user_agent 启用且配置了 agent_policy 时触发。
+        allow_interrupt=false 为仅观察模式:评估照做,只记录不干预,
+        打断上限不拦评估(不 push 中断,计数不会增长)。
         前 2 个迭代不评估(给 CLI agent 启动时间)。
         """
         if not self._agent_policy or not self._checkpoint_callback:
             return
         if not self._agent_policy.get("user_agent_enabled", True):
             return  # 检查点评估是 user_agent 的能力,单 agent 模式完全关闭
-        if not self._agent_policy.get("allow_interrupt", True):
-            return
         if iteration < 2:
             return
 
         from app.agent_checkpoint import get_effective_interval
         effective_k = get_effective_interval(self._agent_policy, self._agent_type)
-        max_interrupts = self._agent_policy.get("max_interrupts_per_round", 2)
 
         # 检查是否达到评估间隔
         if iteration % effective_k != 0:
             return
-        if self._interrupt_count >= max_interrupts:
-            return
+        # 打断上限只拦可打断模式;仅观察模式评估不被拦
+        if self._agent_policy.get("allow_interrupt", True):
+            max_interrupts = self._agent_policy.get("max_interrupts_per_round", 2)
+            if self._interrupt_count >= max_interrupts:
+                return
 
         # 构造快照
         snapshot = self._build_snapshot()
@@ -2166,27 +2168,30 @@ def run_acp_agent(
 
             # ---- 检查点评估回调(CLI agent 的迭代边界轻量评估) ----
             # 在 _ACPCollector 的 _start_new_iteration 中被调用,
-            # 评估结果若 interrupt=true 会写入中断队列,当前 prompt 结束后检查
+            # 评估结果若 interrupt=true 会写入中断队列,当前 prompt 结束后检查;
+            # allow_interrupt=false 为仅观察模式:评估照做,只记录不干预
             def _checkpoint_callback(iteration: int, snapshot: dict[str, Any]) -> None:
                 if not agent_policy or not agent_policy.get("user_agent_enabled", True):
                     return  # user_agent 已禁用(单 agent 模式),不做检查点评估
-                if not agent_policy.get("allow_interrupt", True):
-                    return
                 from app.agent_checkpoint import run_user_agent_checkpoint
                 from app.agent_interrupt import (
                     get_interrupt_count,
                     increment_interrupt_count,
                     push_interrupt,
                 )
-                max_interrupts = agent_policy.get("max_interrupts_per_round", 2)
-                current_count = get_interrupt_count(task.id, round_idx)
-                if current_count >= max_interrupts:
-                    return
+                allow_interrupt = bool(agent_policy.get("allow_interrupt", True))
+                if allow_interrupt:
+                    # 打断上限只拦可打断模式;仅观察模式评估不被拦
+                    max_interrupts = agent_policy.get("max_interrupts_per_round", 2)
+                    current_count = get_interrupt_count(task.id, round_idx)
+                    if current_count >= max_interrupts:
+                        return
                 try:
                     checkpoint_result = run_user_agent_checkpoint(
                         task, db, round_idx, iteration, snapshot, None,
+                        allow_interrupt=allow_interrupt,
                     )
-                    if checkpoint_result.get("interrupt"):
+                    if checkpoint_result.get("interrupt") and allow_interrupt:
                         push_interrupt(
                             task.id,
                             query=checkpoint_result["query"],

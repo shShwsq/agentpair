@@ -131,6 +131,8 @@ CHECKPOINT_SYSTEM_PROMPT = """你是 user_agent(用户代理智能体),正在实
   - 遗漏关键维度(明显应该检查但未涉及的维度)
   - 钻牛角尖(在某个细节上耗费过多迭代)
 - 不确定是否该打断时,选择不打断(让 react_agent 继续)
+- **仅观察模式**(用户消息中注明时):照常判断方向,但 interrupt 必须为 false;
+  若观察到跑偏,在 reason 中写清偏离了什么、当前在做什么(只记录不干预)
 - 若提供了「之前的评估记录」:
   - 避免重复发出相同/相近的打断指令(历史已打断过的方向不再重复)
   - 核查上次打断指令是否已被执行(从当前快照判断),未执行时可换更明确的表述再次提醒
@@ -261,6 +263,8 @@ def run_user_agent_checkpoint(
     iteration: int,
     react_snapshot: dict[str, Any],
     client: LLMClient | None,
+    *,
+    allow_interrupt: bool = True,
 ) -> dict[str, Any]:
     """轻量评估:判断 react_agent 当前方向是否明显跑偏
 
@@ -275,6 +279,8 @@ def run_user_agent_checkpoint(
             - tool_result_summary: str  最近工具结果摘要(~500字符)
             - plan_status: list[dict]  当前 plan 状态
         client: LLMClient(为 None 时用默认)
+        allow_interrupt: 是否允许打断。False=仅观察模式:评估照常做,
+            prompt 告知模型只记录不干预;兜底强制 interrupt=False
 
     返回:
         {"interrupt": bool, "reason": str, "query": str | None, "summary": str}
@@ -307,9 +313,17 @@ def run_user_agent_checkpoint(
         logger.warning(f"[task={task.id}] 加载检查点历史失败(跳过注入): {e}")
         history_section = ""
 
+    # 仅观察模式提示:引导模型 interrupt 固定输出 false,把观察到的跑偏写进 reason
+    observe_note = (
+        "【当前为仅观察模式】即使判断方向跑偏,interrupt 也必须为 false,"
+        "请在 reason 中写清观察到的偏离(只记录不干预)。\n\n"
+        if not allow_interrupt else ""
+    )
+
     user_msg = (
         f"用户原始意图:{task.user_input[:500]}\n\n"
         f"当前协作轮次:第 {round_idx} 轮,第 {iteration} 次迭代\n\n"
+        f"{observe_note}"
         f"{history_section}"
         f"react_agent 当前思考:\n{thinking}\n\n"
         f"最近工具调用:{tool_intent}\n\n"
@@ -351,6 +365,14 @@ def run_user_agent_checkpoint(
         )
         result["interrupt"] = False
         result["reason"] = result.get("reason", "") + "(query 为空,降级为不打断)"
+
+    # 仅观察模式兜底:模型未遵守提示仍输出 interrupt=true 时强制降级(只记录不干预)
+    if result.get("interrupt") and not allow_interrupt:
+        logger.warning(
+            f"[task={task.id}] 检查点评估 interrupt=true 但处于仅观察模式,降级为不打断"
+        )
+        result["interrupt"] = False
+        result["reason"] = result.get("reason", "") + "(仅观察模式:已记录偏离,未干预)"
 
     # 落库 + 推送 agent_checkpoint 事件
     _record_checkpoint(

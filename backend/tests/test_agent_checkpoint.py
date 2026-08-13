@@ -439,3 +439,58 @@ def test_build_history_section_keeps_only_recent_records():
     assert f"s{MAX_HISTORY_RECORDS + 3}" in section
     assert "s1" not in section
     assert "s2" not in section
+
+
+# ============================================================
+# run_user_agent_checkpoint:仅观察模式(不调真实 LLM,mock 流式调用)
+# ============================================================
+
+def _run_checkpoint_with_llm_output(fake_task, llm_output: str, *, allow_interrupt: bool):
+    """辅助:mock 流式调用/落库/历史加载,直接驱动 run_user_agent_checkpoint。"""
+    from unittest.mock import patch
+
+    captured = {}
+
+    def fake_stream(client, messages, **kwargs):
+        captured["messages"] = messages
+        return llm_output
+
+    with patch("app.agent_checkpoint._stream_checkpoint_llm", side_effect=fake_stream), \
+         patch("app.agent_checkpoint._record_checkpoint"), \
+         patch("app.agent_checkpoint._load_checkpoint_history", return_value=[]):
+        import app.agent_checkpoint as acp
+        result = acp.run_user_agent_checkpoint(
+            fake_task, MagicMock(), round_idx=1, iteration=10,
+            react_snapshot={
+                "thinking_summary": "t", "tool_intent": "i",
+                "tool_result_summary": "r", "plan_status": [],
+            },
+            client=MagicMock(),
+            allow_interrupt=allow_interrupt,
+        )
+    return result, captured.get("messages", [])
+
+
+def test_checkpoint_observe_mode_downgrades_interrupt(fake_task):
+    """仅观察模式:模型未遵守提示仍输出 interrupt=true 时强制降级,reason 标注未干预。"""
+    llm_output = '{"interrupt": true, "reason": "方向跑偏", "query": "转向 X", "summary": "跑偏"}'
+    result, _ = _run_checkpoint_with_llm_output(fake_task, llm_output, allow_interrupt=False)
+    assert result["interrupt"] is False
+    assert "仅观察模式" in result["reason"]
+
+
+def test_checkpoint_allowed_mode_keeps_interrupt(fake_task):
+    """可打断模式:interrupt=true 照常保留(对照组)。"""
+    llm_output = '{"interrupt": true, "reason": "方向跑偏", "query": "转向 X", "summary": "跑偏"}'
+    result, _ = _run_checkpoint_with_llm_output(fake_task, llm_output, allow_interrupt=True)
+    assert result["interrupt"] is True
+    assert result["query"] == "转向 X"
+
+
+def test_checkpoint_observe_mode_prompt_contains_note(fake_task):
+    """仅观察模式:user 消息含观察模式提示;可打断模式不含。"""
+    llm_output = '{"interrupt": false, "reason": "ok", "query": null, "summary": "s"}'
+    _, messages_obs = _run_checkpoint_with_llm_output(fake_task, llm_output, allow_interrupt=False)
+    _, messages_allow = _run_checkpoint_with_llm_output(fake_task, llm_output, allow_interrupt=True)
+    assert "仅观察模式" in messages_obs[1]["content"]
+    assert "仅观察模式" not in messages_allow[1]["content"]

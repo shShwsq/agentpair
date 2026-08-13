@@ -521,13 +521,13 @@ def run_react_agent(
                     messages.append({"role": "system", "content": reminder})
 
         # user_agent 检查点评估:每 K 个迭代做轻量评估,判断方向是否跑偏
-        # 只在 user_agent 启用、allow_interrupt=true 且达到评估间隔时触发
-        # (单 agent 模式下 user_agent 已禁用,检查点评估/打断完全关闭)
+        # 只在 user_agent 启用且达到评估间隔时触发
+        # (单 agent 模式下 user_agent 已禁用,检查点评估完全关闭;
+        #  allow_interrupt=false 为仅观察模式:评估照做,只记录不干预)
         # 前 2 个迭代不评估(给 react_agent 启动时间)
         if (
             agent_policy
             and agent_policy.get("user_agent_enabled", True)
-            and agent_policy.get("allow_interrupt", True)
         ):
             from app.agent_checkpoint import get_effective_interval, run_user_agent_checkpoint
             from app.agent_interrupt import (
@@ -537,13 +537,15 @@ def run_react_agent(
             )
 
             effective_k = get_effective_interval(agent_policy, "builtin")
+            allow_interrupt = bool(agent_policy.get("allow_interrupt", True))
             max_interrupts = agent_policy.get("max_interrupts_per_round", 2)
             current_interrupt_count = get_interrupt_count(task.id, round_idx)
 
+            # 打断上限只拦可打断模式;仅观察模式不 push 中断,计数不会增长,评估不被拦
             if (
                 iteration >= 2
                 and iteration % effective_k == 0
-                and current_interrupt_count < max_interrupts
+                and (not allow_interrupt or current_interrupt_count < max_interrupts)
             ):
                 # 构造 react_agent 快照供检查点评估
                 # 记录本迭代最后一个工具的 intent 和 result(若有)
@@ -572,6 +574,7 @@ def run_react_agent(
                 try:
                     checkpoint_result = run_user_agent_checkpoint(
                         task, db, round_idx, iteration, snapshot, client,
+                        allow_interrupt=allow_interrupt,
                     )
                     if checkpoint_result.get("interrupt"):
                         push_interrupt(
