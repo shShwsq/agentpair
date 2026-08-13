@@ -279,10 +279,14 @@ function isCompactCall(it: ToolItem): boolean {
   return false
 }
 
-/** 配对后的渲染段:紧凑工具对(单行摘要)或普通工具项(保持原折叠渲染)。
+/** 配对后的渲染段:
+ * - compact:紧凑工具对(单行摘要)
+ * - agent:子智能体调用对(轨迹报告卡片)
+ * - toolpair:普通工具对(调用+结果整体一张折叠卡)
+ * - plain:落单的 tool_result 等,保持原渲染兜底。
  * 泛型 T 保留调用方传入的具体项类型(如 TaskDetailView 的 DisplayItem) */
 export type ToolSegment<T extends ToolItem = ToolItem> =
-  | { kind: 'compact'; call: T; result: T | null }
+  | { kind: 'compact' | 'agent' | 'toolpair'; call: T; result: T | null }
   | { kind: 'plain'; items: T[] }
 
 /** 安全解析 JSON,失败返回 null(tool_result 可能是错误消息文本) */
@@ -374,8 +378,9 @@ export function buildToolSummary(call: ToolItem, result: ToolItem | null): strin
 
 /**
  * 把迭代内的 tool_call/tool_result 列表转成渲染段序列:
- * 紧凑工具与其紧邻的 result 配对成 compact 段,其余按原顺序合并进 plain 段。
- * 流式项(type 未定)与落单的 tool_result 一律归入 plain,保持原渲染兜底。
+ * 每个 tool_call 与其紧邻的 result 配对(react_agent 执行循环中 result 紧跟 call 落库),
+ * 按调用类型分为 compact(浏览型单行摘要)/agent(子智能体)/toolpair(普通工具)三种卡片段;
+ * 尚未到达的 result 为 null,落单的 tool_result 归入 plain 兜底。
  */
 export function buildToolSegments<T extends ToolItem>(items: T[]): ToolSegment<T>[] {
   const segments: ToolSegment<T>[] = []
@@ -388,20 +393,80 @@ export function buildToolSegments<T extends ToolItem>(items: T[]): ToolSegment<T
   }
   for (let i = 0; i < items.length; i++) {
     const it = items[i]
-    if (it.type === 'tool_call' && isCompactCall(it)) {
-      flush()
-      // react_agent 执行循环中 result 紧跟 call 落库;尚未到达时 result 为 null
-      const next = items[i + 1]
-      if (next && next.type === 'tool_result') {
-        segments.push({ kind: 'compact', call: it, result: next })
-        i++
-      } else {
-        segments.push({ kind: 'compact', call: it, result: null })
-      }
-    } else {
+    if (it.type !== 'tool_call') {
+      // 落单 result(理论上不出现)兜底原渲染
       plain.push(it)
+      continue
+    }
+    flush()
+    const kind: 'compact' | 'agent' | 'toolpair' = isCompactCall(it)
+      ? 'compact'
+      : toolNameOf(it) === 'Agent'
+        ? 'agent'
+        : 'toolpair'
+    const next = items[i + 1]
+    if (next && next.type === 'tool_result') {
+      segments.push({ kind, call: it, result: next })
+      i++
+    } else {
+      segments.push({ kind, call: it, result: null })
     }
   }
   flush()
   return segments
+}
+
+// ============================================================
+// 子智能体(Agent)轨迹解析
+// ============================================================
+
+/** 子智能体轨迹(Agent tool_result 的 rawOutput)结构化解析结果 */
+export interface AgentTrace {
+  /** 子智能体类型(A 族 actual_subagent_type,如 explore);B 族无头时为 null */
+  subType: string | null
+  /** 执行状态(A 族 status,如 completed);B 族为 null */
+  status: string | null
+  /** 内部思考 <think> 块内容(无则空串) */
+  think: string
+  /** 报告正文(已剥元信息头/[summary]/think 标记),Markdown */
+  body: string
+}
+
+/**
+ * 解析子智能体输出轨迹。
+ *
+ * 两种格式族(logs/acp 实测):
+ * - A 族(Kimi):开头若干 `key: value` 元信息行(agent_id/actual_subagent_type/status),
+ *   其后 [summary] 标记、可选 <think> 块,再后是 Markdown 报告正文
+ * - B 族(Qoder/qwen):无元信息头,直接是 Markdown 报告正文
+ */
+export function parseAgentTrace(content: string): AgentTrace {
+  let subType: string | null = null
+  let status: string | null = null
+
+  // A 族元信息头:仅开头连续的 key: value 行(遇到首个不匹配行即止)
+  const lines = content.split('\n')
+  let idx = 0
+  while (idx < lines.length) {
+    const line = lines[idx]
+    const m = line.match(/^(agent_id|actual_subagent_type|status):\s*(\S.*)$/)
+    if (!m) break
+    if (m[1] === 'actual_subagent_type') subType = m[2].trim()
+    else if (m[1] === 'status') status = m[2].trim()
+    idx++
+  }
+  let rest = lines.slice(idx).join('\n')
+
+  // 剥 [summary] 标记行
+  rest = rest.replace(/^\s*\[summary\]\s*$/m, '')
+
+  // 提取 <think> 块(内部思考,与报告正文分离)
+  let think = ''
+  const thinkMatch = rest.match(/<think>[\s\S]*?<\/think>/)
+  if (thinkMatch) {
+    think = thinkMatch[0].replace(/^<think>/, '').replace(/<\/think>$/, '').trim()
+    rest = rest.replace(thinkMatch[0], '')
+  }
+
+  return { subType, status, think, body: rest.trim() }
 }

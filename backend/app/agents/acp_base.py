@@ -934,7 +934,7 @@ class _ACPCollector:
         self._iter_started = False
         # tool_call 状态追踪:toolCallId -> {title, kind, tool_name, raw_input, input_text}
         # Qoder CN 的 rawInput 在 tool_call 事件里一次性给出;
-        # Kimi 的参数在 tool_call_update(in_progress)里增量构建,需累积 input_text。
+        # Kimi(如 Agent 子任务)/Hermes 的参数经 tool_call_update(in_progress)增量构建,需累积 input_text。
         self._pending_tool_calls: dict[str, dict] = {}
         # 检查点评估配置(CLI agent 的迭代边界轻量评估)
         self._agent_policy = agent_policy
@@ -1137,7 +1137,7 @@ class _ACPCollector:
         qoder_meta = meta.get("qoder") or {}
         tool_name = qoder_meta.get("toolName", "") or self._infer_tool_name(title, kind)
 
-        # Kimi 风格事件:无 rawInput,目标信息在 title 前缀与 locations 里
+        # Hermes 风格事件:无 rawInput,目标信息在 title 前缀与 locations 里
         # (read: /path、terminal: cmd、search: pattern),归一化成标准 rawInput,
         # 让 _build_tool_intent_detail 生成可读 intent(也避免 read: 被误判成 Bash)
         if not raw_input:

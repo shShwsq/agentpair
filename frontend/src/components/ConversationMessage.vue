@@ -36,9 +36,6 @@ interface DisplayItem {
 
 const props = defineProps<{
   item: DisplayItem
-  /** 标记此项属于子智能体(Agent)调用:tool_call 含 [Agent] 标签,
-   * 或 tool_result 是 Agent 调用的输出。用于加缩进+左边线,视觉上表示嵌套。 */
-  isSubAgent?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -183,7 +180,7 @@ const detailLabel = computed(() =>
 </script>
 
 <template>
-  <div v-if="showCard" class="msg-group" :class="{ 'msg-sub-agent': isSubAgent }">
+  <div v-if="showCard" class="msg-group">
     <!-- 流式思考项:reasoning 卡片 + content 卡片,两者独立 -->
     <template v-if="item.is_streaming && item.streaming">
       <!-- reasoning 独立卡片(可折叠) -->
@@ -284,14 +281,6 @@ const detailLabel = computed(() =>
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-}
-
-/* 子智能体(Agent)调用的参数+输出:左侧边线 + 缩进,视觉上表示嵌套 */
-.msg-sub-agent {
-  margin-left: var(--space-4);
-  padding-left: var(--space-3);
-  border-left: 2px solid var(--color-primary, #6366f1);
-  background: linear-gradient(90deg, rgba(99, 102, 241, 0.04) 0%, transparent 100%);
 }
 
 /* reasoning 独立卡片:淡灰背景,与 content 卡片视觉区分 */

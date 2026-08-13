@@ -1,10 +1,11 @@
 /**
- * buildToolSegments / buildToolSummary 单元测试
+ * buildToolSegments / buildToolSummary / parseAgentTrace 单元测试
  *
- * 覆盖紧凑工具(读文件/搜索/列目录)的配对与单行摘要生成:
- * 1. 配对:紧凑 tool_call 与紧邻 tool_result 成对,其余保持原顺序进 plain 段
+ * 覆盖工具段的配对与渲染摘要:
+ * 1. 配对:compact/agent/toolpair 三类工具段与紧邻 result 配对,落单项进 plain 兜底
  * 2. 摘要:各工具的计数/路径提取、执行中、执行失败兜底
  * 3. Bash/run_command 命令解析:只读命令白名单摘要、危险命令拒绝
+ * 4. 子智能体轨迹解析:A 族元信息头/think 块/B 族无头格式
  */
 import { describe, expect, it } from 'vitest'
 
@@ -12,6 +13,7 @@ import {
   buildToolSegments,
   buildToolSummary,
   commandOf,
+  parseAgentTrace,
   shortenPath,
   summarizeCliToolCall,
   summarizeCommand,
@@ -119,22 +121,36 @@ describe('buildToolSegments', () => {
     expect(segs[0]).toMatchObject({ kind: 'compact', result: null })
   })
 
-  it('非紧凑工具归入 plain 段且保持原顺序', () => {
+  it('非紧凑工具配对成 toolpair 段且保持原顺序', () => {
     const items = [
       call('c1', '写入文件 b.py [write_file]'),
       result('r1', 'ok'),
-      call('c2', '执行命令: pytest [run_command]'),
+      call('c2', '执行命令: pytest [run_command]\n{"command": "pytest"}'),
       result('r2', 'passed'),
     ]
     const segs = buildToolSegments(items)
-    expect(segs).toHaveLength(1)
-    expect(segs[0].kind).toBe('plain')
-    if (segs[0].kind === 'plain') {
-      expect(segs[0].items.map((i) => i.id)).toEqual(['c1', 'r1', 'c2', 'r2'])
-    }
+    expect(segs).toHaveLength(2)
+    expect(segs[0]).toMatchObject({ kind: 'toolpair', call: { id: 'c1' }, result: { id: 'r1' } })
+    expect(segs[1]).toMatchObject({ kind: 'toolpair', call: { id: 'c2' }, result: { id: 'r2' } })
   })
 
-  it('混合场景:紧凑段与普通段交替,顺序不乱', () => {
+  it('Agent 子任务配对成 agent 段', () => {
+    const items = [
+      call('c1', '子任务: 探索项目架构 [Agent]\n{"prompt": "探索"}'),
+      result('r1', 'agent_id: agent-0\nstatus: completed'),
+    ]
+    const segs = buildToolSegments(items)
+    expect(segs).toHaveLength(1)
+    expect(segs[0]).toMatchObject({ kind: 'agent', call: { id: 'c1' }, result: { id: 'r1' } })
+  })
+
+  it('Agent 执行中(无 result):result 为 null', () => {
+    const segs = buildToolSegments([call('c1', '子任务: x [Agent]')])
+    expect(segs).toHaveLength(1)
+    expect(segs[0]).toMatchObject({ kind: 'agent', result: null })
+  })
+
+  it('混合场景:compact/toolpair/agent 交替,顺序不乱', () => {
     const items = [
       call('c1', '读取文件 a.py [read_file]'),
       result('r1', '{}'),
@@ -142,18 +158,81 @@ describe('buildToolSegments', () => {
       result('r2', 'ok'),
       call('c3', '搜索代码: TODO [search_code]'),
       result('r3', '{}'),
+      call('c4', '子任务: 探索架构 [Agent]'),
+      result('r4', '## 报告'),
     ]
     const segs = buildToolSegments(items)
-    expect(segs.map((s) => s.kind)).toEqual(['compact', 'plain', 'compact'])
-    if (segs[1].kind === 'plain') {
-      expect(segs[1].items.map((i) => i.id)).toEqual(['c2', 'r2'])
-    }
+    expect(segs.map((s) => s.kind)).toEqual(['compact', 'toolpair', 'compact', 'agent'])
   })
 
   it('落单的 tool_result 归入 plain 兜底', () => {
     const segs = buildToolSegments([result('r1', '孤儿结果')])
     expect(segs).toHaveLength(1)
     expect(segs[0].kind).toBe('plain')
+  })
+})
+
+describe('parseAgentTrace(子智能体轨迹)', () => {
+  it('A 族(Kimi):元信息头 + [summary] + think + 报告正文', () => {
+    const trace = parseAgentTrace([
+      'agent_id: agent-0',
+      'actual_subagent_type: explore',
+      'status: completed',
+      '',
+      '[summary]',
+      '<think>',
+      '我需要先了解项目结构',
+      '然后阅读核心模块代码',
+      '</think>',
+      '',
+      '## 项目架构分析',
+      '',
+      '核心入口位于 `src/main.py`。',
+    ].join('\n'))
+    expect(trace.subType).toBe('explore')
+    expect(trace.status).toBe('completed')
+    expect(trace.think).toBe('我需要先了解项目结构\n然后阅读核心模块代码')
+    expect(trace.body).toBe('## 项目架构分析\n\n核心入口位于 `src/main.py`。')
+  })
+
+  it('A 族无 think 块:think 为空串,body 完整保留', () => {
+    const trace = parseAgentTrace([
+      'agent_id: agent-1',
+      'actual_subagent_type: verifier',
+      'status: completed',
+      '',
+      '[summary]',
+      '验证通过,共 3 处修复。',
+    ].join('\n'))
+    expect(trace.subType).toBe('verifier')
+    expect(trace.think).toBe('')
+    expect(trace.body).toBe('验证通过,共 3 处修复。')
+  })
+
+  it('B 族(Qoder/qwen):无元信息头,直接 Markdown 正文', () => {
+    const trace = parseAgentTrace('## 调查报告\n\n- 文件 a.py 存在风险\n- 文件 b.py 正常')
+    expect(trace.subType).toBeNull()
+    expect(trace.status).toBeNull()
+    expect(trace.think).toBe('')
+    expect(trace.body).toBe('## 调查报告\n\n- 文件 a.py 存在风险\n- 文件 b.py 正常')
+  })
+
+  it('B 族正文中含 key: value 样式内容时不误判为元信息头', () => {
+    // 元信息头仅识别开头连续的指定 key 行;Markdown 标题行直接终止扫描
+    const trace = parseAgentTrace('# 报告\n\nstatus: 该字段表示任务状态\n')
+    expect(trace.status).toBeNull()
+    expect(trace.body).toContain('status: 该字段表示任务状态')
+  })
+
+  it('status 非 completed 时保留(前端标题展示用)', () => {
+    const trace = parseAgentTrace('agent_id: agent-0\nstatus: interrupted\n\n[summary]\n执行被中断。')
+    expect(trace.status).toBe('interrupted')
+    expect(trace.body).toBe('执行被中断。')
+  })
+
+  it('空输入:全部字段为空/空串', () => {
+    const trace = parseAgentTrace('')
+    expect(trace).toEqual({ subType: null, status: null, think: '', body: '' })
   })
 })
 
@@ -342,14 +421,14 @@ describe('Bash/run_command 紧凑化集成', () => {
     }
   })
 
-  it('危险 Bash 命令保持 plain', () => {
+  it('危险 Bash 命令不紧凑化,配对成 toolpair 卡片(仍可见完整结果)', () => {
     const items = [
       bashCall('rm -rf build/'),
       result('r1', 'done'),
     ]
     const segs = buildToolSegments(items)
     expect(segs).toHaveLength(1)
-    expect(segs[0].kind).toBe('plain')
+    expect(segs[0].kind).toBe('toolpair')
   })
 
   it('Bash result 未到达:摘要 + 省略号', () => {

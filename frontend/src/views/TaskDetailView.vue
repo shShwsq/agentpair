@@ -53,7 +53,7 @@ import { subscribeTaskStream } from '@/api/stream'
 import { listArtifacts } from '@/api/taskArtifacts'
 import { extractErrorMessage } from '@/utils/error'
 import { renderMarkdown } from '@/utils/markdown'
-import { buildToolSegments, buildToolSummary } from '@/utils/toolSummary'
+import { buildToolSegments, buildToolSummary, parseAgentTrace } from '@/utils/toolSummary'
 import type {
   AgentCheckpointEventData,
   AnswerItem,
@@ -997,12 +997,11 @@ interface RoundGroup {
 
 /** 用户手动展开过的 step 组 id */
 const expandedSteps = reactive<Set<string>>(new Set())
-/** 用户手动展开过的迭代 id(流式结束后保留展开状态,不被自动折叠) */
-const expandedIterations = reactive<Set<string>>(new Set())
-/** 用户手动展开过的工具组 id(普通工具组,key 形如 `${iterId}-plain-${idx}`) */
-const expandedToolGroups = reactive<Set<string>>(new Set())
-/** 用户展开过原始结果的紧凑工具行(读文件/搜索等单行摘要的轻量展开),存 tool_call id */
-const expandedCompactResults = reactive<Set<string>>(new Set())
+/** 用户手动收起过的 step 组 id(优先级最高,覆盖“最后一组默认展开”) */
+const collapsedSteps = reactive<Set<string>>(new Set())
+/** 用户展开过的工具行(紧凑行轻量展开 / 子智能体卡片 / 普通工具卡片),存 tool_call id,
+ * 内部思考小卡用 `${callId}-think` 复合 key */
+const expandedToolRows = reactive<Set<string>>(new Set())
 
 /** 判断 DisplayItem 是否为 react_agent 的 thinking(迭代起点) */
 function isReactThinkingItem(item: DisplayItem): boolean {
@@ -1305,17 +1304,31 @@ const userDirective = computed<DisplayItem | null>(() => {
 
 // ---- 折叠状态查询/切换 ----
 
-/** step 组是否展开:用户手动展开 OR 含流式中(自动展开) OR 状态为 in_progress */
+/** step 组是否展开:手动收起优先;否则手动展开 OR 含流式(自动展开)
+ * OR 任务已结束且是最后一组(最终总结直接可见,不折叠) */
 function isStepExpanded(group: StepGroup): boolean {
-  return expandedSteps.has(group.id) || group.hasStreaming
+  if (collapsedSteps.has(group.id)) return false
+  if (expandedSteps.has(group.id) || group.hasStreaming) return true
+  return !isRunning.value && isLastStepGroup(group)
 }
 
 function toggleStep(group: StepGroup): void {
-  if (expandedSteps.has(group.id)) {
+  if (isStepExpanded(group)) {
+    collapsedSteps.add(group.id)
     expandedSteps.delete(group.id)
   } else {
+    collapsedSteps.delete(group.id)
     expandedSteps.add(group.id)
   }
+}
+
+/** 是否为最后一个 round 的最后一个 step 组(最终总结所在) */
+function isLastStepGroup(group: StepGroup): boolean {
+  const groups = roundGroups.value
+  if (!groups.length) return false
+  const lastRound = groups[groups.length - 1]
+  const last = lastRound.segments[lastRound.segments.length - 1]
+  return !!last && last.kind === 'step' && last.id === group.id
 }
 
 /** step 组的状态图标:done=✓,in_progress=◌,pending=○,none=· */
@@ -1328,42 +1341,16 @@ function stepStatusIcon(status: PlanStep['status'] | 'none'): string {
   }
 }
 
-/** 迭代是否展开:用户手动展开 OR 当前正在流式(自动展开) */
-function isIterationExpanded(seg: IterationSegment): boolean {
-  return expandedIterations.has(seg.id) || seg.hasStreaming
+/** 工具渲染行是否展开(默认折叠,由用户控制;key 支持 `${callId}-think` 复合键) */
+function isRowExpanded(key: string): boolean {
+  return expandedToolRows.has(key)
 }
 
-function toggleIteration(seg: IterationSegment): void {
-  if (expandedIterations.has(seg.id)) {
-    expandedIterations.delete(seg.id)
+function toggleRow(key: string): void {
+  if (expandedToolRows.has(key)) {
+    expandedToolRows.delete(key)
   } else {
-    expandedIterations.add(seg.id)
-  }
-}
-
-/** 工具组是否展开(默认折叠,仅由用户控制) */
-function isToolGroupExpanded(key: string): boolean {
-  return expandedToolGroups.has(key)
-}
-
-function toggleToolGroup(key: string): void {
-  if (expandedToolGroups.has(key)) {
-    expandedToolGroups.delete(key)
-  } else {
-    expandedToolGroups.add(key)
-  }
-}
-
-/** 紧凑工具行的原始结果是否展开(轻量展开,默认折叠) */
-function isCompactExpanded(callId: string): boolean {
-  return expandedCompactResults.has(callId)
-}
-
-function toggleCompact(callId: string): void {
-  if (expandedCompactResults.has(callId)) {
-    expandedCompactResults.delete(callId)
-  } else {
-    expandedCompactResults.add(callId)
+    expandedToolRows.add(key)
   }
 }
 
@@ -1383,78 +1370,110 @@ function toolCallCount(seg: IterationSegment): number {
   ).length
 }
 
-/** 工具渲染行:紧凑行(单行摘要)或普通折叠组行,字段扁平化避免模板内联合类型收窄 */
+/** 工具渲染行:compact 单行摘要 / agent 子智能体卡片 / toolpair 普通工具卡片 / plain 兜底。
+ * 字段扁平化避免模板内联合类型收窄 */
 interface ToolRenderRow {
   key: string
-  kind: 'compact' | 'plain'
-  /** compact:tool_call id(展开状态 key) */
+  kind: 'compact' | 'agent' | 'toolpair' | 'plain'
+  /** compact/agent/toolpair:tool_call id(展开状态 key) */
   callId: string
-  /** compact:单行摘要文案 */
+  /** compact:单行摘要;agent/toolpair:卡片标题 */
   summary: string
-  /** compact:是否已有结果(执行中为 false) */
+  /** 是否已有结果(执行中为 false) */
   hasResult: boolean
-  /** compact:原始结果内容(轻量展开用) */
+  /** 结果文本(compact 轻量展开 / toolpair 结果块) */
   resultContent: string
-  /** plain:该段内的工具项(保持原折叠卡片渲染) */
+  /** agent/toolpair:调用参数 detail(展开后等宽块) */
+  callDetail: string
+  /** agent:内部思考(<think> 块内容) */
+  agentThink: string
+  /** agent:Markdown 渲染的报告正文 HTML */
+  agentBodyHtml: string
+  /** plain:该段内的工具项(兜底原渲染) */
   items: DisplayItem[]
+}
+
+/** tool_call content 拆分为 intent(首行,剥 [tool_name] 标签)与 detail(其后内容) */
+function callPartsOf(call: DisplayItem): { intent: string; detail: string } {
+  const content = call.content || ''
+  const idx = content.indexOf('\n')
+  const rawIntent = idx < 0 ? content : content.slice(0, idx)
+  return {
+    intent: rawIntent.replace(/\s*\[\w+\]$/, ''),
+    detail: idx < 0 ? '' : content.slice(idx + 1),
+  }
 }
 
 /**
  * 迭代内工具项拆分为渲染行:
- * 紧凑工具(读文件/搜索/列目录)与紧邻的 result 配对成单行摘要,
- * 其余工具按原顺序归入普通折叠组,保持原渲染。
+ * compact(浏览型单行摘要)、agent(子智能体卡片,Markdown 报告)、
+ * toolpair(普通工具,调用+结果整体一张折叠卡)。
  */
 function toolRowsOf(iter: IterationSegment): ToolRenderRow[] {
+  const empty = {
+    resultContent: '',
+    callDetail: '',
+    agentThink: '',
+    agentBodyHtml: '',
+    items: [] as DisplayItem[],
+  }
   return buildToolSegments(iter.toolItems).map((seg, idx) => {
+    if (seg.kind === 'plain') {
+      return {
+        key: `${iter.id}-plain-${idx}`,
+        kind: 'plain' as const,
+        callId: '',
+        summary: '',
+        hasResult: false,
+        ...empty,
+        items: seg.items,
+      }
+    }
+    const callId = seg.call.id
+    const parts = callPartsOf(seg.call)
     if (seg.kind === 'compact') {
       return {
-        key: seg.call.id,
+        key: callId,
         kind: 'compact' as const,
-        callId: seg.call.id,
+        callId,
         summary: buildToolSummary(seg.call, seg.result),
         hasResult: !!seg.result,
+        ...empty,
         resultContent: seg.result?.content || '',
-        items: [] as DisplayItem[],
       }
     }
+    if (seg.kind === 'agent') {
+      const trace = seg.result ? parseAgentTrace(seg.result.content || '') : null
+      // 标题:子任务意图 + 子智能体类型/状态后缀
+      const tags: string[] = []
+      if (trace?.subType) tags.push(trace.subType)
+      if (!seg.result) tags.push('执行中…')
+      else if (trace?.status && trace.status !== 'completed') tags.push(trace.status)
+      else tags.push('已完成')
+      return {
+        key: callId,
+        kind: 'agent' as const,
+        callId,
+        summary: `🤖 ${parts.intent}${tags.length ? ' · ' + tags.join(' · ') : ''}`,
+        hasResult: !!seg.result,
+        ...empty,
+        callDetail: parts.detail,
+        agentThink: trace?.think || '',
+        agentBodyHtml: trace ? renderMarkdown(trace.body) : '',
+      }
+    }
+    // toolpair:普通工具(写操作/非只读命令等),调用+结果整体一张折叠卡
     return {
-      key: `${iter.id}-plain-${idx}`,
-      kind: 'plain' as const,
-      callId: '',
-      summary: '',
-      hasResult: false,
-      resultContent: '',
-      items: seg.items,
+      key: callId,
+      kind: 'toolpair' as const,
+      callId,
+      summary: `🔧 ${parts.intent}`,
+      hasResult: !!seg.result,
+      ...empty,
+      callDetail: parts.detail,
+      resultContent: seg.result?.content || '',
     }
   })
-}
-
-/** 普通渲染段内的工具调用数(只数 tool_call,用于折叠组标题) */
-function plainToolCallCount(items: DisplayItem[]): number {
-  return items.filter((i) => !i.is_streaming && i.type === 'tool_call').length
-}
-
-/**
- * 判断 tool item 是否属于子智能体(Agent)调用,用于加缩进+左边线。
- * - tool_call:原始 content 末尾含 [Agent] 标签(后端 _build_tool_intent_detail 注入)
- * - tool_result:向前找最近的 tool_call,若它是 Agent 调用,则此 result 是其输出
- */
-function isSubAgentToolItem(
-  item: DisplayItem,
-  items: DisplayItem[],
-  index: number,
-): boolean {
-  if (item.type === 'tool_call') {
-    return /\[Agent\]/.test(item.content || '')
-  }
-  if (item.type === 'tool_result') {
-    for (let i = index - 1; i >= 0; i--) {
-      if (items[i].type === 'tool_call') {
-        return /\[Agent\]/.test(items[i].content || '')
-      }
-    }
-  }
-  return false
 }
 
 /** 迭代摘要:工具数量 + 工具名预览(最多 3 个) */
@@ -2034,24 +2053,21 @@ function parseCheckpoint(item: DisplayItem): {
                     </span>
                   </div>
                   <div v-if="isStepExpanded(seg)" class="step-body">
-                    <!-- 该 step 下的所有迭代 -->
+                    <!-- 该 step 下的所有迭代:不再折叠,内容直接平铺
+                         (折叠单位上移到 step 组,浏览型工具已单行化) -->
                     <div
                       v-for="iter in seg.iterations"
                       :key="iter.id"
                       class="iteration-block"
-                      :class="{
-                        'iteration-streaming': iter.hasStreaming,
-                        'iteration-expanded': isIterationExpanded(iter),
-                      }"
+                      :class="{ 'iteration-streaming': iter.hasStreaming }"
                     >
-                      <div class="iteration-header" @click="toggleIteration(iter)">
-                        <span class="iteration-toggle">{{ isIterationExpanded(iter) ? '▼' : '▶' }}</span>
+                      <div class="iteration-divider">
                         <span class="iteration-summary">{{ iterationSummary(iter) }}</span>
                         <span v-if="iter.hasStreaming" class="iteration-streaming-tag">
                           <span class="typing-dots"><span></span><span></span><span></span></span>
                         </span>
                       </div>
-                      <div v-if="isIterationExpanded(iter)" class="iteration-body">
+                      <div class="iteration-body">
                         <!-- thinking 项(流式或历史) -->
                         <ConversationMessage
                           v-for="t in iter.thinkingItems"
@@ -2059,42 +2075,78 @@ function parseCheckpoint(item: DisplayItem): {
                           :item="t"
                           @toggle-reasoning="toggleReasoning"
                         />
-                        <!-- 工具调用渲染行:紧凑工具(读文件/搜索/列目录)单行摘要,
-                             其余工具保持原折叠组渲染 -->
+                        <!-- 工具调用渲染行:compact 单行摘要 / agent 子智能体卡片 /
+                             toolpair 普通工具卡片 / plain 兜底 -->
                         <template v-for="row in toolRowsOf(iter)" :key="row.key">
                           <!-- 紧凑工具:单行摘要,点击轻量展开原始结果 -->
                           <div v-if="row.kind === 'compact'" class="tool-compact">
-                            <div class="tool-compact-row" @click="toggleCompact(row.callId)">
+                            <div class="tool-compact-row" @click="toggleRow(row.callId)">
                               <span class="tool-group-toggle">
-                                {{ row.hasResult ? (isCompactExpanded(row.callId) ? '▼' : '▶') : '' }}
+                                {{ row.hasResult ? (isRowExpanded(row.callId) ? '▼' : '▶') : '' }}
                               </span>
                               <span class="tool-compact-summary">{{ row.summary }}</span>
                             </div>
                             <div
-                              v-if="row.hasResult && isCompactExpanded(row.callId)"
+                              v-if="row.hasResult && isRowExpanded(row.callId)"
                               class="tool-compact-result"
                             >{{ row.resultContent }}</div>
                           </div>
-                          <!-- 普通工具折叠组(该行内的非紧凑工具) -->
-                          <div
-                            v-if="row.kind === 'plain' && row.items.length > 0"
-                            class="tool-group"
-                            :class="{ 'tool-group-expanded': isToolGroupExpanded(row.key) }"
-                          >
-                            <div class="tool-group-header" @click="toggleToolGroup(row.key)">
-                              <span class="tool-group-toggle">{{ isToolGroupExpanded(row.key) ? '▼' : '▶' }}</span>
-                              <span class="tool-group-label">🔧 工具调用 ({{ plainToolCallCount(row.items) }})</span>
+                          <!-- 子智能体卡片:标题单行,展开后参数 + 内部思考 + Markdown 报告 -->
+                          <div v-else-if="row.kind === 'agent'" class="tool-card tool-card-agent">
+                            <div class="tool-card-header" @click="toggleRow(row.callId)">
+                              <span class="tool-group-toggle">{{ isRowExpanded(row.callId) ? '▼' : '▶' }}</span>
+                              <span class="tool-card-title">{{ row.summary }}</span>
                             </div>
-                            <div v-if="isToolGroupExpanded(row.key)" class="tool-group-body">
-                              <ConversationMessage
-                                v-for="(ti, idx) in row.items"
-                                :key="ti.id"
-                                :item="ti"
-                                :is-sub-agent="isSubAgentToolItem(ti, row.items, idx)"
-                                @toggle-reasoning="toggleReasoning"
+                            <div v-if="isRowExpanded(row.callId)" class="tool-card-body">
+                              <div v-if="row.callDetail" class="tool-card-section">
+                                <div class="tool-card-section-label">子任务参数</div>
+                                <div class="tool-card-mono">{{ row.callDetail }}</div>
+                              </div>
+                              <div v-if="row.agentThink" class="tool-card-section">
+                                <div
+                                  class="tool-card-section-label tool-card-think-toggle"
+                                  @click.stop="toggleRow(row.callId + '-think')"
+                                >{{ isRowExpanded(row.callId + '-think') ? '▼' : '▶' }} 内部思考</div>
+                                <div
+                                  v-if="isRowExpanded(row.callId + '-think')"
+                                  class="tool-card-think"
+                                >{{ row.agentThink }}</div>
+                              </div>
+                              <div
+                                v-if="row.hasResult"
+                                class="tool-card-markdown markdown-body"
+                                v-html="row.agentBodyHtml"
                               />
+                              <div v-else class="tool-card-running">子智能体执行中…</div>
                             </div>
                           </div>
+                          <!-- 普通工具卡片:调用+结果整体折叠 -->
+                          <div v-else-if="row.kind === 'toolpair'" class="tool-card">
+                            <div class="tool-card-header" @click="toggleRow(row.callId)">
+                              <span class="tool-group-toggle">{{ isRowExpanded(row.callId) ? '▼' : '▶' }}</span>
+                              <span class="tool-card-title">{{ row.summary }}</span>
+                            </div>
+                            <div v-if="isRowExpanded(row.callId)" class="tool-card-body">
+                              <div v-if="row.callDetail" class="tool-card-section">
+                                <div class="tool-card-section-label">调用参数</div>
+                                <div class="tool-card-mono">{{ row.callDetail }}</div>
+                              </div>
+                              <div v-if="row.hasResult" class="tool-card-section">
+                                <div class="tool-card-section-label">工具结果</div>
+                                <div class="tool-card-mono">{{ row.resultContent }}</div>
+                              </div>
+                              <div v-if="!row.callDetail && !row.hasResult" class="tool-card-running">执行中…</div>
+                            </div>
+                          </div>
+                          <!-- plain 兜底:落单 result 等原样渲染 -->
+                          <template v-else-if="row.kind === 'plain'">
+                            <ConversationMessage
+                              v-for="ti in row.items"
+                              :key="ti.id"
+                              :item="ti"
+                              @toggle-reasoning="toggleReasoning"
+                            />
+                          </template>
                         </template>
                         <!-- 其他项(submit 等) -->
                         <ConversationMessage
@@ -3193,32 +3245,12 @@ function parseCheckpoint(item: DisplayItem): {
   box-shadow: 0 0 0 2px var(--color-msg-pulse-soft);
 }
 
-.iteration-header {
+/* 迭代分隔线:迭代不再折叠,仅保留轻量摘要行作为结构分隔 */
+.iteration-divider {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  cursor: pointer;
-  user-select: none;
-  background: var(--color-surface);
-  border-bottom: 1px solid transparent;
-  transition: background 0.15s ease;
-}
-
-.iteration-header:hover {
-  background: var(--color-surface-alt);
-}
-
-.iteration-expanded .iteration-header {
-  border-bottom-color: var(--color-border);
-}
-
-.iteration-toggle {
-  display: inline-block;
-  width: 14px;
-  font-size: var(--fs-xs);
-  color: var(--color-text-secondary);
-  text-align: center;
+  padding: var(--space-1) var(--space-3);
 }
 
 .iteration-summary {
@@ -3246,31 +3278,107 @@ function parseCheckpoint(item: DisplayItem): {
   padding: var(--space-3);
 }
 
-/* ---- 工具调用折叠组(一个迭代内的所有 tool_call/tool_result 合并) ---- */
-.tool-group {
+/* ---- 工具卡片(agent 子智能体 / toolpair 普通工具:标题行 + 折叠内容) ---- */
+.tool-card {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface);
   overflow: hidden;
 }
 
-.tool-group-header {
+/* 子智能体卡片:左边线标示嵌套层级 */
+.tool-card-agent {
+  border-left: 2px solid var(--color-primary, #6366f1);
+}
+
+.tool-card-header {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
   cursor: pointer;
   user-select: none;
-  border-bottom: 1px solid transparent;
   transition: background 0.15s ease;
 }
 
-.tool-group-header:hover {
+.tool-card-header:hover {
   background: var(--color-surface-alt);
 }
 
-.tool-group-expanded .tool-group-header {
-  border-bottom-color: var(--color-border);
+.tool-card-title {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--color-text);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3) var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+
+.tool-card-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.tool-card-section-label {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--color-text-muted);
+}
+
+.tool-card-think-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+
+.tool-card-mono {
+  padding: var(--space-2);
+  background: var(--color-surface-alt);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.tool-card-think {
+  padding: var(--space-2);
+  background: var(--color-surface-alt);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  font-style: italic;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+/* 子智能体报告正文:Markdown 渲染 */
+.tool-card-markdown {
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-relaxed);
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+.tool-card-running {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  font-style: italic;
 }
 
 .tool-group-toggle {
@@ -3279,19 +3387,6 @@ function parseCheckpoint(item: DisplayItem): {
   font-size: var(--fs-xs);
   color: var(--color-text-secondary);
   text-align: center;
-}
-
-.tool-group-label {
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-semibold);
-  color: var(--color-text-secondary);
-}
-
-.tool-group-body {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
 }
 
 /* ---- 紧凑工具行(读文件/搜索/列目录:单行摘要 + 轻量展开原始结果) ---- */
