@@ -365,6 +365,11 @@ export interface ThinkingDeltaEventData {
    * true 时前端显示"正在验证"而非"正在评估"。
    */
   verify?: boolean
+  /**
+   * 思考流来源:'checkpoint' 表示检查点评估的思考链,
+   * 前端路由到任务详情右侧栏(检查点评估聚合区),不进主对话流。
+   */
+  source?: 'checkpoint'
 }
 
 /** done/error 事件 data */

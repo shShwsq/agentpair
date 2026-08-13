@@ -337,9 +337,9 @@ def run_user_agent_checkpoint(
         {"role": "user", "content": user_msg},
     ]
 
-    # 流式调用(推送 thinking_delta,前端展示检查点评估过程)
+    # 流式调用(推送 thinking_delta,source=checkpoint 供前端路由到右侧栏展示)
     conv_id = str(uuid.uuid4())
-    content_full = _stream_checkpoint_llm(
+    content_full, reasoning_full = _stream_checkpoint_llm(
         client, messages, task_id=task.id, round_idx=round_idx, iteration=iteration,
         conv_id=conv_id,
     )
@@ -374,6 +374,23 @@ def run_user_agent_checkpoint(
         result["interrupt"] = False
         result["reason"] = result.get("reason", "") + "(仅观察模式:已记录偏离,未干预)"
 
+    # 落库真实思考链(role=user_agent, type=thinking),供刷新后右侧栏还原;
+    # content 带检查点前缀,前端据此与完整评估的思考链区分并路由到侧栏。
+    # 不推 SSE:流式期间已通过 thinking_delta 在右侧栏展示,推送会重复。
+    if reasoning_full.strip():
+        try:
+            db.add(Conversation(
+                task_id=task.id,
+                round_idx=round_idx,
+                role="user_agent",
+                type="thinking",
+                content=f"[检查点评估 · 第{round_idx}轮迭代{iteration}]",
+                reasoning=reasoning_full,
+            ))
+            db.commit()
+        except Exception as e:
+            logger.warning(f"[task={task.id}] 落库检查点思考链失败(忽略): {e}")
+
     # 落库 + 推送 agent_checkpoint 事件
     _record_checkpoint(
         db, task, round_idx, iteration, result, reasoning=content_full
@@ -394,13 +411,16 @@ def _stream_checkpoint_llm(
     round_idx: int,
     iteration: int,
     conv_id: str,
-) -> str:
+) -> tuple[str, str]:
     """流式调用检查点评估 LLM,推送 thinking_delta 事件
 
-    复用 user_agent 的 thinking_delta 推送模式,但 role 标记为 user_agent,
-    方便前端在对话流中区分展示。
+    事件带 source=checkpoint 标记,前端据此把思考链路由到任务详情右侧栏
+    (检查点评估聚合区),不进主对话流。
+
+    返回 (content_full, reasoning_full):正式输出(JSON)与完整思考链。
     """
     content_full = ""
+    reasoning_full = ""
 
     publish(task_id, "thinking_delta", {
         "conv_id": conv_id,
@@ -409,11 +429,13 @@ def _stream_checkpoint_llm(
         "phase": "start",
         "delta": "",
         "iteration": iteration,
+        "source": "checkpoint",
     })
 
     try:
         for chunk in client.chat_stream(messages, max_tokens=1024):
             if chunk.reasoning_delta:
+                reasoning_full += chunk.reasoning_delta
                 publish(task_id, "thinking_delta", {
                     "conv_id": conv_id,
                     "round_idx": round_idx,
@@ -421,6 +443,7 @@ def _stream_checkpoint_llm(
                     "phase": "reasoning",
                     "delta": chunk.reasoning_delta,
                     "iteration": iteration,
+                    "source": "checkpoint",
                 })
             if chunk.content_delta:
                 content_full += chunk.content_delta
@@ -438,6 +461,7 @@ def _stream_checkpoint_llm(
             "phase": "error",
             "delta": f"[检查点评估失败: {e}]",
             "iteration": iteration,
+            "source": "checkpoint",
         })
         raise
 
@@ -448,9 +472,10 @@ def _stream_checkpoint_llm(
         "phase": "end",
         "delta": "",
         "iteration": iteration,
+        "source": "checkpoint",
     })
 
-    return content_full
+    return content_full, reasoning_full
 
 
 def _parse_checkpoint_json(content: str) -> dict[str, Any]:

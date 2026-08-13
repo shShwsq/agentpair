@@ -5,7 +5,7 @@
  * 布局区域:
  * 1. 主区协作对话流:按 round_idx 分组,展示 user_agent 与 react_agent 的来回
  * 2. 右侧栏:覆盖度看板 / 结果清单(默认折叠,分组由 task.params._grouping 驱动)/
- *    检查点评估聚合(点击定位对话流) / 任务概览 / 动态验证配置
+ *    检查点评估聚合(含检查点思考链,点击定位对话流) / 任务概览 / 动态验证配置
  *
  * 实时更新:SSE 接收每条对话/状态变更 + thinking_delta(流式 token 增量)。
  * 初始加载 GET /tasks/{id} 拿快照(补历史),然后 SSE 接收增量。
@@ -16,6 +16,7 @@
  * 流式思考显示(thinking_delta):
  * - 一次 LLM 调用对应一个 conv_id,前端按 conv_id 累积 reasoning + content
  * - 流式期间以"流式思考卡片"显示打字机效果
+ * - source=checkpoint 的检查点思考链不进主对话流,路由到右侧栏检查点聚合区
  * - 思考链同时以 type=thinking 落库(react_agent / user_agent),
  *   刷新页面后从 GET /tasks/{id} 还原为只读流式卡片
  */
@@ -162,6 +163,8 @@ interface StreamingItem {
   insertSeq: number
   /** 是否为动态验证的思考流(verifier_agent 产生,显示"正在验证"而非"正在思考") */
   verify?: boolean
+  /** 思考流来源:'checkpoint' → 检查点思考链,路由到右侧栏检查点聚合区,不进主对话流 */
+  source?: 'checkpoint'
 }
 
 const streamingItems = reactive<Map<string, StreamingItem>>(new Map())
@@ -757,7 +760,7 @@ function connectSSE(taskId: string): void {
 // ---- 流式增量处理 ----
 
 function handleThinkingDelta(data: ThinkingDeltaEventData): void {
-  const { conv_id, round_idx, role, phase, delta, iteration, verify } = data
+  const { conv_id, round_idx, role, phase, delta, iteration, verify, source } = data
 
   if (phase === 'start') {
     // 创建新的流式项:reasoning 默认折叠(用户可手动展开查看思考链)
@@ -777,6 +780,7 @@ function handleThinkingDelta(data: ThinkingDeltaEventData): void {
       seq: streamingSeqCounter++,
       insertSeq,
       verify,
+      source,
     })
     return
   }
@@ -798,6 +802,7 @@ function handleThinkingDelta(data: ThinkingDeltaEventData): void {
       seq: streamingSeqCounter++,
       insertSeq,
       verify,
+      source,
     })
   }
 
@@ -1273,6 +1278,14 @@ const roundGroups = computed<RoundGroup[]>(() => {
     // 用户指令不进 round 分组,提到最顶部单独渲染
     if (c.role === 'user' && c.type === 'question') return
 
+    // 检查点思考链(带检查点前缀的 type=thinking)路由到右侧栏检查点聚合区,
+    // 不进主对话流(与后端 agent_checkpoint 落库的 content 前缀约定一致)
+    if (
+      c.role === 'user_agent' &&
+      c.type === 'thinking' &&
+      (c.content || '').startsWith('[检查点评估')
+    ) return
+
     const localIdx = roundCounter.get(c.round_idx) ?? 0
     roundCounter.set(c.round_idx, localIdx + 1)
     const seq = localIdx * 1000
@@ -1330,6 +1343,8 @@ const roundGroups = computed<RoundGroup[]>(() => {
   //     之后、tool_call2(seq=2000)之前。这样每个 thinking 紧跟它之后的 tool_call/tool_result,
   //     正确归入各自迭代,不会出现"所有 thinking 挤前面、所有 tool_call 堆最后"的错乱。
   for (const item of streamingItems.values()) {
+    // 检查点思考链在右侧栏检查点聚合区展示,不进主对话流
+    if (item.source === 'checkpoint') continue
     if (!groups.has(item.round_idx)) groups.set(item.round_idx, [])
     groups.get(item.round_idx)!.push({
       id: `stream:${item.conv_id}`,
@@ -1902,33 +1917,117 @@ interface CheckpointEntry {
   isInterrupt: boolean
   reason: string
   query: string | null
+  /** 检查点思考链(落库 type=thinking 或实时流式累积) */
+  thinking?: string
+  /** 思考链是否正在流式输出 */
+  thinkingStreaming?: boolean
+  /** 评估尚未落库(思考链正在流式,评估进行中) */
+  pending?: boolean
+}
+
+/** 解析检查点 content 前缀中的轮次/迭代号(与后端落库格式一致) */
+function parseCheckpointPos(content: string): {
+  roundIdx: number | null
+  iteration: number | null
+} {
+  const m = content.match(/\[检查点评估 · 第(\d+)轮迭代(\d+)\]/)
+  return m
+    ? { roundIdx: parseInt(m[1], 10), iteration: parseInt(m[2], 10) }
+    : { roundIdx: null, iteration: null }
 }
 
 /**
  * 检查点评估聚合列表(右侧栏展示)。
  *
- * 从 task.conversations 过滤落库的检查点评估(与 isCheckpointItem 同一判定):
- * GET 快照刷新后可还原历史,运行中 SSE conversation 事件推送实时生效。
+ * 三个来源合并:
+ * 1. 落库的检查点评估(type=evaluation,与 isCheckpointItem 同一判定):
+ *    GET 快照刷新后可还原历史,运行中 SSE conversation 事件推送实时生效;
+ * 2. 落库的检查点思考链(type=thinking,content 带检查点前缀):
+ *    按 轮次:迭代 挂到对应评估条目下;
+ * 3. 实时流式中的检查点思考(streamingItems 中 source=checkpoint):
+ *    已有对应评估条目 → 挂上实时思考链;评估尚未落库 → 生成"评估中"占位条目。
  */
 const checkpointList = computed<CheckpointEntry[]>(() => {
-  const convs = task.value?.conversations
-  if (!convs) return []
+  const convs = task.value?.conversations ?? []
+
+  // 落库的检查点思考链:按 轮次:迭代 索引
+  const thinkingByKey = new Map<string, string>()
+  for (const c of convs) {
+    if (c.role !== 'user_agent' || c.type !== 'thinking') continue
+    const content = c.content || ''
+    if (!content.startsWith('[检查点评估')) continue
+    if (!c.reasoning) continue
+    const pos = parseCheckpointPos(content)
+    if (pos.roundIdx === null || pos.iteration === null) continue
+    thinkingByKey.set(`${pos.roundIdx}:${pos.iteration}`, c.reasoning)
+  }
+
+  // 落库的检查点评估:聚合条目主体
   const list: CheckpointEntry[] = []
   for (const c of convs) {
     if (c.role !== 'user_agent' || c.type !== 'evaluation') continue
     const content = c.content || ''
     if (!content.startsWith('[检查点评估')) continue
-    // 轮次/迭代号从前缀解析(迭代号仅存在于前缀中)
-    const posMatch = content.match(/\[检查点评估 · 第(\d+)轮迭代(\d+)\]/)
+    const pos = parseCheckpointPos(content)
+    const roundIdx = pos.roundIdx ?? c.round_idx
     list.push({
       id: c.id,
-      roundIdx: posMatch ? parseInt(posMatch[1], 10) : c.round_idx,
-      iteration: posMatch ? parseInt(posMatch[2], 10) : null,
+      roundIdx,
+      iteration: pos.iteration,
       ...parseCheckpointContent(content),
+      thinking:
+        pos.iteration !== null
+          ? thinkingByKey.get(`${roundIdx}:${pos.iteration}`)
+          : undefined,
+      thinkingStreaming: false,
+      pending: false,
     })
   }
+
+  // 实时流式中的检查点思考链(source=checkpoint)
+  for (const item of streamingItems.values()) {
+    if (item.source !== 'checkpoint' || item.iteration === undefined) continue
+    const existing = list.find(
+      (e) => e.roundIdx === item.round_idx && e.iteration === item.iteration,
+    )
+    if (existing) {
+      // 评估已落库:思考链优先用实时累积(刷新前落库记录尚未进快照)
+      existing.thinking = item.reasoning || existing.thinking
+      existing.thinkingStreaming = item.status === 'streaming'
+    } else {
+      // 评估进行中:占位条目(评估落库后由上方分支接管)
+      list.push({
+        id: `live:${item.conv_id}`,
+        roundIdx: item.round_idx,
+        iteration: item.iteration,
+        isInterrupt: false,
+        reason: '',
+        query: null,
+        thinking: item.reasoning,
+        thinkingStreaming: item.status === 'streaming',
+        pending: true,
+      })
+    }
+  }
+
   return list
 })
+
+/** 检查点思考链展开状态(右侧栏;流式中强制展开) */
+const checkpointThinkingExpanded = reactive<Set<string>>(new Set())
+
+function toggleCheckpointThinking(id: string): void {
+  if (checkpointThinkingExpanded.has(id)) {
+    checkpointThinkingExpanded.delete(id)
+  } else {
+    checkpointThinkingExpanded.add(id)
+  }
+}
+
+/** 思考链是否展开:流式中强制展开,其余按手动展开状态 */
+function isCheckpointThinkingExpanded(cp: CheckpointEntry): boolean {
+  return !!cp.thinkingStreaming || checkpointThinkingExpanded.has(cp.id)
+}
 
 /** 筛选 step 组内应显示在迭代 iterIdx 之后的检查点标记(0 = 首个迭代之前) */
 function checkpointsAfter(group: StepGroup, iterIdx: number): CheckpointMarker[] {
@@ -2531,7 +2630,7 @@ function toggleResult(id: string): void {
           </template>
         </section>
 
-        <!-- 检查点评估聚合(置底;点击条目定位对话流对应轮次) -->
+        <!-- 检查点评估聚合(置底;含检查点思考链,点击条目定位对话流对应轮次) -->
         <section v-if="checkpointList.length > 0" class="sidebar-checkpoints">
           <h2>检查点评估 <span class="count">({{ checkpointList.length }})</span></h2>
           <div class="checkpoint-list">
@@ -2539,14 +2638,18 @@ function toggleResult(id: string): void {
               v-for="cp in checkpointList"
               :key="cp.id"
               :class="['checkpoint-item', { 'checkpoint-item-interrupt': cp.isInterrupt }]"
-              title="点击定位对话流中的检查点位置"
-              @click="locateCheckpoint(cp.id)"
+              :title="cp.pending ? undefined : '点击定位对话流中的检查点位置'"
+              @click="!cp.pending && locateCheckpoint(cp.id)"
             >
               <div class="checkpoint-item-head">
                 <span class="checkpoint-item-pos">
                   第 {{ cp.roundIdx }} 轮<template v-if="cp.iteration !== null"> · 迭代 {{ cp.iteration }}</template>
                 </span>
+                <span v-if="cp.pending" class="checkpoint-badge checkpoint-badge-pending">
+                  评估中
+                </span>
                 <span
+                  v-else
                   :class="[
                     'checkpoint-badge',
                     cp.isInterrupt ? 'checkpoint-badge-interrupt' : 'checkpoint-badge-continue',
@@ -2555,9 +2658,33 @@ function toggleResult(id: string): void {
                   {{ cp.isInterrupt ? '已打断' : '继续' }}
                 </span>
               </div>
-              <div class="checkpoint-item-reason">{{ cp.reason || '无说明' }}</div>
-              <div v-if="cp.isInterrupt && cp.query" class="checkpoint-item-query">
-                追问:{{ cp.query }}
+              <template v-if="!cp.pending">
+                <div class="checkpoint-item-reason">{{ cp.reason || '无说明' }}</div>
+                <div v-if="cp.isInterrupt && cp.query" class="checkpoint-item-query">
+                  追问:{{ cp.query }}
+                </div>
+              </template>
+              <!-- 检查点思考链(落库 type=thinking / 实时流式;默认折叠,流式中展开) -->
+              <div
+                v-if="cp.thinking"
+                class="checkpoint-thinking"
+                :class="{ 'checkpoint-thinking-active': cp.thinkingStreaming }"
+                @click.stop
+              >
+                <div
+                  class="checkpoint-thinking-header"
+                  @click="toggleCheckpointThinking(cp.id)"
+                >
+                  <span class="checkpoint-thinking-toggle">
+                    {{ isCheckpointThinkingExpanded(cp) ? '▼' : '▶' }}
+                  </span>
+                  <span>{{ cp.thinkingStreaming ? '正在思考…' : '思考过程' }}</span>
+                  <span class="checkpoint-thinking-meta">{{ cp.thinking.length }} 字</span>
+                </div>
+                <div
+                  v-if="isCheckpointThinkingExpanded(cp)"
+                  class="checkpoint-thinking-body"
+                >{{ cp.thinking }}</div>
               </div>
             </div>
           </div>
@@ -4023,5 +4150,48 @@ function toggleResult(id: string): void {
 .checkpoint-badge-interrupt {
   color: #c2410c;
   background: rgba(234, 88, 12, 0.15);
+}
+
+.checkpoint-badge-pending {
+  color: var(--color-text-muted);
+  background: var(--color-border);
+}
+
+/* 检查点思考链(条目内可折叠块;流式中 header 高亮) */
+.checkpoint-thinking {
+  margin-top: var(--space-2);
+  padding-top: var(--space-1);
+  border-top: 1px dashed var(--color-border);
+}
+
+.checkpoint-thinking-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.checkpoint-thinking-active .checkpoint-thinking-header {
+  color: var(--color-primary);
+}
+
+.checkpoint-thinking-toggle {
+  font-size: 10px;
+}
+
+.checkpoint-thinking-meta {
+  margin-left: auto;
+}
+
+.checkpoint-thinking-body {
+  margin-top: var(--space-1);
+  max-height: 240px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-text-secondary);
+  line-height: var(--lh-relaxed);
 }
 </style>
