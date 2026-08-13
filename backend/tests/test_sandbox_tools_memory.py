@@ -1,7 +1,8 @@
-"""sandbox_tools 项目记忆文件写入 / read_file 白名单 单元测试(local 模式,不连真实沙箱)。
+"""sandbox_tools 记忆文件写入 / read_file 白名单 单元测试(local 模式,不连真实沙箱)。
 
 覆盖:
 - write_project_memory_file:local 模式写入 local_dir/.agent_memory/project_memory.md
+- write_global_memory_file:local 模式写入 local_dir/.agent_memory/global_memory.md
 - read_file 白名单:绝对路径 /home/user/.agent_memory/project_memory.md 能读到记忆文件
 - read_file 拒绝仓库外逃逸(非白名单绝对路径 / 记忆目录穿越)
 """
@@ -62,6 +63,54 @@ def test_write_memory_file_empty_clears_previous(local_mode, task_id):
         mem_file = Path(ctx["local_dir"]) / ".agent_memory" / "project_memory.md"
         assert mem_file.is_file()
         assert mem_file.read_text(encoding="utf-8") == ""
+    finally:
+        _cleanup(task_id)
+
+
+# ---------- write_global_memory_file ----------
+
+def test_write_global_memory_file_local_writes_file(local_mode, task_id):
+    """local 模式:写入内容到 local_dir/.agent_memory/global_memory.md。"""
+    try:
+        content = "## Lessons Learned\n- lesson A"
+        sandbox_tools.write_global_memory_file(task_id, content)
+
+        ctx = sandbox_tools._get_or_create_session(task_id)
+        mem_file = Path(ctx["local_dir"]) / ".agent_memory" / "global_memory.md"
+        assert mem_file.is_file()
+        assert mem_file.read_text(encoding="utf-8") == content
+    finally:
+        _cleanup(task_id)
+
+
+def test_write_global_memory_file_empty_clears_previous(local_mode, task_id):
+    """写空串清空旧文件(避免看到上一个用户的全局记忆)。"""
+    try:
+        sandbox_tools.write_global_memory_file(task_id, "old global memory")
+        sandbox_tools.write_global_memory_file(task_id, "")
+
+        ctx = sandbox_tools._get_or_create_session(task_id)
+        mem_file = Path(ctx["local_dir"]) / ".agent_memory" / "global_memory.md"
+        assert mem_file.is_file()
+        assert mem_file.read_text(encoding="utf-8") == ""
+    finally:
+        _cleanup(task_id)
+
+
+def test_read_file_whitelist_reads_global_memory_file(local_mode, task_id):
+    """read_file 传全局记忆文件绝对路径 → 读到写入内容(白名单不受 repo_path 限制)。"""
+    try:
+        content = "## Tech Stack\n- FastAPI + Vue"
+        sandbox_tools.write_global_memory_file(task_id, content)
+
+        result = sandbox_tools.read_file(
+            "/home/user/repos/dummy",
+            "/home/user/.agent_memory/global_memory.md",
+            task_id=task_id,
+        )
+        assert result["total_lines"] == 2
+        assert "## Tech Stack" in result["content"]
+        assert "- FastAPI + Vue" in result["content"]
     finally:
         _cleanup(task_id)
 

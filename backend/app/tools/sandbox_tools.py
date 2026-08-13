@@ -46,6 +46,8 @@ _SESSION_TTL_AFTER_COMPLETE = 3600  # 1 小时
 # 智能体不知道 project_id,固定路径降低认知负担;"分项目"靠每任务只写当前项目记忆实现。
 _MEMORY_DIR_SANDBOX = "/home/user/.agent_memory"
 _MEMORY_FILE = "project_memory.md"
+# 全局长期记忆文件(跨项目通用经验,每任务启动时覆盖为当前用户的全局记忆)
+_GLOBAL_MEMORY_FILE = "global_memory.md"
 
 
 def _get_or_create_session(task_id: str) -> dict[str, Any]:
@@ -488,6 +490,26 @@ def write_project_memory_file(task_id: str, content: str) -> None:
         session.write_file(f"{_MEMORY_DIR_SANDBOX}/{_MEMORY_FILE}", content)
 
 
+def write_global_memory_file(task_id: str, content: str) -> None:
+    """把全局长期记忆写入沙箱固定路径,供 react_agent / CLI 智能体随时 read_file 查阅。
+
+    固定路径 /home/user/.agent_memory/global_memory.md(每任务启动时覆盖为当前
+    用户的全局记忆)。content 为空也写(清空旧文件,避免看到上一个用户的记忆)。
+
+    与 write_project_memory_file 同构:local 模式写本地目录,sandbox 模式写沙箱绝对路径。
+    """
+    ctx = _get_or_create_session(task_id)
+    mode = ctx["mode"]
+    if mode == "local":
+        mem_dir = Path(ctx["local_dir"]) / ".agent_memory"
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        (mem_dir / _GLOBAL_MEMORY_FILE).write_text(content, encoding="utf-8")
+    else:
+        session: SandboxSession = ctx["session"]
+        session.run_command(f"mkdir -p {shlex.quote(_MEMORY_DIR_SANDBOX)}")
+        session.write_file(f"{_MEMORY_DIR_SANDBOX}/{_GLOBAL_MEMORY_FILE}", content)
+
+
 def _is_memory_file_path(file_path: str) -> bool:
     """file_path 是否指向记忆目录(白名单绝对路径,不受 repo_path 限制)
 
@@ -557,7 +579,7 @@ def read_file(
     }
 
     特例:file_path 以 /home/user/.agent_memory/ 开头(记忆文件白名单)时,
-    不受 repo_path 限制,直接读记忆目录文件(供查阅完整项目记忆)。
+    不受 repo_path 限制,直接读记忆目录文件(供查阅完整项目记忆 / 全局记忆)。
     """
     ctx = _get_or_create_session(task_id)
     mode = ctx["mode"]

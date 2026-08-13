@@ -1634,12 +1634,29 @@ def _build_prompt_message(
     memory_summary: str = "",
     global_memory: str = "",
 ) -> str:
-    """构造发给 CLI 的 prompt 消息
+    """构造发给 CLI 的完整 prompt 消息(纯指令 + 记忆注入段)
+
+    落库展示用 _build_base_prompt(纯指令);实际发送用本函数(含记忆段)。
+    """
+    return _build_base_prompt(
+        task, round_idx, followup_query, repo_context, repo_path, previous_plan,
+    ) + _build_memory_section(memory_summary, global_memory)
+
+
+def _build_base_prompt(
+    task: Task,
+    round_idx: int,
+    followup_query: str | None,
+    repo_context: str | None,
+    repo_path: str,
+    previous_plan: list[dict] | None,
+) -> str:
+    """构造发给 CLI 的纯指令部分(不含记忆注入段)
 
     - 第 1 轮:task.user_input + 仓库信息 + repo_context(已 clone 提示)
     - 追问轮:基于已有仓库继续,注入跨轮记忆(plan 续接)
-    - 每轮末尾追加项目记忆精简版 + 完整记忆文件路径提示(供 CLI read_file 查阅)
-    - 再追加全局长期记忆段(跨项目通用经验,影响执行方式)
+
+    这部分落库到 Conversation(前端展示),记忆段单独拼接只进发送内容。
     """
     if followup_query is None:
         msg = task.user_input
@@ -1670,21 +1687,38 @@ def _build_prompt_message(
         if reminder:
             msg += f"\n\n{reminder}"
 
+    return msg
+
+
+def _build_memory_section(memory_summary: str = "", global_memory: str = "") -> str:
+    """构造记忆注入段(拼在发送给 CLI 的 prompt 末尾,不落库不展示)
+
+    - 项目记忆精简版 + 完整记忆文件路径提示(供 CLI read_file 查阅)
+    - 全局长期记忆段(跨项目通用经验)+ 完整记忆文件路径提示
+
+    两部分都为空时返回空串。
+    """
+    section = ""
+
     # 项目记忆精简版 + 完整记忆文件路径提示(每轮注入,与 react_agent system prompt 行为一致)
     summary = (memory_summary or "").strip()
     if summary:
-        msg += (
+        section += (
             "\n\n[项目记忆摘要]\n"
             + summary
             + "\n\n完整项目记忆可 read_file /home/user/.agent_memory/project_memory.md 查阅"
         )
 
     # 全局长期记忆(跨项目通用经验,影响执行方式;与 react_agent system prompt 行为一致)
+    # 完整文件在任务启动时已写入沙箱,超截断上限时 CLI 可 read_file 查全量
     gmem = (global_memory or "").strip()
     if gmem:
-        msg += "\n\n" + gmem
+        section += (
+            "\n\n" + gmem
+            + "\n\n完整全局记忆可 read_file /home/user/.agent_memory/global_memory.md 查阅"
+        )
 
-    return msg
+    return section
 
 
 # ============================================================
@@ -1853,16 +1887,18 @@ def run_acp_agent(
                 post_session_setup(client, acp_session_id, task)
 
             # ---- 构造 prompt 消息 ----
-            user_msg = _build_prompt_message(
+            # 落库只存纯指令(前端展示不含记忆注入段);实际发送拼上记忆段
+            base_msg = _build_base_prompt(
                 task, round_idx, followup_query, repo_context, repo_path, previous_plan,
-                memory_summary=memory_summary, global_memory=global_memory,
             )
 
             _add_conversation(
                 db, task, round_idx=round_idx,
                 role="user", type="question",
-                content=user_msg,
+                content=base_msg,
             )
+
+            user_msg = base_msg + _build_memory_section(memory_summary, global_memory)
 
             # ---- 检查点评估回调(CLI agent 的迭代边界轻量评估) ----
             # 在 _ACPCollector 的 _start_new_iteration 中被调用,

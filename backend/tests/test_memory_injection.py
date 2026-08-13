@@ -257,3 +257,20 @@ def test_global_section_truncates_long_content():
     assert body.startswith("X" * 100)
     assert "[...truncated...]" in body
     assert len(body) < len(mem.content)
+
+
+def test_global_section_truncated_appends_file_hint():
+    """被截断时附全局记忆文件路径提示(供 read_file 查全量);未截断不附。"""
+    from app.services.memory_injection import MAX_GLOBAL_MEM_CHARS
+
+    # 超长 → 截断 → 附提示
+    mem = MagicMock()
+    mem.content = "X" * (MAX_GLOBAL_MEM_CHARS + 500)
+    result = build_global_memory_section(_mock_db(first_result=mem), 1)
+    assert "/home/user/.agent_memory/global_memory.md" in result
+
+    # 未超长 → 不附提示(内联已是全量)
+    mem2 = MagicMock()
+    mem2.content = "## Tech Stack\n- FastAPI"
+    result2 = build_global_memory_section(_mock_db(first_result=mem2), 1)
+    assert "global_memory.md" not in result2

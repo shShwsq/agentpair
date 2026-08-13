@@ -161,16 +161,25 @@ def build_global_memory_section(db: Session, user_id) -> str:
     直接影响执行正确性,故注入执行侧而非仅 user_agent。
 
     user_id 为 None(匿名任务)或无全局记忆 → 返回空串(不注入)。
-    截断到 MAX_GLOBAL_MEM_CHARS(与 user_agent 一致),不写沙箱文件
-    (全局记忆通常不超长,且无需跨字数限制查阅)。
+    截断到 MAX_GLOBAL_MEM_CHARS;被截断时附完整记忆文件路径提示(任务启动时
+    已写入沙箱 global_memory.md),引导 agent 用 read_file 查阅全量。
     """
     if user_id is None:
         return ""
     mem = db.query(UserMemory).filter(UserMemory.user_id == user_id).first()
     if not mem or not mem.content or not mem.content.strip():
         return ""
-    return (
+    content = mem.content.strip()
+    truncated = _truncate(content, MAX_GLOBAL_MEM_CHARS)
+    section = (
         "The following is general experience accumulated across tasks, "
         "organized by category (follow during execution):\n"
-        + _truncate(mem.content.strip(), MAX_GLOBAL_MEM_CHARS)
+        + truncated
     )
+    # 被截断时提示可 read_file 查全量(文件在任务启动时写入沙箱)
+    if truncated != content:
+        section += (
+            "\n\nFull memory available via read_file "
+            "/home/user/.agent_memory/global_memory.md"
+        )
+    return section

@@ -863,6 +863,12 @@ def _prepare_repo_context(
     """
     params = task.params or {}
     repo_url = params.get("repo_url")
+
+    # 记忆文件提前写入(不依赖是否选仓库,供执行侧 read_file 查全量):
+    # - 全局记忆文件:无条件写(无记忆则写空串清残留)
+    # - 项目记忆文件:选了仓库且能匹配到 Project 时写,否则写空串清残留
+    _write_memory_files_for_task(task, db, task_id_str, repo_url)
+
     if not repo_url:
         return None, ""
 
@@ -882,10 +888,7 @@ def _prepare_repo_context(
         f"files_count={clone_result.get('files_count')}"
     )
 
-    # clone 成功后,把当前项目的完整记忆写入沙箱固定路径
-    # (供 react_agent / CLI 智能体随时 read_file 查阅,突破注入字数限制)
-    # 无 Project/无记忆则写空串(清空上一个项目残留)。失败不阻塞任务。
-    _write_project_memory_for_task(task, db, task_id_str, repo_url)
+    # (记忆文件已在任务启动时写入,见 _write_memory_files_for_task)
 
     # 主动 list_files(根目录),把结构拼进上下文
     task.current_stage = "正在读取仓库根目录结构..."
@@ -903,21 +906,43 @@ def _prepare_repo_context(
     return repo_path, repo_context
 
 
-def _write_project_memory_for_task(
-    task: Task, db: Session, task_id_str: str, repo_url: str,
+def _write_memory_files_for_task(
+    task: Task, db: Session, task_id_str: str, repo_url: str | None,
 ) -> None:
-    """把当前项目的完整记忆写入沙箱固定路径(供 react_agent / CLI 随时 read_file 查阅)
+    """把记忆文件写入沙箱固定路径(供 react_agent / CLI 随时 read_file 查阅)
 
-    按 task.user_id + repo_url 归一化查 Project,取 memory_content 写入。
-    无 Project/无记忆则写空串(清空上一个项目残留,避免看到无关记忆)。
+    - 全局记忆文件:写入 UserMemory.content(无则写空串清残留),无条件写
+    - 项目记忆文件:按 user_id + repo_url 归一化查 Project,取 memory_content 写入;
+      无 Project/无记忆则写空串(清空上一个项目残留,避免看到无关记忆)
+
     任何异常都 catch + log,不阻塞任务启动。
     """
+    try:
+        from app.models.user_memory import UserMemory
+
+        global_content = ""
+        if task.user_id is not None:
+            mem = (
+                db.query(UserMemory)
+                .filter(UserMemory.user_id == task.user_id)
+                .first()
+            )
+            if mem and mem.content:
+                global_content = mem.content.strip()
+        sandbox_tools.write_global_memory_file(task_id_str, global_content)
+        logger.info(
+            f"[task={task.id}] 已写入全局记忆文件 "
+            f"(/home/user/.agent_memory/global_memory.md, {len(global_content)} 字符)"
+        )
+    except Exception as e:
+        logger.warning(f"[task={task.id}] 写入全局记忆文件失败(忽略): {e}")
+
     try:
         from app.models.project import Project
         from app.services.repo_url import normalize_repo_url
 
         memory_content = ""
-        norm = normalize_repo_url(repo_url)
+        norm = normalize_repo_url(repo_url) if repo_url else ""
         if norm and task.user_id is not None:
             proj = (
                 db.query(Project)
@@ -1036,6 +1061,12 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
     # 起始 round = max(Conversation.round_idx) + 1,最多再跑 MAX_RESUME_ROUNDS 轮
     start_round_idx = _get_next_round_idx(db, task.id)
     max_rounds = start_round_idx + MAX_RESUME_ROUNDS - 1
+
+    # 重启路径不走 _prepare_repo_context,补写记忆文件(幂等:会话存活时覆盖同内容,
+    # 会话已被回收时重建文件,保证执行侧 read_file 能查到全量记忆)
+    _write_memory_files_for_task(
+        task, db, task_id_str, (task.params or {}).get("repo_url"),
+    )
 
     # 把用户消息拼到 user_intent 后面,让 user_agent 把它视为新的检查方向
     effective_intent = task.user_input + f"\n\n[用户追加消息]\n{user_message}"

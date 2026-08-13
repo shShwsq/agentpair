@@ -1,10 +1,15 @@
 """acp_base._build_prompt_message 单元测试(纯函数,不连 DB / 不连沙箱)。
 
-覆盖 CLI 智能体 prompt 中项目记忆精简版 + 全局记忆的注入与拼接顺序。
+覆盖 CLI 智能体 prompt 中项目记忆精简版 + 全局记忆的注入与拼接顺序,
+以及"纯指令(落库展示)与记忆注入段(只进发送内容)"的拆分。
 """
 from unittest.mock import MagicMock
 
-from app.agents.acp_base import _build_prompt_message
+from app.agents.acp_base import (
+    _build_base_prompt,
+    _build_memory_section,
+    _build_prompt_message,
+)
 
 
 def _mk_task(user_input="审计这个仓库的安全问题", params=None):
@@ -82,3 +87,47 @@ def test_previous_plan_and_memories_coexist():
     )
     assert "PROJECT_MEM" in msg
     assert "GLOBAL_MEM" in msg
+
+
+# ---------- 纯指令 / 记忆段拆分(落库不含记忆注入段) ----------
+
+def test_base_prompt_excludes_memories():
+    """_build_base_prompt 只含纯指令,不含项目/全局记忆段(落库展示用)。"""
+    task = _mk_task()
+    base = _build_base_prompt(
+        task, 1, None, "[repo context]", "/home/user/repos/r", None,
+    )
+    assert task.user_input in base
+    assert "[项目记忆摘要]" not in base
+    assert "general experience accumulated" not in base
+
+
+def test_memory_section_contains_both_and_global_file_hint():
+    """_build_memory_section 含项目记忆 + 全局记忆 + 全局记忆文件路径提示。"""
+    section = _build_memory_section(
+        memory_summary="PROJECT_MEM", global_memory="GLOBAL_MEM",
+    )
+    assert "PROJECT_MEM" in section
+    assert "GLOBAL_MEM" in section
+    assert "/home/user/.agent_memory/global_memory.md" in section
+    assert "/home/user/.agent_memory/project_memory.md" in section
+
+
+def test_memory_section_empty_when_no_memories():
+    """两部分都为空 → 记忆段为空串。"""
+    assert _build_memory_section("", "") == ""
+    assert _build_memory_section("   ", "") == ""
+
+
+def test_prompt_message_equals_base_plus_section():
+    """_build_prompt_message == 纯指令 + 记忆段(发送内容完整,落库内容纯净)。"""
+    task = _mk_task()
+    base = _build_base_prompt(
+        task, 1, None, "[repo context]", "/home/user/repos/r", None,
+    )
+    section = _build_memory_section("PROJECT_MEM", "GLOBAL_MEM")
+    msg = _build_prompt_message(
+        task, 1, None, "[repo context]", "/home/user/repos/r", None,
+        memory_summary="PROJECT_MEM", global_memory="GLOBAL_MEM",
+    )
+    assert msg == base + section
