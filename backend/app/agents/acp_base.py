@@ -1137,6 +1137,25 @@ class _ACPCollector:
         qoder_meta = meta.get("qoder") or {}
         tool_name = qoder_meta.get("toolName", "") or self._infer_tool_name(title, kind)
 
+        # Kimi 风格事件:无 rawInput,目标信息在 title 前缀与 locations 里
+        # (read: /path、terminal: cmd、search: pattern),归一化成标准 rawInput,
+        # 让 _build_tool_intent_detail 生成可读 intent(也避免 read: 被误判成 Bash)
+        if not raw_input:
+            locations = update.get("locations") or []
+            loc_path = (
+                locations[0].get("path", "")
+                if locations and isinstance(locations[0], dict) else ""
+            )
+            if title.startswith("read: "):
+                tool_name = "Read"
+                raw_input = {"file_path": loc_path or title[6:].strip()}
+            elif title.startswith("terminal: "):
+                tool_name = "Bash"
+                raw_input = {"command": title[10:].strip()}
+            elif title.startswith("search: "):
+                tool_name = "Grep"
+                raw_input = {"pattern": title[8:].strip()}
+
         # 缓存,等 tool_call_update 累积输入 / completed 拿输出
         self._pending_tool_calls[tool_call_id] = {
             "title": title,
@@ -1289,6 +1308,7 @@ class _ACPCollector:
         各工具类型的 intent:
         - Agent(子智能体):"子任务: {description}" 或 "子任务: {prompt摘要}"
         - Bash(命令执行):"执行: {command摘要}"
+        - Read/Grep/Glob(浏览型):"读取文件 {path}"/"搜索代码: {pattern}"/"查找文件: {pattern}"
         - 其他:"调用 {tool_name}"
         """
         raw_input = raw_input or {}
@@ -1337,6 +1357,19 @@ class _ACPCollector:
                 intent = "执行命令"
             detail = cmd or (json.dumps(raw_input, ensure_ascii=False, indent=2) if raw_input else "")
             intent += " [Bash]"
+
+        elif tool_name == "Read":
+            fp = raw_input.get("file_path", "")
+            intent = f"读取文件 {fp}" if fp else "读取文件"
+            detail = json.dumps(raw_input, ensure_ascii=False, indent=2) if raw_input else input_text
+            intent += " [Read]"
+
+        elif tool_name in ("Grep", "Glob"):
+            pattern = raw_input.get("pattern", "")
+            verb = "搜索代码" if tool_name == "Grep" else "查找文件"
+            intent = f"{verb}: {pattern[:60]}" if pattern else verb
+            detail = json.dumps(raw_input, ensure_ascii=False, indent=2) if raw_input else input_text
+            intent += f" [{tool_name}]"
 
         else:
             intent = f"调用 {tool_name}"

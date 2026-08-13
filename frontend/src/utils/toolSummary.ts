@@ -214,10 +214,65 @@ export function summarizeCommand(cmdRaw: string): string | null {
   return parts.join('、')
 }
 
-/** 判断 tool_call 是否可紧凑化:内置浏览型工具,或命令全部只读的 Bash/run_command */
+/** CLI 智能体原生浏览工具(Qoder Read/Grep/Glob):从调用参数 JSON 摘要,
+ * 不依赖结果(结果是原始输出文本) */
+const CLI_COMPACT_TOOLS = new Set(['Read', 'Grep', 'Glob'])
+
+/** tool_call content 首行后的 detail 解析为 JSON(失败返回 null) */
+function detailJsonOf(call: ToolItem): Record<string, unknown> | null {
+  const content = call.content || ''
+  const idx = content.indexOf('\n')
+  if (idx < 0) return null
+  const detail = content.slice(idx + 1).trim()
+  if (!detail.startsWith('{')) return null
+  try {
+    const v = JSON.parse(detail)
+    return v && typeof v === 'object' ? (v as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Read/Grep/Glob 单行摘要:从调用参数 JSON 提取路径/模式。
+ * 无有效参数(如旧数据只有 intent 没有 detail)时返回 null,回退原折叠展示。
+ */
+export function summarizeCliToolCall(call: ToolItem): string | null {
+  const name = toolNameOf(call)
+  const data = detailJsonOf(call)
+  if (!data) return null
+  if (name === 'Read') {
+    const fp = typeof data.file_path === 'string' ? data.file_path : ''
+    if (!fp) return null
+    // limit/offset:读指定行范围时标注
+    let mod = ''
+    const limit = typeof data.limit === 'number' ? data.limit : null
+    const offset = typeof data.offset === 'number' ? data.offset : 1
+    if (limit !== null) {
+      mod = offset > 1 ? ` · 第 ${offset}~${offset + limit} 行` : ` · 前 ${limit} 行`
+    }
+    return `📖 阅读了 ${shortenPath(fp)}${mod}`
+  }
+  if (name === 'Grep') {
+    const pattern = typeof data.pattern === 'string' ? data.pattern.slice(0, 40) : ''
+    if (!pattern) return null
+    const path = typeof data.path === 'string' ? data.path : ''
+    return `🔍 搜索 ${pattern}${path ? ` · ${shortenPath(path)}` : ''}`
+  }
+  if (name === 'Glob') {
+    const pattern = typeof data.pattern === 'string' ? data.pattern : ''
+    if (!pattern) return null
+    return `🔍 查找文件 ${pattern}`
+  }
+  return null
+}
+
+/** 判断 tool_call 是否可紧凑化:内置浏览型工具、只读命令的 Bash/run_command,
+ * 或参数完整的 CLI 原生 Read/Grep/Glob */
 function isCompactCall(it: ToolItem): boolean {
   const name = toolNameOf(it)
   if (COMPACT_TOOLS.has(name)) return true
+  if (CLI_COMPACT_TOOLS.has(name)) return !!summarizeCliToolCall(it)
   if (name === 'Bash' || name === 'run_command') {
     return !!summarizeCommand(commandOf(it))
   }
@@ -267,6 +322,14 @@ export function buildToolSummary(call: ToolItem, result: ToolItem | null): strin
   // Bash/run_command:按命令内容摘要(结果是原始输出文本,非 JSON)
   if (name === 'Bash' || name === 'run_command') {
     const s = summarizeCommand(commandOf(call))
+    if (!s) return intent
+    if (!result || !result.content) return `${s} ...`
+    return s
+  }
+
+  // CLI 原生 Read/Grep/Glob:按调用参数摘要(结果同样是原始输出文本)
+  if (CLI_COMPACT_TOOLS.has(name)) {
+    const s = summarizeCliToolCall(call)
     if (!s) return intent
     if (!result || !result.content) return `${s} ...`
     return s

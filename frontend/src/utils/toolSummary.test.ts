@@ -13,6 +13,7 @@ import {
   buildToolSummary,
   commandOf,
   shortenPath,
+  summarizeCliToolCall,
   summarizeCommand,
   toolNameOf,
   type ToolItem,
@@ -268,6 +269,58 @@ describe('summarizeCommand(日志真实命令形态)', () => {
 
   it('未知命令拒绝:pip install', () => {
     expect(summarizeCommand('pip install requests')).toBeNull()
+  })
+})
+
+describe('CLI 原生 Read/Grep/Glob 紧凑化(Qoder 日志真实形态)', () => {
+  it('Read:file_path 剥仓库前缀', () => {
+    const c = call('1', '调用 Read [Read]\n{"file_path": "/home/user/repos/openclaw-manager/CONTEXT.md"}')
+    expect(summarizeCliToolCall(c)).toBe('📖 阅读了 CONTEXT.md')
+  })
+
+  it('Read 带 limit:前 N 行', () => {
+    const c = call('1', '调用 Read [Read]\n{"file_path": "/x/services/app.py", "limit": 400}')
+    expect(summarizeCliToolCall(c)).toBe('📖 阅读了 /x/services/app.py · 前 400 行')
+  })
+
+  it('Read 带 offset+limit:行范围', () => {
+    const c = call('1', '调用 Read [Read]\n{"file_path": "/x/app.py", "limit": 500, "offset": 1}')
+    expect(summarizeCliToolCall(c)).toBe('📖 阅读了 /x/app.py · 前 500 行')
+    const c2 = call('2', '调用 Read [Read]\n{"file_path": "/x/app.py", "limit": 100, "offset": 201}')
+    expect(summarizeCliToolCall(c2)).toBe('📖 阅读了 /x/app.py · 第 201~301 行')
+  })
+
+  it('Grep:pattern + path', () => {
+    // detail 由后端 json.dumps 生成:正则里的 \ 在 JSON 文本中是 \\(双反斜杠才是合法转义)
+    const c = call('1', '调用 Grep [Grep]\n{"output_mode": "content", "path": "/home/user/repos/proj/services", "pattern": "subprocess\\\\.run"}')
+    expect(summarizeCliToolCall(c)).toBe('🔍 搜索 subprocess\\.run · services')
+  })
+
+  it('Glob:pattern', () => {
+    const c = call('1', '调用 Glob [Glob]\n{"path": "/home/user/repos/proj", "pattern": "tests/**/*"}')
+    expect(summarizeCliToolCall(c)).toBe('🔍 查找文件 tests/**/*')
+  })
+
+  it('无 detail(旧数据)时返回 null 回退折叠', () => {
+    expect(summarizeCliToolCall(call('1', '调用 Read [Read]'))).toBeNull()
+  })
+
+  it('配对成 compact 段并生成摘要', () => {
+    const items = [
+      call('c1', '调用 Read [Read]\n{"file_path": "/home/user/repos/proj/README.md"}'),
+      result('r1', '# README 内容...'),
+    ]
+    const segs = buildToolSegments(items)
+    expect(segs).toHaveLength(1)
+    expect(segs[0].kind).toBe('compact')
+    if (segs[0].kind === 'compact') {
+      expect(buildToolSummary(segs[0].call, segs[0].result)).toBe('📖 阅读了 README.md')
+    }
+  })
+
+  it('Read result 未到达:摘要 + 省略号', () => {
+    const c = call('1', '调用 Read [Read]\n{"file_path": "a.py"}')
+    expect(buildToolSummary(c, null)).toBe('📖 阅读了 a.py ...')
   })
 })
 
