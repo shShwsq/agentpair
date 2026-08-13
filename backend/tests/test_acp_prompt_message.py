@@ -9,6 +9,7 @@ from app.agents.acp_base import (
     _build_base_prompt,
     _build_memory_section,
     _build_prompt_message,
+    _build_repo_context_section,
 )
 
 
@@ -102,6 +103,30 @@ def test_base_prompt_excludes_memories():
     assert "general experience accumulated" not in base
 
 
+def test_base_prompt_excludes_repo_context():
+    """_build_base_prompt 不含预 clone 上下文段(落库展示用,前端不展示)。"""
+    task = _mk_task(
+        params={"repo_url": "https://github.com/a/b", "branch": "main"},
+    )
+    base = _build_base_prompt(
+        task, 1, None, "仓库 xxx 已克隆到 /home/user/repos/r", "/home/user/repos/r", None,
+    )
+    assert "仓库已预先 clone" not in base
+    assert "已克隆到" not in base
+    # 仓库地址/分支属用户选择的元信息,仍保留展示
+    assert "仓库地址: https://github.com/a/b" in base
+    assert "分支: main" in base
+
+
+def test_repo_context_section_roundtrip():
+    """_build_repo_context_section:有内容时包裹提示语,空时返回空串。"""
+    assert _build_repo_context_section(None) == ""
+    assert _build_repo_context_section("") == ""
+    section = _build_repo_context_section("仓库 xxx 已克隆到 /home/user/repos/r")
+    assert "仓库已预先 clone" in section
+    assert "已克隆到 /home/user/repos/r" in section
+
+
 def test_memory_section_contains_both_and_global_file_hint():
     """_build_memory_section 含项目记忆 + 全局记忆 + 全局记忆文件路径提示。"""
     section = _build_memory_section(
@@ -119,15 +144,16 @@ def test_memory_section_empty_when_no_memories():
     assert _build_memory_section("   ", "") == ""
 
 
-def test_prompt_message_equals_base_plus_section():
-    """_build_prompt_message == 纯指令 + 记忆段(发送内容完整,落库内容纯净)。"""
+def test_prompt_message_equals_base_plus_repo_and_memory():
+    """_build_prompt_message == 纯指令 + 预 clone 上下文段 + 记忆段(发送完整,落库纯净)。"""
     task = _mk_task()
     base = _build_base_prompt(
         task, 1, None, "[repo context]", "/home/user/repos/r", None,
     )
+    repo_section = _build_repo_context_section("[repo context]")
     section = _build_memory_section("PROJECT_MEM", "GLOBAL_MEM")
     msg = _build_prompt_message(
         task, 1, None, "[repo context]", "/home/user/repos/r", None,
         memory_summary="PROJECT_MEM", global_memory="GLOBAL_MEM",
     )
-    assert msg == base + section
+    assert msg == base + repo_section + section

@@ -1790,13 +1790,20 @@ def _build_prompt_message(
     memory_summary: str = "",
     global_memory: str = "",
 ) -> str:
-    """构造发给 CLI 的完整 prompt 消息(纯指令 + 记忆注入段)
+    """构造发给 CLI 的完整 prompt 消息(纯指令 + 预 clone 上下文 + 记忆注入段)
 
-    落库展示用 _build_base_prompt(纯指令);实际发送用本函数(含记忆段)。
+    落库展示用 _build_base_prompt(纯指令);预 clone 上下文段与记忆段
+    都只进发送内容,不落库不展示。
     """
-    return _build_base_prompt(
-        task, round_idx, followup_query, repo_context, repo_path, previous_plan,
-    ) + _build_memory_section(memory_summary, global_memory)
+    return (
+        _build_base_prompt(
+            task, round_idx, followup_query, repo_context, repo_path, previous_plan,
+        )
+        + _build_repo_context_section(
+            repo_context if followup_query is None else None,
+        )
+        + _build_memory_section(memory_summary, global_memory)
+    )
 
 
 def _build_base_prompt(
@@ -1807,12 +1814,13 @@ def _build_base_prompt(
     repo_path: str,
     previous_plan: list[dict] | None,
 ) -> str:
-    """构造发给 CLI 的纯指令部分(不含记忆注入段)
+    """构造发给 CLI 的纯指令部分(不含预 clone 上下文与记忆注入段)
 
-    - 第 1 轮:task.user_input + 仓库信息 + repo_context(已 clone 提示)
+    - 第 1 轮:task.user_input + 仓库信息
     - 追问轮:基于已有仓库继续,注入跨轮记忆(plan 续接)
 
-    这部分落库到 Conversation(前端展示),记忆段单独拼接只进发送内容。
+    这部分落库到 Conversation(前端展示);预 clone 上下文段与记忆段
+    单独拼接只进发送内容(属系统编排信息,非用户原话)。
     """
     if followup_query is None:
         msg = task.user_input
@@ -1822,13 +1830,9 @@ def _build_base_prompt(
         if params.get("branch"):
             msg += f"\n分支: {params['branch']}"
 
-        if repo_context:
-            msg += (
-                "\n\n[仓库已预先 clone,无需你再调用 clone_repo]\n"
-                + repo_context
-                + "\n\n请直接基于上述仓库路径开始审计。"
-            )
-        elif repo_path:
+        # 预 clone 上下文见 _build_repo_context_section(只进发送内容);
+        # 未预 clone 但有路径时,展示仓库路径供用户确认
+        if not repo_context and repo_path:
             msg += f"\n仓库路径: {repo_path}"
     else:
         msg = (
@@ -1844,6 +1848,22 @@ def _build_base_prompt(
             msg += f"\n\n{reminder}"
 
     return msg
+
+
+def _build_repo_context_section(repo_context: str | None) -> str:
+    """构造预 clone 仓库上下文段(拼在发送给 CLI 的 prompt 中,不落库不展示)
+
+    orchestrator 主动 clone 成功后注入,提示 CLI 跳过 clone_repo。
+    属系统编排信息而非用户原话,与记忆注入段同样处理:落库内容保持纯净。
+    repo_context 为空时返回空串。
+    """
+    if not repo_context:
+        return ""
+    return (
+        "\n\n[仓库已预先 clone,无需你再调用 clone_repo]\n"
+        + repo_context
+        + "\n\n请直接基于上述仓库路径开始审计。"
+    )
 
 
 def _build_memory_section(memory_summary: str = "", global_memory: str = "") -> str:
@@ -2105,7 +2125,8 @@ def run_acp_agent(
                     }
 
             # ---- 构造 prompt 消息 ----
-            # 落库只存纯指令(前端展示不含记忆注入段);实际发送拼上记忆段
+            # 落库只存纯指令(前端展示不含预 clone 上下文与记忆注入段);
+            # 实际发送时再拼上这两段(系统编排信息,不展示给用户)
             base_msg = _build_base_prompt(
                 task, round_idx, followup_query, repo_context, repo_path, previous_plan,
             )
@@ -2116,7 +2137,13 @@ def run_acp_agent(
                 content=base_msg,
             )
 
-            user_msg = base_msg + _build_memory_section(memory_summary, global_memory)
+            user_msg = (
+                base_msg
+                + _build_repo_context_section(
+                    repo_context if followup_query is None else None,
+                )
+                + _build_memory_section(memory_summary, global_memory)
+            )
 
             # ---- 检查点评估回调(CLI agent 的迭代边界轻量评估) ----
             # 在 _ACPCollector 的 _start_new_iteration 中被调用,

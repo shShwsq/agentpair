@@ -202,6 +202,9 @@ def run_react_agent(
             system_prompt = system_prompt + "\n\n" + _global_mem
 
     # 构造初始 user 消息
+    # repo_ctx_section:预 clone 上下文段,只进发送内容不落库展示
+    # (属系统编排信息,非用户原话,与 acp_base 记忆注入段同样处理)
+    repo_ctx_section = ""
     if followup_query is None:
         # 第一轮:用 task.user_input
         user_msg = task.user_input
@@ -213,7 +216,7 @@ def run_react_agent(
 
         # orchestrator 已主动 clone 时,注入仓库上下文,提示跳过 clone_repo
         if repo_context:
-            user_msg += (
+            repo_ctx_section = (
                 "\n\n[仓库已预先 clone,无需你再调用 clone_repo]\n"
                 + repo_context
                 + "\n\n请直接基于上述仓库路径开始审计(用 read_file / search_code / "
@@ -252,12 +255,16 @@ def run_react_agent(
             f"\n\n[本轮 user_agent 追问]\n{followup_query}"
         )
 
-    # 记录 user 指令到对话
+    # 记录 user 指令到对话(落库只存纯指令,不含预 clone 上下文段)
     _add_conversation(
         db, task, round_idx=round_idx,
         role="user", type="question",
         content=user_msg,
     )
+
+    # 实际发送给 LLM 时拼上预 clone 上下文段
+    if repo_ctx_section:
+        user_msg += repo_ctx_section
 
     # 创建 LLM 客户端(优先用注入的,否则回退到 env 默认)
     client = client or LLMClient()
