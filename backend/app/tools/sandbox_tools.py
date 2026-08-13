@@ -311,12 +311,19 @@ def _parse_git_progress(line: str) -> int | None:
 
 
 def _clone_repo_sandbox(ctx: dict, clone_url: str, repo_name: str, branch: str | None, task_id: str = "") -> dict:
-    """sandbox 模式:在沙箱里 git clone(后台命令 + 轮询日志流式推进度)
+    """sandbox 模式:在沙箱里 git clone(后台命令 + 进度文件轮询流式推进度)
 
-    对齐 local 模式 _clone_repo_local 的流式体验:clone 命令后台运行,
-    轮询 get_command_status / get_background_logs(cursor 增量),解析
-    "Receiving objects: X%" 后通过 event_bus 推 clone_progress 事件
-    (节流:百分比变化 >=5 或距上次推送 >=2s)。超时 interrupt + 抛异常。
+    进度采集为何不用 execd 日志(get_background_logs):
+    git 进度输出用 \r 刷新同一行,只在阶段 done. 时才打 \n,而 Server 端
+    execd 日志采集按 \n 分行缓存,\r 进度块拿不到(实测 cursor 长期不动)。
+    改为把 stderr 重定向到沙箱内进度文件(文件写入无行缓冲,\r 实时落盘),
+    轮询 read_file 解析最新进度行推 clone_progress 事件
+    (节流:百分比变化 >=5 或距上次推送 >=2s)。
+
+    完成判定:轮询 get_command_status(命令未退出时恒为 200,避免每轮
+    read_file 退出码标记文件触发 404 + SDK ERROR traceback 污染日志);
+    退出后若 status 拿不到 exit_code,再读一次退出码标记文件兜底。
+    超时 interrupt + 抛异常。
     """
     session: SandboxSession = ctx["session"]
     repo_dir = f"/home/user/repos/{repo_name}"
@@ -324,60 +331,99 @@ def _clone_repo_sandbox(ctx: dict, clone_url: str, repo_name: str, branch: str |
     # 避免 git clone 报 "destination path already exists" 直接失败
     session.run_command(f"rm -rf {shlex.quote(repo_dir)} && mkdir -p {shlex.quote(repo_dir)}")
 
-    # --progress 强制非 tty(后台命令无 tty)也输出进度到 stderr
-    cmd = "git clone --progress " + " ".join(_clone_depth_args())
+    # 进度文件 + 退出码标记文件(沙箱内 /tmp,仅本次 clone 使用)
+    run_tag = uuid.uuid4().hex[:8]
+    progress_file = f"/tmp/clone_progress_{run_tag}.log"
+    exit_file = f"/tmp/clone_exit_{run_tag}.code"
+
+    # --progress 强制非 tty(后台命令无 tty)也输出进度到 stderr;
+    # stderr 重定向到进度文件(\r 实时落盘),退出码写标记文件供轮询判完成
+    git_cmd = "git clone --progress " + " ".join(_clone_depth_args())
     if branch:
-        cmd += f" --branch {shlex.quote(branch)}"
-    cmd += f" {shlex.quote(clone_url)} {shlex.quote(repo_dir)}"
+        git_cmd += f" --branch {shlex.quote(branch)}"
+    git_cmd += f" {shlex.quote(clone_url)} {shlex.quote(repo_dir)}"
+    cmd = (
+        f"{git_cmd} 2> {shlex.quote(progress_file)}; "
+        f"echo $? > {shlex.quote(exit_file)}"
+    )
 
     logger.info(f"[sandbox] git clone: {clone_url}")
     exec_id = session.run_command_background(cmd)
 
     timeout = settings.REPO_CLONE_TIMEOUT
     deadline = time.monotonic() + timeout
-    cursor: int | None = None
     last_percent = -1
     last_push_ts = time.monotonic()
-    tail_lines: list[str] = []
+    last_content = ""
 
-    while True:
-        # 增量读日志,解析进度行推前端(节流逻辑同 local 模式)
-        logs_text, new_cursor = session.get_background_logs(exec_id, cursor=cursor)
-        if new_cursor is not None:
-            cursor = new_cursor
-        if logs_text:
-            for line in logs_text.splitlines():
-                tail_lines.append(line)
-                percent = _parse_git_progress(line)
-                if percent is None or not task_id:
-                    continue
-                now = time.monotonic()
-                if percent > last_percent and (
-                    percent - last_percent >= 5 or now - last_push_ts >= 2.0
-                ):
-                    publish_event(task_id, "clone_progress", {
-                        "percent": percent,
-                        "message": line.strip()[:200],
-                    })
-                    last_percent = percent
-                    last_push_ts = now
-
-        running, exit_code = session.get_command_status(exec_id)
-        if not running:
-            # exit_code 为 None 时无法区分,视为成功(防御性处理)
-            if exit_code not in (None, 0):
-                stderr_text = "\n".join(tail_lines)[-500:]
-                raise RuntimeError(
-                    f"git clone 失败(退出码 {exit_code}): {stderr_text}"
-                )
-            break
-        if time.monotonic() > deadline:
+    try:
+        while True:
+            # 1) 进度:读进度文件,按 \r/\n 拆行取最新进度行推前端
             try:
-                session.interrupt_command(exec_id)
+                last_content = session.read_file(progress_file)
             except Exception:
-                pass
-            raise RuntimeError(f"git clone 超时({timeout}s)")
-        time.sleep(0.5)
+                last_content = ""  # 文件尚未创建(命令刚启动)
+            if last_content and task_id:
+                for line in reversed(last_content.replace("\r", "\n").splitlines()):
+                    percent = _parse_git_progress(line)
+                    if percent is None:
+                        continue
+                    now = time.monotonic()
+                    if percent > last_percent and (
+                        percent - last_percent >= 5 or now - last_push_ts >= 2.0
+                    ):
+                        publish_event(task_id, "clone_progress", {
+                            "percent": percent,
+                            "message": line.strip()[:200],
+                        })
+                        last_percent = percent
+                        last_push_ts = now
+                    break
+
+            # 2) 完成判定:查命令状态(未退出时恒 200,不会像 read_file
+            #    未创建的标记文件那样每轮 404 + SDK ERROR traceback)
+            running, exit_code = session.get_command_status(exec_id)
+            if not running:
+                if exit_code is None:
+                    # status 没给退出码,兜底读标记文件;文件还没写出说明
+                    # 状态滞后(命令刚退出 shell 尾部还没执行完),再等一轮
+                    try:
+                        exit_text = session.read_file(exit_file).strip()
+                    except Exception:
+                        exit_text = ""
+                    if not exit_text:
+                        time.sleep(1.0)
+                        if time.monotonic() > deadline:
+                            raise RuntimeError(f"git clone 超时({timeout}s)")
+                        continue
+                    try:
+                        exit_code = int(exit_text)
+                    except ValueError:
+                        exit_code = 1
+                if exit_code != 0:
+                    # 报错信息在进度文件尾部(如 fatal: Remote branch xxx not found)
+                    err_tail = last_content[-500:].replace("\r", "\n")
+                    raise RuntimeError(
+                        f"git clone 失败(退出码 {exit_code}): {err_tail}"
+                    )
+                break
+
+            if time.monotonic() > deadline:
+                try:
+                    session.interrupt_command(exec_id)
+                except Exception:
+                    pass
+                raise RuntimeError(f"git clone 超时({timeout}s)")
+            # 两次跨公网 read_file 有延迟,轮询间隔给 1s
+            time.sleep(1.0)
+    finally:
+        # 清理临时文件(尽力而为,失败不阻断)
+        try:
+            session.run_command(
+                f"rm -f {shlex.quote(progress_file)} {shlex.quote(exit_file)}"
+            )
+        except Exception:
+            pass
 
     count_cmd = f"find {shlex.quote(repo_dir)} -type f -not -path '*/.git/*' | wc -l"
     files_count = int(session.run_command(count_cmd).strip() or "0")
