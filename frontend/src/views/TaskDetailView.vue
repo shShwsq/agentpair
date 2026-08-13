@@ -2,11 +2,10 @@
 /**
  * 任务详情页
  *
- * 三大区域:
- * 1. 任务概览:状态徽章、场景、创建时间、当前阶段、错误信息
- * 2. 结果清单:分组由 task.params._grouping 驱动(user_agent done 时声明),
- *    展示 title/content/meta(meta 字段从 results 的 metadata keys 动态推断)
- * 3. 协作对话流:按 round_idx 分组,展示 user_agent 与 react_agent 的来回
+ * 布局区域:
+ * 1. 主区协作对话流:按 round_idx 分组,展示 user_agent 与 react_agent 的来回
+ * 2. 右侧栏:覆盖度看板 / 结果清单(默认折叠,分组由 task.params._grouping 驱动)/
+ *    检查点评估聚合(点击定位对话流) / 任务概览 / 动态验证配置
  *
  * 实时更新:SSE 接收每条对话/状态变更 + thinking_delta(流式 token 增量)。
  * 初始加载 GET /tasks/{id} 拿快照(补历史),然后 SSE 接收增量。
@@ -1831,13 +1830,12 @@ function isCheckpointItem(item: DisplayItem): boolean {
   return (item.content || '').startsWith('[检查点评估')
 }
 
-/** 解析检查点评估 content,提取 interrupt/reason/query(供卡片渲染) */
-function parseCheckpoint(item: DisplayItem): {
+/** 解析检查点评估 content,提取 interrupt/reason/query */
+function parseCheckpointContent(c: string): {
   isInterrupt: boolean
   reason: string
   query: string | null
 } {
-  const c = item.content || ''
   // content 格式(后端 agent_checkpoint._record_checkpoint):
   //   打断:[检查点评估 · 第N轮迭代M] 打断\n理由:...\n追问指令:...
   //   继续:[检查点评估 · 第N轮迭代M] 继续\n理由:...
@@ -1848,6 +1846,62 @@ function parseCheckpoint(item: DisplayItem): {
     isInterrupt,
     reason: reasonMatch ? reasonMatch[1].trim() : '',
     query: queryMatch ? queryMatch[1].trim() : null,
+  }
+}
+
+/** 检查点评估聚合条目(右侧栏聚合列表展示) */
+interface CheckpointEntry {
+  id: string
+  roundIdx: number
+  iteration: number | null
+  isInterrupt: boolean
+  reason: string
+  query: string | null
+}
+
+/**
+ * 检查点评估聚合列表(右侧栏展示)。
+ *
+ * 从 task.conversations 过滤落库的检查点评估(与 isCheckpointItem 同一判定):
+ * GET 快照刷新后可还原历史,运行中 SSE conversation 事件推送实时生效。
+ */
+const checkpointList = computed<CheckpointEntry[]>(() => {
+  const convs = task.value?.conversations
+  if (!convs) return []
+  const list: CheckpointEntry[] = []
+  for (const c of convs) {
+    if (c.role !== 'user_agent' || c.type !== 'evaluation') continue
+    const content = c.content || ''
+    if (!content.startsWith('[检查点评估')) continue
+    // 轮次/迭代号从前缀解析(迭代号仅存在于前缀中)
+    const posMatch = content.match(/\[检查点评估 · 第(\d+)轮迭代(\d+)\]/)
+    list.push({
+      id: c.id,
+      roundIdx: posMatch ? parseInt(posMatch[1], 10) : c.round_idx,
+      iteration: posMatch ? parseInt(posMatch[2], 10) : null,
+      ...parseCheckpointContent(content),
+    })
+  }
+  return list
+})
+
+/** 点击右侧栏检查点条目:滚动到对话流对应轮次并短暂高亮 */
+function locateCheckpoint(roundIdx: number): void {
+  const el = document.getElementById(`round-anchor-${roundIdx}`)
+  if (!el) return
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  el.classList.add('round-flash')
+  window.setTimeout(() => el.classList.remove('round-flash'), 1600)
+}
+
+// ---- 右侧栏结果清单展开状态(默认折叠,点击卡片展开正文) ----
+const expandedResults = reactive<Set<string>>(new Set())
+
+function toggleResult(id: string): void {
+  if (expandedResults.has(id)) {
+    expandedResults.delete(id)
+  } else {
+    expandedResults.add(id)
   }
 }
 </script>
@@ -1918,46 +1972,8 @@ function parseCheckpoint(item: DisplayItem): {
         <RouterLink to="/tasks/new">提交新任务</RouterLink>
       </div>
 
-      <!-- 任务详情(主区聚焦结果清单 + 协作对话流;任务详情/覆盖度看板在右侧栏) -->
+      <!-- 任务详情(主区聚焦协作对话流;结果清单/检查点评估/覆盖度看板在右侧栏) -->
       <template v-else-if="task">
-        <!-- 结果清单(分组由 task.params._grouping 驱动) -->
-        <section
-          v-if="task.results.length > 0"
-          class="results-section"
-          data-onboarding="detail-results"
-        >
-          <h2>结果清单 <span class="count">({{ task.results.length }})</span></h2>
-          <div v-for="group in resultGroups" :key="group.key" class="severity-group">
-            <h3>
-              <span :class="['severity-tag', `sev-${group.color}`]">{{ group.label }}</span>
-              <span class="count">{{ group.results.length }}</span>
-            </h3>
-            <div class="result-cards">
-              <article
-                v-for="r in group.results"
-                :key="r.id"
-                class="result-card"
-              >
-                <div class="result-header">
-                  <h4>{{ r.title }}</h4>
-                  <span class="round-tag">第 {{ r.round_idx }} 轮</span>
-                </div>
-                <div class="result-content markdown-body" v-html="renderResultContent(r.content)" />
-                <div v-if="getResultMetaItems(r).length > 0" class="result-meta">
-                  <span
-                    v-for="item in getResultMetaItems(r)"
-                    :key="item.field.name"
-                    :class="['meta-tag', { 'meta-file': item.field.type === 'file' }]"
-                    @click="item.field.type === 'file' ? onResultFileClick(r) : undefined"
-                  >
-                    {{ item.value }}
-                  </span>
-                </div>
-              </article>
-            </div>
-          </div>
-        </section>
-
         <!-- 协作对话流(无外框,顶部仅在运行时显示实时徽标) -->
         <section
           v-if="roundGroups.length > 0 || isRunning"
@@ -1972,7 +1988,12 @@ function parseCheckpoint(item: DisplayItem): {
             />
           </div>
 
-          <div v-for="group in roundGroups" :key="group.roundIdx" class="round-group">
+          <div
+            v-for="group in roundGroups"
+            :id="`round-anchor-${group.roundIdx}`"
+            :key="group.roundIdx"
+            class="round-group"
+          >
             <div class="round-label">{{ group.label }}</div>
             <!-- 计划清单(复杂任务时 react_agent 输出,展示接下来要做的步骤 + 进度) -->
             <div v-if="group.planSteps.length > 0" class="plan-card">
@@ -1998,7 +2019,8 @@ function parseCheckpoint(item: DisplayItem): {
                 v-for="seg in group.segments"
                 :key="seg.kind === 'step' ? `step-${seg.id}` : `plain-${seg.item.id}`"
               >
-                <!-- 平铺段:user_agent 评估/追问/总结、user 指令等关键消息 -->
+                <!-- 平铺段:user_agent 评估/追问/总结、user 指令等关键消息
+                     (检查点评估不在此渲染,已聚合到右侧栏 checkpointList) -->
                 <!-- 用户补充消息(type=message)右对齐,与顶部 userDirective 视觉一致 -->
                 <div
                   v-if="seg.kind === 'plain' && !isCheckpointItem(seg.item)"
@@ -2008,43 +2030,6 @@ function parseCheckpoint(item: DisplayItem): {
                     :item="seg.item"
                     @toggle-reasoning="toggleReasoning"
                   />
-                </div>
-
-                <!-- 检查点评估专属轻量卡片:user_agent 在迭代边界做轻量评估,
-                     interrupt=true 时高亮打断指令(显示用户注入 react_agent 的追问) -->
-                <div
-                  v-else-if="seg.kind === 'plain' && isCheckpointItem(seg.item)"
-                  :class="[
-                    'checkpoint-card',
-                    { 'checkpoint-interrupt': parseCheckpoint(seg.item).isInterrupt },
-                  ]"
-                >
-                  <div class="checkpoint-header">
-                    <span class="checkpoint-icon">
-                      {{ parseCheckpoint(seg.item).isInterrupt ? '⚠' : '✓' }}
-                    </span>
-                    <span class="checkpoint-title">检查点评估</span>
-                    <span
-                      :class="[
-                        'checkpoint-badge',
-                        parseCheckpoint(seg.item).isInterrupt
-                          ? 'checkpoint-badge-interrupt'
-                          : 'checkpoint-badge-continue',
-                      ]"
-                    >
-                      {{ parseCheckpoint(seg.item).isInterrupt ? '已打断' : '继续' }}
-                    </span>
-                  </div>
-                  <div class="checkpoint-reason">
-                    {{ parseCheckpoint(seg.item).reason || '无说明' }}
-                  </div>
-                  <div
-                    v-if="parseCheckpoint(seg.item).isInterrupt && parseCheckpoint(seg.item).query"
-                    class="checkpoint-query"
-                  >
-                    <span class="checkpoint-query-label">追问指令</span>
-                    <span class="checkpoint-query-text">{{ parseCheckpoint(seg.item).query }}</span>
-                  </div>
                 </div>
 
                 <!-- step 分组:plan step 下含多个迭代(无 plan 时为单个"执行过程"组) -->
@@ -2291,6 +2276,82 @@ function parseCheckpoint(item: DisplayItem): {
           </div>
         </section>
 
+        <!-- 结果清单(从主区迁入;分组由 task.params._grouping 驱动,卡片默认折叠) -->
+        <section
+          v-if="task.results.length > 0"
+          class="sidebar-results"
+          data-onboarding="detail-results"
+        >
+          <h2>结果清单 <span class="count">({{ task.results.length }})</span></h2>
+          <template v-for="group in resultGroups" :key="group.key">
+            <h3 v-if="resultGrouping" class="sidebar-result-group">
+              <span :class="['severity-tag', `sev-${group.color}`]">{{ group.label }}</span>
+              <span class="count">{{ group.results.length }}</span>
+            </h3>
+            <div class="result-cards">
+              <article
+                v-for="r in group.results"
+                :key="r.id"
+                :class="['result-card', { 'result-card-expanded': expandedResults.has(r.id) }]"
+                @click="toggleResult(r.id)"
+              >
+                <div class="result-header">
+                  <span class="result-toggle">{{ expandedResults.has(r.id) ? '▼' : '▶' }}</span>
+                  <h4>{{ r.title }}</h4>
+                  <span class="round-tag">第 {{ r.round_idx }} 轮</span>
+                </div>
+                <div v-if="getResultMetaItems(r).length > 0" class="result-meta">
+                  <span
+                    v-for="item in getResultMetaItems(r)"
+                    :key="item.field.name"
+                    :class="['meta-tag', { 'meta-file': item.field.type === 'file' }]"
+                    @click.stop="item.field.type === 'file' ? onResultFileClick(r) : undefined"
+                  >
+                    {{ item.value }}
+                  </span>
+                </div>
+                <div
+                  v-if="expandedResults.has(r.id)"
+                  class="result-content markdown-body"
+                  v-html="renderResultContent(r.content)"
+                />
+              </article>
+            </div>
+          </template>
+        </section>
+
+        <!-- 检查点评估聚合(从对话流内联卡片迁入;点击条目定位对话流对应轮次) -->
+        <section v-if="checkpointList.length > 0" class="sidebar-checkpoints">
+          <h2>检查点评估 <span class="count">({{ checkpointList.length }})</span></h2>
+          <div class="checkpoint-list">
+            <div
+              v-for="cp in checkpointList"
+              :key="cp.id"
+              :class="['checkpoint-item', { 'checkpoint-item-interrupt': cp.isInterrupt }]"
+              title="点击定位对话流对应轮次"
+              @click="locateCheckpoint(cp.roundIdx)"
+            >
+              <div class="checkpoint-item-head">
+                <span class="checkpoint-item-pos">
+                  第 {{ cp.roundIdx }} 轮<template v-if="cp.iteration !== null"> · 迭代 {{ cp.iteration }}</template>
+                </span>
+                <span
+                  :class="[
+                    'checkpoint-badge',
+                    cp.isInterrupt ? 'checkpoint-badge-interrupt' : 'checkpoint-badge-continue',
+                  ]"
+                >
+                  {{ cp.isInterrupt ? '已打断' : '继续' }}
+                </span>
+              </div>
+              <div class="checkpoint-item-reason">{{ cp.reason || '无说明' }}</div>
+              <div v-if="cp.isInterrupt && cp.query" class="checkpoint-item-query">
+                追问:{{ cp.query }}
+              </div>
+            </div>
+          </div>
+        </section>
+
         <!-- 任务详情(扁平化,无卡片外框) -->
         <section class="overview-section">
           <div class="overview-header">
@@ -2405,7 +2466,7 @@ function parseCheckpoint(item: DisplayItem): {
       </div>
     </aside>
 
-    <!-- 折叠态:page-body 右上角悬浮把手(header 下方右侧,点击重新展开) -->
+    <!-- 折叠态:page-body 右上角悬浮把手(header 下方右侧,点击重新展开;有结果时显示数量角标) -->
     <div v-else-if="task" class="detail-handle">
       <WorkspaceToggleButton
         side="right"
@@ -2414,6 +2475,9 @@ function parseCheckpoint(item: DisplayItem): {
         collapse-title="折叠任务详情"
         @toggle="toggleDetail"
       />
+      <span v-if="task.results.length > 0" class="detail-handle-badge">
+        {{ task.results.length }}
+      </span>
     </div>
     </div>
 
@@ -2508,8 +2572,8 @@ function parseCheckpoint(item: DisplayItem): {
 /* ---- 右侧任务详情栏(抽屉把手式;展开时顶部条+滚动内容区,折叠时不渲染) ---- */
 .detail-sidebar {
   flex-shrink: 0;
-  width: clamp(300px, 26vw, 380px);
-  min-width: 300px;
+  width: clamp(320px, 28vw, 420px);
+  min-width: 320px;
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -2553,6 +2617,25 @@ function parseCheckpoint(item: DisplayItem): {
   z-index: 5;
 }
 
+/* 折叠态结果数量角标(提示折叠栏内有结果) */
+.detail-handle-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: var(--fw-semibold);
+  color: var(--color-surface);
+  background: var(--color-primary);
+  border-radius: var(--radius-full);
+  pointer-events: none;
+}
+
 /* ---- 响应式:窄屏下右侧栏改为覆盖式抽屉 ---- */
 @media (max-width: 1024px) {
   .detail-sidebar {
@@ -2561,7 +2644,7 @@ function parseCheckpoint(item: DisplayItem): {
     top: 0;
     bottom: 0;
     z-index: 20;
-    width: min(380px, 85vw);
+    width: min(420px, 85vw);
     box-shadow: var(--shadow-xl);
   }
 }
@@ -2710,23 +2793,29 @@ function parseCheckpoint(item: DisplayItem): {
 }
 
 /* ---- 通用 section ---- */
-.results-section {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-sm);
-  padding: var(--space-6);
-  margin-bottom: var(--space-6);
-}
-
 /* 对话流:无外框,直接铺在主区背景上(聊天式) */
 .conversation-section {
   margin-bottom: var(--space-6);
 }
 
-.results-section h2 {
-  font-size: var(--fs-lg);
-  margin-bottom: var(--space-5);
+/* 右侧栏分区标题(结果清单/检查点评估,与覆盖度区块一致) */
+.sidebar-results h2,
+.sidebar-checkpoints h2 {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  font-size: var(--fs-base);
+  font-weight: var(--fw-semibold);
+}
+
+/* 结果分组头(仅有分组声明时显示) */
+.sidebar-result-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--fs-sm);
+  margin: var(--space-3) 0 var(--space-2);
 }
 
 .count {
@@ -2913,19 +3002,7 @@ function parseCheckpoint(item: DisplayItem): {
   word-break: break-all;
 }
 
-/* ---- 结果清单 ---- */
-.severity-group {
-  margin-bottom: var(--space-5);
-}
-
-.severity-group h3 {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: var(--fs-base);
-  margin-bottom: var(--space-3);
-}
-
+/* ---- 结果清单(右侧栏,卡片默认折叠) ---- */
 .severity-tag {
   display: inline-flex;
   align-items: center;
@@ -2945,13 +3022,14 @@ function parseCheckpoint(item: DisplayItem): {
 .result-cards {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-2);
 }
 
 .result-card {
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  cursor: pointer;
   transition: border-color var(--transition-fast);
 }
 
@@ -2959,18 +3037,30 @@ function parseCheckpoint(item: DisplayItem): {
   border-color: var(--color-border-strong);
 }
 
+.result-card-expanded {
+  border-color: var(--color-border-strong);
+}
+
 .result-header {
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-3);
-  margin-bottom: var(--space-2);
+  gap: var(--space-2);
+}
+
+.result-toggle {
+  flex-shrink: 0;
+  margin-top: 2px;
+  font-size: var(--fs-xs);
+  line-height: var(--lh-tight);
+  color: var(--color-text-muted);
 }
 
 .result-header h4 {
-  font-size: var(--fs-base);
+  flex: 1;
+  font-size: var(--fs-sm);
   font-weight: var(--fw-semibold);
   line-height: var(--lh-tight);
+  word-break: break-word;
 }
 
 .round-tag {
@@ -2983,10 +3073,10 @@ function parseCheckpoint(item: DisplayItem): {
 }
 
 .result-content {
-  font-size: var(--fs-sm);
+  margin-top: var(--space-2);
+  font-size: var(--fs-xs);
   color: var(--color-text-secondary);
   word-break: break-word;
-  margin-bottom: var(--space-3);
 }
 
 /* markdown-body 容器覆盖 pre-wrap:marked 已处理换行 */
@@ -2994,10 +3084,16 @@ function parseCheckpoint(item: DisplayItem): {
   white-space: normal;
 }
 
+/* 右侧栏窄宽:代码块横向滚动,避免撑破卡片 */
+.result-content.markdown-body pre {
+  overflow-x: auto;
+}
+
 .result-meta {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
+  margin-top: var(--space-2);
 }
 
 .meta-tag {
@@ -3040,6 +3136,17 @@ function parseCheckpoint(item: DisplayItem): {
 
 .round-group:last-child {
   margin-bottom: 0;
+}
+
+/* 右侧栏检查点点击定位:对应轮次短暂高亮闪烁 */
+.round-flash {
+  border-radius: var(--radius-md);
+  animation: round-flash 1.6s ease-out;
+}
+
+@keyframes round-flash {
+  0% { background: var(--color-primary-light); }
+  100% { background: transparent; }
 }
 
 .round-label {
@@ -3727,52 +3834,68 @@ function parseCheckpoint(item: DisplayItem): {
 .diff-line-ctx { color: var(--color-text); }
 
 /* ============================================================
- * 检查点评估卡片(user_agent 迭代边界轻量评估)
- * - 默认态:浅色边框,信息密度低,与对话流不抢戏
- * - 打断态(interrupt=true):橙红边框 + 高亮追问指令块
- *   让用户一眼看出 user_agent 打断了 react_agent 的方向
+ * 检查点评估聚合列表(右侧栏)
+ * - 按时间聚合 user_agent 迭代边界轻量评估
+ * - 打断项橙红左边框高亮;点击条目定位对话流对应轮次
  * ============================================================ */
-.checkpoint-card {
-  margin: var(--space-2) 0;
-  padding: var(--space-3) var(--space-4);
+.checkpoint-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.checkpoint-item {
+  padding: var(--space-2) var(--space-3);
   background: var(--color-surface-alt);
   border: 1px solid var(--color-border);
   border-left: 3px solid var(--color-text-muted);
   border-radius: var(--radius-md);
-  font-size: var(--fs-sm);
-  transition: border-color var(--transition-fast), background var(--transition-fast);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  transition: border-color var(--transition-fast);
 }
 
-.checkpoint-card.checkpoint-interrupt {
+.checkpoint-item:hover {
+  border-color: var(--color-border-strong);
+}
+
+.checkpoint-item-interrupt {
   background: var(--color-checkpoint-interrupt-bg);
   border-color: var(--color-checkpoint-interrupt-border);
   border-left-color: #ea580c;
 }
 
-.checkpoint-header {
+.checkpoint-item-interrupt:hover {
+  border-color: var(--color-checkpoint-interrupt-border);
+}
+
+.checkpoint-item-head {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  margin-bottom: var(--space-2);
+  margin-bottom: var(--space-1);
 }
 
-.checkpoint-icon {
-  flex-shrink: 0;
-  font-size: var(--fs-md);
-  line-height: 1;
+.checkpoint-item-pos {
+  font-weight: var(--fw-medium);
+  color: var(--color-text-secondary);
 }
 
-.checkpoint-card.checkpoint-interrupt .checkpoint-icon {
-  color: #ea580c;
+.checkpoint-item-reason {
+  color: var(--color-text-secondary);
+  line-height: var(--lh-relaxed);
+  word-break: break-word;
 }
 
-.checkpoint-card:not(.checkpoint-interrupt) .checkpoint-icon {
-  color: #059669;
+.checkpoint-item-interrupt .checkpoint-item-reason {
+  color: #7c2d12;
 }
 
-.checkpoint-title {
-  font-weight: var(--fw-semibold);
+.checkpoint-item-query {
+  margin-top: var(--space-1);
   color: var(--color-text);
+  font-weight: var(--fw-medium);
+  word-break: break-word;
 }
 
 .checkpoint-badge {
@@ -3791,41 +3914,5 @@ function parseCheckpoint(item: DisplayItem): {
 .checkpoint-badge-interrupt {
   color: #c2410c;
   background: rgba(234, 88, 12, 0.15);
-}
-
-.checkpoint-reason {
-  color: var(--color-text-secondary);
-  line-height: var(--lh-relaxed);
-  word-break: break-word;
-}
-
-.checkpoint-card.checkpoint-interrupt .checkpoint-reason {
-  color: #7c2d12;
-}
-
-.checkpoint-query {
-  margin-top: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  background: rgba(234, 88, 12, 0.08);
-  border-left: 2px solid #ea580c;
-  border-radius: var(--radius-sm);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.checkpoint-query-label {
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-semibold);
-  color: #c2410c;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.checkpoint-query-text {
-  color: var(--color-text);
-  font-weight: var(--fw-medium);
-  word-break: break-word;
-  white-space: pre-wrap;
 }
 </style>
