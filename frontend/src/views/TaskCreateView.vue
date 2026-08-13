@@ -1257,33 +1257,35 @@ onUnmounted(() => {
                       <span class="policy-hint">上限 {{ MAX_ROUNDS_LIMIT }}</span>
                     </label>
   
-                    <div class="policy-grid">
-                      <label class="policy-field">
-                        <span class="policy-label">评估频率 K</span>
-                        <input
-                          v-model.number="policyInterval"
-                          type="number" min="1" max="20"
-                          class="policy-input"
-                        />
-                        <span class="policy-hint">每 K 个迭代评估一次</span>
-                      </label>
-  
-                      <label class="policy-field">
-                        <span class="policy-label">每轮最大打断</span>
-                        <input
-                          v-model.number="policyMaxInterrupts"
-                          type="number" min="0" max="10"
-                          class="policy-input"
-                          :disabled="!policyAllowInterrupt"
-                        />
-                        <span class="policy-hint">防死锁上限</span>
-                      </label>
-                    </div>
-  
+                    <label class="policy-field">
+                      <span class="policy-label">评估频率 K</span>
+                      <input
+                        v-model.number="policyInterval"
+                        type="number" min="1" max="20"
+                        class="policy-input"
+                      />
+                      <span class="policy-hint">每 K 个迭代评估一次</span>
+                    </label>
+
                     <label class="policy-toggle-row">
                       <input v-model="policyAllowInterrupt" class="switch" type="checkbox" :disabled="!policyUserAgentEnabled" />
                       <span>允许 user_agent 打断 react_agent</span>
                     </label>
+
+                    <!-- 每轮最大打断:仅当开启「允许打断」时展开 -->
+                    <Transition name="collapse">
+                      <div v-show="policyAllowInterrupt">
+                        <label class="policy-field">
+                          <span class="policy-label">每轮最大打断</span>
+                          <input
+                            v-model.number="policyMaxInterrupts"
+                            type="number" min="0" max="10"
+                            class="policy-input"
+                          />
+                          <span class="policy-hint">防死锁上限</span>
+                        </label>
+                      </div>
+                    </Transition>
   
                     <label class="policy-toggle-row">
                       <input v-model="policyAllowVerify" class="switch" type="checkbox" />

@@ -3,17 +3,20 @@
 覆盖:
 - _ACPCollector._maybe_trigger_checkpoint:K 值触发条件、前 2 迭代跳过、
   allow_interrupt=false 禁用、max_interrupts 上限拒绝
+- 触发时机接线:tool_call 落库后不触发,tool_result 落库后才触发
+  (保证落库顺序 tool_call → tool_result → 检查点评估,
+  前端检查点横线不会把工具结果切到折叠块外)
 - orchestrator finally 块的清理函数:clear_interrupts + clear_interrupt_count
   在任务结束时正确清理(push + increment 后调用清理,验证队列/计数归零)
 
-测试不连真实 DB / LLM,用 MagicMock 替换 task/db,直接调用 collector 的
-_maybe_trigger_checkpoint 方法,验证 checkpoint_callback 是否被调用。
+测试不连真实 DB / LLM,用 MagicMock 替换 task/db,验证 checkpoint_callback
+是否被调用。
 
 不测试 run_user_agent_checkpoint 本身(涉及 LLM 流式调用,已在单元测试
 覆盖配置解析 + JSON 解析)。
 """
 import uuid
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -30,6 +33,15 @@ from app.agent_interrupt import (
 from app.agents.acp_base import _ACPCollector
 
 
+# 拦截 _add_conversation:避免真实构造 Conversation ORM 实体
+# (测试环境未导入全部 models,SQLAlchemy mapper 配置会失败;
+# 本测试只关心检查点触发链路,落库细节不在覆盖范围)
+_DB_WRITE_PATCH = patch(
+    "app.agents.acp_base._add_conversation",
+    return_value=MagicMock(id=uuid.uuid4()),
+)
+
+
 # ============================================================
 # fixtures
 # ============================================================
@@ -42,10 +54,16 @@ def mock_task():
     return task
 
 
+@pytest.fixture(autouse=True)
+def _stub_db_write():
+    """全局拦截落库(所有用例生效):_handle_tool_result 链路会经 _add_conversation。"""
+    with _DB_WRITE_PATCH:
+        yield
+
+
 @pytest.fixture
 def mock_db():
-    """构造 mock db:_ACPCollector 在 _maybe_trigger_checkpoint 中不调用 db
-    (db 只在 _flush_iteration 落库时用,本测试不触发)。"""
+    """构造 mock db:落库已被 _stub_db_write 拦截,这里仅承接引用。"""
     return MagicMock()
 
 
@@ -80,14 +98,27 @@ def _make_collector(
 
 
 def _advance_iterations(collector, n: int) -> None:
-    """模拟 n 次 _start_new_iteration 调用(即 n 个迭代边界)。
+    """模拟 n 个完整迭代(tool_call + tool_result 均完成)。
 
-    _start_new_iteration 先调 _maybe_trigger_checkpoint(用当前 iteration),
-    然后 iteration += 1。所以调用 n 次后,iteration = n,
-    触发点在 iteration ∈ {2, 3, ..., n-1}(避开前 2 个)中满足 %K==0 的值。
+    运行时链路:tool_call 事件 → _handle_tool_call(记录 iteration)→
+    _start_new_iteration(iteration+1)→ tool_result 事件 →
+    _handle_tool_result → _maybe_trigger_checkpoint(调用所属迭代序号)。
+    本辅助按该链路逐个迭代驱动,触发点为 iteration ∈ {0..n-1} 中
+    满足过滤条件(K 倍数、≥ 2、未达 max_interrupts)的值。
     """
-    for _ in range(n):
+    for i in range(n):
         collector._start_new_iteration()
+        tid = f"tc{i}"
+        collector._pending_tool_calls[tid] = {
+            "title": "t",
+            "kind": "other",
+            "tool_name": "工具",
+            "raw_input": {},
+            "input_text": "",
+            "conv_id": None,
+            "iteration": i,
+        }
+        collector._handle_tool_result(tid, {"rawOutput": "ok"})
 
 
 # ============================================================
@@ -108,7 +139,7 @@ def test_collector_triggers_at_K_multiples(mock_task, mock_db, checkpoint_callba
 def test_collector_skips_first_2_iterations(mock_task, mock_db, checkpoint_callback):
     """K=1 时(每迭代都评估),前 2 个迭代仍跳过,从 iteration=2 开始触发。
 
-    注:_maybe_trigger_checkpoint 用 `if self.iteration < 2: return`,
+    注:_maybe_trigger_checkpoint 用 `if iteration < 2: return`,
     所以 iteration=0,1 跳过,iteration=2,3,4,... 满足 K 倍数时触发。
     K=1 时 iteration=2,3,4,5 都触发。
     """
@@ -139,6 +170,85 @@ def test_collector_K_2_triggers_at_2_4_6(mock_task, mock_db, checkpoint_callback
     )
     _advance_iterations(collector, 8)
     assert checkpoint_callback.calls == [2, 4, 6]
+
+
+# ============================================================
+# _ACPCollector:触发时机接线(tool_result 后才触发)
+# ============================================================
+
+def test_checkpoint_not_triggered_at_tool_call(mock_task, mock_db, checkpoint_callback):
+    """tool_call 落库 + _start_new_iteration 后不应触发检查点。
+
+    旧实现在 _start_new_iteration 里触发,导致落库顺序为
+    tool_call → 检查点评估 → tool_result,前端检查点横线会把
+    工具结果切到折叠块外。现在 _start_new_iteration 不再触发。
+    """
+    collector = _make_collector(
+        mock_task, mock_db, checkpoint_callback,
+        agent_policy={**DEFAULT_AGENT_POLICY, "checkpoint_interval": 1,
+                      "allow_interrupt": True, "max_interrupts_per_round": 100},
+    )
+    # 模拟迭代 2 的 tool_call 到达(满足 K=1 且 ≥2,旧实现会在此触发)
+    for _ in range(3):
+        collector._start_new_iteration()
+
+    assert checkpoint_callback.calls == []
+
+
+def test_checkpoint_triggered_after_tool_result_with_call_iteration(
+    mock_task, mock_db, checkpoint_callback,
+):
+    """tool_result 落库后触发,且 iteration 用 tool_call 所属迭代序号
+    (而非已 +1 的 self.iteration)。"""
+    collector = _make_collector(
+        mock_task, mock_db, checkpoint_callback,
+        agent_policy={**DEFAULT_AGENT_POLICY, "checkpoint_interval": 1,
+                      "allow_interrupt": True, "max_interrupts_per_round": 100},
+    )
+    # 迭代 0,1 不触发(< 2);迭代 2 的 tool_result 完成后应触发且 iteration=2
+    for i in range(3):
+        collector._start_new_iteration()
+        tid = f"tc{i}"
+        collector._pending_tool_calls[tid] = {
+            "title": "t", "kind": "other", "tool_name": "工具",
+            "raw_input": {}, "input_text": "", "conv_id": None,
+            "iteration": i,
+        }
+        collector._handle_tool_result(tid, {"rawOutput": "ok"})
+
+    assert checkpoint_callback.calls == [2]
+    # 触发后 pending 已清理(防止重复 completed 重复触发)
+    assert "tc2" not in collector._pending_tool_calls
+
+
+def test_checkpoint_snapshot_uses_finished_iteration_thinking(
+    mock_task, mock_db, checkpoint_callback,
+):
+    """快照 thinking_summary 用已缓存的上一迭代内容(content_buf 已清空),
+    tool_result_summary 是当前工具的真实结果(不再是上一工具的过期结果)。"""
+    collector = _make_collector(
+        mock_task, mock_db, checkpoint_callback,
+        agent_policy={**DEFAULT_AGENT_POLICY, "checkpoint_interval": 1,
+                      "allow_interrupt": True, "max_interrupts_per_round": 100},
+    )
+    # 迭代 0,1 跳过(<2),只跑到迭代 2
+    for i in range(3):
+        collector.content_buf = f"thinking-{i}"
+        collector._last_tool_intent = f"intent-{i}"
+        collector._start_new_iteration()  # 清空 content_buf 前缓存摘要
+        tid = f"tc{i}"
+        collector._pending_tool_calls[tid] = {
+            "title": "t", "kind": "other", "tool_name": "工具",
+            "raw_input": {}, "input_text": "", "conv_id": None,
+            "iteration": i,
+        }
+        collector._handle_tool_result(tid, {"rawOutput": f"result-{i}"})
+
+    assert checkpoint_callback.calls == [2]
+    snapshot = checkpoint_callback.call_args[0][1]
+    assert snapshot["thinking_summary"] == "thinking-2"
+    assert snapshot["tool_intent"] == "intent-2"
+    assert snapshot["tool_result_summary"] == "result-2"
 
 
 # ============================================================

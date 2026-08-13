@@ -1089,6 +1089,10 @@ class _ACPCollector:
         # 最近工具调用快照(供检查点评估使用)
         self._last_tool_intent = "(无工具调用)"
         self._last_tool_result = "(无工具结果)"
+        # 最近一次结束迭代的 thinking 摘要(供检查点评估快照使用):
+        # 检查点在 tool_result 落库后触发,此时 content_buf 已被
+        # _start_new_iteration 清空,需在清空前暂存
+        self._last_thinking_summary = ""
         # [perf] 首个 ACP 事件到达时间(collector 创建 ≈ prompt 发送前一刻)
         self._perf_t0 = time.perf_counter()
         self._perf_first_logged = False
@@ -1132,9 +1136,9 @@ class _ACPCollector:
 
     def _start_new_iteration(self) -> None:
         """开新迭代:iteration+1, 新 conv_id, 清空 buf(懒启动,不立即推 start)"""
-        # 检查点评估:在新迭代开始前(即上一迭代结束时),若达到评估间隔则触发
-        # iteration 在此处 +1 之前表示刚结束的迭代序号
-        self._maybe_trigger_checkpoint()
+        # 暂存刚结束迭代的 thinking 摘要:检查点评估已移到 tool_result
+        # 落库之后触发(_handle_tool_result),届时 content_buf 已清空
+        self._last_thinking_summary = self.content_buf[:500]
 
         self.iteration += 1
         self.current_conv_id = str(uuid.uuid4())
@@ -1142,10 +1146,13 @@ class _ACPCollector:
         self.content_buf = ""
         self._iter_started = False
 
-    def _maybe_trigger_checkpoint(self) -> None:
+    def _maybe_trigger_checkpoint(self, iteration: int) -> None:
         """检查点评估触发:每 K 个迭代边界做轻量评估
 
-        在 _start_new_iteration 开头调用(此时 iteration 还是刚结束的迭代序号)。
+        由 _handle_tool_result 在工具结果落库后调用(此时落库顺序为
+        tool_call → tool_result → 检查点评估,前端检查点横线不会把工具
+        结果切到折叠块外;评估快照也能看到当前工具的真实结果)。
+        iteration 为被评估的迭代序号(即产生该工具结果的迭代)。
         只在 user_agent 启用、配置了 agent_policy 且 allow_interrupt=true 时触发。
         前 2 个迭代不评估(给 CLI agent 启动时间)。
         """
@@ -1155,16 +1162,15 @@ class _ACPCollector:
             return  # 检查点评估是 user_agent 的能力,单 agent 模式完全关闭
         if not self._agent_policy.get("allow_interrupt", True):
             return
-        if self.iteration < 2:
+        if iteration < 2:
             return
 
         from app.agent_checkpoint import get_effective_interval
         effective_k = get_effective_interval(self._agent_policy, self._agent_type)
         max_interrupts = self._agent_policy.get("max_interrupts_per_round", 2)
 
-        # iteration 此时是刚结束的迭代序号(0-based 起步,实际是已完成的迭代数)
         # 检查是否达到评估间隔
-        if self.iteration % effective_k != 0:
+        if iteration % effective_k != 0:
             return
         if self._interrupt_count >= max_interrupts:
             return
@@ -1172,16 +1178,16 @@ class _ACPCollector:
         # 构造快照
         snapshot = self._build_snapshot()
         try:
-            self._checkpoint_callback(self.iteration, snapshot)
+            self._checkpoint_callback(iteration, snapshot)
         except Exception as e:
             logger.warning(
-                f"[task={self.task.id}] CLI 检查点评估失败(iteration={self.iteration}, 忽略): {e}"
+                f"[task={self.task.id}] CLI 检查点评估失败(iteration={iteration}, 忽略): {e}"
             )
 
     def _build_snapshot(self) -> dict[str, Any]:
         """构造 react_agent 快照供检查点评估"""
         return {
-            "thinking_summary": self.content_buf[:500] if self.content_buf else "",
+            "thinking_summary": self._last_thinking_summary,
             "tool_intent": self._last_tool_intent,
             "tool_result_summary": self._last_tool_result[:500] if self._last_tool_result else "",
             "plan_status": [],  # CLI agent 的 plan 由 content_full 提取,这里暂不传
@@ -1315,6 +1321,8 @@ class _ACPCollector:
                 raw_input = {"pattern": title[8:].strip()}
 
         # 缓存,等 tool_call_update 累积输入 / completed 拿输出
+        # iteration:该调用所属迭代序号(tool_result 到达时 self.iteration 已 +1,
+        # 检查点评估需用此序号触发,保证落库顺序为 tool_call → tool_result → 检查点)
         self._pending_tool_calls[tool_call_id] = {
             "title": title,
             "kind": kind,
@@ -1322,6 +1330,7 @@ class _ACPCollector:
             "raw_input": raw_input or {},
             "input_text": "",  # Kimi 增量累积
             "conv_id": None,  # 落库后填充,completed 时用于更新
+            "iteration": self.iteration,
         }
 
         # 生成 intent + detail(Kimi 此时 input_text 为空,detail 可能为空)
@@ -1437,6 +1446,16 @@ class _ACPCollector:
 
         # 记录最近工具结果(供检查点评估快照使用)
         self._last_tool_result = raw_output
+
+        # 检查点评估:在工具结果落库之后触发(而非 tool_call 落库后立即触发),
+        # 保证落库顺序 tool_call → tool_result → 检查点评估:
+        # 1) 前端按序切迭代时 call/result 同组,检查点横线不会切开工具折叠卡;
+        # 2) 评估快照能看到当前工具的真实结果(此前只能看到上一个工具的)
+        iter_of_call = pending.get("iteration")
+        if isinstance(iter_of_call, int):
+            self._maybe_trigger_checkpoint(iter_of_call)
+        # 该 tool_call 已完成,清理 pending(避免累积 + 防止重复 completed 重复触发)
+        self._pending_tool_calls.pop(tool_call_id, None)
 
     @staticmethod
     def _infer_tool_name(title: str, kind: str) -> str:
