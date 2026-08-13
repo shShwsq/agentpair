@@ -196,9 +196,9 @@
   --color-sev-low-border: #713f12;
   --color-sev-info-border: #1e3a8a;
 
-  /* ---- 色彩:计划清单卡片(深底加深背景、调亮前景) ---- */
-  --color-plan-bg: linear-gradient(135deg, #052e16 0%, #083344 100%);
-  --color-plan-border: #14532d;
+  /* ---- 色彩:计划清单卡片(底色用 slate 系贴近页面背景,前景保留绿色系调亮) ---- */
+  --color-plan-bg: linear-gradient(135deg, #1e293b 0%, #172033 100%);
+  --color-plan-border: #334155;
   --color-plan-title: #34d399;
   --color-plan-progress: #4ade80;
   --color-plan-progress-bg: rgba(255, 255, 255, 0.08);
