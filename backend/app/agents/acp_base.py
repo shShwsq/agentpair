@@ -791,6 +791,30 @@ def _extract_bridge_error(session, execution_id: str, agent_type: str = "") -> s
     return ""
 
 
+def _extract_recent_cli_stderr(
+    session, execution_id: str, agent_type: str = "", max_lines: int = 25
+) -> str:
+    """提取最近的 CLI stderr 行(经 bridge [cli stderr] 前缀转发)
+
+    用于"模型未响应"等静默失败场景:CLI 调用 LLM API 后未抛异常但返回空,
+    真实的 HTTP 错误/拒绝信息在 CLI stderr 中。返回最近 max_lines 行 [cli stderr] 内容。
+    """
+    try:
+        logs, _ = session.get_background_logs(execution_id)
+    except Exception:
+        return ""
+    if not logs:
+        return ""
+
+    lines = logs.splitlines()
+    cli_stderr_lines = [line for line in lines if "[cli stderr]" in line]
+    if not cli_stderr_lines:
+        return ""
+
+    recent = cli_stderr_lines[-max_lines:]
+    return "\n".join(recent)
+
+
 # ============================================================
 # bridge/session 复用缓存(性能优化:省去每轮 ~25s 的 bridge 重建链路)
 # ============================================================
@@ -2457,15 +2481,25 @@ def test_credential_streaming(
                 e = prompt_error[0]
                 err_msg = str(e)
                 low = err_msg.lower()
+                # 提取 CLI stderr,补充真实错误详情(ACP 异常消息常为泛化描述)
+                cli_stderr = ""
+                if bridge_exec_id:
+                    cli_stderr = _extract_recent_cli_stderr(
+                        session, bridge_exec_id, agent_type
+                    )
                 if any(kw in low for kw in ("quota", "credit", "limit", "余额", "配额",
                                             "pricing", "pricingurl")):
-                    yield done(False, f"账户配额不足,请前往充值后重试。错误详情: {err_msg}")
+                    msg = f"账户配额不足,请前往充值后重试。错误详情: {err_msg}"
                 elif any(kw in low for kw in ("auth", "unauthorized", "token", "401")):
-                    yield done(False, f"凭证认证失败: {err_msg}")
+                    msg = f"凭证认证失败: {err_msg}"
                 elif "timeout" in low:
-                    yield done(False, "模型响应超时(60s,请检查网络或配额)")
+                    msg = "模型响应超时(60s,请检查网络或配额)"
                 else:
-                    yield done(False, f"模型响应测试失败: {err_msg}")
+                    msg = f"模型响应测试失败: {err_msg}"
+                if cli_stderr:
+                    msg += f"\n\n[CLI 日志]\n{cli_stderr}"
+                    logger.info(f"[{agent_type}_test] prompt 异常,CLI stderr:\n{cli_stderr}")
+                yield done(False, msg)
                 return
 
             # 自动拆分 <think>...</think>:某些模型/端点(Kimi CLI openai provider
@@ -2507,15 +2541,22 @@ def test_credential_streaming(
                 )
             else:
                 # 既无回复也无思考:真正未响应
-                # Kimi CLI 默认用 kimi provider 类型(Moonshot 专用协议,发送顶层 thinking 参数),
-                # 非 Moonshot 端点(MiniMax/DeepSeek/DashScope 等)可能不识别该参数而拒绝或静默无响应。
-                # 提示用户在「智能体配置」中将「供应商协议类型」改为 openai 后重试。
-                yield done(
-                    False,
+                # 提取 CLI stderr 日志,展示真实的 API 错误(如 HTTP 401/400/配额不足等)
+                # kimi CLI 调 LLM 后未抛异常但返回空,真实错误在 stderr 中
+                cli_stderr = ""
+                if bridge_exec_id:
+                    cli_stderr = _extract_recent_cli_stderr(
+                        session, bridge_exec_id, agent_type
+                    )
+                msg = (
                     "session/new 成功,但模型未响应(请检查配额或网络)。"
                     "若使用 MiniMax/DeepSeek/阿里云等非 Moonshot 端点,"
                     "请在「智能体配置」中将「供应商协议类型」改为 openai 后重试。"
                 )
+                if cli_stderr:
+                    msg += f"\n\n[CLI 日志]\n{cli_stderr}"
+                    logger.info(f"[{agent_type}_test] 模型未响应,CLI stderr:\n{cli_stderr}")
+                yield done(False, msg)
 
         except RuntimeError as e:
             err_msg = str(e)

@@ -172,6 +172,15 @@ USER_AGENT_SYSTEM_PROMPT = """你是 user_agent(用户代理智能体),扮演一
 ```
 grouping 可为 null(不分组,平铺展示)。
 
+### questions 问题对象格式(ask_user=true 时):
+```json
+"questions": [
+  {"type": "text", "question": "问题文本(必填,放 question 字段)", "placeholder": "输入提示(可选)", "required": false},
+  {"type": "choice", "question": "问题文本", "options": [{"value": "val1", "label": "选项显示名"}], "multi": false}
+]
+```
+注意:不需要输出 id(系统自动生成);问题文本必须放在 question 字段。
+
 ## checklist 生成原则(第 0 轮)
 - 根据用户意图自适应:安全审计任务生成安全维度(注入/认证/反序列化等),
   代码审查任务生成质量维度(可读性/正确性/性能等),其他任务按语义生成。
@@ -501,7 +510,13 @@ def run_user_agent(
                 if q_type not in ("choice", "text"):
                     q_type = "text"
                 q["type"] = q_type
-                q.setdefault("question", "(未提供问题)")
+                # 问题文本:LLM 可能把文本写到 text/content 等替代字段,兼容提取
+                # (曾因 prompt 未定义问题结构,LLM 用 text 字段导致前端显示"(未提供问题)")
+                q_text = (
+                    q.get("question") or q.get("text")
+                    or q.get("content") or q.get("title")
+                )
+                q["question"] = str(q_text).strip() if q_text else "(未提供问题)"
                 if q_type == "choice":
                     if not isinstance(q.get("options"), list) or not q["options"]:
                         # 选择题无选项,降级为填空题
