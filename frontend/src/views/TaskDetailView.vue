@@ -2315,6 +2315,39 @@ function toggleResult(id: string): void {
     <aside v-if="task && !detailCollapsed" class="detail-sidebar">
       <div class="detail-sidebar-header">
         <span class="detail-sidebar-title">任务详情</span>
+        <!-- 状态徽标 + 下载/打印:自任务概览区块顶部迁入,排在折叠按钮左侧 -->
+        <span :class="['badge', statusConfig[task.status].class]">
+          {{ statusConfig[task.status].label }}
+        </span>
+        <div
+          v-if="task.status === 'completed' || task.results.length > 0"
+          class="overview-actions"
+        >
+          <button
+            class="btn-export"
+            :disabled="exporting"
+            title="下载 Markdown 报告"
+            @click="exportMarkdown"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+          </button>
+          <button
+            class="btn-export"
+            :disabled="exporting"
+            title="打印或另存为 PDF"
+            @click="exportPdf"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="6 9 6 2 18 2 18 9" />
+              <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+              <rect x="6" y="14" width="12" height="8" />
+            </svg>
+          </button>
+        </div>
         <WorkspaceToggleButton
           side="right"
           :collapsed="false"
@@ -2346,118 +2379,8 @@ function toggleResult(id: string): void {
           </div>
         </section>
 
-        <!-- 结果清单(从主区迁入;分组由 task.params._grouping 驱动,卡片默认折叠) -->
-        <section
-          v-if="task.results.length > 0"
-          class="sidebar-results"
-          data-onboarding="detail-results"
-        >
-          <h2>结果清单 <span class="count">({{ task.results.length }})</span></h2>
-          <template v-for="group in resultGroups" :key="group.key">
-            <h3 v-if="resultGrouping" class="sidebar-result-group">
-              <span :class="['severity-tag', `sev-${group.color}`]">{{ group.label }}</span>
-              <span class="count">{{ group.results.length }}</span>
-            </h3>
-            <div class="result-cards">
-              <article
-                v-for="r in group.results"
-                :key="r.id"
-                :class="['result-card', { 'result-card-expanded': expandedResults.has(r.id) }]"
-                @click="toggleResult(r.id)"
-              >
-                <div class="result-header">
-                  <span class="result-toggle">{{ expandedResults.has(r.id) ? '▼' : '▶' }}</span>
-                  <h4>{{ r.title }}</h4>
-                  <span class="round-tag">第 {{ r.round_idx }} 轮</span>
-                </div>
-                <div v-if="getResultMetaItems(r).length > 0" class="result-meta">
-                  <span
-                    v-for="item in getResultMetaItems(r)"
-                    :key="item.field.name"
-                    :class="['meta-tag', { 'meta-file': item.field.type === 'file' }]"
-                    @click.stop="item.field.type === 'file' ? onResultFileClick(r) : undefined"
-                  >
-                    {{ item.value }}
-                  </span>
-                </div>
-                <div
-                  v-if="expandedResults.has(r.id)"
-                  class="result-content markdown-body"
-                  v-html="renderResultContent(r.content)"
-                />
-              </article>
-            </div>
-          </template>
-        </section>
-
-        <!-- 检查点评估聚合(从对话流内联卡片迁入;点击条目定位对话流对应轮次) -->
-        <section v-if="checkpointList.length > 0" class="sidebar-checkpoints">
-          <h2>检查点评估 <span class="count">({{ checkpointList.length }})</span></h2>
-          <div class="checkpoint-list">
-            <div
-              v-for="cp in checkpointList"
-              :key="cp.id"
-              :class="['checkpoint-item', { 'checkpoint-item-interrupt': cp.isInterrupt }]"
-              title="点击定位对话流中的检查点位置"
-              @click="locateCheckpoint(cp.id)"
-            >
-              <div class="checkpoint-item-head">
-                <span class="checkpoint-item-pos">
-                  第 {{ cp.roundIdx }} 轮<template v-if="cp.iteration !== null"> · 迭代 {{ cp.iteration }}</template>
-                </span>
-                <span
-                  :class="[
-                    'checkpoint-badge',
-                    cp.isInterrupt ? 'checkpoint-badge-interrupt' : 'checkpoint-badge-continue',
-                  ]"
-                >
-                  {{ cp.isInterrupt ? '已打断' : '继续' }}
-                </span>
-              </div>
-              <div class="checkpoint-item-reason">{{ cp.reason || '无说明' }}</div>
-              <div v-if="cp.isInterrupt && cp.query" class="checkpoint-item-query">
-                追问:{{ cp.query }}
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <!-- 任务详情(扁平化,无卡片外框) -->
+        <!-- 任务详情(扁平化,无卡片外框):状态徽标与下载/打印按钮已移至标题行,用户意图卡片已移除 -->
         <section class="overview-section">
-          <div class="overview-header">
-            <span :class="['badge', statusConfig[task.status].class]">
-              {{ statusConfig[task.status].label }}
-            </span>
-            <div
-              v-if="task.status === 'completed' || task.results.length > 0"
-              class="overview-actions"
-            >
-              <button
-                class="btn-export"
-                :disabled="exporting"
-                title="下载 Markdown 报告"
-                @click="exportMarkdown"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                  <polyline points="7 10 12 15 17 10" />
-                  <line x1="12" y1="15" x2="12" y2="3" />
-                </svg>
-              </button>
-              <button
-                class="btn-export"
-                :disabled="exporting"
-                title="打印或另存为 PDF"
-                @click="exportPdf"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="6 9 6 2 18 2 18 9" />
-                  <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
-                  <rect x="6" y="14" width="12" height="8" />
-                </svg>
-              </button>
-            </div>
-          </div>
           <dl class="overview-meta">
             <div>
               <dt>场景</dt>
@@ -2472,10 +2395,6 @@ function toggleResult(id: string): void {
               <dd>{{ formatTime(task.completed_at) }}</dd>
             </div>
           </dl>
-          <div class="overview-input">
-            <span class="label">用户意图</span>
-            <p class="markdown-body" v-html="renderMarkdown(task.user_input)"></p>
-          </div>
           <div v-if="task.current_stage" class="overview-stage">
             <span class="label">当前阶段</span>
             <p>{{ task.current_stage }}</p>
@@ -2530,6 +2449,82 @@ function toggleResult(id: string): void {
             >
               <span class="token-label">{{ token.label }}</span>
               <code class="token-header">{{ token.header_name }}: {{ maskTokenValue(token.header_value) }}</code>
+            </div>
+          </div>
+        </section>
+
+        <!-- 结果清单(分组由 task.params._grouping 驱动,卡片默认折叠;置底展示) -->
+        <section
+          v-if="task.results.length > 0"
+          class="sidebar-results"
+          data-onboarding="detail-results"
+        >
+          <h2>结果清单 <span class="count">({{ task.results.length }})</span></h2>
+          <template v-for="group in resultGroups" :key="group.key">
+            <h3 v-if="resultGrouping" class="sidebar-result-group">
+              <span :class="['severity-tag', `sev-${group.color}`]">{{ group.label }}</span>
+              <span class="count">{{ group.results.length }}</span>
+            </h3>
+            <div class="result-cards">
+              <article
+                v-for="r in group.results"
+                :key="r.id"
+                :class="['result-card', { 'result-card-expanded': expandedResults.has(r.id) }]"
+                @click="toggleResult(r.id)"
+              >
+                <div class="result-header">
+                  <span class="result-toggle">{{ expandedResults.has(r.id) ? '▼' : '▶' }}</span>
+                  <h4>{{ r.title }}</h4>
+                  <span class="round-tag">第 {{ r.round_idx }} 轮</span>
+                </div>
+                <div v-if="getResultMetaItems(r).length > 0" class="result-meta">
+                  <span
+                    v-for="item in getResultMetaItems(r)"
+                    :key="item.field.name"
+                    :class="['meta-tag', { 'meta-file': item.field.type === 'file' }]"
+                    @click.stop="item.field.type === 'file' ? onResultFileClick(r) : undefined"
+                  >
+                    {{ item.value }}
+                  </span>
+                </div>
+                <div
+                  v-if="expandedResults.has(r.id)"
+                  class="result-content markdown-body"
+                  v-html="renderResultContent(r.content)"
+                />
+              </article>
+            </div>
+          </template>
+        </section>
+
+        <!-- 检查点评估聚合(置底;点击条目定位对话流对应轮次) -->
+        <section v-if="checkpointList.length > 0" class="sidebar-checkpoints">
+          <h2>检查点评估 <span class="count">({{ checkpointList.length }})</span></h2>
+          <div class="checkpoint-list">
+            <div
+              v-for="cp in checkpointList"
+              :key="cp.id"
+              :class="['checkpoint-item', { 'checkpoint-item-interrupt': cp.isInterrupt }]"
+              title="点击定位对话流中的检查点位置"
+              @click="locateCheckpoint(cp.id)"
+            >
+              <div class="checkpoint-item-head">
+                <span class="checkpoint-item-pos">
+                  第 {{ cp.roundIdx }} 轮<template v-if="cp.iteration !== null"> · 迭代 {{ cp.iteration }}</template>
+                </span>
+                <span
+                  :class="[
+                    'checkpoint-badge',
+                    cp.isInterrupt ? 'checkpoint-badge-interrupt' : 'checkpoint-badge-continue',
+                  ]"
+                >
+                  {{ cp.isInterrupt ? '已打断' : '继续' }}
+                </span>
+              </div>
+              <div class="checkpoint-item-reason">{{ cp.reason || '无说明' }}</div>
+              <div v-if="cp.isInterrupt && cp.query" class="checkpoint-item-query">
+                追问:{{ cp.query }}
+              </div>
             </div>
           </div>
         </section>
@@ -2654,16 +2649,37 @@ function toggleResult(id: string): void {
 .detail-sidebar-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: var(--space-2);
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
 }
 
 .detail-sidebar-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--fs-sm);
   font-weight: var(--fw-semibold);
   color: var(--color-text);
+}
+
+/* 标题行内的状态徽标与导出按钮:紧凑不换行、不被压缩,
+   窄屏下优先保标题截断 */
+.detail-sidebar-header .badge {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.detail-sidebar-header .overview-actions {
+  flex-shrink: 0;
+}
+
+.detail-sidebar-header .btn-export {
+  width: 28px;
+  height: 28px;
 }
 
 /* 内容区:独立滚动,卡片间距用 gap 统一 */
@@ -2744,16 +2760,6 @@ function toggleResult(id: string): void {
   padding: var(--space-2) 0;
 }
 
-.overview-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  margin-bottom: var(--space-3);
-  padding-bottom: var(--space-3);
-  border-bottom: 1px solid var(--color-border);
-}
-
 .overview-actions {
   display: flex;
   gap: var(--space-2);
@@ -2803,14 +2809,12 @@ function toggleResult(id: string): void {
   color: var(--color-text);
 }
 
-.overview-input,
 .overview-stage {
   padding: var(--space-3) var(--space-4);
   background: var(--color-surface-alt);
   border-radius: var(--radius-md);
 }
 
-.overview-input .label,
 .overview-stage .label {
   display: block;
   font-size: var(--fs-xs);
@@ -2818,18 +2822,12 @@ function toggleResult(id: string): void {
   margin-bottom: var(--space-1);
 }
 
-.overview-input p,
 .overview-stage p {
   font-size: var(--fs-sm);
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 120px;
   overflow-y: auto;
-}
-
-/* overview-input 的 p 是 markdown-body 容器,覆盖 pre-wrap */
-.overview-input p.markdown-body {
-  white-space: normal;
 }
 
 /* ---- 状态徽章 ---- */
