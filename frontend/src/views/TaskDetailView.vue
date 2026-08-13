@@ -59,6 +59,7 @@ import type {
   AnswerItem,
   ChecklistDimension,
   ClarificationQuestion,
+  CloneProgressEventData,
   Conversation,
   PlanStep,
   QuestionEventData,
@@ -330,6 +331,11 @@ const submittingVerifyAction = ref(false)
 // command_confirm 事件,前端弹出 CommandConfirmDialog 让用户确认/拒绝。
 const commandConfirmData = ref<CommandConfirmEventData | null>(null)
 const submittingCommandConfirm = ref(false)
+
+// ---- 仓库克隆进度(clone_progress 事件)----
+// local 模式下后端用 Popen 流式读 git clone 的 stderr,解析百分比后推送。
+// 克隆完成(后端推 status 切换 current_stage)或任务结束时清除。
+const cloneProgress = ref<CloneProgressEventData | null>(null)
 
 /** 从 VerifyActionEventData 填充弹窗数据并打开 */
 function openVerifyActionDialog(action: VerifyActionEventData): void {
@@ -662,9 +668,15 @@ function connectSSE(taskId: string): void {
         task.value.status = data.status
         task.value.current_stage = data.current_stage
       }
+      // 阶段切换(如"正在读取仓库根目录结构...")意味着克隆已完成,清除进度条
+      cloneProgress.value = null
     },
     onThinkingDelta: (data) => {
       handleThinkingDelta(data)
+      nextTick(scrollToBottom)
+    },
+    onCloneProgress: (data) => {
+      cloneProgress.value = data
       nextTick(scrollToBottom)
     },
     onPlan: (data) => {
@@ -727,6 +739,8 @@ function connectSSE(taskId: string): void {
       } catch (err) {
         console.error('拉取最终结果失败:', err)
       }
+      // 清除克隆进度条(任务结束)
+      cloneProgress.value = null
       // 任务完成时后端刚写入工作区 diff,重拉一次展示(失败兜底,静默)
       void loadArtifact(taskId)
     },
@@ -735,6 +749,8 @@ function connectSSE(taskId: string): void {
         task.value.status = 'failed'
         task.value.error_message = data.error_message || '执行失败'
       }
+      // 清除克隆进度条(任务失败)
+      cloneProgress.value = null
     },
   })
 }
@@ -2170,10 +2186,29 @@ function parseCheckpoint(item: DisplayItem): {
             class="waiting-hint"
             :class="{ 'waiting-hint-paused': isPaused }"
           >
-            <span v-if="!isPaused" class="typing-dots">
-              <span></span><span></span><span></span>
-            </span>
-            {{ isPaused ? '已暂停,点击恢复按钮继续执行' : (task?.current_stage || '智能体思考中...') }}
+            <template v-if="cloneProgress && !isPaused">
+              <div class="clone-progress">
+                <div class="clone-progress-info">
+                  <span class="clone-progress-stage">
+                    {{ task?.current_stage || '正在克隆仓库...' }}
+                  </span>
+                  <span class="clone-progress-percent">{{ cloneProgress.percent }}%</span>
+                </div>
+                <div class="clone-progress-bar">
+                  <div
+                    class="clone-progress-fill"
+                    :style="{ width: cloneProgress.percent + '%' }"
+                  ></div>
+                </div>
+                <div class="clone-progress-msg">{{ cloneProgress.message }}</div>
+              </div>
+            </template>
+            <template v-else>
+              <span v-if="!isPaused" class="typing-dots">
+                <span></span><span></span><span></span>
+              </span>
+              {{ isPaused ? '已暂停,点击恢复按钮继续执行' : (task?.current_stage || '智能体思考中...') }}
+            </template>
           </div>
         </section>
 
@@ -3581,6 +3616,55 @@ function parseCheckpoint(item: DisplayItem): {
 @keyframes typing {
   0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
   30% { opacity: 1; transform: translateY(-4px); }
+}
+
+/* ---- 仓库克隆进度条 ---- */
+.clone-progress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+.clone-progress-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--fs-sm);
+}
+
+.clone-progress-stage {
+  color: var(--color-text-secondary);
+}
+
+.clone-progress-percent {
+  color: var(--color-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.clone-progress-bar {
+  width: 100%;
+  height: 6px;
+  background: var(--color-border);
+  border-radius: var(--radius-full, 999px);
+  overflow: hidden;
+}
+
+.clone-progress-fill {
+  height: 100%;
+  background: var(--color-primary);
+  border-radius: var(--radius-full, 999px);
+  transition: width 0.3s ease;
+}
+
+.clone-progress-msg {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono, monospace);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ---- 工作区变更(diff/patch 展示) ---- */

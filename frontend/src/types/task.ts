@@ -273,6 +273,7 @@ export type SSEEventType =
   | 'conversation_update'
   | 'status'
   | 'thinking_delta'
+  | 'clone_progress'
   | 'plan'
   | 'question'
   | 'checklist_review'
@@ -318,6 +319,20 @@ export interface ConversationUpdateEventData {
 export interface StatusEventData {
   status: TaskStatus
   current_stage: string | null
+}
+
+/**
+ * clone_progress 事件 data
+ *
+ * local 模式下 git clone 的进度推送。后端用 Popen 流式读 git stderr,
+ * 解析 "Receiving objects: X%" 等行后推送。高频瞬时事件,前端按 percent
+ * 更新进度条。克隆完成(后端推 status 切换 current_stage)或任务结束时清除。
+ */
+export interface CloneProgressEventData {
+  /** 进度百分比 0-100 */
+  percent: number
+  /** 原始进度行文本(如 "Receiving objects: 45% (1234/5678)") */
+  message: string
 }
 
 /**

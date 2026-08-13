@@ -17,6 +17,7 @@ import { getAccessToken } from './client'
 import type {
   AgentCheckpointEventData,
   ChecklistReviewEventData,
+  CloneProgressEventData,
   CommandConfirmEventData,
   ConnectedData,
   ConversationEventData,
@@ -40,6 +41,8 @@ export interface StreamCallbacks {
   onStatus?: (data: StatusEventData) => void
   /** 流式 token 增量(打字机效果)。每个 LLM 调用按 conv_id 累积 */
   onThinkingDelta?: (data: ThinkingDeltaEventData) => void
+  /** 仓库克隆进度(local 模式 Popen 流式解析 git stderr 推送) */
+  onCloneProgress?: (data: CloneProgressEventData) => void
   /** 计划清单更新(复杂任务时 react_agent 输出 <plan>,后端提取推送) */
   onPlan?: (data: PlanEventData) => void
   /** 用户澄清提问(阶段 8:user_agent 输出 ask_user=true 时触发) */
@@ -79,6 +82,7 @@ export function subscribeTaskStream(
     'conversation_update',
     'status',
     'thinking_delta',
+    'clone_progress',
     'plan',
     'question',
     'checklist_review',
@@ -110,6 +114,9 @@ export function subscribeTaskStream(
             break
           case 'thinking_delta':
             callbacks.onThinkingDelta?.(data as unknown as ThinkingDeltaEventData)
+            break
+          case 'clone_progress':
+            callbacks.onCloneProgress?.(data as unknown as CloneProgressEventData)
             break
           case 'plan':
             callbacks.onPlan?.(data as unknown as PlanEventData)
