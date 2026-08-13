@@ -6,13 +6,18 @@
 
 工作流程(通用):
 1. 复用 sandbox_tools 的沙箱会话(orchestrator 已预 clone 仓库)
-2. 从 user_agent_configs 加载用户凭证(加密存储),经 registry 映射为环境变量
-3. 将 acp_bridge.py 写入沙箱
-4. 后台启动 acp_bridge.py(监听端口 ACP_BRIDGE_PORT),凭证经 envs 注入
+2. 查本任务缓存的 bridge + ACP session(命中则直接跳到 7;bridge/CLI 进程驻留
+   沙箱,会话上下文随 session 在轮次/追问间自然延续)
+3. 未命中:从 user_agent_configs 加载用户凭证(加密存储),经 registry 映射为环境变量
+4. 将 acp_bridge.py 写入沙箱,后台启动(监听端口 ACP_BRIDGE_PORT),凭证经 envs 注入
 5. 通过 get_endpoint(ACP_BRIDGE_PORT) 获取转发地址 + headers
-6. ACP 客户端:initialize → session/new → [post_session_setup] → session/prompt
-7. 流式接收 session/update 通知,翻译为 event_bus 事件
+6. ACP 客户端:initialize → session/new → [post_session_setup],随后写入缓存
+7. session/prompt 流式接收 session/update 通知,翻译为 event_bus 事件
 8. 收集最终 summary,提取 plan,返回 (results, summary, plan)
+
+bridge 不在每轮结束时停止:进程随沙箱会话存活,供后续轮次/resume 追问复用
+(省去 ensure_cli_env/start_bridge/initialize/new_session 合计 ~25s);
+沙箱会话销毁(close_session)时经 stop_task_bridge 清缓存,容器销毁连带回收进程。
 
 各 wrapper 的差异通过回调/参数注入:
 - post_session_setup(client, session_id, task):session/new 之后、prompt 之前执行
@@ -784,6 +789,85 @@ def _extract_bridge_error(session, execution_id: str, agent_type: str = "") -> s
         return "\n".join(relevant[-20:])
 
     return ""
+
+
+# ============================================================
+# bridge/session 复用缓存(性能优化:省去每轮 ~25s 的 bridge 重建链路)
+# ============================================================
+
+# task_id -> bridge 状态。
+# bridge(HTTP 服务)与 CLI 进程驻留沙箱内,ACP 会话状态在 CLI 进程内,
+# 因此缓存 bridge_exec_id + acp_session_id 即可跨轮次/跨 resume 直接发 prompt,
+# CLI 侧对话上下文随 session 自然延续。
+_bridge_cache: dict[str, dict[str, Any]] = {}
+_bridge_cache_lock = threading.Lock()
+
+
+def _bridge_fingerprint(acp_args: list[str], credential_envs: dict[str, str]) -> str:
+    """bridge 启动配置指纹:启动参数或凭证变化时缓存失效(需重建 bridge)
+
+    不含 HERMES_YOLO_MODE 等由 wrapper 在 prompt/会话层动态处理的开关。
+    """
+    keys = sorted(k for k in credential_envs if k != "HERMES_YOLO_MODE")
+    return json.dumps(
+        [list(acp_args), [[k, credential_envs[k]] for k in keys]],
+        ensure_ascii=False, sort_keys=True,
+    )
+
+
+def _bridge_alive(endpoint_url: str, endpoint_headers: dict[str, str]) -> bool:
+    """健康检查:缓存的 bridge 及其 CLI 进程是否仍存活"""
+    try:
+        with httpx.Client(headers=endpoint_headers, timeout=5) as hc:
+            resp = hc.get(f"{endpoint_url}/health")
+            return (
+                resp.status_code == 200
+                and (resp.json() or {}).get("status") == "ok"
+            )
+    except Exception:
+        return False
+
+
+def _try_reuse_bridge(
+    task_id: str, session, agent_type: str, fingerprint: str,
+) -> dict[str, Any] | None:
+    """尝试复用本任务缓存的 bridge + ACP session
+
+    可复用须同时满足:同一沙箱会话对象(容器未重建)、agent 类型一致、
+    启动配置指纹一致、/health 通过。任一不满足则清缓存返回 None(走全新链路)。
+    返回:{"bridge_exec_id", "endpoint_url", "endpoint_headers", "acp_session_id"}
+    """
+    with _bridge_cache_lock:
+        entry = _bridge_cache.get(task_id)
+        if not entry:
+            return None
+        if entry["session"] is not session:
+            # 沙箱会话已重建,旧 bridge 随旧容器消亡,仅清缓存
+            _bridge_cache.pop(task_id, None)
+            return None
+        if entry["agent_type"] != agent_type or entry["fingerprint"] != fingerprint:
+            # 同沙箱内切换 agent 类型或启动参数/凭证变化:
+            # 停旧 bridge(避免端口冲突)后重建
+            _stop_acp_bridge(entry["session"], entry["bridge_exec_id"], entry["agent_type"])
+            _bridge_cache.pop(task_id, None)
+            return None
+        reused = dict(entry)
+
+    if not _bridge_alive(reused["endpoint_url"], reused["endpoint_headers"]):
+        with _bridge_cache_lock:
+            _bridge_cache.pop(task_id, None)
+        logger.info(f"[task={task_id}] 缓存的 ACP bridge 已失活,重新初始化")
+        return None
+    return reused
+
+
+def stop_task_bridge(task_id: str) -> None:
+    """停止任务的 bridge 并清缓存(沙箱会话关闭/任务删除时调用)"""
+    with _bridge_cache_lock:
+        entry = _bridge_cache.pop(task_id, None)
+    if not entry:
+        return
+    _stop_acp_bridge(entry["session"], entry["bridge_exec_id"], entry["agent_type"])
 
 
 # ============================================================
@@ -1822,32 +1906,49 @@ def run_acp_agent(
     # ---- 加载全局长期记忆(跨项目通用经验,影响执行方式) ----
     global_memory = _load_global_memory(db, task)
 
-    # ---- 准备 CLI 环境 ----
+    # ---- 尝试复用缓存的 bridge + ACP session ----
+    # 命中时跳过 ensure_cli_env/pre_bridge_hook/start_bridge/initialize/new_session
+    # 合计 ~25s 的重建链路,直接发 prompt;CLI 侧会话上下文随 session 延续。
+    fingerprint = _bridge_fingerprint(
+        _get_acp_args(task, agent_type), credential_envs
+    )
     _t0 = time.perf_counter()
-    _ensure_cli_env(session, agent_type)
-    perf_log(task.id, "acp_ensure_cli_env", time.perf_counter() - _t0, agent_type=agent_type)
+    reused = _try_reuse_bridge(task_id_str, session, agent_type, fingerprint)
+    perf_log(
+        task.id, "acp_bridge_reuse", time.perf_counter() - _t0,
+        agent_type=agent_type, hit=reused is not None,
+    )
 
-    # ---- wrapper 层钩子:bridge 启动前的沙箱文件准备 ----
-    # hermes 用此回调写入 ~/.hermes/config.yaml(模型/provider/base_url 配置)
-    # codex 用此回调写入 ~/.codex/config.toml(按 task.params 决定 approval_policy)
-    if pre_bridge_hook:
+    if reused is None:
+        # ---- 全新链路:准备 CLI 环境 ----
         _t0 = time.perf_counter()
-        pre_bridge_hook(session, credentials, agent_type, task)
-        perf_log(task.id, "acp_pre_bridge_hook", time.perf_counter() - _t0, agent_type=agent_type)
+        _ensure_cli_env(session, agent_type)
+        perf_log(task.id, "acp_ensure_cli_env", time.perf_counter() - _t0, agent_type=agent_type)
 
-    # ---- 启动 ACP bridge ----
-    _t0 = time.perf_counter()
-    bridge_exec_id = _start_acp_bridge(session, credential_envs, task, agent_type=agent_type)
-    perf_log(task.id, "acp_start_bridge", time.perf_counter() - _t0, agent_type=agent_type)
+        # ---- wrapper 层钩子:bridge 启动前的沙箱文件准备 ----
+        # hermes 用此回调写入 ~/.hermes/config.yaml(模型/provider/base_url 配置)
+        # codex 用此回调写入 ~/.codex/config.toml(按 task.params 决定 approval_policy)
+        if pre_bridge_hook:
+            _t0 = time.perf_counter()
+            pre_bridge_hook(session, credentials, agent_type, task)
+            perf_log(task.id, "acp_pre_bridge_hook", time.perf_counter() - _t0, agent_type=agent_type)
+
+        # ---- 启动 ACP bridge ----
+        _t0 = time.perf_counter()
+        bridge_exec_id = _start_acp_bridge(session, credential_envs, task, agent_type=agent_type)
+        perf_log(task.id, "acp_start_bridge", time.perf_counter() - _t0, agent_type=agent_type)
+    else:
+        bridge_exec_id = reused["bridge_exec_id"]
 
     endpoint_url, endpoint_headers = session.get_endpoint(ACP_BRIDGE_PORT)
 
     try:
-        _t0 = time.perf_counter()
-        _wait_for_bridge_ready(
-            session, bridge_exec_id, endpoint_url, endpoint_headers, agent_type
-        )
-        perf_log(task.id, "acp_wait_bridge_ready", time.perf_counter() - _t0, agent_type=agent_type)
+        if reused is None:
+            _t0 = time.perf_counter()
+            _wait_for_bridge_ready(
+                session, bridge_exec_id, endpoint_url, endpoint_headers, agent_type
+            )
+            perf_log(task.id, "acp_wait_bridge_ready", time.perf_counter() - _t0, agent_type=agent_type)
 
         # ---- ACP 通信 ----
         recorder = _ACPRecorder(task.id, round_idx)
@@ -1880,44 +1981,61 @@ def run_acp_agent(
         client = ACPClient(endpoint_url, endpoint_headers, recorder=recorder,
                            permission_handler=_permission_handler)
         try:
-            # 握手
-            _t0 = time.perf_counter()
-            init_result = client.initialize()
-            perf_log(task.id, "acp_initialize", time.perf_counter() - _t0, agent_type=agent_type)
-
-            # 跳过 authenticate,直接 session/new
-            # 凭证经环境变量注入后内部已自动认证,session/new 可直接成功。
-            # (authenticate 在沙箱无 TTY 环境下会静默挂起)
-            auth_methods = init_result.get("authMethods", []) or []
-            if auth_methods:
-                logger.info(
-                    f"[{agent_type}] 跳过 authenticate(凭证经环境变量自动认证),"
-                    f"authMethods={[m.get('id') for m in auth_methods]}"
-                )
-
-            # 创建会话(cwd 设为仓库路径)
-            cwd = repo_path or BRIDGE_WORK_DIR
-            _t0 = time.perf_counter()
-            try:
-                acp_session_id = client.new_session(cwd=cwd)
-            except RuntimeError as e:
-                # session/new 失败时提取 bridge 日志中的 CLI stderr(含 Python traceback),
-                # -32603 Internal error 时 JSON-RPC 响应只有泛化消息,
-                # 真实异常在 CLI 的 stderr 里(经 bridge _pump_stderr 转发)
-                bridge_detail = _extract_bridge_error(
-                    session, bridge_exec_id, agent_type
-                )
-                if bridge_detail:
-                    raise RuntimeError(f"{e}\n\n[CLI 日志]\n{bridge_detail}") from e
-                raise
-            perf_log(task.id, "acp_new_session", time.perf_counter() - _t0, agent_type=agent_type)
-
-            # ---- wrapper 层钩子:session/new 后的自定义设置 ----
-            # kimi 在此调 set_config_option(mode=yolo) 等
-            if post_session_setup:
+            if reused is not None:
+                # 复用路径:bridge/CLI 已完成 initialize,session 存于 CLI 进程内,
+                # 直接用缓存的 session_id 发 prompt(对话上下文随 session 延续)
+                acp_session_id = reused["acp_session_id"]
+            else:
+                # 握手
                 _t0 = time.perf_counter()
-                post_session_setup(client, acp_session_id, task)
-                perf_log(task.id, "acp_post_session_setup", time.perf_counter() - _t0, agent_type=agent_type)
+                init_result = client.initialize()
+                perf_log(task.id, "acp_initialize", time.perf_counter() - _t0, agent_type=agent_type)
+
+                # 跳过 authenticate,直接 session/new
+                # 凭证经环境变量注入后内部已自动认证,session/new 可直接成功。
+                # (authenticate 在沙箱无 TTY 环境下会静默挂起)
+                auth_methods = init_result.get("authMethods", []) or []
+                if auth_methods:
+                    logger.info(
+                        f"[{agent_type}] 跳过 authenticate(凭证经环境变量自动认证),"
+                        f"authMethods={[m.get('id') for m in auth_methods]}"
+                    )
+
+                # 创建会话(cwd 设为仓库路径)
+                cwd = repo_path or BRIDGE_WORK_DIR
+                _t0 = time.perf_counter()
+                try:
+                    acp_session_id = client.new_session(cwd=cwd)
+                except RuntimeError as e:
+                    # session/new 失败时提取 bridge 日志中的 CLI stderr(含 Python traceback),
+                    # -32603 Internal error 时 JSON-RPC 响应只有泛化消息,
+                    # 真实异常在 CLI 的 stderr 里(经 bridge _pump_stderr 转发)
+                    bridge_detail = _extract_bridge_error(
+                        session, bridge_exec_id, agent_type
+                    )
+                    if bridge_detail:
+                        raise RuntimeError(f"{e}\n\n[CLI 日志]\n{bridge_detail}") from e
+                    raise
+                perf_log(task.id, "acp_new_session", time.perf_counter() - _t0, agent_type=agent_type)
+
+                # ---- wrapper 层钩子:session/new 后的自定义设置 ----
+                # kimi 在此调 set_config_option(mode=yolo) 等
+                if post_session_setup:
+                    _t0 = time.perf_counter()
+                    post_session_setup(client, acp_session_id, task)
+                    perf_log(task.id, "acp_post_session_setup", time.perf_counter() - _t0, agent_type=agent_type)
+
+                # ---- 写入复用缓存(bridge 不再每轮停止,供后续轮次/resume 复用) ----
+                with _bridge_cache_lock:
+                    _bridge_cache[task_id_str] = {
+                        "session": session,
+                        "agent_type": agent_type,
+                        "bridge_exec_id": bridge_exec_id,
+                        "endpoint_url": endpoint_url,
+                        "endpoint_headers": endpoint_headers,
+                        "acp_session_id": acp_session_id,
+                        "fingerprint": fingerprint,
+                    }
 
             # ---- 构造 prompt 消息 ----
             # 落库只存纯指令(前端展示不含记忆注入段);实际发送拼上记忆段
@@ -2030,6 +2148,11 @@ def run_acp_agent(
 
             except Exception as e:
                 logger.exception(f"[task={task.id}] ACP prompt 失败 ({agent_type})")
+                # 连接层失败(bridge/CLI 已死)时清缓存,下次走全新链路;
+                # ACP 业务错误保留缓存(session 仍有效)。
+                if isinstance(e, (httpx.HTTPError, ConnectionError)):
+                    with _bridge_cache_lock:
+                        _bridge_cache.pop(task_id_str, None)
                 publish(task.id, "thinking_delta", {
                     "conv_id": collector.current_conv_id,
                     "round_idx": round_idx,
@@ -2047,7 +2170,12 @@ def run_acp_agent(
             client.close()
 
     finally:
-        _stop_acp_bridge(session, bridge_exec_id, agent_type)
+        # bridge 保持运行(写入/已在 _bridge_cache),供后续轮次/resume 复用;
+        # 仅在初始化阶段失败且未入缓存时停掉,避免残留坏进程。
+        with _bridge_cache_lock:
+            _cached = _bridge_cache.get(task_id_str) is not None
+        if not _cached:
+            _stop_acp_bridge(session, bridge_exec_id, agent_type)
 
     # ---- 提取 summary 和 plan ----
     summary = collector.content_full or ""

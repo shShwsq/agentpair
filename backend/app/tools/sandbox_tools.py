@@ -108,6 +108,13 @@ def close_session(task_id: str) -> None:
     ctx = _sessions.pop(task_id)
     session: SandboxSession = ctx["session"]
     try:
+        # 延迟导入避免循环依赖(acp_base 依赖 sandbox_tools)
+        # 停掉驻留沙箱的 ACP bridge(若存在)并清其复用缓存
+        from app.agents.acp_base import stop_task_bridge
+        stop_task_bridge(task_id)
+    except Exception as e:
+        logger.warning(f"[task={task_id}] 停止 ACP bridge 失败(忽略): {e}")
+    try:
         # local 模式下 session.close() 会清理统一临时目录(含 clone/workspace/memory)
         session.close()
     except Exception as e:
