@@ -58,6 +58,7 @@
       "thinkingTemperature": 1.0,
       "nonThinkingTemperature": 0.6,
       "models": [
+        { "id": "kimi-k2.7-code", "thinking": "only", "thinkingDefault": true },
         { "id": "kimi-k2.6", "thinking": "hybrid", "thinkingDefault": true },
         { "id": "kimi-k2.5", "thinking": "hybrid", "thinkingDefault": true }
       ]

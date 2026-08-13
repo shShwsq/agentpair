@@ -367,7 +367,9 @@ class LLMClient:
 
         返回 { success, message, latency_ms, reply }
         用流式接口调用,收集完整 content 后返回,供前端展示模型实际回复。
-        测试时强制关闭深度思考,避免思考链耗时过长(thinking_mode=only 的模型无法关闭)。
+        测试时优先关闭深度思考,避免思考链耗时过长(thinking_mode=only 的模型无法关闭)。
+        若关闭思考被厂商拒绝(如 kimi-k2.7-code 仅允许 thinking:enabled),
+        则按用户原始配置重试一次。
 
         思考内容处理:
         - reasoning_content / <think> 标签的思考内容在流式过程已通过思考流展示给前端
@@ -378,58 +380,69 @@ class LLMClient:
         import time
 
         start = time.perf_counter()
-        # 临时关闭深度思考,测试完恢复
         original_thinking = self.enable_thinking
-        self.enable_thinking = False
+        # 先用关闭思考的快路径;厂商拒绝(400 等 API 异常)且原始配置开着思考时,用原始配置重试
+        attempts = [False] + ([original_thinking] if original_thinking else [])
+        last_exc: Exception | None = None
         try:
-            messages = [{"role": "user", "content": prompt}]
-            # 收集完整 content,max_tokens 限制在合理范围(一句口号)
-            collected: list[str] = []
-            reasoning_collected: list[str] = []
-            for chunk in self.chat_stream(messages, max_tokens=128):
-                if chunk.content_delta:
-                    collected.append(chunk.content_delta)
-                if chunk.reasoning_delta:
-                    reasoning_collected.append(chunk.reasoning_delta)
-                if chunk.finish_reason in ("stop", "tool_calls", "length"):
-                    break
-            latency_ms = int((time.perf_counter() - start) * 1000)
-            reply = "".join(collected).strip()
-            reasoning = "".join(reasoning_collected).strip()
-            if reply:
-                # 有正式回复:正常成功
-                return {
-                    "success": True,
-                    "message": "LLM 测试成功",
-                    "latency_ms": latency_ms,
-                    "reply": reply,
-                }
-            if reasoning:
-                # 无正式回复但有思考:模型确实响应了(思考已在流式过程展示),
-                # 判为成功,但 reply 为空,不把思考混入回复。
-                return {
-                    "success": True,
-                    "message": "LLM 测试成功(模型仅返回思考内容,未给出正式回复)",
-                    "latency_ms": latency_ms,
-                    "reply": None,
-                }
-            # 既无回复也无思考:真正未响应
-            return {
-                "success": False,
-                "message": "LLM 测试失败:模型未响应(请检查配额或网络)",
-                "latency_ms": latency_ms,
-                "reply": None,
-            }
-        except Exception as e:
+            for thinking_flag in attempts:
+                self.enable_thinking = thinking_flag
+                try:
+                    return self._test_once(prompt, start)
+                except Exception as e:  # API 层异常(400/401/超时等),尝试下一组配置
+                    last_exc = e
             latency_ms = int((time.perf_counter() - start) * 1000)
             return {
                 "success": False,
-                "message": f"LLM 测试失败: {e}",
+                "message": f"LLM 测试失败: {last_exc}",
                 "latency_ms": latency_ms,
                 "reply": None,
             }
         finally:
             self.enable_thinking = original_thinking
+
+    def _test_once(self, prompt: str, start: float) -> dict[str, Any]:
+        """执行一次测试调用;API 异常向上抛由 test() 决定是否换配置重试"""
+        import time
+
+        messages = [{"role": "user", "content": prompt}]
+        # 收集完整 content,max_tokens 限制在合理范围(一句口号)
+        collected: list[str] = []
+        reasoning_collected: list[str] = []
+        for chunk in self.chat_stream(messages, max_tokens=128):
+            if chunk.content_delta:
+                collected.append(chunk.content_delta)
+            if chunk.reasoning_delta:
+                reasoning_collected.append(chunk.reasoning_delta)
+            if chunk.finish_reason in ("stop", "tool_calls", "length"):
+                break
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        reply = "".join(collected).strip()
+        reasoning = "".join(reasoning_collected).strip()
+        if reply:
+            # 有正式回复:正常成功
+            return {
+                "success": True,
+                "message": "LLM 测试成功",
+                "latency_ms": latency_ms,
+                "reply": reply,
+            }
+        if reasoning:
+            # 无正式回复但有思考:模型确实响应了(思考已在流式过程展示),
+            # 判为成功,但 reply 为空,不把思考混入回复。
+            return {
+                "success": True,
+                "message": "LLM 测试成功(模型仅返回思考内容,未给出正式回复)",
+                "latency_ms": latency_ms,
+                "reply": None,
+            }
+        # 既无回复也无思考:真正未响应(不属于可重试的 API 异常,直接失败)
+        return {
+            "success": False,
+            "message": "LLM 测试失败:模型未响应(请检查配额或网络)",
+            "latency_ms": latency_ms,
+            "reply": None,
+        }
 
 
 # ============================================================

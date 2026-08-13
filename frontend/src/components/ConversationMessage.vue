@@ -73,6 +73,15 @@ const isActive = computed(
 /** 正式对话项 reasoning 的折叠状态:默认折叠,点击展开 */
 const evalExpanded = ref(false)
 
+/**
+ * user_agent 的结构化评估块(已覆盖/未覆盖/判断/追问)属内部编排记录,
+ * 不作为"思考"卡片展示给用户;user_agent 真实思考链以 type=thinking
+ * 单独落库并还原为流式卡片。
+ */
+const isUaEvaluation = computed(
+  () => props.item.role === 'user_agent' && props.item.type === 'evaluation',
+)
+
 /** 流式项 reasoning 的展开状态(由父组件通过 streamingItems 管理) */
 const streamingExpanded = computed(() => props.item.streaming?.reasoning_expanded ?? false)
 
@@ -226,8 +235,8 @@ const detailLabel = computed(() =>
 
     <!-- 正式对话项:reasoning 卡片(可折叠) + content 卡片,两者独立 -->
     <template v-else>
-      <!-- reasoning 独立卡片(可折叠) -->
-      <div v-if="item.reasoning" class="msg-reasoning-card">
+      <!-- reasoning 独立卡片(可折叠);user_agent 结构化评估块不展示 -->
+      <div v-if="item.reasoning && !isUaEvaluation" class="msg-reasoning-card">
         <div
           class="msg-reasoning-header"
           @click="evalExpanded = !evalExpanded"

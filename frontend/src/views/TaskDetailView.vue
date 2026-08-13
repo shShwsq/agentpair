@@ -16,8 +16,8 @@
  * 流式思考显示(thinking_delta):
  * - 一次 LLM 调用对应一个 conv_id,前端按 conv_id 累积 reasoning + content
  * - 流式期间以"流式思考卡片"显示打字机效果
- * - 流式结束后(phase='end')延迟 800ms 移除卡片,由后续 conversation 事件接管
- *   (reasoning 不入正式对话表,只在流式卡片临时显示)
+ * - 思考链同时以 type=thinking 落库(react_agent / user_agent),
+ *   刷新页面后从 GET /tasks/{id} 还原为只读流式卡片
  */
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -811,7 +811,8 @@ function handleThinkingDelta(data: ThinkingDeltaEventData): void {
     cur.reasoning += `\n[错误] ${delta}`
   } else if (phase === 'end') {
     // 流式结束:标记完成,reasoning 自动折叠(只显示标题和字数提示)
-    // 不移除卡片!reasoning 不入正式 conversation 表,移除后用户再也看不到了
+    // 不移除卡片:它是本次会话内唯一的实时展示载体;
+    // 刷新页面后由落库的 type=thinking 记录还原为只读卡片
     cur.status = 'done'
     cur.finished_at = new Date().toISOString()
     cur.reasoning_expanded = false

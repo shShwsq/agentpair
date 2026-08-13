@@ -156,7 +156,7 @@ class Conversation(Base):
     #   question(用户提问)
     #   evaluation(user_agent 评估)
     #   followup(user_agent 追问)
-    #   thinking(react_agent 思考)
+    #   thinking(react_agent / user_agent 思考)
     #   tool_call / tool_result
     #   submit(react_agent 提交结果)
     #   summary(user_agent 最终总结)

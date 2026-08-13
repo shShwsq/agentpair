@@ -387,10 +387,13 @@ def run_user_agent(
     # LLM 调用循环:处理 verify 工具调用(验证结果回灌后再调 LLM 输出 JSON 评估)
     content = ""
     verify_count = 0
+    reasoning_parts: list[str] = []  # 各次流式调用的真实思考链(含 verify 循环)
     while True:
-        content, tool_calls = _stream_user_agent_llm(
+        content, tool_calls, reasoning_chunk = _stream_user_agent_llm(
             client, messages, task_id=task_id, round_idx=round_idx, tools=tools
         )
+        if reasoning_chunk:
+            reasoning_parts.append(reasoning_chunk)
 
         # 无工具调用 → content 是 JSON 评估结果,跳出循环
         if not tool_calls:
@@ -542,6 +545,24 @@ def run_user_agent(
             else:
                 result["questions"] = normalized
 
+    # 落库真实思考链(供前端刷新后还原思考卡片,与 react_agent thinking 同机制)。
+    # 不推 SSE:流式期间已通过 thinking_delta 在流式卡片展示,推送会重复。
+    # 结构化评估记录仍由 orchestrator._record_user_agent 落库(跨轮记忆依赖)。
+    reasoning_full = "\n\n".join(p for p in reasoning_parts if p.strip())
+    if db is not None and task is not None and reasoning_full:
+        try:
+            db.add(Conversation(
+                task_id=task.id,
+                round_idx=round_idx,
+                role="user_agent",
+                type="thinking",
+                content="",
+                reasoning=reasoning_full,
+            ))
+            db.commit()
+        except Exception as e:
+            logger.warning(f"[task={task_id}] 落库 user_agent 思考链失败(忽略): {e}")
+
     return result
 
 
@@ -557,15 +578,16 @@ def _stream_user_agent_llm(
     task_id: UUID | str,
     round_idx: int = 0,
     tools: list[dict[str, Any]] | None = None,
-) -> tuple[str, list[dict[str, Any]]]:
+) -> tuple[str, list[dict[str, Any]], str]:
     """流式调用 user_agent 的 LLM,实时推送 thinking_delta 事件
 
     支持 verify 工具调用:tools 非空时传入 LLM,返回的 tool_calls 供调用方处理。
     无 tools 时行为与原来一致(只产出 reasoning + content)。
 
-    返回 (content_full, tool_calls_full)
+    返回 (content_full, tool_calls_full, reasoning_full)
         - content_full: 完整回答内容(JSON 格式的结构化评估结果)
         - tool_calls_full: 工具调用列表 [{"id", "name", "arguments_str", "index"}]
+        - reasoning_full: 完整思考链(调用方落库,供前端刷新后还原思考卡片)
     """
     conv_id = str(uuid.uuid4())
     reasoning_full = ""
@@ -644,7 +666,7 @@ def _stream_user_agent_llm(
     })
 
     tool_calls_full = [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
-    return content_full, tool_calls_full
+    return content_full, tool_calls_full, reasoning_full
 
 
 # ============================================================
