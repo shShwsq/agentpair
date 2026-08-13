@@ -65,8 +65,28 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
     """执行双智能体协作审计"""
     task_id_str = str(task.id)
 
+    # 先解析 agent 策略(检查点评估频率、打断权限等):
+    # 启动阶段文案必须在推送前由 user_agent 启停决定,
+    # 否则单 agent 模式会先闪现"双智能体协作启动"误导前端
+    # 合并用户级默认(UserPreference.agent_policy)+ 任务级覆盖(task.params["_agent_policy"])
+    agent_policy = resolve_agent_policy(task, db)
+    logger.info(
+        f"[task={task.id}] agent_policy: K={agent_policy.get('checkpoint_interval')}, "
+        f"allow_interrupt={agent_policy.get('allow_interrupt')}, "
+        f"max_interrupts={agent_policy.get('max_interrupts_per_round')}"
+    )
+
+    # user_agent 启停 + 协作总轮次(替代 user_agent.py 硬编码 MAX_ROUNDS)
+    ua_enabled = bool(agent_policy.get("user_agent_enabled", True))
+    max_rounds = int(agent_policy.get("max_rounds", MAX_ROUNDS))
+    logger.info(
+        f"[task={task.id}] user_agent_enabled={ua_enabled}, max_rounds={max_rounds}"
+    )
+
     task.status = TaskStatus.RUNNING
-    task.current_stage = "双智能体协作启动"
+    task.current_stage = (
+        "双智能体协作启动" if ua_enabled else "单 agent 模式启动(user_agent 已禁用)"
+    )
     db.commit()
     _publish_status(task)
 
@@ -97,21 +117,8 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
     # (builtin → 内置 react_agent;registry 中的 agent_type → 外部 CLI via ACP)
     executor = get_executor(task)
 
-    # 加载 agent 策略(检查点评估频率、打断权限等)
-    # 合并用户级默认(UserPreference.agent_policy)+ 任务级覆盖(task.params["_agent_policy"])
-    agent_policy = resolve_agent_policy(task, db)
-    logger.info(
-        f"[task={task.id}] agent_policy: K={agent_policy.get('checkpoint_interval')}, "
-        f"allow_interrupt={agent_policy.get('allow_interrupt')}, "
-        f"max_interrupts={agent_policy.get('max_interrupts_per_round')}"
-    )
-
-    # user_agent 启停 + 协作总轮次(替代 user_agent.py 硬编码 MAX_ROUNDS)
-    ua_enabled = bool(agent_policy.get("user_agent_enabled", True))
-    max_rounds = int(agent_policy.get("max_rounds", MAX_ROUNDS))
-    logger.info(
-        f"[task={task.id}] user_agent_enabled={ua_enabled}, max_rounds={max_rounds}"
-    )
+    # agent_policy / ua_enabled / max_rounds 已在函数开头解析
+    # (启动阶段文案需在推送前由 ua_enabled 决定)
 
     # 用户原始意图
     user_intent = task.user_input
