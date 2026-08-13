@@ -1885,13 +1885,16 @@ const checkpointList = computed<CheckpointEntry[]>(() => {
   return list
 })
 
-/** 点击右侧栏检查点条目:滚动到对话流对应轮次并短暂高亮 */
-function locateCheckpoint(roundIdx: number): void {
-  const el = document.getElementById(`round-anchor-${roundIdx}`)
+/** 点击右侧栏检查点条目:滚动到对话流中该检查点位置,横线浮现闪烁后淡出 */
+function locateCheckpoint(id: string): void {
+  const el = document.getElementById(`checkpoint-anchor-${id}`)
   if (!el) return
-  el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  el.classList.add('round-flash')
-  window.setTimeout(() => el.classList.remove('round-flash'), 1600)
+  // 重复点击同一检查点时重启浮现动画
+  el.classList.remove('checkpoint-divider-active')
+  void el.offsetWidth
+  el.classList.add('checkpoint-divider-active')
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  window.setTimeout(() => el.classList.remove('checkpoint-divider-active'), 1600)
 }
 
 // ---- 右侧栏结果清单展开状态(默认折叠,点击卡片展开正文) ----
@@ -1988,12 +1991,7 @@ function toggleResult(id: string): void {
             />
           </div>
 
-          <div
-            v-for="group in roundGroups"
-            :id="`round-anchor-${group.roundIdx}`"
-            :key="group.roundIdx"
-            class="round-group"
-          >
+          <div v-for="group in roundGroups" :key="group.roundIdx" class="round-group">
             <div class="round-label">{{ group.label }}</div>
             <!-- 计划清单(复杂任务时 react_agent 输出,展示接下来要做的步骤 + 进度) -->
             <div v-if="group.planSteps.length > 0" class="plan-card">
@@ -2019,8 +2017,7 @@ function toggleResult(id: string): void {
                 v-for="seg in group.segments"
                 :key="seg.kind === 'step' ? `step-${seg.id}` : `plain-${seg.item.id}`"
               >
-                <!-- 平铺段:user_agent 评估/追问/总结、user 指令等关键消息
-                     (检查点评估不在此渲染,已聚合到右侧栏 checkpointList) -->
+                <!-- 平铺段:user_agent 评估/追问/总结、user 指令等关键消息 -->
                 <!-- 用户补充消息(type=message)右对齐,与顶部 userDirective 视觉一致 -->
                 <div
                   v-if="seg.kind === 'plain' && !isCheckpointItem(seg.item)"
@@ -2031,6 +2028,20 @@ function toggleResult(id: string): void {
                     @toggle-reasoning="toggleReasoning"
                   />
                 </div>
+
+                <!-- 检查点位置标记:平时隐藏;点击右侧栏条目时浮现横线叠加在内容分界线上(不撑开行距),
+                     打断评估为橙色、继续为主题色,闪烁后淡出 -->
+                <div
+                  v-else-if="seg.kind === 'plain' && isCheckpointItem(seg.item)"
+                  :id="`checkpoint-anchor-${seg.item.id}`"
+                  :class="[
+                    'checkpoint-divider',
+                    {
+                      'checkpoint-divider-interrupt':
+                        parseCheckpointContent(seg.item.content || '').isInterrupt,
+                    },
+                  ]"
+                />
 
                 <!-- step 分组:plan step 下含多个迭代(无 plan 时为单个"执行过程"组) -->
                 <div
@@ -2328,8 +2339,8 @@ function toggleResult(id: string): void {
               v-for="cp in checkpointList"
               :key="cp.id"
               :class="['checkpoint-item', { 'checkpoint-item-interrupt': cp.isInterrupt }]"
-              title="点击定位对话流对应轮次"
-              @click="locateCheckpoint(cp.roundIdx)"
+              title="点击定位对话流中的检查点位置"
+              @click="locateCheckpoint(cp.id)"
             >
               <div class="checkpoint-item-head">
                 <span class="checkpoint-item-pos">
@@ -3138,15 +3149,40 @@ function toggleResult(id: string): void {
   margin-bottom: 0;
 }
 
-/* 右侧栏检查点点击定位:对应轮次短暂高亮闪烁 */
-.round-flash {
-  border-radius: var(--radius-md);
-  animation: round-flash 1.6s ease-out;
+/* 检查点位置标记(对话流):平时隐藏;浮现时元素本身高度为 0 不撑开行距,
+   横线由伪元素绝对定位叠加在内容分界线上,继续评估用主题色、打断评估用橙色 */
+.checkpoint-divider {
+  display: none;
 }
 
-@keyframes round-flash {
-  0% { background: var(--color-primary-light); }
-  100% { background: transparent; }
+.checkpoint-divider-active {
+  display: block;
+  height: 0;
+  position: relative;
+  /* .messages 为带 gap 的纵向 flex,零高项作为子项前后仍各吃一份 gap,
+     用负 margin 精确抵消,保证浮现时布局零变化 */
+  margin: calc(var(--space-3) / -2) 0;
+}
+
+.checkpoint-divider-active::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -2px;
+  height: 3px;
+  border-radius: var(--radius-full);
+  background: var(--color-primary);
+  animation: checkpoint-flash 1.6s ease-out forwards;
+}
+
+.checkpoint-divider-interrupt.checkpoint-divider-active::after {
+  background: #ea580c;
+}
+
+@keyframes checkpoint-flash {
+  0%, 60% { opacity: 1; }
+  100% { opacity: 0; }
 }
 
 .round-label {
