@@ -52,7 +52,7 @@ import { subscribeTaskStream } from '@/api/stream'
 import { listArtifacts } from '@/api/taskArtifacts'
 import { extractErrorMessage } from '@/utils/error'
 import { renderMarkdown } from '@/utils/markdown'
-import { buildToolSegments, buildToolSummary, parseAgentTrace } from '@/utils/toolSummary'
+import { buildToolSegments, buildToolSummary, parseAgentTrace, toolFileTargetOf } from '@/utils/toolSummary'
 import type {
   AgentCheckpointEventData,
   AnswerItem,
@@ -1435,6 +1435,13 @@ interface ToolRenderRow {
   callId: string
   /** compact:单行摘要;agent/toolpair:卡片标题 */
   summary: string
+  /** compact:可跳转的文件路径(工作区相对路径,无则空串) */
+  filePath: string
+  /** compact:摘要中展示的文件路径文本 */
+  fileDisplay: string
+  /** compact:摘要拆分前后缀(filePath 非空时,摘要 = prefix + fileDisplay + suffix) */
+  summaryPrefix: string
+  summarySuffix: string
   /** 是否已有结果(执行中为 false) */
   hasResult: boolean
   /** 结果文本(compact 轻量展开 / toolpair 结果块) */
@@ -1471,6 +1478,10 @@ function toolRowsOf(iter: IterationSegment): ToolRenderRow[] {
     callDetail: '',
     agentThink: '',
     agentBodyHtml: '',
+    filePath: '',
+    fileDisplay: '',
+    summaryPrefix: '',
+    summarySuffix: '',
     items: [] as DisplayItem[],
   }
   return buildToolSegments(iter.toolItems).map((seg, idx) => {
@@ -1488,6 +1499,8 @@ function toolRowsOf(iter: IterationSegment): ToolRenderRow[] {
     const callId = seg.call.id
     const parts = callPartsOf(seg.call)
     if (seg.kind === 'compact') {
+      // 读文件工具提取跳转目标:摘要中路径文本包成链接,点击在工作区文件树打开
+      const target = toolFileTargetOf(seg.call, seg.result)
       return {
         key: callId,
         kind: 'compact' as const,
@@ -1496,6 +1509,10 @@ function toolRowsOf(iter: IterationSegment): ToolRenderRow[] {
         hasResult: !!seg.result,
         ...empty,
         resultContent: seg.result?.content || '',
+        filePath: target?.path || '',
+        fileDisplay: target?.display || '',
+        summaryPrefix: target?.prefix || '',
+        summarySuffix: target?.suffix || '',
       }
     }
     if (seg.kind === 'agent') {
@@ -1764,6 +1781,14 @@ async function onResultFileClick(r: TaskResult): Promise<void> {
   workspaceCollapsed.value = false
   await nextTick()
   await sidebarRef.value?.openTaskFile(String(task.value.id), path, startLine)
+}
+
+/** 点击工具行摘要中的文件路径:展开工作区侧栏并在文件树中打开该文件 */
+async function onToolFileClick(path: string): Promise<void> {
+  if (!path || !task.value?.id) return
+  workspaceCollapsed.value = false
+  await nextTick()
+  await sidebarRef.value?.openTaskFile(String(task.value.id), path)
 }
 
 // ---- 侧栏事件:任务被删除 / 标题被修改 ----
@@ -2147,7 +2172,16 @@ function toggleResult(id: string): void {
                               <span class="tool-group-toggle">
                                 {{ row.hasResult ? (isRowExpanded(row.callId) ? '▼' : '▶') : '' }}
                               </span>
-                              <span class="tool-compact-summary">{{ row.summary }}</span>
+                              <span class="tool-compact-summary">
+                                <template v-if="row.filePath">
+                                  {{ row.summaryPrefix }}<a
+                                    class="tool-file-link"
+                                    title="在文件树中打开"
+                                    @click.stop="onToolFileClick(row.filePath)"
+                                  >{{ row.fileDisplay }}</a>{{ row.summarySuffix }}
+                                </template>
+                                <template v-else>{{ row.summary }}</template>
+                              </span>
                             </div>
                             <div
                               v-if="row.hasResult && isRowExpanded(row.callId)"
@@ -3621,6 +3655,18 @@ function toggleResult(id: string): void {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 工具行摘要内的文件路径链接:点击跳转左侧文件树打开 */
+.tool-file-link {
+  color: var(--color-primary);
+  text-decoration: underline;
+  text-decoration-style: dashed;
+  cursor: pointer;
+}
+
+.tool-file-link:hover {
+  color: var(--color-primary-hover);
 }
 
 .tool-compact-result {

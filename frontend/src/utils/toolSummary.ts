@@ -376,6 +376,65 @@ export function buildToolSummary(call: ToolItem, result: ToolItem | null): strin
   }
 }
 
+/** 紧凑工具中「阅读文件」的跳转目标:工作区相对路径 + 摘要拆分(路径文本前后缀) */
+export interface ToolFileTarget {
+  /** 工作区相对路径(用于跳转 openTaskFile) */
+  path: string
+  /** 摘要中展示的路径文本 */
+  display: string
+  /** 摘要 = prefix + display + suffix(模板把 display 包成可点击链接) */
+  prefix: string
+  suffix: string
+}
+
+/**
+ * 从紧凑工具对提取「阅读文件」跳转目标;非读文件工具/多文件返回 null。
+ * - read_file:从结果 JSON 取 path;执行中(无结果)时从 intent「读取文件 <路径>」解析
+ * - CLI Read:从调用参数 JSON 取 file_path
+ * - Bash/run_command:仅支持 cat/head 等读文件命令的单文件形式
+ */
+export function toolFileTargetOf(
+  call: ToolItem,
+  result: ToolItem | null,
+): ToolFileTarget | null {
+  const name = toolNameOf(call)
+  let rawPath = ''
+  if (name === 'read_file') {
+    const data = result?.content ? tryParseJson(result.content) : null
+    rawPath = (data?.path as string) || ''
+    if (!rawPath) {
+      const m = intentOf(call).match(/^读取文件\s+(\S+)/)
+      rawPath = m ? m[1] : ''
+    }
+  } else if (name === 'Read') {
+    const data = detailJsonOf(call)
+    rawPath = typeof data?.file_path === 'string' ? data.file_path : ''
+  } else if (name === 'Bash' || name === 'run_command') {
+    const chains = parseReadonlyChains(commandOf(call))
+    if (chains?.length === 1) {
+      const head = chains[0][0]
+      if (head && READ_FILE_CMDS.has(head.cmd)) {
+        const files = filesOf(head.args)
+        if (files.length === 1) rawPath = files[0]
+      }
+    }
+  }
+  if (!rawPath || rawPath === '?') return null
+
+  // read_file 结果路径已是仓库相对路径(摘要原样展示);
+  // CLI/Bash 可能带沙箱绝对路径前缀,展示与跳转都剥掉 /repos/<仓库>/
+  const display = name === 'read_file' ? rawPath : shortenPath(rawPath)
+  const summary = buildToolSummary(call, result)
+  const idx = summary.indexOf(display)
+  if (idx < 0) return null // 摘要中未出现路径文本,兜底不生成跳转
+  return {
+    path: shortenPath(rawPath),
+    display,
+    prefix: summary.slice(0, idx),
+    suffix: summary.slice(idx + display.length),
+  }
+}
+
 /**
  * 把迭代内的 tool_call/tool_result 列表转成渲染段序列:
  * 每个 tool_call 与其紧邻的 result 配对(react_agent 执行循环中 result 紧跟 call 落库),

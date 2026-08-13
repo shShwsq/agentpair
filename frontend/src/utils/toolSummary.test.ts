@@ -17,6 +17,7 @@ import {
   shortenPath,
   summarizeCliToolCall,
   summarizeCommand,
+  toolFileTargetOf,
   toolNameOf,
   type ToolItem,
 } from './toolSummary'
@@ -439,5 +440,56 @@ describe('Bash/run_command 紧凑化集成', () => {
   it('run_command 只读命令也紧凑化', () => {
     const c = call('1', '执行命令: cat app.py [run_command]\n{"command": "cat app.py"}')
     expect(buildToolSummary(c, result('r', 'content'))).toBe('📖 阅读了 app.py')
+  })
+})
+
+describe('toolFileTargetOf', () => {
+  it('read_file:从结果 JSON 提取路径并拆分摘要', () => {
+    const c = call('1', '读取文件 src/main.py [read_file]')
+    const r = result('2', JSON.stringify({
+      path: 'src/main.py', content: '...', total_lines: 356, truncated: false,
+    }))
+    const t = toolFileTargetOf(c, r)
+    expect(t).not.toBeNull()
+    expect(t!.path).toBe('src/main.py')
+    expect(t!.display).toBe('src/main.py')
+    expect(t!.prefix).toBe('📖 阅读了 ')
+    expect(t!.suffix).toBe(' · 356 行')
+  })
+
+  it('read_file 执行中:从 intent 解析路径', () => {
+    const c = call('1', '读取文件 src/app.py [read_file]\n{"file_path": "src/app.py"}')
+    const t = toolFileTargetOf(c, null)
+    expect(t?.path).toBe('src/app.py')
+    expect(t!.prefix + t!.display + t!.suffix).toBe(buildToolSummary(c, null))
+  })
+
+  it('CLI Read:剥掉 /repos/<仓库>/ 前缀', () => {
+    const c = call('1', '读取文件 /home/user/repos/proj/src/util.py [Read]\n{"file_path": "/home/user/repos/proj/src/util.py"}')
+    const t = toolFileTargetOf(c, result('2', 'content'))
+    expect(t?.path).toBe('src/util.py')
+    expect(t!.display).toBe('src/util.py')
+  })
+
+  it('Bash cat 单文件:提取跳转目标', () => {
+    const c = call('b1', '执行: cat src/main.py [Bash]\ncat src/main.py')
+    const t = toolFileTargetOf(c, result('r', 'content'))
+    expect(t?.path).toBe('src/main.py')
+  })
+
+  it('非读文件工具返回 null', () => {
+    const c = call('1', '搜索代码: TODO [search_code]')
+    const r = result('2', JSON.stringify({ total_matches: 3, matches: [] }))
+    expect(toolFileTargetOf(c, r)).toBeNull()
+  })
+
+  it('Bash 多文件 cat 返回 null', () => {
+    const c = call('b1', '执行: cat a.py b.py [Bash]\ncat a.py b.py')
+    expect(toolFileTargetOf(c, result('r', 'x'))).toBeNull()
+  })
+
+  it('Bash 非只读命令返回 null', () => {
+    const c = call('b1', '执行: rm a.py [Bash]\nrm a.py')
+    expect(toolFileTargetOf(c, result('r', 'x'))).toBeNull()
   })
 })
