@@ -41,7 +41,7 @@ const MAX_ROUNDS_LIMIT = ref(10)
 const DEFAULT_POLICY = {
   user_agent_enabled: true,
   max_rounds: 4,
-  checkpoint_interval: 3,
+  checkpoint_interval: 10,
   checkpoint_interval_builtin: null as number | null,
   checkpoint_interval_cli: null as number | null,
   allow_interrupt: true,

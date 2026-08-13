@@ -1,9 +1,10 @@
-"""agent_checkpoint 单元测试:配置解析 + JSON 解析(不调 LLM,不连真实 DB)。
+"""agent_checkpoint 单元测试:配置解析 + JSON 解析 + 历史注入(不调 LLM,不连真实 DB)。
 
 覆盖:
 - resolve_agent_policy:用户级默认 + 任务级覆盖合并优先级
 - get_effective_interval:内置/CLI 各自 K 值解析
-- _parse_checkpoint_json:LLM 输出容错解析(带/不带 ```json 包裹)
+- _parse_checkpoint_json:LLM 输出容错解析(带/不带 ```json 包裹、summary 字段)
+- _extract_checkpoint_record / _build_history_section:历史评估记录提取与格式化
 - DEFAULT_AGENT_POLICY 常量字段完整性
 """
 import uuid
@@ -13,6 +14,9 @@ import pytest
 
 from app.agent_checkpoint import (
     DEFAULT_AGENT_POLICY,
+    MAX_HISTORY_RECORDS,
+    _build_history_section,
+    _extract_checkpoint_record,
     _parse_checkpoint_json,
     get_effective_interval,
     resolve_agent_policy,
@@ -76,7 +80,7 @@ def test_default_policy_has_all_required_fields():
     # 关键默认值(与设计文档 / 前端 DEFAULT_POLICY 对齐)
     assert DEFAULT_AGENT_POLICY["user_agent_enabled"] is True
     assert DEFAULT_AGENT_POLICY["max_rounds"] == 4
-    assert DEFAULT_AGENT_POLICY["checkpoint_interval"] == 3
+    assert DEFAULT_AGENT_POLICY["checkpoint_interval"] == 10
     assert DEFAULT_AGENT_POLICY["checkpoint_interval_builtin"] is None
     assert DEFAULT_AGENT_POLICY["checkpoint_interval_cli"] is None
     assert DEFAULT_AGENT_POLICY["allow_interrupt"] is True
@@ -96,7 +100,7 @@ def test_resolve_returns_defaults_for_anonymous_task(fake_task):
     policy = resolve_agent_policy(fake_task, db)
 
     # 应等于默认值
-    assert policy["checkpoint_interval"] == 3
+    assert policy["checkpoint_interval"] == 10
     assert policy["allow_interrupt"] is True
     assert policy["max_interrupts_per_round"] == 2
 
@@ -159,7 +163,7 @@ def test_resolve_handles_empty_user_pref_agent_policy():
     db = _mock_db_with_user_pref(user_pref=user_pref)
 
     policy = resolve_agent_policy(task, db)
-    assert policy["checkpoint_interval"] == 3
+    assert policy["checkpoint_interval"] == 10
     assert policy["allow_interrupt"] is True
 
 
@@ -169,7 +173,7 @@ def test_resolve_handles_no_user_pref_row():
     db = _mock_db_with_user_pref(user_pref=None)
 
     policy = resolve_agent_policy(task, db)
-    assert policy["checkpoint_interval"] == 3
+    assert policy["checkpoint_interval"] == 10
 
 
 def test_resolve_handles_empty_params_dict():
@@ -178,7 +182,7 @@ def test_resolve_handles_empty_params_dict():
     db = _mock_db_with_user_pref(user_pref=None)
 
     policy = resolve_agent_policy(task, db)
-    assert policy["checkpoint_interval"] == 3
+    assert policy["checkpoint_interval"] == 10
 
 
 def test_resolve_handles_empty_agent_policy_in_params():
@@ -187,7 +191,7 @@ def test_resolve_handles_empty_agent_policy_in_params():
     db = _mock_db_with_user_pref(user_pref=None)
 
     policy = resolve_agent_policy(task, db)
-    assert policy["checkpoint_interval"] == 3
+    assert policy["checkpoint_interval"] == 10
 
 
 # ============================================================
@@ -224,11 +228,11 @@ def test_effective_interval_builtin_specific_does_not_affect_cli():
     assert get_effective_interval(policy, "cli") == 5
 
 
-def test_effective_interval_falls_back_to_default_3_when_missing():
-    """policy 完全缺 checkpoint_interval → 用默认值 3。"""
+def test_effective_interval_falls_back_to_default_10_when_missing():
+    """policy 完全缺 checkpoint_interval → 用默认值 10。"""
     policy = {}
-    assert get_effective_interval(policy, "builtin") == 3
-    assert get_effective_interval(policy, "cli") == 3
+    assert get_effective_interval(policy, "builtin") == 10
+    assert get_effective_interval(policy, "cli") == 10
 
 
 def test_effective_interval_handles_zero_specific_as_falsy():
@@ -324,3 +328,114 @@ def test_parse_invalid_json_raises():
     """无效 JSON 应抛出异常(由调用方 run_user_agent_checkpoint 捕获并降级)。"""
     with pytest.raises(Exception):
         _parse_checkpoint_json("not a json at all")
+
+
+# ============================================================
+# _parse_checkpoint_json:summary 字段(评估摘要)
+# ============================================================
+
+def test_parse_summary_field_present():
+    """LLM 输出带 summary 字段时应正常解析。"""
+    content = '{"interrupt": false, "reason": "r", "query": null, "summary": "正在分析认证模块"}'
+    result = _parse_checkpoint_json(content)
+    assert result["summary"] == "正在分析认证模块"
+
+
+def test_parse_summary_missing_falls_back_to_reason():
+    """缺 summary 字段(旧格式输出)时回退到 reason。"""
+    content = '{"interrupt": false, "reason": "方向正确", "query": null}'
+    result = _parse_checkpoint_json(content)
+    assert result["summary"] == "方向正确"
+
+
+def test_parse_summary_truncated_to_100_chars():
+    """summary 超长时截断到 100 字符(控制历史注入体积)。"""
+    long_summary = "长" * 200
+    content = f'{{"interrupt": false, "reason": "r", "query": null, "summary": "{long_summary}"}}'
+    result = _parse_checkpoint_json(content)
+    assert len(result["summary"]) == 100
+
+
+# ============================================================
+# _extract_checkpoint_record / _build_history_section:历史注入
+# ============================================================
+
+def _make_checkpoint_conv(content: str, reasoning: str):
+    """构造 fake 检查点评估 Conversation(只需 content/reasoning 两个属性)。"""
+    conv = MagicMock()
+    conv.content = content
+    conv.reasoning = reasoning
+    return conv
+
+
+def test_extract_record_interrupt_true():
+    """打断记录:iteration 从 content 前缀解析,字段完整。"""
+    conv = _make_checkpoint_conv(
+        "[检查点评估 · 第1轮迭代20] 打断\n理由:x\n追问指令:y",
+        '{"interrupt": true, "reason": "跑偏", "query": "转向", "summary": "已打断"}',
+    )
+    record = _extract_checkpoint_record(conv)
+    assert record is not None
+    assert record["iteration"] == 20
+    assert record["interrupt"] is True
+    assert record["query"] == "转向"
+    assert record["summary"] == "已打断"
+
+
+def test_extract_record_skips_unparseable_reasoning():
+    """reasoning 解析失败的兜底记录应返回 None(跳过不注入)。"""
+    conv = _make_checkpoint_conv(
+        "[检查点评估 · 第1轮迭代10] 继续\n理由:解析失败",
+        "not a json",  # 兜底记录的 reasoning 是原文
+    )
+    assert _extract_checkpoint_record(conv) is None
+
+
+def test_extract_record_handles_bad_iteration_prefix():
+    """content 前缀无法解析 iteration 时,iteration=None 不影响其余字段。"""
+    conv = _make_checkpoint_conv(
+        "[检查点评估] 无迭代号",
+        '{"interrupt": false, "reason": "r", "query": null}',
+    )
+    record = _extract_checkpoint_record(conv)
+    assert record is not None
+    assert record["iteration"] is None
+
+
+def test_build_history_section_empty():
+    """无历史记录时返回空串(不注入段落)。"""
+    assert _build_history_section([]) == ""
+
+
+def test_build_history_section_formats_records():
+    """继续/打断两种记录的格式化,含打断指令。"""
+    records = [
+        {"iteration": 10, "interrupt": False, "reason": "方向正确", "query": None, "summary": "分析认证中"},
+        {"iteration": 20, "interrupt": True, "reason": "跑偏", "query": "转向授权", "summary": "已打断"},
+    ]
+    section = _build_history_section(records)
+    assert section.startswith("你之前的评估记录:")
+    assert "[迭代10] 继续 | 摘要:分析认证中" in section
+    assert "[迭代20] 打断 | 摘要:已打断 | 指令:转向授权" in section
+
+
+def test_build_history_section_summary_falls_back_to_reason():
+    """summary 为空时回退展示 reason。"""
+    records = [
+        {"iteration": 10, "interrupt": False, "reason": "方向正确", "query": None, "summary": ""},
+    ]
+    section = _build_history_section(records)
+    assert "摘要:方向正确" in section
+
+
+def test_build_history_section_keeps_only_recent_records():
+    """超过 MAX_HISTORY_RECORDS 时只保留最近 N 条。"""
+    records = [
+        {"iteration": i, "interrupt": False, "reason": f"r{i}", "query": None, "summary": f"s{i}"}
+        for i in range(1, MAX_HISTORY_RECORDS + 4)
+    ]
+    section = _build_history_section(records)
+    # 最早的几条被丢弃,最近的保留
+    assert f"s{MAX_HISTORY_RECORDS + 3}" in section
+    assert "s1" not in section
+    assert "s2" not in section

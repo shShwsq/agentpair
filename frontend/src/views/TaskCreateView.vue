@@ -269,7 +269,7 @@ const error = ref('')
 /** 是否分别配置内置/CLI 的 K 值(高级中的高级) */
 const policyAdvanced = ref(false)
 /** 统一 K 值:每 K 个迭代评估一次 */
-const policyInterval = ref(3)
+const policyInterval = ref(10)
 /** 内置 react_agent 专用 K 值(null=用统一值) */
 const policyIntervalBuiltin = ref<number | null>(null)
 /** CLI agent 专用 K 值(null=用统一值) */
@@ -303,7 +303,7 @@ const verifierAuthModeOptions = [
 const DEFAULT_POLICY = {
   user_agent_enabled: true,
   max_rounds: 4,
-  checkpoint_interval: 3,
+  checkpoint_interval: 10,
   allow_interrupt: true,
   max_interrupts_per_round: 2,
   allow_verify: false,

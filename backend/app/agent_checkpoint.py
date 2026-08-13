@@ -40,7 +40,7 @@ MAX_MAX_ROUNDS = int(os.environ.get("AGENTPAIR_MAX_ROUNDS_LIMIT", "10"))
 DEFAULT_AGENT_POLICY: dict[str, Any] = {
     "user_agent_enabled": True,  # 是否启用 user_agent(关闭=单 agent 模式,跳过评估/打断/验证)
     "max_rounds": 4,  # user_agent 协作总轮次(替代 user_agent.py 硬编码 MAX_ROUNDS)
-    "checkpoint_interval": 3,  # 统一 K 值,每 K 个迭代评估一次
+    "checkpoint_interval": 10,  # 统一 K 值,每 K 个迭代评估一次
     "checkpoint_interval_builtin": None,  # 高级:内置专用(null=用统一值)
     "checkpoint_interval_cli": None,  # 高级:CLI 专用(null=用统一值)
     "allow_interrupt": True,  # user_agent 是否能打断 react_agent
@@ -104,7 +104,7 @@ def get_effective_interval(policy: dict[str, Any], executor: str) -> int:
     - executor == "builtin":优先 checkpoint_interval_builtin,为 None 时用 checkpoint_interval
     - 其他(CLI agent):优先 checkpoint_interval_cli,为 None 时用 checkpoint_interval
     """
-    base_k = int(policy.get("checkpoint_interval", 3))
+    base_k = int(policy.get("checkpoint_interval", 10))
     if executor == "builtin":
         specific = policy.get("checkpoint_interval_builtin")
         return int(specific) if specific else base_k
@@ -131,13 +131,18 @@ CHECKPOINT_SYSTEM_PROMPT = """你是 user_agent(用户代理智能体),正在实
   - 遗漏关键维度(明显应该检查但未涉及的维度)
   - 钻牛角尖(在某个细节上耗费过多迭代)
 - 不确定是否该打断时,选择不打断(让 react_agent 继续)
+- 若提供了「之前的评估记录」:
+  - 避免重复发出相同/相近的打断指令(历史已打断过的方向不再重复)
+  - 核查上次打断指令是否已被执行(从当前快照判断),未执行时可换更明确的表述再次提醒
+  - 历史记录仅供参考,以当前快照为主要判断依据
 
 ## 输出格式(严格 JSON)
 ```json
 {
   "interrupt": false,
   "reason": "当前方向正确,继续",
-  "query": null
+  "query": null,
+  "summary": "react_agent 正在分析认证模块,方向符合预期"
 }
 ```
 
@@ -146,7 +151,8 @@ CHECKPOINT_SYSTEM_PROMPT = """你是 user_agent(用户代理智能体),正在实
 {
   "interrupt": true,
   "reason": "react_agent 在深挖 SQL 注入,但用户意图是检查认证授权,且已发现 3 个同类问题,应转向检查认证绕过",
-  "query": "已经发现 3 个 SQL 注入问题,现在转向检查认证与授权相关问题"
+  "query": "已经发现 3 个 SQL 注入问题,现在转向检查认证与授权相关问题",
+  "summary": "已发现 3 个 SQL 注入,打断并要求转向认证授权检查"
 }
 ```
 
@@ -154,7 +160,94 @@ CHECKPOINT_SYSTEM_PROMPT = """你是 user_agent(用户代理智能体),正在实
 - interrupt: 是否打断(true 时 query 必填)
 - reason: 判断理由(展示给用户看)
 - query: 打断时的追问指令(注入 react_agent 作为 user 消息),null 表示不打断
+- summary: 本次评估的一句话摘要(≤50字,供下次评估参考;打断时写明已发出的指令)
 """
+
+
+# ============================================================
+# 历史评估记录注入(K 调大后评估变稀疏,靠历史摘要保持连续性)
+# ============================================================
+
+# 检查点评估落库的 content 前缀(用于与 round 边界完整评估区分,两者同为 evaluation type)
+_CHECKPOINT_CONTENT_PREFIX = "[检查点评估"
+
+# 注入的历史评估记录条数上限(取最近 N 条)
+MAX_HISTORY_RECORDS = 5
+
+# 注入的历史评估记录总字符数上限(与 react_agent/user_agent 截断风格对齐)
+MAX_HISTORY_CHARS = 1500
+
+
+def _load_checkpoint_history(db: Session, task_id, round_idx: int) -> list[dict[str, Any]]:
+    """加载本轮(同一 round_idx)之前的检查点评估记录
+
+    与 round 边界完整评估同为 role=user_agent/type=evaluation,
+    用 content 前缀区分。reasoning 解析失败的兜底记录直接跳过。
+    返回记录列表(时间序,含 iteration/interrupt/reason/query/summary)。
+    """
+    convs = (
+        db.query(Conversation)
+        .filter(
+            Conversation.task_id == task_id,
+            Conversation.round_idx == round_idx,
+            Conversation.role == "user_agent",
+            Conversation.type == "evaluation",
+            Conversation.content.like(f"{_CHECKPOINT_CONTENT_PREFIX}%"),
+        )
+        .order_by(Conversation.created_at)
+        .all()
+    )
+    records: list[dict[str, Any]] = []
+    for c in convs:
+        record = _extract_checkpoint_record(c)
+        if record is not None:
+            records.append(record)
+    return records
+
+
+def _extract_checkpoint_record(conv: Conversation) -> dict[str, Any] | None:
+    """从检查点评估 Conversation 提取摘要记录;reasoning 解析失败返回 None
+
+    iteration 从 content 前缀 `[检查点评估 · 第N轮迭代M]` 的 M 解析,失败时为 None。
+    """
+    try:
+        parsed = _parse_checkpoint_json(conv.reasoning or "")
+    except Exception:
+        return None
+    iteration = None
+    try:
+        iteration = int(str(conv.content).split("迭代")[1].split("]")[0])
+    except (IndexError, ValueError):
+        pass
+    return {
+        "iteration": iteration,
+        "interrupt": parsed["interrupt"],
+        "reason": parsed["reason"],
+        "query": parsed["query"],
+        "summary": parsed["summary"],
+    }
+
+
+def _build_history_section(records: list[dict[str, Any]]) -> str:
+    """把历史评估记录格式化成 prompt 段落;无记录时返回空串
+
+    只取最近 MAX_HISTORY_RECORDS 条,总长超 MAX_HISTORY_CHARS 时从最早的丢弃。
+    """
+    if not records:
+        return ""
+    lines: list[str] = []
+    for r in records[-MAX_HISTORY_RECORDS:]:
+        loc = f"迭代{r['iteration']}" if r.get("iteration") else "早期迭代"
+        if r.get("interrupt"):
+            line = f"- [{loc}] 打断 | 摘要:{r.get('summary') or r.get('reason', '')} | 指令:{r.get('query', '')}"
+        else:
+            line = f"- [{loc}] 继续 | 摘要:{r.get('summary') or r.get('reason', '')}"
+        lines.append(line)
+    while lines and sum(len(x) for x in lines) > MAX_HISTORY_CHARS:
+        lines.pop(0)
+    if not lines:
+        return ""
+    return "你之前的评估记录:\n" + "\n".join(lines) + "\n\n"
 
 
 # ============================================================
@@ -184,7 +277,7 @@ def run_user_agent_checkpoint(
         client: LLMClient(为 None 时用默认)
 
     返回:
-        {"interrupt": bool, "reason": str, "query": str | None}
+        {"interrupt": bool, "reason": str, "query": str | None, "summary": str}
     """
     client = client or LLMClient()
 
@@ -205,9 +298,19 @@ def run_user_agent_checkpoint(
     else:
         plan_text = "(无 plan)"
 
+    # 本轮历史评估记录:注入上下文,避免重复打断、核查上次指令是否执行
+    try:
+        history_section = _build_history_section(
+            _load_checkpoint_history(db, task.id, round_idx)
+        )
+    except Exception as e:
+        logger.warning(f"[task={task.id}] 加载检查点历史失败(跳过注入): {e}")
+        history_section = ""
+
     user_msg = (
         f"用户原始意图:{task.user_input[:500]}\n\n"
         f"当前协作轮次:第 {round_idx} 轮,第 {iteration} 次迭代\n\n"
+        f"{history_section}"
         f"react_agent 当前思考:\n{thinking}\n\n"
         f"最近工具调用:{tool_intent}\n\n"
         f"最近工具结果:\n{tool_result}\n\n"
@@ -238,6 +341,7 @@ def run_user_agent_checkpoint(
             "interrupt": False,
             "reason": f"检查点评估解析失败,默认不打断({e})",
             "query": None,
+            "summary": "",
         }
 
     # 校验:interrupt=true 时 query 必填
@@ -349,6 +453,8 @@ def _parse_checkpoint_json(content: str) -> dict[str, Any]:
         "interrupt": bool(result.get("interrupt", False)),
         "reason": str(result.get("reason", "")),
         "query": result.get("query") if result.get("query") else None,
+        # 摘要缺失时回退到 reason(兼容旧格式输出)
+        "summary": str(result.get("summary") or result.get("reason", ""))[:100],
     }
 
 

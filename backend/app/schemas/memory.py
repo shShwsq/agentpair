@@ -58,7 +58,7 @@ class SaveAgentPolicyRequest(BaseModel):
     user_agent_enabled: bool = True
     # 上界在路由层用 MAX_MAX_ROUNDS 动态校验(schema 层只校验下界)
     max_rounds: int = Field(default=4, ge=1)
-    checkpoint_interval: int = Field(default=3, ge=1, le=20)
+    checkpoint_interval: int = Field(default=10, ge=1, le=20)
     checkpoint_interval_builtin: int | None = Field(default=None, ge=1, le=20)
     checkpoint_interval_cli: int | None = Field(default=None, ge=1, le=20)
     allow_interrupt: bool = True
