@@ -881,7 +881,9 @@ def _prepare_repo_context(
     - 有 repo_url:clone(HTTPS+token → SSH → HTTPS 匿名,含分支回退);
       失败不抛异常,降级返回 (None, "") → 回到 react_agent 自主 clone 路径
       (工具失败可被 LLM 重试/自适应,成功率高于预 clone 一次定生死);
-      成功后 list_files 根目录,格式化成 repo_context 文本
+      成功且仓库非空时 list_files 根目录,格式化成 repo_context 文本;
+      仓库为空(或 list_files 失败无法确认非空)则降级返回 (repo_path, ""),
+      不注入"已预先 clone"提示,避免误导 agent 在空仓库上直接开始审计
 
     git_tokens 用于访问私有仓库({provider: token},按 repo_url 主机匹配;
     无匹配则只试 SSH + 匿名 HTTPS)。
@@ -952,6 +954,15 @@ def _prepare_repo_context(
         # list_files 失败不应让整个任务失败(clone 已成功),降级为只给 repo_path
         logger.warning(f"[task={task.id}] list_files 失败,降级为仅 repo_path: {e}")
         files_result = {"entries": [], "total": 0, "truncated": False}
+
+    # 仅当仓库非空才注入上下文:根目录无条目(空仓库/list_files 降级)时,
+    # 告诉 agent "已 clone、直接开始审计"会误导,降级为仅 repo_path
+    if not files_result.get("entries"):
+        logger.info(
+            f"[task={task.id}] clone 成功但根目录为空,"
+            f"不注入 repo_context(降级为仅 repo_path={repo_path})"
+        )
+        return repo_path, ""
 
     repo_context = _format_repo_context(repo_url, repo_path, files_result)
     return repo_path, repo_context
