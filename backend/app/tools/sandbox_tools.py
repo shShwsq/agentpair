@@ -1940,7 +1940,13 @@ def clone_repo_with_fallback(
     1. HTTPS + token(该 provider 有 token 时,可访问私有仓库)
     2. SSH(依赖宿主机/沙箱的 SSH key 配置,适合公开仓库)
     3. HTTPS 匿名(无 token,仅公开仓库)
-    三者都失败才抛 RuntimeError。
+
+    分支回退:指定 branch 时先带 --branch 跑完整回退链;若全部失败,
+    再不带分支重跑一遍(远端默认分支兜底)。分支错误与协议无关,
+    协议回退救不了,常见于前端自动填充的 default_branch 与远端不符
+    (如空仓库 default_branch 为 null 被兜底成 main/master)。
+
+    所有组合都失败才抛 RuntimeError。
 
     复用同一套 session 管理(_get_or_create_session + _set_repo_path),
     所以 clone 完成后 react_agent / workspace 路由可直接通过 task_id 复用会话。
@@ -1976,38 +1982,50 @@ def clone_repo_with_fallback(
     mode = ctx["mode"]
 
     errors: list[str] = []
-    for idx, url in enumerate(candidates):
-        # 日志里不打印 token(脱敏)
-        safe_url = url.split("@")[-1] if "@" in url else url
-        try:
-            logger.info(
-                f"[clone_fallback] task={task_id} 尝试第 {idx + 1} 种协议: {safe_url}"
-            )
-            if mode == "local":
-                result = _clone_repo_local(ctx, url, repo_name, branch, task_id=task_id)
-            else:
-                result = _clone_repo_sandbox(ctx, url, repo_name, branch)
-            _set_repo_path(task_id, result["path"])
-            logger.info(f"[clone_fallback] task={task_id} 克隆成功(协议 {safe_url})")
-            return result
-        except Exception as e:
-            err_msg = str(e)[:300]
-            errors.append(f"[{safe_url}] {err_msg}")
+    # 分支尝试顺序:指定了 branch 先带 --branch,全失败后不带分支再跑一遍
+    branch_attempts: list[str | None] = [branch, None] if branch else [None]
+    for attempt_idx, attempt_branch in enumerate(branch_attempts):
+        if attempt_idx > 0:
             logger.warning(
-                f"[clone_fallback] task={task_id} 协议 {safe_url} 克隆失败: {err_msg}"
+                f"[clone_fallback] task={task_id} 带 branch={branch} 全部协议失败,"
+                f"回退为不带分支重试(用远端默认分支)"
             )
-            # 清理可能残留的半成品目录(local 模式),避免下次重试撞目录
-            if mode == "local":
-                local_dir: Path = ctx["local_dir"]
-                leftover = local_dir / repo_name
-                if leftover.exists():
-                    try:
-                        shutil.rmtree(leftover, ignore_errors=True)
-                    except Exception:
-                        pass
+        for idx, url in enumerate(candidates):
+            # 日志里不打印 token(脱敏)
+            safe_url = url.split("@")[-1] if "@" in url else url
+            try:
+                logger.info(
+                    f"[clone_fallback] task={task_id} 尝试第 {idx + 1} 种协议"
+                    f"(branch={attempt_branch}): {safe_url}"
+                )
+                if mode == "local":
+                    result = _clone_repo_local(
+                        ctx, url, repo_name, attempt_branch, task_id=task_id,
+                    )
+                else:
+                    result = _clone_repo_sandbox(ctx, url, repo_name, attempt_branch)
+                _set_repo_path(task_id, result["path"])
+                logger.info(f"[clone_fallback] task={task_id} 克隆成功(协议 {safe_url})")
+                return result
+            except Exception as e:
+                err_msg = str(e)[:300]
+                errors.append(f"[{safe_url}] {err_msg}")
+                logger.warning(
+                    f"[clone_fallback] task={task_id} 协议 {safe_url} 克隆失败: {err_msg}"
+                )
+                # 清理可能残留的半成品目录(local 模式),避免下次重试撞目录
+                if mode == "local":
+                    local_dir: Path = ctx["local_dir"]
+                    leftover = local_dir / repo_name
+                    if leftover.exists():
+                        try:
+                            shutil.rmtree(leftover, ignore_errors=True)
+                        except Exception:
+                            pass
 
     raise RuntimeError(
-        f"仓库克隆失败(已尝试 {len(candidates)} 种协议):\n" + "\n".join(errors)
+        f"仓库克隆失败(已尝试 {len(candidates)} 种协议 x {len(branch_attempts)} 种分支策略):\n"
+        + "\n".join(errors)
     )
 
 

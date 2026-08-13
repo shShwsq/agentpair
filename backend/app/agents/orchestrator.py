@@ -152,12 +152,14 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         #   - 注入 react_agent 第 1 轮:跳过自主 clone,直接开始审计
         # 修复 9:repo_context 不再拼到 effective_intent(避免膨胀所有轮次的
         #   user_agent 输入),改为单独传参给 round 0 的 user_agent 调用
-        # clone 失败(https+ssh 都不行)抛异常,由外层 except 捕获 → 任务 failed
+        # clone 失败不再让整个任务 failed:降级返回 (None, ""),回到
+        #   react_agent 自主 clone 路径(有 LLM 重试/自适应,成功率更高)
         _t0 = time.perf_counter()
         repo_path, repo_context = _prepare_repo_context(task, db, task_id_str, git_tokens)
         perf_log(
             task.id, "prepare_repo_context", time.perf_counter() - _t0,
             has_repo=bool((task.params or {}).get("repo_url")),
+            cloned=bool(repo_path),
         )
 
         # ===== 单 agent 模式:user_agent 已禁用,跳过评估/打断/验证 =====
@@ -876,7 +878,9 @@ def _prepare_repo_context(
     """若用户选了仓库,主动 clone + list_files,返回 (repo_path, repo_context 文本)
 
     - 无 repo_url:返回 (None, ""),走原流程(react_agent 自主 clone)
-    - 有 repo_url:clone(HTTPS+token → SSH → HTTPS 匿名),失败抛异常;
+    - 有 repo_url:clone(HTTPS+token → SSH → HTTPS 匿名,含分支回退);
+      失败不抛异常,降级返回 (None, "") → 回到 react_agent 自主 clone 路径
+      (工具失败可被 LLM 重试/自适应,成功率高于预 clone 一次定生死);
       成功后 list_files 根目录,格式化成 repo_context 文本
 
     git_tokens 用于访问私有仓库({provider: token},按 repo_url 主机匹配;
@@ -902,14 +906,33 @@ def _prepare_repo_context(
 
     branch = params.get("branch")
 
-    # 主动 clone(协议回退:HTTPS+token → SSH → HTTPS 匿名,都失败抛 RuntimeError)
+    # 主动 clone(协议回退:HTTPS+token → SSH → HTTPS 匿名,含分支回退)
     task.current_stage = "正在克隆仓库(HTTPS+token → SSH → 匿名)..."
     db.commit()
     _publish_status(task)
 
-    clone_result = sandbox_tools.clone_repo_with_fallback(
-        repo_url, branch=branch, task_id=task_id_str, git_tokens=git_tokens or {},
-    )
+    try:
+        clone_result = sandbox_tools.clone_repo_with_fallback(
+            repo_url, branch=branch, task_id=task_id_str, git_tokens=git_tokens or {},
+        )
+    except Exception as e:
+        # 降级而非失败:预 clone 一次定生死太脆(网络抖动/分支不符/私有仓库
+        # token 问题都会直接挂任务),改为回到 react_agent 自主 clone 路径,
+        # 由 LLM 看报错重试/自适应(历史观察该路径成功率明显更高)
+        logger.warning(
+            f"[task={task.id}] 主动 clone 失败,降级为 react_agent 自主 clone: {e}"
+        )
+        task.current_stage = "预克隆失败,改由 react_agent 自主克隆..."
+        db.commit()
+        _publish_status(task)
+        _add_conversation(
+            db, task, round_idx=0,
+            role="system", type="warning",
+            content=(
+                f"预先克隆仓库失败,已降级为执行阶段自主克隆:\n{str(e)[:500]}"
+            ),
+        )
+        return None, ""
     repo_path = clone_result["path"]
     logger.info(
         f"[task={task.id}] 主动 clone 成功,path={repo_path},"
