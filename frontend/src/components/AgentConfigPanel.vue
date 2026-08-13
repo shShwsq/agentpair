@@ -875,6 +875,8 @@ onUnmounted(() => {
   border-radius: var(--radius-md);
   font-size: var(--fs-sm);
   line-height: var(--lh-relaxed);
+  max-height: 300px;
+  overflow-y: auto;
 }
 
 .test-ok {
@@ -894,6 +896,7 @@ onUnmounted(() => {
 
 .test-message {
   word-break: break-word;
+  white-space: pre-wrap;
 }
 
 /* ---- 流式进度区 ---- */

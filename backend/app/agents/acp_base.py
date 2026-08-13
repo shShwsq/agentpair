@@ -791,13 +791,30 @@ def _extract_bridge_error(session, execution_id: str, agent_type: str = "") -> s
     return ""
 
 
-def _extract_recent_cli_stderr(
-    session, execution_id: str, agent_type: str = "", max_lines: int = 25
+# bridge 的 JSON-RPC 流水行:[bridge] <<< CLI stdout [N]: {...},
+# 单条可达 500 字符,对用户无诊断价值,展示时过滤掉
+_BRIDGE_JSONRPC_NOISE_RE = re.compile(r"\[bridge\] <<< CLI stdout \[\d+\]:")
+
+# 静默失败场景下值得展示的错误关键词(HTTP 状态/限流/鉴权等)
+_BRIDGE_LOG_ERROR_KEYWORDS = (
+    "error", "exception", "failed", "traceback", "refused", "timeout",
+    "unauthorized", "invalid", "denied",
+    "400", "401", "402", "403", "429", "500",
+    "错误", "失败", "超时", "拒绝", "配额", "余额", "异常", "警告", "退出",
+)
+
+
+def _extract_recent_bridge_logs(
+    session, execution_id: str, agent_type: str = "", max_lines: int = 40
 ) -> str:
-    """提取最近的 CLI stderr 行(经 bridge [cli stderr] 前缀转发)
+    """提取最近的 bridge 日志(过滤噪音,优先保留错误信息)
 
     用于"模型未响应"等静默失败场景:CLI 调用 LLM API 后未抛异常但返回空,
-    真实的 HTTP 错误/拒绝信息在 CLI stderr 中。返回最近 max_lines 行 [cli stderr] 内容。
+    真实的 HTTP 错误/拒绝信息可能在 CLI stderr 或 bridge 日志中。
+
+    提取策略(逐级回退):
+    1. [cli stderr] 转发行 + 含错误关键词的行(如 HTTP 401/429、超时等)
+    2. 若无匹配,回退为最近 max_lines 行原始日志(仍过滤 JSON-RPC 流水噪音)
     """
     try:
         logs, _ = session.get_background_logs(execution_id)
@@ -807,12 +824,31 @@ def _extract_recent_cli_stderr(
         return ""
 
     lines = logs.splitlines()
-    cli_stderr_lines = [line for line in lines if "[cli stderr]" in line]
-    if not cli_stderr_lines:
+    if not lines:
         return ""
 
-    recent = cli_stderr_lines[-max_lines:]
-    return "\n".join(recent)
+    def _clip(line: str, limit: int = 300) -> str:
+        return line if len(line) <= limit else line[:limit] + " ..."
+
+    def _is_noise(line: str) -> bool:
+        return bool(_BRIDGE_JSONRPC_NOISE_RE.search(line))
+
+    # 一级:[cli stderr] 转发行 + 错误关键词行
+    error_lines = [
+        _clip(line)
+        for line in lines
+        if "[cli stderr]" in line
+        or (
+            not _is_noise(line)
+            and any(kw in line.lower() for kw in _BRIDGE_LOG_ERROR_KEYWORDS)
+        )
+    ]
+    if error_lines:
+        return "\n".join(error_lines[-max_lines:])
+
+    # 二级:回退为最近原始日志(过滤 JSON-RPC 流水噪音)
+    recent = [_clip(line) for line in lines[-max_lines * 2 :] if not _is_noise(line)]
+    return "\n".join(recent[-max_lines:])
 
 
 # ============================================================
@@ -2481,10 +2517,10 @@ def test_credential_streaming(
                 e = prompt_error[0]
                 err_msg = str(e)
                 low = err_msg.lower()
-                # 提取 CLI stderr,补充真实错误详情(ACP 异常消息常为泛化描述)
-                cli_stderr = ""
+                # 提取 bridge 日志,补充真实错误详情(ACP 异常消息常为泛化描述)
+                bridge_logs = ""
                 if bridge_exec_id:
-                    cli_stderr = _extract_recent_cli_stderr(
+                    bridge_logs = _extract_recent_bridge_logs(
                         session, bridge_exec_id, agent_type
                     )
                 if any(kw in low for kw in ("quota", "credit", "limit", "余额", "配额",
@@ -2496,9 +2532,9 @@ def test_credential_streaming(
                     msg = "模型响应超时(60s,请检查网络或配额)"
                 else:
                     msg = f"模型响应测试失败: {err_msg}"
-                if cli_stderr:
-                    msg += f"\n\n[CLI 日志]\n{cli_stderr}"
-                    logger.info(f"[{agent_type}_test] prompt 异常,CLI stderr:\n{cli_stderr}")
+                if bridge_logs:
+                    msg += f"\n\n[CLI 日志]\n{bridge_logs}"
+                    logger.info(f"[{agent_type}_test] prompt 异常,bridge 日志:\n{bridge_logs}")
                 yield done(False, msg)
                 return
 
@@ -2541,11 +2577,11 @@ def test_credential_streaming(
                 )
             else:
                 # 既无回复也无思考:真正未响应
-                # 提取 CLI stderr 日志,展示真实的 API 错误(如 HTTP 401/400/配额不足等)
-                # kimi CLI 调 LLM 后未抛异常但返回空,真实错误在 stderr 中
-                cli_stderr = ""
+                # 提取 bridge 日志,展示真实的 API 错误(如 HTTP 401/400/配额不足等)
+                # kimi CLI 调 LLM 后未抛异常但返回空,真实错误可能在 stdout 或 stderr 中
+                bridge_logs = ""
                 if bridge_exec_id:
-                    cli_stderr = _extract_recent_cli_stderr(
+                    bridge_logs = _extract_recent_bridge_logs(
                         session, bridge_exec_id, agent_type
                     )
                 msg = (
@@ -2553,9 +2589,9 @@ def test_credential_streaming(
                     "若使用 MiniMax/DeepSeek/阿里云等非 Moonshot 端点,"
                     "请在「智能体配置」中将「供应商协议类型」改为 openai 后重试。"
                 )
-                if cli_stderr:
-                    msg += f"\n\n[CLI 日志]\n{cli_stderr}"
-                    logger.info(f"[{agent_type}_test] 模型未响应,CLI stderr:\n{cli_stderr}")
+                if bridge_logs:
+                    msg += f"\n\n[CLI 日志]\n{bridge_logs}"
+                    logger.info(f"[{agent_type}_test] 模型未响应,bridge 日志:\n{bridge_logs}")
                 yield done(False, msg)
 
         except RuntimeError as e:
