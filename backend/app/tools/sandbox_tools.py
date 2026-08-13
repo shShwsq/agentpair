@@ -15,12 +15,14 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from app.config import settings
+from app.event_bus import publish as publish_event
 from app.git_provider import get_provider_for_url
 from app.sandbox.client import SandboxSession, check_local_write_permission, create_sandbox
 from app.user_interaction import (
@@ -193,20 +195,80 @@ def _clone_depth_args() -> list[str]:
     return ["--depth", str(depth)] if depth > 0 else []
 
 
-def _clone_repo_local(ctx: dict, clone_url: str, repo_name: str, branch: str | None) -> dict:
-    """local 模式:本地 git clone"""
+def _clone_repo_local(ctx: dict, clone_url: str, repo_name: str, branch: str | None, task_id: str = "") -> dict:
+    """local 模式:本地 git clone(Popen 流式读进度 + 推 SSE)
+
+    用 subprocess.Popen 逐行读 git 的 stderr 进度输出(需 --progress 强制非 tty
+    也输出),解析 "Receiving objects: X%" 等行后通过 event_bus 推 clone_progress
+    事件给前端。节流:百分比变化 >=5 或距上次推送 >=2s 才推一次。
+
+    超时用 deadline + poll 机制(而非 subprocess.run 的 timeout),超时主动 kill
+    进程并 join 读线程,避免大仓库卡死时无反馈。
+    """
     local_dir: Path = ctx["local_dir"]
     repo_dir = local_dir / repo_name
 
-    cmd = ["git", "clone"] + _clone_depth_args()
+    cmd = ["git", "clone", "--progress"] + _clone_depth_args()
     if branch:
         cmd.extend(["--branch", branch])
     cmd.extend([clone_url, str(repo_dir)])
 
     logger.info(f"[local] git clone: {clone_url}")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=settings.REPO_CLONE_TIMEOUT)
-    if result.returncode != 0:
-        raise RuntimeError(f"git clone 失败: {result.stderr[:500]}")
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    stderr_lines: list[str] = []
+    last_percent = -1
+    last_push_ts = time.monotonic()
+    timeout = settings.REPO_CLONE_TIMEOUT
+    deadline = time.monotonic() + timeout
+
+    def _read_stderr() -> None:
+        nonlocal last_percent, last_push_ts
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            stderr_lines.append(line)
+            percent = _parse_git_progress(line)
+            if percent is None or not task_id:
+                continue
+            now = time.monotonic()
+            # 节流:百分比增加 >=5 或距上次推送 >=2s
+            if percent > last_percent and (
+                percent - last_percent >= 5 or now - last_push_ts >= 2.0
+            ):
+                publish_event(task_id, "clone_progress", {
+                    "percent": percent,
+                    "message": line.strip()[:200],
+                })
+                last_percent = percent
+                last_push_ts = now
+
+    reader = threading.Thread(target=_read_stderr, daemon=True)
+    reader.start()
+
+    try:
+        while True:
+            ret = proc.poll()
+            if ret is not None:
+                break
+            if time.monotonic() > deadline:
+                proc.kill()
+                reader.join(timeout=2)
+                raise RuntimeError(f"git clone 超时({timeout}s)")
+            time.sleep(0.5)
+    finally:
+        reader.join(timeout=5)
+
+    if proc.returncode != 0:
+        stderr_text = "".join(stderr_lines)[-500:]
+        raise RuntimeError(f"git clone 失败: {stderr_text}")
 
     files_count = sum(
         1
@@ -217,11 +279,29 @@ def _clone_repo_local(ctx: dict, clone_url: str, repo_name: str, branch: str | N
     return {"path": str(repo_dir), "files_count": files_count}
 
 
+# git clone 进度行正则:匹配各阶段的 "X%"
+#   Receiving objects: 45% (1234/5678), 1.23 MiB | 2.34 MiB/s
+#   Resolving deltas: 30% (123/456)
+#   Counting objects: 100% (1234/1234), done.
+#   Compressing objects: 45% (12/27)
+_GIT_PROGRESS_RE = re.compile(
+    r"(?:Receiving objects|Resolving deltas|Counting objects|Compressing objects):\s+(\d+)%"
+)
+
+
+def _parse_git_progress(line: str) -> int | None:
+    """从 git clone 的 stderr 行解析进度百分比,非进度行返回 None"""
+    m = _GIT_PROGRESS_RE.search(line)
+    return int(m.group(1)) if m else None
+
+
 def _clone_repo_sandbox(ctx: dict, clone_url: str, repo_name: str, branch: str | None) -> dict:
     """sandbox 模式:在沙箱里 git clone"""
     session: SandboxSession = ctx["session"]
     repo_dir = f"/home/user/repos/{repo_name}"
-    session.run_command(f"mkdir -p {shlex.quote(repo_dir)}")
+    # 清理可能残留的半成品目录(上次失败/中断残留),
+    # 避免 git clone 报 "destination path already exists" 直接失败
+    session.run_command(f"rm -rf {shlex.quote(repo_dir)} && mkdir -p {shlex.quote(repo_dir)}")
 
     cmd = "git clone " + " ".join(_clone_depth_args())
     if branch:
@@ -1869,7 +1949,7 @@ def clone_repo_with_fallback(
                 f"[clone_fallback] task={task_id} 尝试第 {idx + 1} 种协议: {safe_url}"
             )
             if mode == "local":
-                result = _clone_repo_local(ctx, url, repo_name, branch)
+                result = _clone_repo_local(ctx, url, repo_name, branch, task_id=task_id)
             else:
                 result = _clone_repo_sandbox(ctx, url, repo_name, branch)
             _set_repo_path(task_id, result["path"])

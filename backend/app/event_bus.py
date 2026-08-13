@@ -28,6 +28,14 @@ thinking_delta 事件(阶段 7+):
     - index: int|None    工具调用索引(tool_call/tool_result phase 才有)
   流式结束后,完整内容仍会通过 conversation 事件推送一次,
   让迟到的订阅者(补播历史)也能看到完整内容。
+
+clone_progress 事件(仓库克隆进度):
+  local 模式下 _clone_repo_local 用 Popen 流式读 git clone 的 stderr,
+  解析 "Receiving objects: X%" 等进度行后推送。高频瞬时事件,节流推送
+  (百分比变化 >=5 或距上次推送 >=2s)。data 字段:
+    - percent: int       进度百分比 0-100
+    - message: str       原始进度行文本(截断到 200 字符)
+  不入历史缓存:进度是瞬时的,迟到的订阅者(刷新页面)看到过时进度无意义。
 """
 from __future__ import annotations
 
@@ -46,6 +54,7 @@ EventType = Literal[
     "question",  # user_agent 请求用户澄清(选择题/填空题弹窗)
     "done", "error",
     "agent_checkpoint",  # user_agent 检查点评估结果(迭代边界轻量评估)
+    "clone_progress",  # 仓库克隆进度(local 模式 Popen 流式解析 git stderr)
 ]
 
 # 单个订阅者的队列容量上限(防止消费者过慢导致内存膨胀)
@@ -85,9 +94,10 @@ class _TaskBus:
     def publish(self, event: dict[str, Any]) -> None:
         """推送事件给所有订阅者,并缓存到历史
 
-        thinking_delta 不入历史缓存:
-        这类事件数量极大(每个 token 一条),会挤掉 conversation/status 等重要事件。
-        打字机效果只对在线订阅者有意义,迟到的订阅者直接看完整 conversation 即可。
+        thinking_delta / clone_progress 不入历史缓存:
+        这类事件数量极大(每个 token / 每个进度行一条),会挤掉 conversation/status
+        等重要事件。流式效果只对在线订阅者有意义,迟到的订阅者直接看完整 conversation
+        即可(clone 进度是瞬时的,过时无意义)。
 
         question 不入历史缓存:
         这是一次性触发事件(弹窗),迟到订阅者(刷新页面)应通过
@@ -98,8 +108,8 @@ class _TaskBus:
             if self._finished:
                 return
             etype = event.get("type")
-            # thinking_delta / question 不缓存,只推给在线订阅者
-            if etype not in ("thinking_delta", "question"):
+            # 高频瞬时事件不缓存,只推给在线订阅者
+            if etype not in ("thinking_delta", "question", "clone_progress"):
                 self._history.append(event)
                 # 限制历史长度
                 if len(self._history) > 500:
@@ -109,8 +119,8 @@ class _TaskBus:
                 try:
                     q.put_nowait(event)
                 except queue.Full:
-                    # thinking_delta 满了就丢(打字机效果不要求可靠性)
-                    if etype == "thinking_delta":
+                    # 高频流式事件满了就丢(不要求可靠性)
+                    if etype in ("thinking_delta", "clone_progress"):
                         continue
                     logger.warning("订阅者队列满,丢弃事件")
 
