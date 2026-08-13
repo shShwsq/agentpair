@@ -38,11 +38,11 @@ class TaskCreateRequest(BaseModel):
     """提交任务的请求
 
     方式 1(通用):传 scenario + user_input + params
-    方式 2(兼容):传 repo_url,自动推断 scenario=code_security_audit
+    方式 2(兼容):只传 repo_url,自动生成通用 user_input(场景无关)
     """
 
-    # 场景标识,对应已注册的场景(见 app/scenarios/)
-    scenario: str = "code_security_audit"
+    # 场景标识,对应已注册的场景(见 app/scenarios/);默认 "general"(通用,未选特定模板)
+    scenario: str = "general"
     # 任务标题:可选,用户自定义便于识别;为空时前端用 user_input 截断展示
     title: str | None = Field(default=None, max_length=255)
     # 用户意图文本(必填,若提供 repo_url 则自动生成)

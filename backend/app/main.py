@@ -22,7 +22,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
-# 导入场景模块,触发注册
+# 导入场景模块,触发注册(general 放首位 → 前端新建任务默认选中"通用")
+from app.scenarios import general  # noqa: F401
 from app.scenarios import code_review  # noqa: F401
 from app.scenarios import security_audit  # noqa: F401
 
