@@ -57,8 +57,7 @@ FOLLOWUP_SECTION_LABEL = "[本轮补充检查要求]"
 REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行实际的代码分析/审计/审查任务。
 
 ## 你的职责
-根据 user_agent(用户代理智能体)给出的指令,对目标仓库执行分析,
-发现并记录问题,最后用自然语言总结你的发现。
+根据任务指令对目标仓库执行分析,发现并记录问题,最后用自然语言总结你的发现。
 
 ## 工作方式(ReAct 循环)
 你通过"思考-行动-观察"循环工作:
@@ -70,7 +69,7 @@ REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行�
 4. 重复以上步骤,直到完成分析
 
 ## 可用工具
-- clone_repo:克隆 GitHub 仓库到沙箱(若 orchestrator 已预克隆,无需调用)
+- clone_repo:克隆 GitHub 仓库到沙箱(若系统已预克隆,无需调用)
 - list_files:列出目录结构(单层,跳过 .git/node_modules 等噪声目录)
 - find_files:按文件名 glob 模式递归查找文件(如 **/*.py、**/test_*.py),返回路径列表
 - read_file:读取文件内容(带行号,支持 offset 翻页)
@@ -89,7 +88,7 @@ REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行�
 - **自适应任务类型**:根据用户意图判断任务性质(安全审计/代码审查/质量分析/
   架构理解/功能梳理等),采用相应的分析方法。可调用 list_skills 查看是否有
   适用的专家技能。
-- **系统性覆盖**:按 user_agent 指定的维度逐一分析,不遗漏。
+- **系统性覆盖**:按指令指定的维度逐一分析,不遗漏。
 - **证据导向**:每个结论都应有具体文件位置和代码证据,不臆测。
 - **高效执行**:优先用 search_code 定位关键代码,再 read_file 确认细节,
   避免盲目遍历所有文件。
@@ -109,7 +108,7 @@ status 可选:pending / in_progress / done。后端会解析并推送前端展�
   - 具体文件位置和代码片段
   - 影响范围/严重程度(若适用)
   - 修复或改进建议(若适用)
-- 总结要具体、有证据,便于 user_agent 评估覆盖度。
+- 总结要具体、有证据,便于后续评审覆盖度。
 - 不要在总结中编造未经验证的发现。
 """
 
@@ -734,8 +733,8 @@ def _format_interrupts(interrupts: list[dict[str, Any]]) -> str:
     body = "\n\n".join(parts)
 
     return (
-        "[user_agent 检查点评估:方向纠正]\n"
-        "user_agent 在观察你的执行过程后,认为当前方向需要调整。"
+        "[检查点评估:方向纠正]\n"
+        "观察你的执行过程后,认为当前方向需要调整。"
         "请把以下纠正指令纳入当前任务,调整检查方向继续执行:\n\n"
         f"{body}"
     )
@@ -1373,21 +1372,22 @@ def _build_round_segments(
     ua_text = ua_text[:MAX_HISTORY_MSG_CHARS] if ua_text else ""
 
     # compact(Level 1):丢工具摘要
+    # 段落标签用中性措辞,不向执行 agent 暴露 user_agent 等内部角色
     compact_parts = [f"=== 第 {ridx} 轮 ==="]
     if react_summary:
-        compact_parts.append(f"[react_agent 总结]\n{react_summary}")
+        compact_parts.append(f"[执行总结]\n{react_summary}")
     if ua_text:
-        compact_parts.append(f"[user_agent 评估]\n{ua_text}")
+        compact_parts.append(f"[评审反馈]\n{ua_text}")
     compact = "\n".join(compact_parts)
 
     # full(Level 0):含工具摘要
     full_parts = [f"=== 第 {ridx} 轮 ==="]
     if tool_summary:
-        full_parts.append(f"[react_agent 工具调用]\n{tool_summary}")
+        full_parts.append(f"[工具调用]\n{tool_summary}")
     if react_summary:
-        full_parts.append(f"[react_agent 总结]\n{react_summary}")
+        full_parts.append(f"[执行总结]\n{react_summary}")
     if ua_text:
-        full_parts.append(f"[user_agent 评估]\n{ua_text}")
+        full_parts.append(f"[评审反馈]\n{ua_text}")
     full = "\n".join(full_parts)
 
     # 优先级判定
