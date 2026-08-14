@@ -1264,6 +1264,13 @@ def _build_markdown_report(
             for r in results:
                 _append_result_md(lines, r, meta_fields)
 
+    # 协作轨迹(结论类附录:跳过 thinking/tool_call/tool_result/history_compress)
+    trace = _collect_conversation_trace(task)
+    if trace:
+        lines.append("## 协作轨迹")
+        lines.append("")
+        _append_conversation_trace_md(lines, trace)
+
     return "\n".join(lines)
 
 
@@ -1358,6 +1365,20 @@ def _build_html_report(
         ".result h4{margin:0 0 6px;}"
         ".result .rmeta{font-size:12px;color:#6b7280;margin:6px 0;}"
         ".result .round{font-size:11px;color:#9ca3af;}"
+        ".conv{margin:10px 0;padding:10px 14px;background:#fafafa;border-radius:6px;"
+        "border-left:3px solid #d1d5db;break-inside:avoid;}"
+        ".conv.round-header{background:transparent;border-left:none;padding:4px 0;"
+        "font-weight:600;color:#374151;}"
+        ".conv-tag{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;"
+        "border-radius:10px;margin-right:8px;color:#fff;background:#6b7280;}"
+        ".conv-tag.question{background:#2563eb;}"
+        ".conv-tag.evaluation{background:#7c3aed;}"
+        ".conv-tag.followup{background:#0891b2;}"
+        ".conv-tag.submit{background:#16a34a;}"
+        ".conv-tag.summary{background:#d97706;}"
+        ".conv-tag.error{background:#dc2626;}"
+        ".conv-role{font-size:12px;color:#6b7280;}"
+        ".conv-content{margin-top:6px;white-space:pre-wrap;font-size:13px;}"
         "@media print{body{margin:0;max-width:none;}}"
     )
     parts.append("</style></head><body>")
@@ -1410,6 +1431,12 @@ def _build_html_report(
         else:
             for r in results:
                 _append_result_html(parts, r, meta_fields)
+
+    # 协作轨迹(结论类附录)
+    trace = _collect_conversation_trace(task)
+    if trace:
+        parts.append("<h2>协作轨迹</h2>")
+        _append_conversation_trace_html(parts, trace)
 
     parts.append("</body></html>")
     return "\n".join(parts)
@@ -1467,6 +1494,94 @@ def _append_result_html(
             parts.append(f'<div class="rmeta">{" | ".join(mp)}</div>')
     parts.append(f'<div class="round">第 {r.round_idx} 轮产出</div>')
     parts.append("</div>")
+
+
+# ============================================================
+# 协作轨迹附录(报告导出用)
+# ============================================================
+#
+# 只摘「结论类」对话,跳过 thinking / tool_call / tool_result / history_compress
+# 等过程类内容 —— thinking 含 reasoning_content 思考链,可能几 KB~几十 KB,
+# 全量塞进报告会让 .md / PDF 体积爆炸,浏览器打印会卡死。
+# 结论类消息保留协作决策链:用户提问 → user_agent 评估/追问 → react_agent
+# 提交 → user_agent 总结,读者无需展开每个工具调用细节即可重建协作脉络。
+
+_CONVERSATION_TRACE_TYPES = {
+    "question",    # 用户提问
+    "evaluation",  # user_agent 评估
+    "followup",    # user_agent 追问
+    "submit",      # react_agent 提交结果
+    "summary",     # user_agent 最终总结
+    "error",       # 错误(关键失败原因,属于结论而非过程)
+}
+
+_CONVERSATION_TYPE_LABELS = {
+    "question": "用户提问",
+    "evaluation": "评估",
+    "followup": "追问",
+    "submit": "提交结果",
+    "summary": "总结",
+    "error": "错误",
+}
+
+
+def _collect_conversation_trace(task: Task) -> list[dict[str, Any]]:
+    """收集协作轨迹(仅结论类消息,按 round_idx + created_at 排序)
+
+    返回结构:[{round_idx, role, type, type_label, content, created_at}, ...]
+    依赖 task.conversations relationship(同一 session 内触发 lazy load)。
+    """
+    convs = [c for c in task.conversations if c.type in _CONVERSATION_TRACE_TYPES]
+    convs.sort(key=lambda c: (c.round_idx, c.created_at))
+    return [
+        {
+            "round_idx": c.round_idx,
+            "role": c.role,
+            "type": c.type,
+            "type_label": _CONVERSATION_TYPE_LABELS.get(c.type, c.type),
+            "content": c.content,
+            "created_at": c.created_at,
+        }
+        for c in convs
+    ]
+
+
+def _append_conversation_trace_md(
+    lines: list[str], trace: list[dict[str, Any]]
+) -> None:
+    """按协作轮次分组追加结论类对话到 Markdown"""
+    cur_round: int | None = None
+    for item in trace:
+        if item["round_idx"] != cur_round:
+            cur_round = item["round_idx"]
+            lines.append(f"### 第 {cur_round} 轮")
+            lines.append("")
+        lines.append(f"**[{item['type_label']}] {item['role']}**")
+        lines.append("")
+        lines.append(item["content"] or "(无内容)")
+        lines.append("")
+
+
+def _append_conversation_trace_html(
+    parts: list[str], trace: list[dict[str, Any]]
+) -> None:
+    """按协作轮次分组追加结论类对话到 HTML"""
+    cur_round: int | None = None
+    for item in trace:
+        if item["round_idx"] != cur_round:
+            cur_round = item["round_idx"]
+            parts.append(
+                f'<div class="conv round-header">第 {cur_round} 轮</div>'
+            )
+        parts.append(
+            f'<div class="conv">'
+            f'<span class="conv-tag {item["type"]}">'
+            f'{html.escape(item["type_label"])}</span>'
+            f'<span class="conv-role">{html.escape(item["role"])}</span>'
+            f'<div class="conv-content">'
+            f'{html.escape(item["content"] or "(无内容)")}'
+            f'</div></div>'
+        )
 
 
 @router.get("/tasks/{task_id}/stream")
