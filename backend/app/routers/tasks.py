@@ -1374,6 +1374,8 @@ def _build_html_report(
         ".conv-tag{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;"
         "border-radius:10px;margin-right:8px;color:#fff;background:#6b7280;}"
         ".conv-tag.question{background:#2563eb;}"
+        ".conv-tag.answer{background:#0ea5e9;}"
+        ".conv-tag.message{background:#0284c7;}"
         ".conv-tag.evaluation{background:#7c3aed;}"
         ".conv-tag.followup{background:#0891b2;}"
         ".conv-tag.submit{background:#16a34a;}"
@@ -1504,29 +1506,133 @@ def _append_result_html(
 # 协作轨迹附录(报告导出用)
 # ============================================================
 #
-# 只摘「结论类」对话,跳过 thinking / tool_call / tool_result / history_compress
-# 等过程类内容 —— thinking 含 reasoning_content 思考链,可能几 KB~几十 KB,
-# 全量塞进报告会让 .md / PDF 体积爆炸,浏览器打印会卡死。
+# 与前端任务详情主对话流对齐:只摘「结论类」对话,跳过思考 / 工具调用 /
+# 检查点评估 / history_compress 等过程性内容。
+#
+# 跳过规则(参考 frontend/src/views/TaskDetailView.vue 主对话流过滤):
+# 1. thinking / tool_call / tool_result / history_compress —— 过程类,体积大
+#    (thinking 含 reasoning_content 思考链,可能几 KB~几十 KB,塞进报告会让
+#    .md / PDF 体积爆炸,浏览器打印会卡死)
+# 2. evaluation 类型但 content 以 "[检查点评估" / "[检查点中断]" 开头 ——
+#    检查点评估/中断,前端在右侧栏专门聚合展示,不进主对话流
+#
 # 结论类消息保留协作决策链:用户提问 → user_agent 评估/追问 → react_agent
 # 提交 → user_agent 总结,读者无需展开每个工具调用细节即可重建协作脉络。
+#
+# 补充两点特殊处理:
+# 3. react_agent 每轮总结无独立落库类型,约定为该轮最后一条
+#    role=react_agent type=thinking 的 content(与 orchestrator._load_react_summaries
+#    一致),报告侧按此约定合成「提交结果」条目
+# 4. 存量数据里追问轮 question 可能整段落库了拼进提示词的
+#    "[之前轮次的对话记忆]" 块(新数据已在 react_agent 落库侧拆分),
+#    报告侧裁剪兼容历史任务
 
 _CONVERSATION_TRACE_TYPES = {
-    "question",    # 用户提问
-    "evaluation",  # user_agent 评估
+    "question",    # 用户提问(前端跳过主对话流,单独顶部渲染,报告保留)
+    "answer",      # 用户对追问的回答(前端主对话流展示)
+    "evaluation",  # user_agent 评估(检查点评估/中断会被额外过滤)
     "followup",    # user_agent 追问
     "submit",      # react_agent 提交结果
     "summary",     # user_agent 最终总结
+    "message",     # 用户追加消息(前端主对话流右对齐展示)
     "error",       # 错误(关键失败原因,属于结论而非过程)
 }
 
+# 检查点评估/中断前缀(与前端 TaskDetailView.vue + agent_checkpoint / acp_base
+# 落库约定一致):这类消息属于检查点过程性内容,前端在右侧栏聚合展示,
+# 报告协作轨迹同步跳过
+_CHECKPOINT_CONTENT_PREFIXES = ("[检查点评估", "[检查点中断")
+
+# 跨轮历史记忆注入块标记(react_agent._build_history_context 生成)。
+# 历史存量数据里追问轮 question 可能把它整段落库,报告侧需裁掉
+_HISTORY_MEMORY_MARKER = "[之前轮次的对话记忆]"
+
+
+def _is_checkpoint_evaluation(c) -> bool:
+    """判断是否为检查点评估/中断消息(前端路由到右侧栏检查点聚合区,不进主对话流)
+
+    检查点评估:user_agent 的 thinking 或 evaluation 类型,content 以
+    "[检查点评估" 开头 —— 前端 TaskDetailView.vue:1283-1287 / 1956-1971
+    把这类消息从主对话流过滤掉,聚到右侧栏专门展示。
+    检查点中断:恢复流程中 acp_base 落库的 evaluation,content 以
+    "[检查点中断]" 开头,同属检查点过程通知。
+    报告协作轨迹应同步跳过。
+    """
+    if c.role != "user_agent":
+        return False
+    if c.type not in ("thinking", "evaluation"):
+        return False
+    if not c.content:
+        return False
+    return any(c.content.startswith(p) for p in _CHECKPOINT_CONTENT_PREFIXES)
+
 _CONVERSATION_TYPE_LABELS = {
     "question": "用户提问",
+    "answer": "用户回答",
     "evaluation": "评估",
     "followup": "追问",
     "submit": "提交结果",
     "summary": "总结",
+    "message": "用户消息",
     "error": "错误",
 }
+
+
+def _strip_question_memory_block(content: str) -> str:
+    """裁掉 question 里混入的跨轮历史记忆块(存量数据兼容)
+
+    新数据已在 react_agent 落库侧拆分(历史记忆块只进发送内容不落库),
+    此函数仅用于兼容修改前的历史任务数据。存量 content 结构:
+    头部指令 + "[之前轮次的对话记忆]..." + "[本轮 user_agent 追问]...",
+    只移除中间的记忆块,保留追问部分(它是本轮真实指令)。
+    """
+    if not content:
+        return content
+    idx = content.find(_HISTORY_MEMORY_MARKER)
+    if idx < 0:
+        return content
+    followup_idx = content.find("[本轮 user_agent 追问]", idx)
+    head = content[:idx].rstrip()
+    if followup_idx < 0:
+        # 没找到追问段标记,记忆块延伸到末尾,直接截断
+        return head or content
+    tail = content[followup_idx:]
+    return f"{head}\n\n{tail}" if head else tail
+
+
+def _collect_react_summaries(task: Task) -> list[dict[str, Any]]:
+    """按轮提取 react_agent 每轮最终总结,合成「提交结果」条目
+
+    约定(与 orchestrator._load_react_summaries 一致):react_agent 每轮
+    最终总结落库为该轮最后一条 role=react_agent type=thinking 的 content,
+    无独立 submit 类型。报告白名单跳过 thinking,故在此按约定合成,
+    保证协作轨迹里能看到 react_agent 每轮的结果。
+    """
+    last_by_round: dict[int, Any] = {}
+    for c in task.conversations:
+        if (
+            c.role == "react_agent"
+            and c.type == "thinking"
+            and c.content
+        ):
+            # task.conversations 顺序不保证,按 created_at 取每轮最后一条
+            prev = last_by_round.get(c.round_idx)
+            if prev is None or (
+                c.created_at
+                and (prev.created_at is None or c.created_at >= prev.created_at)
+            ):
+                last_by_round[c.round_idx] = c
+    return [
+        {
+            "round_idx": c.round_idx,
+            "role": "react_agent",
+            "type": "submit",
+            "type_label": _CONVERSATION_TYPE_LABELS["submit"],
+            "content": c.content,
+            "created_at": c.created_at,
+        }
+        for _, c in sorted(last_by_round.items())
+    ]
 
 
 def _collect_conversation_trace(task: Task) -> list[dict[str, Any]]:
@@ -1534,20 +1640,36 @@ def _collect_conversation_trace(task: Task) -> list[dict[str, Any]]:
 
     返回结构:[{round_idx, role, type, type_label, content, created_at}, ...]
     依赖 task.conversations relationship(同一 session 内触发 lazy load)。
+
+    过滤规则(与前端任务详情主对话流对齐):
+    - 仅保留 _CONVERSATION_TRACE_TYPES 中的类型
+      (thinking/tool_call/tool_result/history_compress 不在白名单,天然跳过)
+    - 额外跳过检查点评估/中断(_is_checkpoint_evaluation)
+    - react_agent 每轮总结按约定合成「提交结果」条目并入
+    - question 内容裁掉存量数据里的历史记忆块
     """
-    convs = [c for c in task.conversations if c.type in _CONVERSATION_TRACE_TYPES]
-    convs.sort(key=lambda c: (c.round_idx, c.created_at))
-    return [
+    convs = [
+        c for c in task.conversations
+        if c.type in _CONVERSATION_TRACE_TYPES
+        and not _is_checkpoint_evaluation(c)
+    ]
+    items = [
         {
             "round_idx": c.round_idx,
             "role": c.role,
             "type": c.type,
             "type_label": _CONVERSATION_TYPE_LABELS.get(c.type, c.type),
-            "content": c.content,
+            "content": (
+                _strip_question_memory_block(c.content)
+                if c.type == "question" else c.content
+            ),
             "created_at": c.created_at,
         }
         for c in convs
     ]
+    items.extend(_collect_react_summaries(task))
+    items.sort(key=lambda it: (it["round_idx"], it["created_at"]))
+    return items
 
 
 def _append_conversation_trace_md(

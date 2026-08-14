@@ -205,6 +205,7 @@ def run_react_agent(
     # repo_ctx_section:预 clone 上下文段,只进发送内容不落库展示
     # (属系统编排信息,非用户原话,与 acp_base 记忆注入段同样处理)
     repo_ctx_section = ""
+    history_prefix = ""  # 追问轮的历史记忆块,同样只进发送内容不落库
     if followup_query is None:
         # 第一轮:用 task.user_input
         user_msg = task.user_input
@@ -255,11 +256,16 @@ def run_react_agent(
             f"\n\n[本轮 user_agent 追问]\n{followup_query}"
         )
 
-    # 记录 user 指令到对话(落库只存纯指令,不含预 clone 上下文段)
+    # 记录 user 指令到对话(落库只存纯指令,不含预 clone 上下文段与
+    # 历史记忆块:两者均为编排/拼接信息,非用户原话)
+    stored_msg = (
+        user_msg.replace(f"{history_prefix}\n\n", "", 1)
+        if history_prefix else user_msg
+    )
     _add_conversation(
         db, task, round_idx=round_idx,
         role="user", type="question",
-        content=user_msg,
+        content=stored_msg,
     )
 
     # 实际发送给 LLM 时拼上预 clone 上下文段
