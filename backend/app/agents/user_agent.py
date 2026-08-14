@@ -170,10 +170,35 @@ USER_AGENT_SYSTEM_PROMPT = """你是 user_agent(用户代理智能体),扮演一
   "results": [
     {"title": "结果标题", "content": "结果详细内容", "metadata": {"自定义字段": "值"}}
   ],
-  "grouping": {"field": "metadata中的分组字段名", "values": [{"value": "值", "label": "显示名", "color": "颜色key"}]}
+  "grouping": {
+    "field": "metadata中的分组字段名",
+    "type": "ordered",
+    "values": [{"value": "值", "label": "显示名", "color": "颜色key", "order": 1}],
+    "default_label": "其他",
+    "default_color": "unknown"
+  }
 }
 ```
-grouping 可为 null(不分组,平铺展示)。
+grouping 可为 null(不分组,平铺展示)。非 null 时各字段说明:
+
+- **field**:必填。从 result.metadata 取该字段的值作为分组 key。
+- **type**:必填,`ordered` 或 `dynamic`。
+  - `ordered`:**固定枚举 + 顺序**。适合分类维度可预知的场景
+    (如安全审计的 severity: high/medium/low/info)。
+    按 `values` 数组中 `order` 字段排序展示,未匹配枚举的结果归入 default 组。
+    **values 必填且需列全所有可能的枚举值**。
+  - `dynamic`:**按 metadata 实际值动态分组**。适合分类值不可预知的场景
+    (如按 file_path 分组,文件名无数种可能)。
+    按 results 实际出现的值现分,无固定顺序。**values 可省略**(填了也不读)。
+- **values**:ordered 必填。每项含 `value`(原始值)、`label`(展示名)、
+  `color`(颜色 key,可选 high/medium/low/info/critical/unknown)、`order`(展示顺序,数字)。
+- **default_label**:必填。metadata 缺失该字段时的分组展示名(如"其他")。
+- **default_color**:必填。default 组的颜色 key,可选 high/medium/low/info/critical/unknown。
+
+**选 type 的判断准则**:
+- 1-8 个固定分类(严重程度、优先级、类型)→ 用 `ordered`
+- 文件名/模块名/标签等开放集合 → 用 `dynamic`
+- 不确定是否固定 → 用 `dynamic`(更安全)
 
 ### questions 问题对象格式(ask_user=true 时):
 ```json
@@ -201,7 +226,12 @@ grouping 可为 null(不分组,平铺展示)。
 - results 从 react_agent 各轮总结中提取结构化发现。
 - 每条 result 含 title(简短标题)、content(详细内容)、metadata(自定义字段)。
 - grouping 声明前端如何分组展示:field 指定 metadata 中的分组字段,
-  values 列出分组枚举(含显示名和颜色)。无明确分组维度时 grouping=null。
+  type 决定分组模式(ordered 固定枚举+顺序 / dynamic 按实际值动态分)。
+  无明确分组维度时 grouping=null。
+- **典型场景参考**:
+  - 安全审计 → `ordered` 按 severity(high/medium/low/info)分组,高危在前
+  - 代码审查 → `ordered` 按 category(可读性/正确性/性能/安全)分组
+  - 文件级分析 → `dynamic` 按 file_path 分组(文件名集合开放)
 
 ## 动态验证(可选,有 verify 工具时)
 如果任务配置了测试环境,你可以调用 `verify` 工具动态验证 react_agent 发现的安全问题:
