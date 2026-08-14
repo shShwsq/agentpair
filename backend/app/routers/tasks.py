@@ -1547,6 +1547,10 @@ _CHECKPOINT_CONTENT_PREFIXES = ("[检查点评估", "[检查点中断")
 # 历史存量数据里追问轮 question 可能把它整段落库,报告侧需裁掉
 _HISTORY_MEMORY_MARKER = "[之前轮次的对话记忆]"
 
+# 追问轮指令段标签(新旧兼容):记忆块之后紧跟的追问段起点,
+# 裁剪记忆块时需保留该段(它是本轮真实指令)
+_FOLLOWUP_SECTION_LABELS = ("[本轮补充检查要求]", "[本轮 user_agent 追问]", "[本轮追问]")
+
 
 def _is_checkpoint_evaluation(c) -> bool:
     """判断是否为检查点评估/中断消息(前端路由到右侧栏检查点聚合区,不进主对话流)
@@ -1583,15 +1587,20 @@ def _strip_question_memory_block(content: str) -> str:
 
     新数据已在 react_agent 落库侧拆分(历史记忆块只进发送内容不落库),
     此函数仅用于兼容修改前的历史任务数据。存量 content 结构:
-    头部指令 + "[之前轮次的对话记忆]..." + "[本轮 user_agent 追问]...",
-    只移除中间的记忆块,保留追问部分(它是本轮真实指令)。
+    头部指令 + "[之前轮次的对话记忆]..." + 追问段(新旧标签见
+    _FOLLOWUP_SECTION_LABELS),只移除中间的记忆块,保留追问部分
+    (它是本轮真实指令)。
     """
     if not content:
         return content
     idx = content.find(_HISTORY_MEMORY_MARKER)
     if idx < 0:
         return content
-    followup_idx = content.find("[本轮 user_agent 追问]", idx)
+    followup_idx = -1
+    for label in _FOLLOWUP_SECTION_LABELS:
+        followup_idx = content.find(label, idx)
+        if followup_idx >= 0:
+            break
     head = content[:idx].rstrip()
     if followup_idx < 0:
         # 没找到追问段标记,记忆块延伸到末尾,直接截断

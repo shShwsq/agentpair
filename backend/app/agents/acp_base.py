@@ -1954,12 +1954,12 @@ def _build_base_prompt(
         if not repo_context and repo_path:
             msg += f"\n仓库路径: {repo_path}"
     else:
-        msg = (
-            f"基于之前的审计结果,现在请针对以下问题继续检查(不需要重新 clone 仓库):\n"
-        )
-        if repo_path:
-            msg += f"仓库路径(已 clone): {repo_path}\n\n"
-        msg += f"[本轮追问]\n{followup_query}"
+        msg = "基于之前的审计结果,现在请针对以下问题继续检查"
+        # 只有工作区确实有文件才声称"已 clone":预 clone 可能失败降级为
+        # 空目录,此时若断言已 clone 会误导 CLI 跳过 clone
+        if repo_path and sandbox_tools.workspace_has_files(str(task.id)):
+            msg += f"\n仓库路径(已 clone,无需再 clone): {repo_path}"
+        msg += f"\n\n[本轮补充检查要求]\n{followup_query}"
 
     if previous_plan:
         reminder = _format_plan_reminder(previous_plan)

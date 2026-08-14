@@ -46,6 +46,9 @@ LOOP_WINDOW_SIZE = 6
 # 窗口内不同 call_sig 少于等于此值 → 判定为循环(覆盖交替循环 A,B,A,B,A,B)
 LOOP_MIN_DISTINCT = 2
 
+# 追问轮指令段标签(中性措辞,不向执行 agent 暴露 user_agent 等内部角色)
+FOLLOWUP_SECTION_LABEL = "[本轮补充检查要求]"
+
 
 # ============================================================
 # 通用 system prompt(场景降级后,不再从场景读取)
@@ -231,13 +234,15 @@ def run_react_agent(
 
         ws_info = sandbox_tools.get_workspace_info(task_id_str)
         repo_path_hint = ""
+        # 只有工作区确实有文件才声称"已 clone":预 clone 可能失败降级为
+        # 空目录,此时若断言已 clone 会误导 react_agent 跳过 clone
         if (
             ws_info and ws_info.get("repo_path")
-            and _workspace_has_files(task_id_str)
+            and sandbox_tools.workspace_has_files(task_id_str)
         ):
             repo_path_hint = (
-                f"\n仓库路径(已 clone,直接用这个路径调 read_file/search_code/list_files): "
-                f"{ws_info['repo_path']}"
+                f"\n仓库路径(已 clone,无需再 clone,直接用这个路径调 "
+                f"read_file/search_code/list_files): {ws_info['repo_path']}"
             )
 
         # 之前轮次的对话记忆(react_agent 自己的总结 + user_agent 的评估反馈)
@@ -256,7 +261,7 @@ def run_react_agent(
             f"基于之前的审计结果,现在请针对以下问题继续检查"
             f"{repo_path_hint}\n\n"
             f"{history_prefix}"
-            f"\n\n{_FOLLOWUP_SECTION_LABEL}\n{followup_query}"
+            f"\n\n{FOLLOWUP_SECTION_LABEL}\n{followup_query}"
         )
 
     # 记录 user 指令到对话(落库只存纯指令,不含预 clone 上下文段与
