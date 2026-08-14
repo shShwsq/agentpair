@@ -162,6 +162,21 @@ def browse_files(task_id: str, subdir: str = "") -> dict:
         return _list_files_sandbox(ctx, repo_path, subdir, 500)
 
 
+def workspace_has_files(task_id: str) -> bool:
+    """轻量探测工作区根目录是否有实际条目
+
+    供追问轮决定是否注入"仓库已 clone"的路径提示:预 clone 可能失败
+    降级为空目录(见预克隆失败降级处理),此时声称"已 clone"会误导
+    执行 agent 跳过 clone。任何异常(session 过期 / 未 clone / 目录
+    不存在 / 沙箱命令失败)均视为无文件。
+    """
+    try:
+        listing = browse_files(task_id)
+        return bool(listing.get("entries"))
+    except Exception:
+        return False
+
+
 def browse_read_file(task_id: str, file_path: str, offset: int = 1, max_lines: int = 500) -> dict:
     """面向前端的文件读取(复用 read_file 逻辑,但不带行号)
 

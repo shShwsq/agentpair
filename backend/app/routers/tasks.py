@@ -1264,6 +1264,13 @@ def _build_markdown_report(
             for r in results:
                 _append_result_md(lines, r, meta_fields)
 
+    # 协作轨迹(结论类附录:跳过 thinking/tool_call/tool_result/history_compress)
+    trace = _collect_conversation_trace(task)
+    if trace:
+        lines.append("## 协作轨迹")
+        lines.append("")
+        _append_conversation_trace_md(lines, trace)
+
     return "\n".join(lines)
 
 
@@ -1275,30 +1282,32 @@ def _append_grouped_results_md(
 ) -> None:
     """按场景声明 result_grouping 分组追加结果到 Markdown"""
     buckets: dict[str, list] = {}
-    field = grouping["field"]
+    field = grouping.get("field")
     for r in results:
         md = r.metadata_ or {}
-        val = md.get(field)
+        val = md.get(field) if field else None
         key = val if val else "__default__"
         buckets.setdefault(key, []).append(r)
 
-    if grouping["type"] == "ordered":
+    # type 默认 dynamic(LLM 输出可能不带 type/default_label,见 user_agent prompt 示例)
+    default_label = grouping.get("default_label", "其他")
+    if grouping.get("type") == "ordered":
         for v in sorted(grouping.get("values", []), key=lambda x: x.get("order", 0)):
             rs = buckets.get(v["value"], [])
             if rs:
-                lines.append(f"### {v['label']} ({len(rs)})")
+                lines.append(f"### {v.get('label', v.get('value', '?'))} ({len(rs)})")
                 lines.append("")
                 for r in rs:
                     _append_result_md(lines, r, meta_fields)
         default_rs = buckets.get("__default__", [])
         if default_rs:
-            lines.append(f"### {grouping['default_label']} ({len(default_rs)})")
+            lines.append(f"### {default_label} ({len(default_rs)})")
             lines.append("")
             for r in default_rs:
                 _append_result_md(lines, r, meta_fields)
     else:
         for key, rs in buckets.items():
-            label = grouping["default_label"] if key == "__default__" else key
+            label = default_label if key == "__default__" else key
             lines.append(f"### {label} ({len(rs)})")
             lines.append("")
             for r in rs:
@@ -1358,6 +1367,22 @@ def _build_html_report(
         ".result h4{margin:0 0 6px;}"
         ".result .rmeta{font-size:12px;color:#6b7280;margin:6px 0;}"
         ".result .round{font-size:11px;color:#9ca3af;}"
+        ".conv{margin:10px 0;padding:10px 14px;background:#fafafa;border-radius:6px;"
+        "border-left:3px solid #d1d5db;break-inside:avoid;}"
+        ".conv.round-header{background:transparent;border-left:none;padding:4px 0;"
+        "font-weight:600;color:#374151;}"
+        ".conv-tag{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;"
+        "border-radius:10px;margin-right:8px;color:#fff;background:#6b7280;}"
+        ".conv-tag.question{background:#2563eb;}"
+        ".conv-tag.answer{background:#0ea5e9;}"
+        ".conv-tag.message{background:#0284c7;}"
+        ".conv-tag.evaluation{background:#7c3aed;}"
+        ".conv-tag.followup{background:#0891b2;}"
+        ".conv-tag.submit{background:#16a34a;}"
+        ".conv-tag.summary{background:#d97706;}"
+        ".conv-tag.error{background:#dc2626;}"
+        ".conv-role{font-size:12px;color:#6b7280;}"
+        ".conv-content{margin-top:6px;white-space:pre-wrap;font-size:13px;}"
         "@media print{body{margin:0;max-width:none;}}"
     )
     parts.append("</style></head><body>")
@@ -1411,6 +1436,12 @@ def _build_html_report(
             for r in results:
                 _append_result_html(parts, r, meta_fields)
 
+    # 协作轨迹(结论类附录)
+    trace = _collect_conversation_trace(task)
+    if trace:
+        parts.append("<h2>协作轨迹</h2>")
+        _append_conversation_trace_html(parts, trace)
+
     parts.append("</body></html>")
     return "\n".join(parts)
 
@@ -1423,10 +1454,10 @@ def _append_grouped_results_html(
 ) -> None:
     """按场景声明 result_grouping 分组追加结果到 HTML"""
     buckets: dict[str, list] = {}
-    field = grouping["field"]
+    field = grouping.get("field")
     for r in results:
         md = r.metadata_ or {}
-        val = md.get(field)
+        val = md.get(field) if field else None
         key = val if val else "__default__"
         buckets.setdefault(key, []).append(r)
 
@@ -1435,17 +1466,19 @@ def _append_grouped_results_html(
         for r in rs:
             _append_result_html(parts, r, meta_fields)
 
-    if grouping["type"] == "ordered":
+    # type 默认 dynamic(LLM 输出可能不带 type/default_label,见 user_agent prompt 示例)
+    default_label = grouping.get("default_label", "其他")
+    if grouping.get("type") == "ordered":
         for v in sorted(grouping.get("values", []), key=lambda x: x.get("order", 0)):
             rs = buckets.get(v["value"], [])
             if rs:
-                _emit_group(v["label"], rs)
+                _emit_group(v.get("label", v.get("value", "?")), rs)
         default_rs = buckets.get("__default__", [])
         if default_rs:
-            _emit_group(grouping["default_label"], default_rs)
+            _emit_group(default_label, default_rs)
     else:
         for key, rs in buckets.items():
-            label = grouping["default_label"] if key == "__default__" else key
+            label = default_label if key == "__default__" else key
             _emit_group(label, rs)
 
 
@@ -1467,6 +1500,294 @@ def _append_result_html(
             parts.append(f'<div class="rmeta">{" | ".join(mp)}</div>')
     parts.append(f'<div class="round">第 {r.round_idx} 轮产出</div>')
     parts.append("</div>")
+
+
+# ============================================================
+# 协作轨迹附录(报告导出用)
+# ============================================================
+#
+# 与前端任务详情主对话流对齐:只摘「结论类」对话,跳过思考 / 工具调用 /
+# 检查点评估 / history_compress 等过程性内容。
+#
+# 跳过规则(参考 frontend/src/views/TaskDetailView.vue 主对话流过滤):
+# 1. thinking / tool_call / tool_result / history_compress —— 过程类,体积大
+#    (thinking 含 reasoning_content 思考链,可能几 KB~几十 KB,塞进报告会让
+#    .md / PDF 体积爆炸,浏览器打印会卡死)
+# 2. evaluation 类型但 content 以 "[检查点评估" / "[检查点中断]" 开头 ——
+#    检查点评估/中断,前端在右侧栏专门聚合展示,不进主对话流
+#
+# 结论类消息保留协作决策链:用户提问 → user_agent 评估/追问 → react_agent
+# 提交 → user_agent 总结,读者无需展开每个工具调用细节即可重建协作脉络。
+#
+# 补充特殊处理:
+# 3. react_agent 每轮总结无独立落库类型,约定为该轮最后一条
+#    role=react_agent type=thinking 的 content(与 orchestrator._load_react_summaries
+#    一致),报告侧按此约定合成「提交结果」条目
+# 4. 存量数据里追问轮 question 可能整段落库了拼进提示词的
+#    "[之前轮次的对话记忆]" 块(新数据已在 react_agent 落库侧拆分),
+#    报告侧裁剪兼容历史任务
+# 5. user_agent 启用时,驱动第 r+1 轮的问题是第 r 轮 user_agent 评估生成的
+#    追问(非 done/ask_user 时评估 content 就是 followup_query),协作轨迹
+#    把这类评估归位到下一轮展示为提问/追问,避免与落库的样板 question 重复
+
+_CONVERSATION_TRACE_TYPES = {
+    "question",    # 用户提问(前端跳过主对话流,单独顶部渲染,报告保留)
+    "answer",      # 用户对追问的回答(前端主对话流展示)
+    "evaluation",  # user_agent 评估(检查点评估/中断会被额外过滤)
+    "followup",    # user_agent 追问
+    "submit",      # react_agent 提交结果
+    "summary",     # user_agent 最终总结
+    "message",     # 用户追加消息(前端主对话流右对齐展示)
+    "error",       # 错误(关键失败原因,属于结论而非过程)
+}
+
+# 检查点评估/中断前缀(与前端 TaskDetailView.vue + agent_checkpoint / acp_base
+# 落库约定一致):这类消息属于检查点过程性内容,前端在右侧栏聚合展示,
+# 报告协作轨迹同步跳过
+_CHECKPOINT_CONTENT_PREFIXES = ("[检查点评估", "[检查点中断")
+
+# 跨轮历史记忆注入块标记(react_agent._build_history_context 生成)。
+# 历史存量数据里追问轮 question 可能把它整段落库,报告侧需裁掉
+_HISTORY_MEMORY_MARKER = "[之前轮次的对话记忆]"
+
+# 追问轮指令段标签(新旧兼容):记忆块之后紧跟的追问段起点,
+# 裁剪记忆块时需保留该段(它是本轮真实指令)
+_FOLLOWUP_SECTION_LABELS = (
+    "[本轮补充要求]", "[本轮补充检查要求]",
+    "[本轮 user_agent 追问]", "[本轮追问]",
+)
+
+# user_agent 评估中的非追问内容标记(_record_user_agent 落库约定):
+# 这类评估是结论/动作记录而非驱动下一轮的问题,协作轨迹中保留在原轮
+_UA_EVAL_NON_FOLLOWUP_MARKERS = ("评估完成,无需追问", "(未给出追问)", "请求用户澄清")
+
+
+def _is_ua_followup_evaluation(c) -> bool:
+    """判断 user_agent 评估是否为追问类(其 content 即驱动下一轮的问题)
+
+    _record_user_agent 落库约定:非 done/ask_user 时 content 就是
+    followup_query 本身;done/ask_user/无追问时为固定标记文案。
+    """
+    if c.role != "user_agent" or c.type != "evaluation":
+        return False
+    if _is_checkpoint_evaluation(c):
+        return False
+    content = (c.content or "").strip()
+    return bool(content) and not any(
+        content.startswith(m) for m in _UA_EVAL_NON_FOLLOWUP_MARKERS
+    )
+
+
+def _is_checkpoint_evaluation(c) -> bool:
+    """判断是否为检查点评估/中断消息(前端路由到右侧栏检查点聚合区,不进主对话流)
+
+    检查点评估:user_agent 的 thinking 或 evaluation 类型,content 以
+    "[检查点评估" 开头 —— 前端 TaskDetailView.vue:1283-1287 / 1956-1971
+    把这类消息从主对话流过滤掉,聚到右侧栏专门展示。
+    检查点中断:恢复流程中 acp_base 落库的 evaluation,content 以
+    "[检查点中断]" 开头,同属检查点过程通知。
+    报告协作轨迹应同步跳过。
+    """
+    if c.role != "user_agent":
+        return False
+    if c.type not in ("thinking", "evaluation"):
+        return False
+    if not c.content:
+        return False
+    return any(c.content.startswith(p) for p in _CHECKPOINT_CONTENT_PREFIXES)
+
+_CONVERSATION_TYPE_LABELS = {
+    "question": "用户提问",
+    "answer": "用户回答",
+    "evaluation": "评估",
+    "followup": "追问",
+    "submit": "提交结果",
+    "summary": "总结",
+    "message": "用户消息",
+    "error": "错误",
+}
+
+
+def _strip_question_memory_block(content: str) -> str:
+    """裁掉 question 里混入的跨轮历史记忆块(存量数据兼容)
+
+    新数据已在 react_agent 落库侧拆分(历史记忆块只进发送内容不落库),
+    此函数仅用于兼容修改前的历史任务数据。存量 content 结构:
+    头部指令 + "[之前轮次的对话记忆]..." + 追问段(新旧标签见
+    _FOLLOWUP_SECTION_LABELS),只移除中间的记忆块,保留追问部分
+    (它是本轮真实指令)。
+    """
+    if not content:
+        return content
+    idx = content.find(_HISTORY_MEMORY_MARKER)
+    if idx < 0:
+        return content
+    followup_idx = -1
+    for label in _FOLLOWUP_SECTION_LABELS:
+        followup_idx = content.find(label, idx)
+        if followup_idx >= 0:
+            break
+    head = content[:idx].rstrip()
+    if followup_idx < 0:
+        # 没找到追问段标记,记忆块延伸到末尾,直接截断
+        return head or content
+    tail = content[followup_idx:]
+    return f"{head}\n\n{tail}" if head else tail
+
+
+def _collect_react_summaries(task: Task) -> list[dict[str, Any]]:
+    """按轮提取 react_agent 每轮最终总结,合成「提交结果」条目
+
+    约定(与 orchestrator._load_react_summaries 一致):react_agent 每轮
+    最终总结落库为该轮最后一条 role=react_agent type=thinking 的 content,
+    无独立 submit 类型。报告白名单跳过 thinking,故在此按约定合成,
+    保证协作轨迹里能看到 react_agent 每轮的结果。
+    """
+    last_by_round: dict[int, Any] = {}
+    for c in task.conversations:
+        if (
+            c.role == "react_agent"
+            and c.type == "thinking"
+            and c.content
+        ):
+            # task.conversations 顺序不保证,按 created_at 取每轮最后一条
+            prev = last_by_round.get(c.round_idx)
+            if prev is None or (
+                c.created_at
+                and (prev.created_at is None or c.created_at >= prev.created_at)
+            ):
+                last_by_round[c.round_idx] = c
+    return [
+        {
+            "round_idx": c.round_idx,
+            "role": "react_agent",
+            "type": "submit",
+            "type_label": _CONVERSATION_TYPE_LABELS["submit"],
+            "content": c.content,
+            "created_at": c.created_at,
+        }
+        for _, c in sorted(last_by_round.items())
+    ]
+
+
+def _collect_conversation_trace(task: Task) -> list[dict[str, Any]]:
+    """收集协作轨迹(仅结论类消息,按 round_idx + created_at 排序)
+
+    返回结构:[{round_idx, role, type, type_label, content, created_at}, ...]
+    依赖 task.conversations relationship(同一 session 内触发 lazy load)。
+
+    过滤规则(与前端任务详情主对话流对齐):
+    - 仅保留 _CONVERSATION_TRACE_TYPES 中的类型
+      (thinking/tool_call/tool_result/history_compress 不在白名单,天然跳过)
+    - 额外跳过检查点评估/中断(_is_checkpoint_evaluation)
+    - react_agent 每轮总结按约定合成「提交结果」条目并入
+    - question 内容裁掉存量数据里的历史记忆块
+
+    user_agent 启用时的提问归位:
+    - 驱动第 r+1 轮的问题是第 r 轮 user_agent 评估的追问 → 归位到
+      r+1 轮展示为提问/追问(role=user_agent);包括 round_idx=0 的
+      初始评估(提问阶段结束时落库,其追问即第 1 轮有效意图)
+    - 落库的样板 question(原始意图/编排样板)相应跳过:第 1 轮原始意图
+      已在报告「用户意图」节展示,后续轮 question 主体就是已归位的追问
+    - 单 agent 模式(无 user_agent 评估)保持原样展示落库 question
+    """
+    convs = [
+        c for c in task.conversations
+        if c.type in _CONVERSATION_TRACE_TYPES
+        and not _is_checkpoint_evaluation(c)
+    ]
+    submits = _collect_react_summaries(task)
+    submit_rounds = {it["round_idx"] for it in submits}
+
+    # user_agent 启用判定:存在 user_agent 评估即为双 agent 协作
+    # (单 agent 模式 user_agent 完全关闭,不会有评估落库)
+    ua_enabled = any(
+        c.role == "user_agent" and c.type == "evaluation" for c in convs
+    )
+
+    items: list[dict[str, Any]] = []
+    # 追问类评估归位:第 r 轮评估 → 第 r+1 轮的提问/追问
+    # (仅当 r+1 轮确实有 react_agent 执行时才归位,末尾轮的结论性评估留在原轮)
+    moved_question_rounds: set[int] = set()
+    if ua_enabled:
+        for c in convs:
+            if (
+                _is_ua_followup_evaluation(c)
+                and (c.round_idx + 1) in submit_rounds
+            ):
+                moved_question_rounds.add(c.round_idx + 1)
+                items.append({
+                    "round_idx": c.round_idx + 1,
+                    "role": c.role,
+                    "type": "followup",
+                    "type_label": "提问" if c.round_idx == 0 else "追问",
+                    "content": c.content,
+                    "created_at": c.created_at,
+                })
+
+    for c in convs:
+        if ua_enabled and _is_ua_followup_evaluation(c) and c.round_idx + 1 in moved_question_rounds:
+            continue  # 已归位到下一轮作为提问/追问
+        if ua_enabled and c.role == "user" and c.type == "question":
+            # 第 1 轮 question 是用户原始意图(已在「用户意图」节展示);
+            # 后续轮 question 是编排样板 + 追问,追问已由评估归位覆盖。
+            # 若该轮没有归位的提问(异常/降级路径),则保留原 question 展示
+            if c.round_idx == 1 and 1 in moved_question_rounds:
+                continue
+            if c.round_idx >= 2 and c.round_idx in moved_question_rounds:
+                continue
+        items.append({
+            "round_idx": c.round_idx,
+            "role": c.role,
+            "type": c.type,
+            "type_label": _CONVERSATION_TYPE_LABELS.get(c.type, c.type),
+            "content": (
+                _strip_question_memory_block(c.content)
+                if c.type == "question" else c.content
+            ),
+            "created_at": c.created_at,
+        })
+    items.extend(submits)
+    items.sort(key=lambda it: (it["round_idx"], it["created_at"]))
+    return items
+
+
+def _append_conversation_trace_md(
+    lines: list[str], trace: list[dict[str, Any]]
+) -> None:
+    """按协作轮次分组追加结论类对话到 Markdown"""
+    cur_round: int | None = None
+    for item in trace:
+        if item["round_idx"] != cur_round:
+            cur_round = item["round_idx"]
+            lines.append(f"### 第 {cur_round} 轮")
+            lines.append("")
+        lines.append(f"**[{item['type_label']}] {item['role']}**")
+        lines.append("")
+        lines.append(item["content"] or "(无内容)")
+        lines.append("")
+
+
+def _append_conversation_trace_html(
+    parts: list[str], trace: list[dict[str, Any]]
+) -> None:
+    """按协作轮次分组追加结论类对话到 HTML"""
+    cur_round: int | None = None
+    for item in trace:
+        if item["round_idx"] != cur_round:
+            cur_round = item["round_idx"]
+            parts.append(
+                f'<div class="conv round-header">第 {cur_round} 轮</div>'
+            )
+        parts.append(
+            f'<div class="conv">'
+            f'<span class="conv-tag {item["type"]}">'
+            f'{html.escape(item["type_label"])}</span>'
+            f'<span class="conv-role">{html.escape(item["role"])}</span>'
+            f'<div class="conv-content">'
+            f'{html.escape(item["content"] or "(无内容)")}'
+            f'</div></div>'
+        )
 
 
 @router.get("/tasks/{task_id}/stream")

@@ -1954,12 +1954,12 @@ def _build_base_prompt(
         if not repo_context and repo_path:
             msg += f"\n仓库路径: {repo_path}"
     else:
-        msg = (
-            f"基于之前的审计结果,现在请针对以下问题继续检查(不需要重新 clone 仓库):\n"
-        )
-        if repo_path:
-            msg += f"仓库路径(已 clone): {repo_path}\n\n"
-        msg += f"[本轮追问]\n{followup_query}"
+        msg = "基于之前的执行结果,现在请针对以下问题继续深入"
+        # 只有工作区确实有文件才声称"已 clone":预 clone 可能失败降级为
+        # 空目录,此时若断言已 clone 会误导 CLI 跳过 clone
+        if repo_path and sandbox_tools.workspace_has_files(str(task.id)):
+            msg += f"\n仓库路径(已 clone,无需再 clone): {repo_path}"
+        msg += f"\n\n[本轮补充要求]\n{followup_query}"
 
     if previous_plan:
         reminder = _format_plan_reminder(previous_plan)
@@ -1981,7 +1981,7 @@ def _build_repo_context_section(repo_context: str | None) -> str:
     return (
         "\n\n[仓库已预先 clone,无需你再调用 clone_repo]\n"
         + repo_context
-        + "\n\n请直接基于上述仓库路径开始审计。"
+        + "\n\n请直接基于上述仓库路径开始执行任务。"
     )
 
 

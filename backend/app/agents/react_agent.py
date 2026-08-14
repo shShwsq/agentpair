@@ -46,16 +46,19 @@ LOOP_WINDOW_SIZE = 6
 # 窗口内不同 call_sig 少于等于此值 → 判定为循环(覆盖交替循环 A,B,A,B,A,B)
 LOOP_MIN_DISTINCT = 2
 
+# 追问轮指令段标签(中性措辞,不向执行 agent 暴露 user_agent 等内部角色;
+# 也不绑定审计/审查等特定场景词,场景专属措辞由场景 preset_prompt 承载)
+FOLLOWUP_SECTION_LABEL = "[本轮补充要求]"
+
 
 # ============================================================
 # 通用 system prompt(场景降级后,不再从场景读取)
 # ============================================================
 
-REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行实际的代码分析/审计/审查任务。
+REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行实际的分析任务(如代码审计、审查、质量分析等)。
 
 ## 你的职责
-根据 user_agent(用户代理智能体)给出的指令,对目标仓库执行分析,
-发现并记录问题,最后用自然语言总结你的发现。
+根据任务指令对目标仓库执行分析,发现并记录问题,最后用自然语言总结你的发现。
 
 ## 工作方式(ReAct 循环)
 你通过"思考-行动-观察"循环工作:
@@ -67,7 +70,7 @@ REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行�
 4. 重复以上步骤,直到完成分析
 
 ## 可用工具
-- clone_repo:克隆 GitHub 仓库到沙箱(若 orchestrator 已预克隆,无需调用)
+- clone_repo:克隆 GitHub 仓库到沙箱(若系统已预克隆,无需调用)
 - list_files:列出目录结构(单层,跳过 .git/node_modules 等噪声目录)
 - find_files:按文件名 glob 模式递归查找文件(如 **/*.py、**/test_*.py),返回路径列表
 - read_file:读取文件内容(带行号,支持 offset 翻页)
@@ -86,7 +89,7 @@ REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行�
 - **自适应任务类型**:根据用户意图判断任务性质(安全审计/代码审查/质量分析/
   架构理解/功能梳理等),采用相应的分析方法。可调用 list_skills 查看是否有
   适用的专家技能。
-- **系统性覆盖**:按 user_agent 指定的维度逐一分析,不遗漏。
+- **系统性覆盖**:按指令指定的维度逐一分析,不遗漏。
 - **证据导向**:每个结论都应有具体文件位置和代码证据,不臆测。
 - **高效执行**:优先用 search_code 定位关键代码,再 read_file 确认细节,
   避免盲目遍历所有文件。
@@ -106,7 +109,7 @@ status 可选:pending / in_progress / done。后端会解析并推送前端展�
   - 具体文件位置和代码片段
   - 影响范围/严重程度(若适用)
   - 修复或改进建议(若适用)
-- 总结要具体、有证据,便于 user_agent 评估覆盖度。
+- 总结要具体、有证据,便于后续评审覆盖度。
 - 不要在总结中编造未经验证的发现。
 """
 
@@ -137,7 +140,7 @@ def run_react_agent(
         client: 可选的 LLMClient(阶段 6:从用户配置构造),None 时回退到 env 默认
         repo_context: 第 1 轮专用。orchestrator 主动 clone 后传入的仓库上下文
             (含 repo_path + 根目录结构)。非空时,第 1 轮 user_msg 会注入它并
-            提示"仓库已 clone,不要调用 clone_repo,直接开始审计"。
+            提示"仓库已 clone,不要调用 clone_repo,直接开始执行任务"。
             None 表示未主动 clone(走原流程,LLM 自主 clone)。
         previous_plan: 上一轮结束时的 plan 状态(修复 4)。None 或空表示第一轮
             或上轮无 plan。传入时,本轮启动即从该 plan 继续(避免跨轮重新规划
@@ -205,6 +208,7 @@ def run_react_agent(
     # repo_ctx_section:预 clone 上下文段,只进发送内容不落库展示
     # (属系统编排信息,非用户原话,与 acp_base 记忆注入段同样处理)
     repo_ctx_section = ""
+    history_prefix = ""  # 追问轮的历史记忆块,同样只进发送内容不落库
     if followup_query is None:
         # 第一轮:用 task.user_input
         user_msg = task.user_input
@@ -219,7 +223,7 @@ def run_react_agent(
             repo_ctx_section = (
                 "\n\n[仓库已预先 clone,无需你再调用 clone_repo]\n"
                 + repo_context
-                + "\n\n请直接基于上述仓库路径开始审计(用 read_file / search_code / "
+                + "\n\n请直接基于上述仓库路径开始执行任务(用 read_file / search_code / "
                 "list_files 等工具),不要再调用 clone_repo。"
             )
     else:
@@ -230,10 +234,15 @@ def run_react_agent(
 
         ws_info = sandbox_tools.get_workspace_info(task_id_str)
         repo_path_hint = ""
-        if ws_info and ws_info.get("repo_path"):
+        # 只有工作区确实有文件才声称"已 clone":预 clone 可能失败降级为
+        # 空目录,此时若断言已 clone 会误导 react_agent 跳过 clone
+        if (
+            ws_info and ws_info.get("repo_path")
+            and sandbox_tools.workspace_has_files(task_id_str)
+        ):
             repo_path_hint = (
-                f"\n仓库路径(已 clone,直接用这个路径调 read_file/search_code/list_files): "
-                f"{ws_info['repo_path']}"
+                f"\n仓库路径(已 clone,无需再 clone,直接用这个路径调 "
+                f"read_file/search_code/list_files): {ws_info['repo_path']}"
             )
 
         # 之前轮次的对话记忆(react_agent 自己的总结 + user_agent 的评估反馈)
@@ -249,17 +258,22 @@ def run_react_agent(
         )
 
         user_msg = (
-            f"基于之前的审计结果,现在请针对以下问题继续检查(不需要重新 clone 仓库):"
+            f"基于之前的执行结果,现在请针对以下问题继续深入"
             f"{repo_path_hint}\n\n"
             f"{history_prefix}"
-            f"\n\n[本轮 user_agent 追问]\n{followup_query}"
+            f"\n\n{FOLLOWUP_SECTION_LABEL}\n{followup_query}"
         )
 
-    # 记录 user 指令到对话(落库只存纯指令,不含预 clone 上下文段)
+    # 记录 user 指令到对话(落库只存纯指令,不含预 clone 上下文段与
+    # 历史记忆块:两者均为编排/拼接信息,非用户原话)
+    stored_msg = (
+        user_msg.replace(f"{history_prefix}\n\n", "", 1)
+        if history_prefix else user_msg
+    )
     _add_conversation(
         db, task, round_idx=round_idx,
         role="user", type="question",
-        content=user_msg,
+        content=stored_msg,
     )
 
     # 实际发送给 LLM 时拼上预 clone 上下文段
@@ -720,9 +734,9 @@ def _format_interrupts(interrupts: list[dict[str, Any]]) -> str:
     body = "\n\n".join(parts)
 
     return (
-        "[user_agent 检查点评估:方向纠正]\n"
-        "user_agent 在观察你的执行过程后,认为当前方向需要调整。"
-        "请把以下纠正指令纳入当前任务,调整检查方向继续执行:\n\n"
+        "[检查点评估:方向纠正]\n"
+        "观察你的执行过程后,认为当前方向需要调整。"
+        "请把以下纠正指令纳入当前任务,调整方向继续执行:\n\n"
         f"{body}"
     )
 
@@ -1359,21 +1373,22 @@ def _build_round_segments(
     ua_text = ua_text[:MAX_HISTORY_MSG_CHARS] if ua_text else ""
 
     # compact(Level 1):丢工具摘要
+    # 段落标签用中性措辞,不向执行 agent 暴露 user_agent 等内部角色
     compact_parts = [f"=== 第 {ridx} 轮 ==="]
     if react_summary:
-        compact_parts.append(f"[react_agent 总结]\n{react_summary}")
+        compact_parts.append(f"[执行总结]\n{react_summary}")
     if ua_text:
-        compact_parts.append(f"[user_agent 评估]\n{ua_text}")
+        compact_parts.append(f"[评审反馈]\n{ua_text}")
     compact = "\n".join(compact_parts)
 
     # full(Level 0):含工具摘要
     full_parts = [f"=== 第 {ridx} 轮 ==="]
     if tool_summary:
-        full_parts.append(f"[react_agent 工具调用]\n{tool_summary}")
+        full_parts.append(f"[工具调用]\n{tool_summary}")
     if react_summary:
-        full_parts.append(f"[react_agent 总结]\n{react_summary}")
+        full_parts.append(f"[执行总结]\n{react_summary}")
     if ua_text:
-        full_parts.append(f"[user_agent 评估]\n{ua_text}")
+        full_parts.append(f"[评审反馈]\n{ua_text}")
     full = "\n".join(full_parts)
 
     # 优先级判定
