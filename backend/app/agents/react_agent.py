@@ -231,7 +231,10 @@ def run_react_agent(
 
         ws_info = sandbox_tools.get_workspace_info(task_id_str)
         repo_path_hint = ""
-        if ws_info and ws_info.get("repo_path"):
+        if (
+            ws_info and ws_info.get("repo_path")
+            and _workspace_has_files(task_id_str)
+        ):
             repo_path_hint = (
                 f"\n仓库路径(已 clone,直接用这个路径调 read_file/search_code/list_files): "
                 f"{ws_info['repo_path']}"
@@ -250,10 +253,10 @@ def run_react_agent(
         )
 
         user_msg = (
-            f"基于之前的审计结果,现在请针对以下问题继续检查(不需要重新 clone 仓库):"
+            f"基于之前的审计结果,现在请针对以下问题继续检查"
             f"{repo_path_hint}\n\n"
             f"{history_prefix}"
-            f"\n\n[本轮 user_agent 追问]\n{followup_query}"
+            f"\n\n{_FOLLOWUP_SECTION_LABEL}\n{followup_query}"
         )
 
     # 记录 user 指令到对话(落库只存纯指令,不含预 clone 上下文段与
