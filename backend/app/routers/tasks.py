@@ -1519,13 +1519,16 @@ def _append_result_html(
 # 结论类消息保留协作决策链:用户提问 → user_agent 评估/追问 → react_agent
 # 提交 → user_agent 总结,读者无需展开每个工具调用细节即可重建协作脉络。
 #
-# 补充两点特殊处理:
+# 补充特殊处理:
 # 3. react_agent 每轮总结无独立落库类型,约定为该轮最后一条
 #    role=react_agent type=thinking 的 content(与 orchestrator._load_react_summaries
 #    一致),报告侧按此约定合成「提交结果」条目
 # 4. 存量数据里追问轮 question 可能整段落库了拼进提示词的
 #    "[之前轮次的对话记忆]" 块(新数据已在 react_agent 落库侧拆分),
 #    报告侧裁剪兼容历史任务
+# 5. user_agent 启用时,驱动第 r+1 轮的问题是第 r 轮 user_agent 评估生成的
+#    追问(非 done/ask_user 时评估 content 就是 followup_query),协作轨迹
+#    把这类评估归位到下一轮展示为提问/追问,避免与落库的样板 question 重复
 
 _CONVERSATION_TRACE_TYPES = {
     "question",    # 用户提问(前端跳过主对话流,单独顶部渲染,报告保留)
@@ -1553,6 +1556,26 @@ _FOLLOWUP_SECTION_LABELS = (
     "[本轮补充要求]", "[本轮补充检查要求]",
     "[本轮 user_agent 追问]", "[本轮追问]",
 )
+
+# user_agent 评估中的非追问内容标记(_record_user_agent 落库约定):
+# 这类评估是结论/动作记录而非驱动下一轮的问题,协作轨迹中保留在原轮
+_UA_EVAL_NON_FOLLOWUP_MARKERS = ("评估完成,无需追问", "(未给出追问)", "请求用户澄清")
+
+
+def _is_ua_followup_evaluation(c) -> bool:
+    """判断 user_agent 评估是否为追问类(其 content 即驱动下一轮的问题)
+
+    _record_user_agent 落库约定:非 done/ask_user 时 content 就是
+    followup_query 本身;done/ask_user/无追问时为固定标记文案。
+    """
+    if c.role != "user_agent" or c.type != "evaluation":
+        return False
+    if _is_checkpoint_evaluation(c):
+        return False
+    content = (c.content or "").strip()
+    return bool(content) and not any(
+        content.startswith(m) for m in _UA_EVAL_NON_FOLLOWUP_MARKERS
+    )
 
 
 def _is_checkpoint_evaluation(c) -> bool:
@@ -1659,14 +1682,61 @@ def _collect_conversation_trace(task: Task) -> list[dict[str, Any]]:
     - 额外跳过检查点评估/中断(_is_checkpoint_evaluation)
     - react_agent 每轮总结按约定合成「提交结果」条目并入
     - question 内容裁掉存量数据里的历史记忆块
+
+    user_agent 启用时的提问归位:
+    - 驱动第 r+1 轮的问题是第 r 轮 user_agent 评估的追问 → 归位到
+      r+1 轮展示为提问/追问(role=user_agent);包括 round_idx=0 的
+      初始评估(提问阶段结束时落库,其追问即第 1 轮有效意图)
+    - 落库的样板 question(原始意图/编排样板)相应跳过:第 1 轮原始意图
+      已在报告「用户意图」节展示,后续轮 question 主体就是已归位的追问
+    - 单 agent 模式(无 user_agent 评估)保持原样展示落库 question
     """
     convs = [
         c for c in task.conversations
         if c.type in _CONVERSATION_TRACE_TYPES
         and not _is_checkpoint_evaluation(c)
     ]
-    items = [
-        {
+    submits = _collect_react_summaries(task)
+    submit_rounds = {it["round_idx"] for it in submits}
+
+    # user_agent 启用判定:存在 user_agent 评估即为双 agent 协作
+    # (单 agent 模式 user_agent 完全关闭,不会有评估落库)
+    ua_enabled = any(
+        c.role == "user_agent" and c.type == "evaluation" for c in convs
+    )
+
+    items: list[dict[str, Any]] = []
+    # 追问类评估归位:第 r 轮评估 → 第 r+1 轮的提问/追问
+    # (仅当 r+1 轮确实有 react_agent 执行时才归位,末尾轮的结论性评估留在原轮)
+    moved_question_rounds: set[int] = set()
+    if ua_enabled:
+        for c in convs:
+            if (
+                _is_ua_followup_evaluation(c)
+                and (c.round_idx + 1) in submit_rounds
+            ):
+                moved_question_rounds.add(c.round_idx + 1)
+                items.append({
+                    "round_idx": c.round_idx + 1,
+                    "role": c.role,
+                    "type": "followup",
+                    "type_label": "提问" if c.round_idx == 0 else "追问",
+                    "content": c.content,
+                    "created_at": c.created_at,
+                })
+
+    for c in convs:
+        if ua_enabled and _is_ua_followup_evaluation(c) and c.round_idx + 1 in moved_question_rounds:
+            continue  # 已归位到下一轮作为提问/追问
+        if ua_enabled and c.role == "user" and c.type == "question":
+            # 第 1 轮 question 是用户原始意图(已在「用户意图」节展示);
+            # 后续轮 question 是编排样板 + 追问,追问已由评估归位覆盖。
+            # 若该轮没有归位的提问(异常/降级路径),则保留原 question 展示
+            if c.round_idx == 1 and 1 in moved_question_rounds:
+                continue
+            if c.round_idx >= 2 and c.round_idx in moved_question_rounds:
+                continue
+        items.append({
             "round_idx": c.round_idx,
             "role": c.role,
             "type": c.type,
@@ -1676,10 +1746,8 @@ def _collect_conversation_trace(task: Task) -> list[dict[str, Any]]:
                 if c.type == "question" else c.content
             ),
             "created_at": c.created_at,
-        }
-        for c in convs
-    ]
-    items.extend(_collect_react_summaries(task))
+        })
+    items.extend(submits)
     items.sort(key=lambda it: (it["round_idx"], it["created_at"]))
     return items
 
