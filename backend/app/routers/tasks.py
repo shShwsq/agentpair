@@ -1282,30 +1282,32 @@ def _append_grouped_results_md(
 ) -> None:
     """按场景声明 result_grouping 分组追加结果到 Markdown"""
     buckets: dict[str, list] = {}
-    field = grouping["field"]
+    field = grouping.get("field")
     for r in results:
         md = r.metadata_ or {}
-        val = md.get(field)
+        val = md.get(field) if field else None
         key = val if val else "__default__"
         buckets.setdefault(key, []).append(r)
 
-    if grouping["type"] == "ordered":
+    # type 默认 dynamic(LLM 输出可能不带 type/default_label,见 user_agent prompt 示例)
+    default_label = grouping.get("default_label", "其他")
+    if grouping.get("type") == "ordered":
         for v in sorted(grouping.get("values", []), key=lambda x: x.get("order", 0)):
             rs = buckets.get(v["value"], [])
             if rs:
-                lines.append(f"### {v['label']} ({len(rs)})")
+                lines.append(f"### {v.get('label', v.get('value', '?'))} ({len(rs)})")
                 lines.append("")
                 for r in rs:
                     _append_result_md(lines, r, meta_fields)
         default_rs = buckets.get("__default__", [])
         if default_rs:
-            lines.append(f"### {grouping['default_label']} ({len(default_rs)})")
+            lines.append(f"### {default_label} ({len(default_rs)})")
             lines.append("")
             for r in default_rs:
                 _append_result_md(lines, r, meta_fields)
     else:
         for key, rs in buckets.items():
-            label = grouping["default_label"] if key == "__default__" else key
+            label = default_label if key == "__default__" else key
             lines.append(f"### {label} ({len(rs)})")
             lines.append("")
             for r in rs:
@@ -1450,10 +1452,10 @@ def _append_grouped_results_html(
 ) -> None:
     """按场景声明 result_grouping 分组追加结果到 HTML"""
     buckets: dict[str, list] = {}
-    field = grouping["field"]
+    field = grouping.get("field")
     for r in results:
         md = r.metadata_ or {}
-        val = md.get(field)
+        val = md.get(field) if field else None
         key = val if val else "__default__"
         buckets.setdefault(key, []).append(r)
 
@@ -1462,17 +1464,19 @@ def _append_grouped_results_html(
         for r in rs:
             _append_result_html(parts, r, meta_fields)
 
-    if grouping["type"] == "ordered":
+    # type 默认 dynamic(LLM 输出可能不带 type/default_label,见 user_agent prompt 示例)
+    default_label = grouping.get("default_label", "其他")
+    if grouping.get("type") == "ordered":
         for v in sorted(grouping.get("values", []), key=lambda x: x.get("order", 0)):
             rs = buckets.get(v["value"], [])
             if rs:
-                _emit_group(v["label"], rs)
+                _emit_group(v.get("label", v.get("value", "?")), rs)
         default_rs = buckets.get("__default__", [])
         if default_rs:
-            _emit_group(grouping["default_label"], default_rs)
+            _emit_group(default_label, default_rs)
     else:
         for key, rs in buckets.items():
-            label = grouping["default_label"] if key == "__default__" else key
+            label = default_label if key == "__default__" else key
             _emit_group(label, rs)
 
 
