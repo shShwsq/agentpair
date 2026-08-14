@@ -631,6 +631,104 @@ def _ensure_cli_env(session, agent_type: str) -> None:
 
 
 # ============================================================
+# Git 凭证注入:credential helper cache(让 CLI 能克隆私有仓库)
+# ============================================================
+
+
+# credential cache 超时(秒):24h,覆盖任务最长执行时长
+# cache 守护进程随沙箱容器销毁自动清理,无需手动退出
+_GIT_CRED_CACHE_TIMEOUT = 86400
+
+
+def _inject_git_credentials_to_cache(session, db: Session, task: Task | None) -> None:
+    """把用户的 git token 注入沙箱的 git credential helper cache
+
+    让 CLI 智能体在沙箱内能克隆/拉取私有仓库,同时避免 token 出现在:
+    - 环境变量(printenv / env / os.environ 读不到)
+    - 磁盘文件(cat ~/.git-credentials 读不到,文件不存在)
+    - 命令行参数(ps / /proc/<pid>/cmdline 读不到,token 通过 write_file
+      写临时文件再重定向,不经过 shell 解析)
+
+    token 只存在于 git credential-cache 守护进程的内存中,
+    仅 git 命令在 HTTPS 鉴权时自动取用。沙箱容器销毁时 cache 随进程退出清理。
+
+    工作流程:
+    1. 配置 git config --global credential.helper 'cache --timeout=86400'
+    2. 对每个有 token 的 provider(GitHub / Gitee):
+       a. write_file 写临时输入文件(含 protocol/host/username/password)
+       b. chmod 600 限制文件权限
+       c. git credential approve < 临时文件(注入到 cache 守护进程内存)
+       d. rm -f 删除临时文件(token 只留在 cache 内存中)
+
+    失败不阻断流程(降级为无 token,CLI 走 SSH / 匿名 HTTPS 回退)。
+    task=None(测试连接场景)时跳过。
+
+    安全性:
+    - LLM 无法通过 env / printenv 读到 token(不在环境变量)
+    - LLM 无法通过 cat ~/.git-credentials 读到(文件模式是 cache 不是 store)
+    - LLM 无法通过 ~/.gitconfig 读到(只配置了 helper=cache,无 token)
+    - LLM 只能通过主动构造 `git credential fill` 命令才能从 cache 取出 token,
+      这种调用很显眼,容易被审计日志捕获
+    """
+    if task is None or task.user_id is None:
+        return
+
+    # 延迟导入避免循环依赖
+    from app.agents.orchestrator import _load_git_tokens
+    from app.git_provider import PROVIDERS
+
+    tokens = _load_git_tokens(db, task.user_id)
+    if not tokens:
+        return
+
+    try:
+        # 配置 git credential helper cache(timeout 覆盖任务最长时长)
+        session.run_command(
+            f"git config --global credential.helper 'cache --timeout={_GIT_CRED_CACHE_TIMEOUT}'",
+            timeout=10,
+        )
+
+        # 对每个有 token 的 provider,注入到 credential cache
+        injected: list[str] = []
+        for provider_id, token in tokens.items():
+            provider = PROVIDERS.get(provider_id)
+            if not provider or not token:
+                continue
+
+            # 写临时输入文件(token 不走命令行,避免 ps / /proc 泄露 + shell 解析问题)
+            cred_input = (
+                f"protocol=https\n"
+                f"host={provider.host}\n"
+                f"username={provider.token_username}\n"
+                f"password={token}\n"
+                f"\n"  # 空行结束输入(git credential approve 读到空行表示输入结束)
+            )
+            cred_file = f"/tmp/.git_cred_{provider_id}_{int(time.time() * 1000)}.tmp"
+            session.write_file(cred_file, cred_input)
+            # 限制文件权限(仅 owner 可读,防止同容器其他用户读取)
+            session.run_command(f"chmod 600 {cred_file}", timeout=5)
+
+            # 注入到 credential cache(git credential approve 启动 cache 守护进程并存入 token)
+            session.run_command(
+                f"git credential approve < {cred_file}",
+                timeout=10, check=False,
+            )
+
+            # 立即删除临时文件(token 只留在 cache 守护进程内存中)
+            session.run_command(f"rm -f {cred_file}", timeout=5)
+            injected.append(provider_id)
+
+        if injected:
+            logger.info(
+                f"[task={task.id}] git credential cache 注入成功: "
+                f"{injected}(沙箱内 git 可访问私有仓库)"
+            )
+    except Exception as e:
+        # 降级:不阻断流程,CLI 走 SSH / 匿名 HTTPS 回退
+        logger.warning(f"[task={task.id}] git credential cache 注入失败(降级为无 token): {e}")
+
+
+# ============================================================
 # ACP bridge 生命周期管理
 # ============================================================
 
@@ -2025,6 +2123,12 @@ def run_acp_agent(
         _t0 = time.perf_counter()
         _ensure_cli_env(session, agent_type)
         perf_log(task.id, "acp_ensure_cli_env", time.perf_counter() - _t0, agent_type=agent_type)
+
+        # ---- 注入 git token 到 credential helper cache ----
+        # 让 CLI 在沙箱内能克隆/拉取私有仓库(token 不进环境变量/磁盘文件/命令行)
+        _t0 = time.perf_counter()
+        _inject_git_credentials_to_cache(session, db, task)
+        perf_log(task.id, "acp_inject_git_cred", time.perf_counter() - _t0, agent_type=agent_type)
 
         # ---- wrapper 层钩子:bridge 启动前的沙箱文件准备 ----
         # hermes 用此回调写入 ~/.hermes/config.yaml(模型/provider/base_url 配置)
