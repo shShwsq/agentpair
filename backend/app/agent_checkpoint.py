@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import uuid
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -137,6 +138,10 @@ CHECKPOINT_SYSTEM_PROMPT = """你是 user_agent(用户代理智能体),正在实
   - 避免重复发出相同/相近的打断指令(历史已打断过的方向不再重复)
   - 核查上次打断指令是否已被执行(从当前快照判断),未执行时可换更明确的表述再次提醒
   - 历史记录仅供参考,以当前快照为主要判断依据
+- 若提供了「上一次检查点以来的工具调用」窗口:
+  - 用它核查该区间 react_agent 的实际动作:识别重复无效操作
+    (相同/相近意图反复出现)、核对上次打断指令是否被执行
+  - 判断以当前快照 + 窗口为主;窗口内细节不要逐条复述到 reason 中
 
 ## 输出格式(严格 JSON)
 ```json
@@ -253,6 +258,172 @@ def _build_history_section(records: list[dict[str, Any]]) -> str:
 
 
 # ============================================================
+# 工具调用窗口构造(检查点评估 / 完整评估共用)
+#
+# 分层信息策略:上一次观察点(检查点)之前的区间由检查点结论覆盖,
+# 观察点之后的工具调用作为明细窗口注入。窗口量由检查点间隔 K 自然钳制,
+# 无检查点时靠条数/字符上限兜底。
+# ============================================================
+
+# 完整评估注入本轮检查点观察的上限(比检查点间互参的 5 条/1500 字符放宽)
+ROUND_CHECKPOINT_MAX_RECORDS = 10
+ROUND_CHECKPOINT_MAX_CHARS = 2400
+
+
+def build_round_checkpoint_section(db: Session, task_id, round_idx: int) -> str:
+    """把本轮全部检查点评估记录格式化成完整评估的注入段落
+
+    供 user_agent.py 完整评估调用:让 round 边界评估看到自己在执行过程中
+    做出的实时判断(含打断指令),保持评估连续性、避免重复追问。
+
+    与 _build_history_section(检查点间互参,5 条/1500 字符)独立实现,
+    上限放宽到 10 条/2400 字符,超限从最早丢弃。
+    无记录返回空串。
+    """
+    records = _load_checkpoint_history(db, task_id, round_idx)
+    if not records:
+        return ""
+    lines: list[str] = []
+    for r in records[-ROUND_CHECKPOINT_MAX_RECORDS:]:
+        loc = f"迭代{r['iteration']}" if r.get("iteration") else "早期迭代"
+        if r.get("interrupt"):
+            line = f"- [{loc}] 打断 | 摘要:{r.get('summary') or r.get('reason', '')} | 指令:{r.get('query', '')}"
+        else:
+            line = f"- [{loc}] 继续 | 摘要:{r.get('summary') or r.get('reason', '')}"
+        lines.append(line)
+    while lines and sum(len(x) for x in lines) > ROUND_CHECKPOINT_MAX_CHARS:
+        lines.pop(0)
+    if not lines:
+        return ""
+    return (
+        "[本轮执行中的检查点观察(你自己在执行过程中做出的判断)]\n"
+        + "\n".join(lines)
+    )
+
+
+def build_tool_window_section(
+    db: Session,
+    task_id,
+    round_idx: int,
+    boundary: datetime | None,
+    *,
+    title: str,
+    max_calls: int = 30,
+    max_chars: int = 6000,
+    result_limit: int = 300,
+) -> str:
+    """构造指定时间窗口内的工具调用明细段落(通用构造器,两处复用)
+
+    查询本轮 boundary 之后(含;None=整轮)的 react_agent tool_call/tool_result
+    记录,格式化为"意图行 + 结果摘要":
+    - tool_call 只取 content 首行(工具意图),丢弃参数 JSON 详情
+    - tool_result 紧随其后截断至 result_limit 字符
+    - 超 max_calls 条 tool_call 或总长超 max_chars 时从最早丢弃(尾部最新最有价值)
+
+    builtin 与 CLI(acp_base)执行器落库格式一致(role=react_agent、首行意图),
+    两条执行路径均可用。无记录返回空串。
+    """
+    q = db.query(Conversation).filter(
+        Conversation.task_id == task_id,
+        Conversation.round_idx == round_idx,
+        Conversation.role == "react_agent",
+        Conversation.type.in_(["tool_call", "tool_result"]),
+    )
+    if boundary is not None:
+        q = q.filter(Conversation.created_at >= boundary)
+    convs = q.order_by(Conversation.created_at).all()
+    if not convs:
+        return ""
+
+    # 逐条格式化:tool_call 取首行意图,tool_result 截断作结果摘要
+    items: list[tuple[bool, str]] = []  # (is_tool_call, formatted_line)
+    for c in convs:
+        content = (c.content or "").strip()
+        if not content:
+            continue
+        if c.type == "tool_call":
+            items.append((True, f"- {content.splitlines()[0]}"))
+        else:
+            summary = content[:result_limit]
+            if len(content) > result_limit:
+                summary += "[...truncated...]"
+            items.append((False, f"  结果摘要: {summary}"))
+
+    # 兜底裁剪:tool_call 条数超限 / 总长超限,均从最早丢弃
+    while sum(1 for is_call, _ in items if is_call) > max_calls and items:
+        items.pop(0)
+    while items and sum(len(t) for _, t in items) > max_chars:
+        items.pop(0)
+    # 裁剪后若开头残留孤立的 tool_result(其 tool_call 已被丢),一并丢弃
+    while items and not items[0][0]:
+        items.pop(0)
+    if not items:
+        return ""
+
+    return title + "\n" + "\n".join(text for _, text in items)
+
+
+def build_tool_tail_section(db: Session, task_id, round_idx: int) -> str:
+    """完整评估专用:最后一次检查点之后的工具调用明细(无检查点=整轮截尾)
+
+    boundary 取本轮最后一条检查点记录的 created_at(检查点在迭代边界落库,
+    严格早于后续工具调用,时间切分可靠)。
+    """
+    last_ckpt = (
+        db.query(Conversation)
+        .filter(
+            Conversation.task_id == task_id,
+            Conversation.round_idx == round_idx,
+            Conversation.role == "user_agent",
+            Conversation.type == "evaluation",
+            Conversation.content.like(f"{_CHECKPOINT_CONTENT_PREFIX}%"),
+        )
+        .order_by(Conversation.created_at.desc())
+        .first()
+    )
+    if last_ckpt is not None:
+        return build_tool_window_section(
+            db, task_id, round_idx, last_ckpt.created_at,
+            title="[最后一次检查点之后的工具调用明细]",
+        )
+    return build_tool_window_section(
+        db, task_id, round_idx, None,
+        title="[本轮全部工具调用明细(截尾)]",
+    )
+
+
+def _build_checkpoint_tool_window(db: Session, task_id, round_idx: int) -> str:
+    """检查点评估专用:上一次检查点至今的工具调用窗口(无上一条=轮起点至今)
+
+    本条检查点尚未落库,本轮"最后一条"检查点记录即"上一条"。
+    检查点定位为轻量评估,上限比完整评估收紧(15 条/3500 字符/结果 200 字符)。
+    """
+    prev_ckpt = (
+        db.query(Conversation)
+        .filter(
+            Conversation.task_id == task_id,
+            Conversation.round_idx == round_idx,
+            Conversation.role == "user_agent",
+            Conversation.type == "evaluation",
+            Conversation.content.like(f"{_CHECKPOINT_CONTENT_PREFIX}%"),
+        )
+        .order_by(Conversation.created_at.desc())
+        .first()
+    )
+    if prev_ckpt is not None:
+        return build_tool_window_section(
+            db, task_id, round_idx, prev_ckpt.created_at,
+            title="[上一次检查点以来的工具调用]",
+            max_calls=15, max_chars=3500, result_limit=200,
+        )
+    return build_tool_window_section(
+        db, task_id, round_idx, None,
+        title="[本轮开始以来的工具调用(截尾)]",
+        max_calls=15, max_chars=3500, result_limit=200,
+    )
+
+
+# ============================================================
 # 检查点评估主函数
 # ============================================================
 
@@ -320,11 +491,22 @@ def run_user_agent_checkpoint(
         if not allow_interrupt else ""
     )
 
+    # 上一次检查点至今的工具调用窗口:让"重复无效操作"判据有真实数据可查
+    # (原来只给最近一条 tool_intent,无法判断重复);查库失败降级为空不阻断评估
+    try:
+        tool_window_section = _build_checkpoint_tool_window(db, task.id, round_idx)
+        if tool_window_section:
+            tool_window_section += "\n\n"
+    except Exception as e:
+        logger.warning(f"[task={task.id}] 加载检查点工具窗口失败(跳过注入): {e}")
+        tool_window_section = ""
+
     user_msg = (
         f"用户原始意图:{task.user_input[:500]}\n\n"
         f"当前协作轮次:第 {round_idx} 轮,第 {iteration} 次迭代\n\n"
         f"{observe_note}"
         f"{history_section}"
+        f"{tool_window_section}"
         f"react_agent 当前思考:\n{thinking}\n\n"
         f"最近工具调用:{tool_intent}\n\n"
         f"最近工具结果:\n{tool_result}\n\n"

@@ -221,6 +221,10 @@ grouping 可为 null(不分组,平铺展示)。非 null 时各字段说明:
 - missing 列表为空是 done 的必要条件,但非充分条件——还需结果质量足够。
 - followup_query 应具体可执行,指明 react_agent 需要补充哪些维度的分析。
 - 保持覆盖度判断连续性:之前已标 covered 的维度,本轮若 react_agent 未推翻,继续保持。
+- 「本轮执行中的检查点观察」是你在执行过程中做出的实时判断,评估应与之保持一致性。
+- 若检查点已发出纠正指令且 react_agent 总结显示已响应,followup_query 不要重复该指令。
+- 「最后一次检查点之后的工具调用明细」是最近的原始证据,可用于校验总结的真实性;
+  更早的工具细节未传入,以检查点结论和各轮总结为准。
 
 ## 结果整理原则(done=true 时)
 - results 从 react_agent 各轮总结中提取结构化发现。
@@ -389,7 +393,29 @@ def run_user_agent(
         user_msg_parts.append(
             f"\n以下是 react_agent 已执行的 {len(react_agent_summaries)} 轮自然语言总结:\n\n"
             + "\n\n".join(rounds_text)
-            + "\n\n请评估覆盖情况,决定是否追问或结束。"
+        )
+
+        # 本轮检查点观察 + 最后一次检查点之后的工具调用明细(分层窗口注入):
+        # 早期区间由检查点结论覆盖,尾部给原始证据,供校验总结真实性、避免重复追问
+        if db is not None:
+            try:
+                from app.agent_checkpoint import (
+                    build_round_checkpoint_section,
+                    build_tool_tail_section,
+                )
+                ckpt_section = build_round_checkpoint_section(db, task_id, round_idx)
+                tail_section = build_tool_tail_section(db, task_id, round_idx)
+                if ckpt_section:
+                    user_msg_parts.append("\n" + ckpt_section)
+                if tail_section:
+                    user_msg_parts.append("\n" + tail_section)
+            except Exception as e:
+                logger.warning(
+                    f"[task={task_id}] 加载检查点/工具窗口注入失败(跳过): {e}"
+                )
+
+        user_msg_parts.append(
+            "\n\n请评估覆盖情况,决定是否追问或结束。"
             + "\n\n[当前不允许提问] react_agent 已开始执行,ask_user 必须为 false。"
         )
         if history_prefix:
@@ -753,6 +779,12 @@ def _build_user_agent_history(
     # 同时记录每段的"重要性"(用于超限时裁剪):missing 非空 > done=false > 其他
     priorities: list[int] = []
     for c in convs:
+        # 排除检查点评估/中断记录:与完整评估同为 evaluation type,其 reasoning 是
+        # 检查点原始 JSON,混入跨轮记忆是噪声(它们另有专门注入通道:
+        # build_round_checkpoint_section)
+        content_head = (c.content or "")
+        if content_head.startswith("[检查点评估") or content_head.startswith("[检查点中断"):
+            continue
         # reasoning 是 _record_user_agent 写入的 full_eval(含 covered/missing/判断/追问)
         text = c.reasoning or c.content or ""
         if not text:
