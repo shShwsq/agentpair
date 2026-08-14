@@ -335,3 +335,30 @@ class VerifyConfigUpdateRequest(BaseModel):
     test_env_url: str | None = Field(default=None, max_length=2048)
     # 登录凭证列表(可选):传入则整体覆盖;空列表清空;None/省略=不修改
     verifier_auth_tokens: list[VerifierAuthToken] | None = None
+
+
+class RuntimePolicyUpdate(BaseModel):
+    """运行时可调整的协作策略字段(任务级覆盖,合并写入 task.params._agent_policy)
+
+    仅暴露高频字段;None=不修改该字段。
+    """
+
+    checkpoint_interval: int | None = Field(default=None, ge=1, le=20)
+    allow_interrupt: bool | None = None
+    max_rounds: int | None = Field(default=None, ge=1)
+
+
+class RuntimeConfigUpdateRequest(BaseModel):
+    """更新任务运行时配置请求(PATCH /tasks/{id}/runtime_config)
+
+    任务进行中修改 react_agent / user_agent 模型与协作策略。
+    生效时机:running/paused 的当前执行线程仍用启动时加载的配置,
+    修改在下一轮执行(completed 后追加消息 / failed 重试)时生效。
+
+    所有字段可选,只更新传入的字段;模型字段传空字符串表示清除
+    (llm_config_id 清除后回退 env 默认,react_llm_config_id 清除后回退 llm_config_id)。
+    """
+
+    llm_config_id: str | None = Field(default=None, max_length=128)
+    react_llm_config_id: str | None = Field(default=None, max_length=128)
+    agent_policy: RuntimePolicyUpdate | None = None

@@ -28,6 +28,7 @@ import ChecklistReviewDialog from '@/components/ChecklistReviewDialog.vue'
 import ConversationMessage from '@/components/ConversationMessage.vue'
 import QuestionDialog from '@/components/QuestionDialog.vue'
 import UserMessageInput from '@/components/UserMessageInput.vue'
+import TaskRuntimeSettings from '@/components/TaskRuntimeSettings.vue'
 import CommandConfirmDialog from '@/components/CommandConfirmDialog.vue'
 import VerifyActionDialog from '@/components/VerifyActionDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
@@ -1873,6 +1874,11 @@ function handleMessageError(message: string): void {
   error.value = message
 }
 
+/** 运行时设置(模型/协作策略)保存成功:回填后端最新快照 */
+function handleRuntimeConfigSaved(updated: TaskDetail): void {
+  task.value = updated
+}
+
 // ---- 失败任务重试(底部重试条,替换输入框位置)----
 
 /** 重试请求是否进行中(按钮 loading 态,防重复点击) */
@@ -2469,6 +2475,15 @@ function toggleResult(id: string): void {
       </template>
       </div>
 
+      <!-- 运行时设置面板(输入框上方箭头展开:react/user_agent 模型 + 协作策略;
+           运行中/暂停中修改在下一轮执行生效,组件内 toast 提示) -->
+      <TaskRuntimeSettings
+        v-if="task && (task.status === 'running' || task.status === 'paused' || task.status === 'completed' || task.status === 'failed')"
+        :key="String(task.id)"
+        :task="task"
+        @saved="handleRuntimeConfigSaved"
+      />
+
       <!-- 用户补充消息输入框(running/paused/completed 可见,pending 隐藏) -->
       <UserMessageInput
         v-if="task && (task.status === 'running' || task.status === 'paused' || task.status === 'completed')"
@@ -2479,7 +2494,7 @@ function toggleResult(id: string): void {
       />
 
       <!-- 失败任务重试条(failed 状态替换输入框位置) -->
-      <div v-else-if="task && task.status === 'failed'" class="retry-bar">
+      <div v-if="task && task.status === 'failed'" class="retry-bar">
         <div class="retry-bar-text">
           <span class="retry-bar-label">任务执行失败,可重试</span>
           <span

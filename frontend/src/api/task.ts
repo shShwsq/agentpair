@@ -25,6 +25,7 @@ import type {
   VerifyActionRequest,
   VerifyActionResponse,
   VerifyConfigUpdateRequest,
+  RuntimeConfigUpdateRequest,
 } from '@/types/task'
 
 /** 列出可用场景 */
@@ -315,4 +316,16 @@ export function updateTaskVerifierConfig(
   req: VerifyConfigUpdateRequest,
 ): Promise<TaskDetail> {
   return client.patch(`/tasks/${taskId}/verifier_config`, req).then((r) => r.data)
+}
+
+/**
+ * 更新任务运行时配置(模型 + 协作策略)
+ *
+ * running/paused 时修改在下一轮执行(completed 后追加消息 / failed 重试)生效。
+ */
+export function updateTaskRuntimeConfig(
+  taskId: string,
+  req: RuntimeConfigUpdateRequest,
+): Promise<TaskDetail> {
+  return client.patch(`/tasks/${taskId}/runtime_config`, req).then((r) => r.data)
 }

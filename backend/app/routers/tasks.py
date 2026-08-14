@@ -25,6 +25,7 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from app.agent_checkpoint import MAX_MAX_ROUNDS
 from app.agents.orchestrator import (
     resume_audit_with_message,
     retry_failed_task,
@@ -36,6 +37,7 @@ from app.event_bus import publish, reset_task_bus, subscribe, unsubscribe
 from app.models.task import Conversation, Result, Task, TaskStatus
 from app.models.task_artifact import TaskArtifact
 from app.models.user import User
+from app.models.user_llm_config import UserLLMConfig
 from app.pause_controller import (
     clear_pause_state,
     pause_task,
@@ -62,6 +64,7 @@ from app.schemas.task import (
     VerifyActionRequest,
     VerifyActionResponse,
     VerifyConfigUpdateRequest,
+    RuntimeConfigUpdateRequest,
 )
 from app.schemas.task_artifact import TaskArtifactOut
 from app.tools import sandbox_tools
@@ -671,6 +674,78 @@ def update_task_verifier_config(
     task.params = params
     db.commit()
     db.refresh(task)
+    return task
+
+
+@router.patch("/tasks/{task_id}/runtime_config", response_model=TaskResponse)
+def update_task_runtime_config(
+    task_id: uuid.UUID,
+    req: RuntimeConfigUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> Task:
+    """更新任务运行时配置(模型 + 协作策略)
+
+    生效时机:running/paused 的当前执行线程使用启动时加载的配置,
+    修改在下一轮执行(completed 后追加消息重启 / failed 重试)时生效。
+
+    - 模型 id 需存在于任务归属用户的 LLM 配置列表,否则 400
+    - react_llm_config_id 仅 executor=builtin 时可改(CLI 执行器模型自管)
+    - agent_policy 增量合并到 task.params._agent_policy(resolve_agent_policy 识别)
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    def _validate_config_id(config_id: str, label: str) -> None:
+        """校验模型配置 id 属于任务归属用户(匿名任务不允许指定模型)"""
+        if task.user_id is None:
+            raise HTTPException(status_code=400, detail="匿名任务不支持指定模型配置")
+        cfg = (
+            db.query(UserLLMConfig)
+            .filter(UserLLMConfig.user_id == task.user_id)
+            .first()
+        )
+        ids = {c.get("id") for c in (cfg.llm_configs if cfg else [])}
+        if config_id not in ids:
+            raise HTTPException(status_code=400, detail=f"{label}不存在或不属于当前用户")
+
+    if req.llm_config_id is not None:
+        if req.llm_config_id:
+            _validate_config_id(req.llm_config_id, "user_agent 模型配置")
+        task.llm_config_id = req.llm_config_id or None
+
+    if req.react_llm_config_id is not None:
+        if task.executor != "builtin":
+            raise HTTPException(
+                status_code=400,
+                detail="当前任务使用外部 CLI 执行器,react 模型由 CLI 自管,不可修改",
+            )
+        if req.react_llm_config_id:
+            _validate_config_id(req.react_llm_config_id, "react_agent 模型配置")
+        task.react_llm_config_id = req.react_llm_config_id or None
+
+    if req.agent_policy is not None:
+        updates = req.agent_policy.model_dump(exclude_none=True)
+        if updates:
+            # 钳制 max_rounds 到 [1, MAX_MAX_ROUNDS](与用户级保存逻辑一致)
+            if "max_rounds" in updates:
+                updates["max_rounds"] = max(1, min(int(updates["max_rounds"]), MAX_MAX_ROUNDS))
+            params = dict(task.params or {})
+            policy = dict(params.get("_agent_policy") or {})
+            policy.update(updates)
+            params["_agent_policy"] = policy
+            task.params = params
+
+    db.commit()
+    db.refresh(task)
+    logger.info(
+        f"[task={task.id}] 运行时配置已更新: llm={task.llm_config_id}, "
+        f"react_llm={task.react_llm_config_id}, policy={req.agent_policy}"
+    )
     return task
 
 

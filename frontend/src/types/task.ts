@@ -552,6 +552,32 @@ export interface VerifyConfigUpdateRequest {
   verifier_auth_tokens?: VerifierAuthToken[]
 }
 
+/** 运行时可调整的协作策略字段(任务级覆盖,增量合并到 task.params._agent_policy) */
+export interface RuntimePolicyUpdate {
+  /** 统一 K 值,每 K 个迭代评估一次(1-20) */
+  checkpoint_interval?: number
+  /** user_agent 是否能打断 react_agent */
+  allow_interrupt?: boolean
+  /** user_agent 协作总轮次(1-10) */
+  max_rounds?: number
+}
+
+/**
+ * 更新任务运行时配置请求(PATCH /tasks/{id}/runtime_config)
+ *
+ * 任务进行中修改 react_agent / user_agent 模型与协作策略。
+ * 生效时机:running/paused 的当前执行仍用启动时配置,
+ * 修改在下一轮执行(completed 后追加消息 / failed 重试)时生效。
+ */
+export interface RuntimeConfigUpdateRequest {
+  /** user_agent 模型配置 id;空字符串=清除(回退 env 默认);undefined=不修改 */
+  llm_config_id?: string
+  /** react_agent 模型配置 id(仅 executor=builtin);空字符串=清除(回退 llm_config_id) */
+  react_llm_config_id?: string
+  /** 协作策略(增量合并) */
+  agent_policy?: RuntimePolicyUpdate
+}
+
 /**
  * agent 策略配置(检查点评估频率、打断权限、验证权限)
  *
