@@ -72,9 +72,9 @@ def test_followup_round_also_includes_memories():
         memory_summary="PROJECT_MEM",
         global_memory="GLOBAL_MEM",
     )
-    # 追问段标签为中性措辞,指令部分(标签之前)不暴露 user_agent 等内部角色
-    assert "[本轮补充检查要求]" in msg
-    assert "user_agent" not in msg.split("[本轮补充检查要求]")[0]
+    # 追问段标签为中性措辞,不暴露内部角色,也不绑定审计/审查等场景词
+    assert "[本轮补充要求]" in msg
+    assert "user_agent" not in msg.split("[本轮补充要求]")[0]
     assert "请重点检查 SQL 注入" in msg
     assert "PROJECT_MEM" in msg
     assert "GLOBAL_MEM" in msg

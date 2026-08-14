@@ -46,15 +46,16 @@ LOOP_WINDOW_SIZE = 6
 # 窗口内不同 call_sig 少于等于此值 → 判定为循环(覆盖交替循环 A,B,A,B,A,B)
 LOOP_MIN_DISTINCT = 2
 
-# 追问轮指令段标签(中性措辞,不向执行 agent 暴露 user_agent 等内部角色)
-FOLLOWUP_SECTION_LABEL = "[本轮补充检查要求]"
+# 追问轮指令段标签(中性措辞,不向执行 agent 暴露 user_agent 等内部角色;
+# 也不绑定审计/审查等特定场景词,场景专属措辞由场景 preset_prompt 承载)
+FOLLOWUP_SECTION_LABEL = "[本轮补充要求]"
 
 
 # ============================================================
 # 通用 system prompt(场景降级后,不再从场景读取)
 # ============================================================
 
-REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行实际的代码分析/审计/审查任务。
+REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行实际的分析任务(如代码审计、审查、质量分析等)。
 
 ## 你的职责
 根据任务指令对目标仓库执行分析,发现并记录问题,最后用自然语言总结你的发现。
@@ -139,7 +140,7 @@ def run_react_agent(
         client: 可选的 LLMClient(阶段 6:从用户配置构造),None 时回退到 env 默认
         repo_context: 第 1 轮专用。orchestrator 主动 clone 后传入的仓库上下文
             (含 repo_path + 根目录结构)。非空时,第 1 轮 user_msg 会注入它并
-            提示"仓库已 clone,不要调用 clone_repo,直接开始审计"。
+            提示"仓库已 clone,不要调用 clone_repo,直接开始执行任务"。
             None 表示未主动 clone(走原流程,LLM 自主 clone)。
         previous_plan: 上一轮结束时的 plan 状态(修复 4)。None 或空表示第一轮
             或上轮无 plan。传入时,本轮启动即从该 plan 继续(避免跨轮重新规划
@@ -222,7 +223,7 @@ def run_react_agent(
             repo_ctx_section = (
                 "\n\n[仓库已预先 clone,无需你再调用 clone_repo]\n"
                 + repo_context
-                + "\n\n请直接基于上述仓库路径开始审计(用 read_file / search_code / "
+                + "\n\n请直接基于上述仓库路径开始执行任务(用 read_file / search_code / "
                 "list_files 等工具),不要再调用 clone_repo。"
             )
     else:
@@ -257,7 +258,7 @@ def run_react_agent(
         )
 
         user_msg = (
-            f"基于之前的审计结果,现在请针对以下问题继续检查"
+            f"基于之前的执行结果,现在请针对以下问题继续深入"
             f"{repo_path_hint}\n\n"
             f"{history_prefix}"
             f"\n\n{FOLLOWUP_SECTION_LABEL}\n{followup_query}"
@@ -735,7 +736,7 @@ def _format_interrupts(interrupts: list[dict[str, Any]]) -> str:
     return (
         "[检查点评估:方向纠正]\n"
         "观察你的执行过程后,认为当前方向需要调整。"
-        "请把以下纠正指令纳入当前任务,调整检查方向继续执行:\n\n"
+        "请把以下纠正指令纳入当前任务,调整方向继续执行:\n\n"
         f"{body}"
     )
 

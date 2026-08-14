@@ -1549,7 +1549,10 @@ _HISTORY_MEMORY_MARKER = "[之前轮次的对话记忆]"
 
 # 追问轮指令段标签(新旧兼容):记忆块之后紧跟的追问段起点,
 # 裁剪记忆块时需保留该段(它是本轮真实指令)
-_FOLLOWUP_SECTION_LABELS = ("[本轮补充检查要求]", "[本轮 user_agent 追问]", "[本轮追问]")
+_FOLLOWUP_SECTION_LABELS = (
+    "[本轮补充要求]", "[本轮补充检查要求]",
+    "[本轮 user_agent 追问]", "[本轮追问]",
+)
 
 
 def _is_checkpoint_evaluation(c) -> bool:
