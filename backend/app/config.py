@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     SANDBOX_IMAGE: str = "ubuntu"
     # 沙箱超时(分钟)
     SANDBOX_TIMEOUT_MINUTES: int = 30
+    # 沙箱续期间隔(分钟):会话被访问时距上次续期超过此值就 renew TTL,
+    # 防长任务(多轮协作/用户等待)拖过 TTL 被 Server 回收(回收后任何命令 404)
+    SANDBOX_RENEW_INTERVAL_MINUTES: int = 5
     # 是否走 Server 代理访问沙箱(跨机部署必须开;本机部署开了也能用)
     # True=所有沙箱请求经 Server 8080 端口转发,后端只需连 Server 一个端口
     # False=SDK 直连沙箱容器端口(需后端能访问 Server 的容器端口范围)
@@ -144,6 +147,15 @@ class Settings(BaseSettings):
     # False=不做原生隔离,仅靠路径策略 + 命令白名单(软隔离)
     # Windows 无原生沙箱,此配置项无效
     SANDBOX_LOCAL_NATIVE_ISOLATION: bool = True
+
+    # ACP CLI 挂死兜底(session/prompt 无数据 idle 超时,按事件状态分级):
+    # - 无活动工具(等待模型输出/最终响应):超过 ACP_IDLE_TIMEOUT_OUTPUT_SECONDS
+    #   无任何 data 事件 → 判挂死,cancel + 用已累积输出提前收尾本轮
+    # - 有工具在跑(git clone/构建等长命令本就长时间无输出):用
+    #   ACP_IDLE_TIMEOUT_TOOL_SECONDS 作最后防线(防 CLI 中途崩溃没发 completed)
+    # 设为 0 关闭对应超时
+    ACP_IDLE_TIMEOUT_OUTPUT_SECONDS: int = 300
+    ACP_IDLE_TIMEOUT_TOOL_SECONDS: int = 1800
 
     # Qoder CLI 配置(qoder_cli executor 用,国际版)
     # qodercli 可执行文件名/路径(沙箱内 PATH 查找或绝对路径)

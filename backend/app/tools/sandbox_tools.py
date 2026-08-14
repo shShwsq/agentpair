@@ -53,7 +53,12 @@ _GLOBAL_MEMORY_FILE = "global_memory.md"
 
 
 def _get_or_create_session(task_id: str) -> dict[str, Any]:
-    """获取或创建任务的沙箱上下文"""
+    """获取或创建任务的沙箱上下文
+
+    复用已有会话时顺带做"访问续期":距上次续期超过
+    SANDBOX_RENEW_INTERVAL_MINUTES 就 renew 一次 TTL,防长任务
+    (多轮协作/用户等待)拖过创建时的 TTL 被 Server 回收(回收后 404)。
+    """
     if task_id not in _sessions:
         # [perf] 新建沙箱会话(拉镜像/启容器/等 healthy,可能是大耗时点)
         with perf_timer(task_id, "sandbox_session", reused=False, mode=settings.SANDBOX_MODE):
@@ -63,10 +68,21 @@ def _get_or_create_session(task_id: str) -> dict[str, Any]:
         # 避免过去 session 一份、ctx 一份的双份临时目录问题)
         if settings.SANDBOX_MODE == "local":
             ctx["local_dir"] = session.local_dir
+        # 创建即起算 TTL,记下起点供后续访问续期节流判断
+        ctx["_last_renew"] = time.monotonic()
         _sessions[task_id] = ctx
     else:
         # [perf] 复用已有会话(无容器创建开销)
         perf_log(task_id, "sandbox_session", reused=True)
+        ctx = _sessions[task_id]
+        # 访问续期(节流):sandbox 模式才需要,间隔内不重复调 Server API
+        renew_interval = settings.SANDBOX_RENEW_INTERVAL_MINUTES * 60
+        if (
+            ctx.get("mode") == "sandbox"
+            and time.monotonic() - ctx.get("_last_renew", 0.0) >= renew_interval
+        ):
+            if ctx["session"].renew():
+                ctx["_last_renew"] = time.monotonic()
     return _sessions[task_id]
 
 

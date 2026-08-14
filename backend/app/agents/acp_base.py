@@ -87,6 +87,27 @@ _DEFAULT_BRIDGE = "acp_bridge"
 # 默认 ACP 日志目录:backend/logs/acp/
 _ACP_LOG_DIR = Path(__file__).resolve().parents[2] / "logs" / "acp"
 
+# idle 看门狗轮询间隔(秒):queue.get 超时粒度,也是 idle 检查粒度
+_IDLE_POLL_SECONDS = 5.0
+
+
+class PromptIdleTimeout(Exception):
+    """session/prompt idle 兜底:长时间无数据事件,CLI 疑似挂死
+
+    由 _rpc 的 idle 看门狗抛出;prompt() 捕获后发 session/cancel 并把
+    已累积输出留给调用方收尾(不 fail 任务)。超时阈值按事件状态分级:
+    有活动工具(长命令执行中)用 ACP_IDLE_TIMEOUT_TOOL_SECONDS,
+    无活动工具(等模型输出/最终响应)用 ACP_IDLE_TIMEOUT_OUTPUT_SECONDS。
+    """
+
+    def __init__(self, idle_secs: float, tool_active: bool):
+        self.idle_secs = idle_secs
+        self.tool_active = tool_active
+        super().__init__(
+            f"CLI 已 {int(idle_secs)}s 无数据事件"
+            f"({'工具执行中' if tool_active else '无活动工具'},疑似挂死)"
+        )
+
 
 # ============================================================
 # ACP HTTP 客户端
@@ -125,6 +146,9 @@ class ACPClient:
         # 返回:{"outcome": "selected", "option_id": "allow_once"} 或 {"outcome": "rejected"}
         # None 表示不处理(默认拒绝,兼容 always_approve 模式下 CLI 仍开 yolo 不会发请求的场景)
         self.permission_handler = permission_handler
+        # 最近一次 prompt 是否被 idle 兜底提前终止(截断原因)。
+        # 非 None 时调用方应用已累积输出收尾本轮,并在 summary 里标注。
+        self.last_prompt_truncated: str | None = None
         # read timeout=None:session/prompt 可能长时间流式输出
         self._client = httpx.Client(
             timeout=httpx.Timeout(connect=10, read=None, write=30, pool=30),
@@ -141,6 +165,7 @@ class ACPClient:
         request: dict,
         on_event=None,
         timeout: httpx.Timeout | float | None = None,
+        idle_probe: Callable[[], bool] | None = None,
     ) -> dict:
         """发送 JSON-RPC 请求,可选流式处理通知,返回最终响应 result
 
@@ -152,6 +177,8 @@ class ACPClient:
         (用于 initialize / session/new 等快速调用)。
         timeout: 本次请求的超时(秒或 httpx.Timeout)。None 用 client 默认
         (read=None 无限等待)。测试场景应传有限值,避免模型无响应时卡死。
+        idle_probe: 返回当前是否有活动工具的回调。非 None 时启用 idle
+        看门狗(挂死兜底),超时抛 PromptIdleTimeout;None 不启用。
         """
         request_id = request.get("id")
         method = request.get("method", "?")
@@ -188,7 +215,15 @@ class ACPClient:
             # 不是 ACP 通知,需要走 permission_handler 路径
             current_event_type: str | None = None
 
-            for line in response.iter_lines():
+            # idle 看门狗:idle_probe 非 None 时把阻塞读挪到后台线程,
+            # 主线程按 _IDLE_POLL_SECONDS 检查无数据 idle 时长(挂死兜底)
+            lines = (
+                self._iter_lines_with_watchdog(response, idle_probe)
+                if idle_probe is not None
+                else response.iter_lines()
+            )
+
+            for line in lines:
                 # 最先记录原始行(不解析、不过滤、不截断),
                 # 确保即使后续 JSONDecodeError 或分发逻辑跳过,
                 # 原始 SSE 文本仍完整保留在 JSONL 中。
@@ -255,6 +290,64 @@ class ACPClient:
         if final_result is None:
             final_result = {}
         return final_result
+
+    def _iter_lines_with_watchdog(
+        self,
+        response,
+        idle_probe: Callable[[], bool],
+    ) -> Generator[str, None, None]:
+        """带 idle 检测的 SSE 行读取(读线程 + queue,主线程定期检查)
+
+        httpx 的 iter_lines 阻塞在 socket 读上,无法插入 idle 检查;
+        这里把读取挪到守护线程,主线程用 queue.get(timeout) 周期性检查。
+
+        活动判定:任何 data:/event: 行算活动(bridge 的 `: idle Ns` 心跳
+        注释只证明 bridge 活着,不代表 CLI 有进展,不重置 idle)。
+        阈值按事件状态分级:idle_probe()=True(有工具在跑,如 git clone/
+        构建等长命令本就长时间无输出)用 ACP_IDLE_TIMEOUT_TOOL_SECONDS,
+        否则用 ACP_IDLE_TIMEOUT_OUTPUT_SECONDS;对应配置为 0 则不检查。
+
+        超时抛 PromptIdleTimeout(由 prompt() 捕获善后)。
+        """
+        line_q: queue.Queue = queue.Queue()
+
+        def _pump() -> None:
+            try:
+                for ln in response.iter_lines():
+                    line_q.put(("line", ln))
+            except Exception as e:  # 读取层错误透传给主线程(与原同步行为一致)
+                line_q.put(("error", e))
+            finally:
+                line_q.put(("end", None))
+
+        threading.Thread(
+            target=_pump, daemon=True, name="acp-sse-reader"
+        ).start()
+
+        last_activity = time.monotonic()
+        while True:
+            try:
+                kind, payload = line_q.get(timeout=_IDLE_POLL_SECONDS)
+            except queue.Empty:
+                idle_secs = time.monotonic() - last_activity
+                tool_active = bool(idle_probe())
+                threshold = (
+                    settings.ACP_IDLE_TIMEOUT_TOOL_SECONDS
+                    if tool_active
+                    else settings.ACP_IDLE_TIMEOUT_OUTPUT_SECONDS
+                )
+                if threshold > 0 and idle_secs >= threshold:
+                    raise PromptIdleTimeout(idle_secs, tool_active)
+                continue
+            if kind == "end":
+                return
+            if kind == "error":
+                raise payload
+            line = payload
+            stripped = line.strip()
+            if stripped.startswith(("data:", "event:")):
+                last_activity = time.monotonic()
+            yield line
 
     def _handle_permission_request(self, payload: dict) -> None:
         """处理 bridge 发来的 permission_request SSE 事件。
@@ -387,6 +480,7 @@ class ACPClient:
         prompt: list[dict],
         on_event=None,
         timeout: httpx.Timeout | float | None = None,
+        idle_probe: Callable[[], bool] | None = None,
     ) -> dict:
         """发送 prompt,流式处理通知,返回最终结果
 
@@ -395,16 +489,30 @@ class ACPClient:
         on_event: 接收 session/update 通知的回调
         timeout: 本次请求超时(秒或 httpx.Timeout)。None 用 client 默认
         (read=None 无限等待)。测试场景应传有限值。
+        idle_probe: 返回当前是否有活动工具的回调(如 collector.has_active_tools)。
+        非 None 时启用挂死兜底:分级 idle 超时后发 session/cancel 并返回空结果,
+        同时置 last_prompt_truncated(调用方用已累积输出收尾,不 fail 任务)。
         """
-        return self._rpc({
-            "jsonrpc": "2.0",
-            "method": "session/prompt",
-            "params": {
-                "sessionId": session_id,
-                "prompt": prompt,
-            },
-            "id": self._next_id(),
-        }, on_event=on_event, timeout=timeout)
+        self.last_prompt_truncated = None
+        try:
+            return self._rpc({
+                "jsonrpc": "2.0",
+                "method": "session/prompt",
+                "params": {
+                    "sessionId": session_id,
+                    "prompt": prompt,
+                },
+                "id": self._next_id(),
+            }, on_event=on_event, timeout=timeout, idle_probe=idle_probe)
+        except PromptIdleTimeout as e:
+            # 挂死兜底:记录现场 → cancel CLI(避免沙箱内残留失控进程)→
+            # 返回空结果,由调用方用 collector 已累积的输出收尾本轮
+            logger.warning(f"[acp] prompt idle 兜底触发: {e}")
+            if self.recorder:
+                self.recorder.record_raw(f"idle timeout: {e}", kind="meta")
+            self.cancel(session_id)
+            self.last_prompt_truncated = str(e)
+            return {}
 
     def cancel(self, session_id: str) -> None:
         """取消正在进行的 prompt"""
@@ -1297,6 +1405,16 @@ class _ACPCollector:
         """prompt 调用结束:flush 最后一段迭代"""
         self._flush_iteration()
 
+    @property
+    def has_active_tools(self) -> bool:
+        """是否有已发起但未结束的 tool_call(idle 超时分级判据)
+
+        True 表示 CLI 在等工具(如 git clone/构建)返回,长时间无输出属正常,
+        idle 兜底用宽松阈值;False 表示模型应在流式输出或已该回最终响应,
+        用严格阈值。failed 状态在 __call__ 里与 completed 同样终结。
+        """
+        return bool(self._pending_tool_calls)
+
     def __call__(self, msg: dict) -> None:
         """处理一条 ACP 通知"""
         # [perf] 首个 ACP 事件 = CLI 侧首 token 到达(前端可见响应的起点)
@@ -1342,7 +1460,9 @@ class _ACPCollector:
             if status == "in_progress":
                 # Kimi 的工具参数经 in_progress 增量构建,累积到 pending 缓存
                 self._accumulate_tool_input(tool_call_id, text)
-            elif status == "completed":
+            elif status in ("completed", "failed"):
+                # failed 同样是终态:落库工具结果(错误输出)并清理 pending,
+                # 否则 pending 泄漏会让 has_active_tools 恒真(idle 兜底误用宽松阈值)
                 self._handle_tool_result(tool_call_id, update)
         elif update_type == "plan":
             self._handle_plan(update.get("entries", []))
@@ -2323,50 +2443,55 @@ def run_acp_agent(
             try:
                 # 软中断循环:当前 prompt 结束后检查中断队列,
                 # 若有中断则用追问指令发起新 prompt(同 session,CLI 保留对话历史)
+                # auto_renew:prompt 期间 CLI 用自带 bash,不触发后端访问续期,
+                # 单轮长执行可能拖过 TTL,后台线程周期性 renew 沙箱
                 current_msg = user_msg
-                while True:
-                    # [perf] prompt 发送锚点(CLI 侧 TTFT 由 acp_first_event 记录)
-                    perf_log(task.id, "acp_prompt_send", round_idx=round_idx, msg_chars=len(current_msg))
-                    result = client.prompt(
-                        acp_session_id,
-                        [{"type": "text", "text": current_msg}],
-                        on_event=collector,
-                    )
+                with session.auto_renew():
+                    while True:
+                        # [perf] prompt 发送锚点(CLI 侧 TTFT 由 acp_first_event 记录)
+                        perf_log(task.id, "acp_prompt_send", round_idx=round_idx, msg_chars=len(current_msg))
+                        result = client.prompt(
+                            acp_session_id,
+                            [{"type": "text", "text": current_msg}],
+                            on_event=collector,
+                            # 挂死兜底:按活动工具状态分级 idle 超时(见 PromptIdleTimeout)
+                            idle_probe=lambda: collector.has_active_tools,
+                        )
 
-                    # 检查中断队列(软中断:不取消当前 prompt,等它结束后再追问)
-                    from app.agent_interrupt import drain_interrupts
-                    pending_interrupts = drain_interrupts(task.id)
-                    if not pending_interrupts:
-                        break  # 无中断,正常结束
+                        # 检查中断队列(软中断:不取消当前 prompt,等它结束后再追问)
+                        from app.agent_interrupt import drain_interrupts
+                        pending_interrupts = drain_interrupts(task.id)
+                        if not pending_interrupts:
+                            break  # 无中断,正常结束
 
-                    # 有中断:构造追问 prompt,继续下一轮 prompt
-                    interrupt_parts = []
-                    for it in pending_interrupts:
-                        query = (it.get("query") or "").strip()
-                        if query:
-                            reason = (it.get("reason") or "").strip()
-                            it_text = f"[方向纠正:{reason}]\n{query}" if reason else query
-                            interrupt_parts.append(it_text)
+                        # 有中断:构造追问 prompt,继续下一轮 prompt
+                        interrupt_parts = []
+                        for it in pending_interrupts:
+                            query = (it.get("query") or "").strip()
+                            if query:
+                                reason = (it.get("reason") or "").strip()
+                                it_text = f"[方向纠正:{reason}]\n{query}" if reason else query
+                                interrupt_parts.append(it_text)
 
-                    if not interrupt_parts:
-                        break  # 中断内容为空,正常结束
+                        if not interrupt_parts:
+                            break  # 中断内容为空,正常结束
 
-                    interrupt_msg = (
-                        "[user_agent 检查点评估:方向纠正]\n"
-                        "user_agent 在观察你的执行过程后,认为当前方向需要调整。"
-                        "请把以下纠正指令纳入当前任务,调整检查方向继续执行:\n\n"
-                        + "\n\n".join(interrupt_parts)
-                    )
-                    logger.info(
-                        f"[task={task.id}] CLI 软中断:用追问指令发起新 prompt "
-                        f"({len(pending_interrupts)} 条中断)"
-                    )
-                    _add_conversation(
-                        db, task, round_idx=round_idx,
-                        role="user_agent", type="evaluation",
-                        content=f"[检查点中断] {interrupt_msg[:200]}",
-                    )
-                    current_msg = interrupt_msg
+                        interrupt_msg = (
+                            "[user_agent 检查点评估:方向纠正]\n"
+                            "user_agent 在观察你的执行过程后,认为当前方向需要调整。"
+                            "请把以下纠正指令纳入当前任务,调整检查方向继续执行:\n\n"
+                            + "\n\n".join(interrupt_parts)
+                        )
+                        logger.info(
+                            f"[task={task.id}] CLI 软中断:用追问指令发起新 prompt "
+                            f"({len(pending_interrupts)} 条中断)"
+                        )
+                        _add_conversation(
+                            db, task, round_idx=round_idx,
+                            role="user_agent", type="evaluation",
+                            content=f"[检查点中断] {interrupt_msg[:200]}",
+                        )
+                        current_msg = interrupt_msg
 
             except Exception as e:
                 logger.exception(f"[task={task.id}] ACP prompt 失败 ({agent_type})")
@@ -2403,6 +2528,27 @@ def run_acp_agent(
     summary = collector.content_full or ""
     if not summary:
         summary = f"第 {round_idx} 轮完成({agent_type},{collector.tool_call_count} 次工具调用)"
+
+    # 挂死兜底提前终止了 prompt:在 summary 里标注截断,让 user_agent 评估时
+    # 知道本轮输出不完整(任务不 fail,照常评估/追问;前端同步推 error 提示)
+    if client.last_prompt_truncated:
+        trunc_reason = client.last_prompt_truncated
+        logger.warning(
+            f"[task={task.id}] {agent_type} 第 {round_idx} 轮被 idle 兜底提前终止: {trunc_reason},"
+            f"用已累积输出({len(collector.content_full)}字符)收尾"
+        )
+        publish(task.id, "thinking_delta", {
+            "conv_id": collector.current_conv_id,
+            "round_idx": round_idx,
+            "role": "react_agent",
+            "phase": "error",
+            "delta": f"[CLI 长时间无响应,本轮已提前终止: {trunc_reason}]",
+            "iteration": collector.iteration,
+        })
+        summary += (
+            f"\n\n[系统注记:本轮执行因 CLI 长时间无响应({trunc_reason})被提前终止,"
+            "以上为终止前已输出的内容,可能不完整]"
+        )
 
     current_plan: list[dict] = [dict(s) for s in (previous_plan or [])]
     extracted = _extract_plan(collector.content_full)

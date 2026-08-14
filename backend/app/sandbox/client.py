@@ -26,6 +26,8 @@ import sys
 import tempfile
 import threading
 import uuid
+from contextlib import contextmanager
+from collections.abc import Generator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -222,6 +224,64 @@ class SandboxSession:
             proc = self._local_bg_procs.pop(execution_id, None)
             if proc:
                 proc.terminate()
+
+    def renew(self, timeout_minutes: int | None = None) -> bool:
+        """续期沙箱 TTL:新过期时间 = 当前时间 + timeout(SDK renew 语义)
+
+        长任务(多轮协作/用户等待确认/CLI 长时间执行)可能拖过创建时的
+        TTL 被 Server 自动回收,回收后任何 run_command 都会 404。
+        调用方应在会话被活跃使用时周期性续期(sandbox_tools 的访问续期
+        + acp_base 的 prompt 期间后台续期)。
+
+        timeout_minutes:续期时长,默认用 SANDBOX_TIMEOUT_MINUTES。
+        返回是否成功。失败不抛异常(可能已过期,由后续命令自行报错);
+        local 模式无 TTL 概念,直接返回 True。
+        """
+        if self._closed:
+            return False
+        if self.mode != "sandbox" or self.sandbox is None:
+            return True
+
+        minutes = timeout_minutes or settings.SANDBOX_TIMEOUT_MINUTES
+        try:
+            resp = self.sandbox.renew(timedelta(minutes=minutes))
+            expires = getattr(resp, "expires_at", None) or getattr(resp, "expiration_time", None)
+            logger.info(f"[sandbox] TTL 已续期 +{minutes} 分钟(过期时间: {expires})")
+            return True
+        except Exception as e:
+            logger.warning(f"[sandbox] TTL 续期失败(沙箱可能已被回收): {e}")
+            return False
+
+    @contextmanager
+    def auto_renew(self, interval_minutes: float | None = None) -> Generator[None, None, None]:
+        """后台周期性续期上下文管理器(供 CLI prompt 等长时间阻塞段使用)
+
+        prompt 期间 CLI 自带 bash 执行命令,不会触发后端 sandbox_tools 的
+        访问续期;若单轮执行超过 TTL,沙箱会被中途回收。用此上下文包裹
+        长阻塞段,后台线程按 interval 周期性 renew。
+
+        interval_minutes:续期间隔,默认 SANDBOX_RENEW_INTERVAL_MINUTES。
+        local 模式/已关闭会话:不开线程,直接 yield(no-op)。
+        """
+        if self._closed or self.mode != "sandbox" or self.sandbox is None:
+            yield
+            return
+
+        interval = (interval_minutes or settings.SANDBOX_RENEW_INTERVAL_MINUTES) * 60
+        stop_event = threading.Event()
+
+        def _loop() -> None:
+            while not stop_event.wait(interval):
+                if self._closed:
+                    break
+                self.renew()
+
+        worker = threading.Thread(target=_loop, daemon=True, name="sandbox-auto-renew")
+        worker.start()
+        try:
+            yield
+        finally:
+            stop_event.set()
 
     def close(self) -> None:
         """关闭沙箱,释放资源
