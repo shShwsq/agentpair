@@ -1058,11 +1058,16 @@ def _format_repo_context(
 # ============================================================
 
 
-def resume_audit_with_message(task: Task, db: Session, user_message: str) -> None:
+def resume_audit_with_message(
+    task: Task, db: Session, user_message: str, retry: bool = False,
+) -> None:
     """用户在任务完成后追加消息,重启协作循环
 
+    retry=True 时表示失败任务重试(断点续跑),消息措辞与阶段文案
+    改为重试语境,其余流程一致。
+
     流程:
-    1. task.status: COMPLETED → RUNNING
+    1. task.status: COMPLETED/FAILED → RUNNING
     2. 加载历史上下文(react_summaries / task_checklist / LLM 配置)
     3. 起始 round_idx = max(Conversation.round_idx) + 1
     4. 先调 user_agent 分析用户消息(对照已有 checklist,输出 followup_query)
@@ -1079,7 +1084,9 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
     task_id_str = str(task.id)
 
     task.status = TaskStatus.RUNNING
-    task.current_stage = "用户追加消息,重启执行"
+    task.current_stage = (
+        "重试失败任务,恢复执行" if retry else "用户追加消息,重启执行"
+    )
     task.error_message = None  # 清除之前的错误信息(若有)
     db.commit()
     _publish_status(task)
@@ -1135,7 +1142,9 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
     perf_log(task.id, "write_memory_files", time.perf_counter() - _t0)
 
     # 把用户消息拼到 user_intent 后面,让 user_agent 把它视为新的检查方向
-    effective_intent = task.user_input + f"\n\n[用户追加消息]\n{user_message}"
+    # 重试场景用专门标记,避免 user_agent 把续跑当成用户新增需求
+    msg_label = "[重试续跑]" if retry else "[用户追加消息]"
+    effective_intent = task.user_input + f"\n\n{msg_label}\n{user_message}"
 
     try:
         # ===== 单 agent 模式:user_agent 已禁用,跳过评估,直接跑 react_agent =====
@@ -1258,16 +1267,17 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
         _finish_resume(task, db, react_summaries, ua_result)
 
     except Exception as e:
-        logger.exception(f"[task={task.id}] 重启审计失败")
+        err_stage = "重试执行失败" if retry else "重启执行失败"
+        logger.exception(f"[task={task.id}] {err_stage}")
         task.status = TaskStatus.FAILED
         task.error_message = str(e)[:1000]
-        task.current_stage = "重启执行失败"
+        task.current_stage = err_stage
         db.commit()
         _publish_status(task)
         _add_conversation(
             db, task, round_idx=0,
             role="user_agent", type="error",
-            content=f"重启执行失败: {e}",
+            content=f"{err_stage}: {e}",
         )
     finally:
         # 清理资源(与 run_dual_agent_audit 对齐)
@@ -1297,6 +1307,78 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
                 "error_message": task.error_message or "未知错误",
             })
         finish_task(task.id)
+
+
+# ============================================================
+# 失败任务重试(断点续跑优先,无进度时从头重跑)
+# ============================================================
+
+
+def retry_failed_task(task: Task, db: Session) -> None:
+    """失败任务重试入口:断点续跑优先,无可续进度时从头重跑
+
+    判定依据:是否已有 user_agent / react_agent 的对话落库
+    - 无(预克隆/沙箱/LLM 配置等早期失败,执行未真正开始):
+      没有可续内容,直接重跑 run_dual_agent_audit
+    - 有(执行中途失败):复用 resume_audit_with_message 断点续跑,
+      以重试续跑消息驱动 user_agent 分析现状、接续未完成工作
+      (round_idx 由 _get_next_round_idx 自动续接,不产生重复轮次)
+
+    续跑前的沙箱探测:失败 finally 已 mark_task_completed,session
+    超 1 小时 TTL 被回收(或后端重启)后已 clone 的仓库丢失;若 session
+    不在且任务配了 repo_url,重新 clone 恢复工作区,避免续跑时执行器
+    找不到仓库。
+
+    注意:本函数由 API 端点在独立后台线程中调用(与 resume 一致),
+    重试时原后台线程已因异常退出,互斥无竞态。
+    """
+    task_id_str = str(task.id)
+    # 先捕获失败原因(后续会清 error_message),拼进续跑消息供 user_agent 参考
+    last_error = task.error_message or "未知错误"
+    perf_log(task.id, "retry_start", last_error_chars=len(last_error))
+
+    has_progress = (
+        db.query(Conversation.id)
+        .filter(
+            Conversation.task_id == task.id,
+            Conversation.role.in_(("react_agent", "user_agent")),
+        )
+        .first()
+        is not None
+    )
+
+    if not has_progress:
+        # 早期失败:无可续内容,从头重跑(状态流转/清理由其内部处理)
+        logger.info(f"[task={task.id}] 重试:无可续进度,从头重跑")
+        task.error_message = None
+        db.commit()
+        run_dual_agent_audit(task, db)
+        return
+
+    # 执行中途失败:沙箱会话已被回收时,重新 clone 恢复工作区
+    repo_url = (task.params or {}).get("repo_url")
+    if repo_url and sandbox_tools.get_workspace_info(task_id_str) is None:
+        logger.info(
+            f"[task={task.id}] 重试:沙箱会话已回收,重新克隆仓库恢复工作区"
+        )
+        task.status = TaskStatus.RUNNING
+        task.current_stage = "重试失败任务,正在恢复工作区..."
+        task.error_message = None
+        db.commit()
+        _publish_status(task)
+        git_tokens = _load_git_tokens(db, task.user_id)
+        set_current_git_tokens(git_tokens)
+        # clone 失败时 _prepare_repo_context 已降级不抛异常
+        # (续跑时 react_agent 可自主克隆,不阻塞重试)
+        _prepare_repo_context(task, db, task_id_str, git_tokens)
+
+    # 以重试续跑消息恢复执行(状态流转/记忆文件重建/轮次续接由 resume 链路处理)
+    retry_message = (
+        f"该任务上一次执行因错误中断: {last_error}\n"
+        "这是一次失败重试(断点续跑),不是用户的新需求: "
+        "请基于已有进度继续完成原任务,不要重做已完成的部分。"
+    )
+    resume_audit_with_message(task, db, retry_message, retry=True)
 
 
 def _finish_resume(

@@ -231,6 +231,24 @@ export function sendTaskMessage(
 }
 
 // ============================================================
+// 失败任务重试
+// ============================================================
+
+/**
+ * 重试失败的任务
+ *
+ * 后端按失败阶段自动分流:
+ * - 早期失败(无可续进度):从头重跑
+ * - 执行中途失败:断点续跑(保留已有进度,round_idx 自动续接)
+ *
+ * 仅 failed 状态接受,其他状态返回 accepted=false。
+ * 重试启动后前端需乐观置 running 并重连 SSE(同 completed 发消息后的处理)。
+ */
+export function retryTask(taskId: string): Promise<SendMessageResponse> {
+  return client.post(`/tasks/${taskId}/retry`).then((r) => r.data)
+}
+
+// ============================================================
 // 动态验证动作授权(verifier_agent per_action 模式)
 // ============================================================
 

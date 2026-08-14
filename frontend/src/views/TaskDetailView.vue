@@ -43,6 +43,7 @@ import {
   getTaskReportHtml,
   pauseTask,
   resumeTask,
+  retryTask,
   submitTaskAnswer,
   submitTaskChecklist,
   submitVerifyAction,
@@ -1872,6 +1873,40 @@ function handleMessageError(message: string): void {
   error.value = message
 }
 
+// ---- 失败任务重试(底部重试条,替换输入框位置)----
+
+/** 重试请求是否进行中(按钮 loading 态,防重复点击) */
+const retrying = ref(false)
+
+/**
+ * 重试失败任务
+ *
+ * 后端按失败阶段自动分流(断点续跑优先,无可续进度从头重跑)。
+ * 启动成功后乐观置 running + 清错误信息 + 重连 SSE
+ * (同 handleMessageSent 的 completed 分支;后端已 reset_task_bus,
+ * 重试标记对话等事件会通过 SSE 历史补播送达)。
+ */
+async function handleRetry(): Promise<void> {
+  if (!task.value || task.value.status !== 'failed' || retrying.value) return
+  retrying.value = true
+  try {
+    const resp = await retryTask(String(task.value.id))
+    if (resp.accepted) {
+      task.value.status = 'running'
+      task.value.error_message = null
+      task.value.current_stage = '重试失败任务...'
+      connectSSE(String(task.value.id))
+      nextTick(scrollToBottom)
+    } else {
+      error.value = resp.message || '重试启动失败'
+    }
+  } catch (err) {
+    error.value = extractErrorMessage(err)
+  } finally {
+    retrying.value = false
+  }
+}
+
 /** 判断 DisplayItem 是否为用户补充消息(type=message,需右对齐展示) */
 function isUserMessageItem(item: DisplayItem): boolean {
   return !item.is_streaming && item.role === 'user' && item.type === 'message'
@@ -2434,7 +2469,7 @@ function toggleResult(id: string): void {
       </template>
       </div>
 
-      <!-- 用户补充消息输入框(running/paused/completed 可见,pending/failed 隐藏) -->
+      <!-- 用户补充消息输入框(running/paused/completed 可见,pending 隐藏) -->
       <UserMessageInput
         v-if="task && (task.status === 'running' || task.status === 'paused' || task.status === 'completed')"
         :task-id="String(task.id)"
@@ -2442,6 +2477,21 @@ function toggleResult(id: string): void {
         @sent="handleMessageSent"
         @error="handleMessageError"
       />
+
+      <!-- 失败任务重试条(failed 状态替换输入框位置) -->
+      <div v-else-if="task && task.status === 'failed'" class="retry-bar">
+        <div class="retry-bar-text">
+          <span class="retry-bar-label">任务执行失败,可重试</span>
+          <span
+            v-if="task.error_message"
+            class="retry-bar-error"
+            :title="task.error_message"
+          >{{ truncateInput(task.error_message, 80) }}</span>
+        </div>
+        <button class="retry-btn" :disabled="retrying" @click="handleRetry">
+          {{ retrying ? '重试启动中...' : '重试' }}
+        </button>
+      </div>
     </main>
 
     <!-- 右侧:任务详情 + 覆盖度看板(抽屉把手式;展开时顶部条带标题+折叠按钮,折叠时悬浮把手在 page-body 右上角) -->
@@ -3006,6 +3056,64 @@ function toggleResult(id: string): void {
 .badge-paused { background: var(--color-warning-light); color: var(--color-warning); }
 .badge-completed { background: var(--color-success-light); color: var(--color-success); }
 .badge-failed { background: var(--color-danger-light); color: var(--color-danger); }
+
+/* ---- 失败任务重试条(failed 状态替换底部补充消息输入框位置) ---- */
+.retry-bar {
+  width: 94%;
+  margin: 0 auto var(--space-4);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-3);
+  box-shadow: var(--shadow-md);
+  background: var(--color-danger-light);
+}
+
+.retry-bar-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.retry-bar-label {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--color-danger);
+}
+
+.retry-bar-error {
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.retry-btn {
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--color-text-inverse);
+  background: var(--color-primary);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.retry-btn:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+}
+
+.retry-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
 
 /* ---- 提示 ---- */
 .alert {

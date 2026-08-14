@@ -8,6 +8,7 @@
 - POST /tasks  提交任务,立即返回 task_id,后台线程执行
 - GET /tasks/{task_id}  查询任务状态与结果
 - GET /tasks/{task_id}/stream  SSE 实时事件流(对话/状态/结果/完成)
+- POST /tasks/{task_id}/retry  重试失败任务(断点续跑优先)
 - GET /scenarios  列出可用场景
 """
 import ast
@@ -24,7 +25,11 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.agents.orchestrator import resume_audit_with_message, run_dual_agent_audit
+from app.agents.orchestrator import (
+    resume_audit_with_message,
+    retry_failed_task,
+    run_dual_agent_audit,
+)
 from app.database import SessionLocal, get_db
 from app.deps import get_optional_user, get_optional_user_sse
 from app.event_bus import publish, reset_task_bus, subscribe, unsubscribe
@@ -870,6 +875,117 @@ def _run_resume_in_background(task_id: str, user_message: str) -> None:
                 task.status = TaskStatus.FAILED
                 task.error_message = str(e)[:1000]
                 task.current_stage = "重启执行失败"
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
+        # 清理 in-memory 暂停状态(防止任务结束但状态卡住)
+        clear_pause_state(task_id)
+
+
+# ============================================================
+# 失败任务重试
+# ============================================================
+
+
+@router.post("/tasks/{task_id}/retry", response_model=SendMessageResponse)
+def retry_failed_task_endpoint(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> SendMessageResponse:
+    """重试失败的任务(断点续跑优先)
+
+    仅 failed 状态接受(其他状态返回 accepted=false,天然防重复点击)。
+    后台线程调 retry_failed_task 按进度分流:
+    - 无可续进度(早期失败):从头重跑 run_dual_agent_audit
+    - 有进度(执行中途失败):复用 resume 链路断点续跑
+
+    与 send_message 的 completed 分支同理,需先 reset_task_bus:
+    失败任务的事件总线已被 finish_task 标记结束,后续 publish 会被静默丢弃。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    if task.status != TaskStatus.FAILED:
+        return SendMessageResponse(
+            accepted=False,
+            message=f"任务状态为 {task.status.value},不支持重试",
+        )
+
+    perf_log(task_id, "user_retry")
+
+    # 重置事件总线(清除 _finished + 旧历史),让新事件能推送、前端重连 SSE 可接收
+    reset_task_bus(task.id)
+
+    # 重试标记对话落库(对话流可见重试起点),role=system 不被重试进度判定计入
+    latest_conv = (
+        db.query(Conversation)
+        .filter(Conversation.task_id == task_id)
+        .order_by(Conversation.round_idx.desc())
+        .first()
+    )
+    conv = Conversation(
+        task_id=task.id,
+        round_idx=latest_conv.round_idx if latest_conv else 0,
+        role="system",
+        type="info",
+        content="发起失败任务重试(优先断点续跑)...",
+    )
+    db.add(conv)
+    db.commit()
+    db.refresh(conv)
+    publish(task.id, "conversation", {
+        "id": str(conv.id),
+        "round_idx": conv.round_idx,
+        "role": conv.role,
+        "type": conv.type,
+        "content": conv.content,
+        "reasoning": conv.reasoning,
+        "created_at": conv.created_at.isoformat() if conv.created_at else None,
+    })
+
+    thread = threading.Thread(
+        target=_run_retry_in_background,
+        args=(str(task_id),),
+        daemon=True,
+        name=f"task-{task_id}-retry",
+    )
+    thread.start()
+    return SendMessageResponse(
+        accepted=True,
+        message="已开始重试",
+    )
+
+
+def _run_retry_in_background(task_id: str) -> None:
+    """后台线程执行失败任务重试(与 _run_resume_in_background 对齐)
+
+    用独立的 DB session(线程安全),执行完毕后关闭。
+    retry_failed_task 内部从头重跑/断点续跑分支各自有异常兜底,
+    这里仅兜底 DB 异常等极端情况。
+    """
+    db = SessionLocal()
+    try:
+        task = db.get(Task, uuid.UUID(task_id))
+        if not task:
+            logger.error(f"重试任务:task {task_id} 不存在")
+            return
+        retry_failed_task(task, db)
+    except Exception as e:
+        logger.exception(f"[task={task_id}] 重试后台执行失败")
+        # 兜底:确保 task 状态被标记为失败
+        try:
+            task = db.get(Task, uuid.UUID(task_id))
+            if task and task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+                task.status = TaskStatus.FAILED
+                task.error_message = str(e)[:1000]
+                task.current_stage = "重试执行失败"
                 db.commit()
         except Exception:
             pass
