@@ -22,6 +22,7 @@
  */
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { jsonrepair } from 'jsonrepair'
 
 import AppHeader from '@/components/AppHeader.vue'
 import ChecklistReviewDialog from '@/components/ChecklistReviewDialog.vue'
@@ -851,19 +852,21 @@ const PLAN_LINE_HAS_TEXT_RE = /[\w\u4e00-\u9fff]/
  *
  * system prompt 示范的是 JSON 数组格式,模型照做时逐行解析会把整行 JSON
  * 当成步骤文本;这里优先按 JSON 解析。容错:无包裹数组时补 [ ],
- * 首次失败后去掉尾逗号重试一次(与后端 json_repair 的常见修复对齐)。
+ * 原生 JSON.parse 失败后用 jsonrepair 修复(尾逗号/截断/缺引号等,
+ * 与后端 json_repair 对齐)。
  */
 function parsePlanJson(block: string): PlanStep[] | null {
   const trimmed = block.trim()
   if (!trimmed || (trimmed[0] !== '[' && trimmed[0] !== '{')) return null
   const candidate = trimmed[0] === '[' ? trimmed : `[${trimmed}]`
   let parsed: unknown = null
-  for (const attempt of [candidate, candidate.replace(/,\s*([\]}])/g, '$1')]) {
+  try {
+    parsed = JSON.parse(candidate)
+  } catch {
     try {
-      parsed = JSON.parse(attempt)
-      break
+      parsed = JSON.parse(jsonrepair(candidate))
     } catch {
-      // 尝试下一种修复
+      return null
     }
   }
   if (!Array.isArray(parsed)) return null
