@@ -23,6 +23,7 @@ import type {
   ConversationEventData,
   ConversationUpdateEventData,
   DoneEventData,
+  InterruptCancelledEventData,
   PlanEventData,
   QuestionEventData,
   SSEEvent,
@@ -55,6 +56,8 @@ export interface StreamCallbacks {
   onCommandConfirm?: (data: CommandConfirmEventData) => void
   /** user_agent 检查点评估结果(迭代边界轻量评估,interrupt=true 时已注入追问) */
   onAgentCheckpoint?: (data: AgentCheckpointEventData) => void
+  /** 用户取消了待生效的检查点打断(CLI 执行器 pending 窗口内) */
+  onInterruptCancelled?: (data: InterruptCancelledEventData) => void
   onDone?: (data: DoneEventData) => void
   onError?: (data: DoneEventData) => void
 }
@@ -89,6 +92,7 @@ export function subscribeTaskStream(
     'verify_action',
     'command_confirm',
     'agent_checkpoint',
+    'interrupt_cancelled',
     'done',
     'error',
   ]
@@ -135,6 +139,9 @@ export function subscribeTaskStream(
             break
           case 'agent_checkpoint':
             callbacks.onAgentCheckpoint?.(data as unknown as AgentCheckpointEventData)
+            break
+          case 'interrupt_cancelled':
+            callbacks.onInterruptCancelled?.(data as unknown as InterruptCancelledEventData)
             break
           case 'done':
             callbacks.onDone?.(data as unknown as DoneEventData)

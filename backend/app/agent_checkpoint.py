@@ -180,6 +180,11 @@ CHECKPOINT_SYSTEM_PROMPT = """你是 user_agent(用户代理智能体),正在实
 # 检查点评估落库的 content 前缀(用于与 round 边界完整评估区分,两者同为 evaluation type)
 _CHECKPOINT_CONTENT_PREFIX = "[检查点评估"
 
+# 用户取消待生效打断后,追加到对应检查点评估记录 content 末尾的标记。
+# 作用:1) 下次检查点评估注入历史记录时 user_agent 能看到指令被否决;
+# 2) 前端侧栏据此把徽标从"已打断"改为"已取消"。
+INTERRUPT_CANCEL_MARKER = "[用户已取消该打断,追问指令未下发]"
+
 # 注入的历史评估记录条数上限(取最近 N 条)
 MAX_HISTORY_RECORDS = 5
 
@@ -234,6 +239,7 @@ def _extract_checkpoint_record(conv: Conversation) -> dict[str, Any] | None:
         "reason": parsed["reason"],
         "query": parsed["query"],
         "summary": parsed["summary"],
+        "cancelled": INTERRUPT_CANCEL_MARKER in str(conv.content),
     }
 
 
@@ -248,7 +254,10 @@ def _build_history_section(records: list[dict[str, Any]]) -> str:
     for r in records[-MAX_HISTORY_RECORDS:]:
         loc = f"迭代{r['iteration']}" if r.get("iteration") else "早期迭代"
         if r.get("interrupt"):
-            line = f"- [{loc}] 打断 | 摘要:{r.get('summary') or r.get('reason', '')} | 指令:{r.get('query', '')}"
+            # 用户取消过的打断明确标注,避免 user_agent 误以为指令已下发
+            # 而只核查执行情况,或朝同一方向重复打断
+            action = "打断(用户已取消,指令未下发)" if r.get("cancelled") else "打断"
+            line = f"- [{loc}] {action} | 摘要:{r.get('summary') or r.get('reason', '')} | 指令:{r.get('query', '')}"
         else:
             line = f"- [{loc}] 继续 | 摘要:{r.get('summary') or r.get('reason', '')}"
         lines.append(line)
@@ -575,11 +584,13 @@ def run_user_agent_checkpoint(
         except Exception as e:
             logger.warning(f"[task={task.id}] 落库检查点思考链失败(忽略): {e}")
 
-    # 落库 + 推送 agent_checkpoint 事件
-    _record_checkpoint(
+    # 落库 + 推送 agent_checkpoint 事件;返回评估记录 id,
+    # 供调用方 push_interrupt 时携带(用户取消待生效打断时定位该记录追加标记)
+    eval_conv_id = _record_checkpoint(
         db, task, round_idx, iteration, result, reasoning=content_full
     )
 
+    result["eval_conv_id"] = str(eval_conv_id) if eval_conv_id else None
     return result
 
 
@@ -697,11 +708,11 @@ def _record_checkpoint(
     result: dict[str, Any],
     *,
     reasoning: str = "",
-) -> None:
+) -> Any:
     """落库检查点评估结果 + 推送 agent_checkpoint 事件
 
     落库为 Conversation(role=user_agent, type=evaluation),content 记录
-    评估摘要,reasoning 记录完整 JSON 输出供回查。
+    评估摘要,reasoning 记录完整 JSON 输出供回查。返回落库记录 id。
     """
     interrupt = result.get("interrupt", False)
     reason = result.get("reason", "")
@@ -750,3 +761,5 @@ def _record_checkpoint(
         "content": content,
         "reasoning": reasoning,
     })
+
+    return conv.id

@@ -599,6 +599,8 @@ def run_react_agent(
                             query=checkpoint_result["query"],
                             reason=checkpoint_result["reason"],
                             iteration=iteration,
+                            round_idx=round_idx,
+                            eval_conv_id=checkpoint_result.get("eval_conv_id"),
                         )
                         increment_interrupt_count(task.id, round_idx)
                         logger.info(

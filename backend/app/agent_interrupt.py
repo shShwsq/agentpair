@@ -36,6 +36,8 @@ class _InterruptQueue:
             "query": str,        # 追问指令内容(注入 react_agent 的 user 消息)
             "reason": str,       # 打断理由(落库 + 前端展示)
             "iteration": int,    # 触发打断时的迭代序号
+            "round_idx": int,    # 触发打断时的协作轮次(取消时回补计数用)
+            "eval_conv_id": str | None,  # 检查点评估落库记录 id(取消时追加标记用)
             "created_at": str,   # ISO 时间(用于排序)
         }
     """
@@ -96,6 +98,8 @@ def push_interrupt(
     query: str,
     reason: str,
     iteration: int,
+    round_idx: int = 0,
+    eval_conv_id: str | None = None,
 ) -> None:
     """追加 user_agent 中断指令到队列(新替旧)
 
@@ -108,12 +112,16 @@ def push_interrupt(
         query: 追问指令内容(将注入 react_agent 的 user 消息)
         reason: 打断理由(落库 + 前端展示)
         iteration: 触发打断时的迭代序号
+        round_idx: 触发打断时的协作轮次(取消时回补该轮计数)
+        eval_conv_id: 检查点评估落库记录 id(取消时在该记录追加已取消标记)
     """
     queue = _get_or_create(str(task_id))
     replaced = queue.push({
         "query": query,
         "reason": reason,
         "iteration": iteration,
+        "round_idx": round_idx,
+        "eval_conv_id": eval_conv_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
     logger.info(
@@ -138,6 +146,29 @@ def has_pending_interrupts(task_id: str | UUID) -> bool:
     """task 是否有待处理的中断(快速判断)"""
     queue = _get_or_create(str(task_id))
     return queue.has_pending()
+
+
+def peek_pending_interrupt(task_id: str | UUID) -> list[dict[str, Any]]:
+    """查看未处理中断的副本(不消费;刷新页面后恢复前端 pending 态用)"""
+    queue = _get_or_create(str(task_id))
+    with queue._lock:  # noqa: SLF001 同模块内直接持锁取副本,避免 drain 误消费
+        return list(queue._items)
+
+
+def cancel_pending_interrupt(task_id: str | UUID) -> list[dict[str, Any]]:
+    """原子取消:取出并清空未处理中断(用户点击取消时调用)
+
+    与 drain_interrupts 共用同一把队列锁,二者互斥:要么取消赢
+    (返回被取消的中断,执行端 drain 到空),要么注入赢(返回空列表,
+    中断已生效不可取消),不会出现两头都生效。
+    """
+    queue = _get_or_create(str(task_id))
+    items = queue.drain()
+    if items:
+        logger.info(
+            f"[task={task_id}] 用户取消 {len(items)} 条待生效 user_agent 中断"
+        )
+    return items
 
 
 def clear_interrupts(task_id: str | UUID) -> None:
@@ -167,6 +198,12 @@ class _InterruptCounter:
             self._counts[round_idx] = self._counts.get(round_idx, 0) + 1
             return self._counts[round_idx]
 
+    def decrement(self, round_idx: int) -> int:
+        """计数 -1(用户取消打断时回补配额),不低于 0"""
+        with self._lock:
+            self._counts[round_idx] = max(self._counts.get(round_idx, 0) - 1, 0)
+            return self._counts[round_idx]
+
     def clear(self) -> None:
         with self._lock:
             self._counts.clear()
@@ -191,6 +228,11 @@ def get_interrupt_count(task_id: str | UUID, round_idx: int) -> int:
 def increment_interrupt_count(task_id: str | UUID, round_idx: int) -> int:
     """打断计数 +1,返回更新后的次数"""
     return _get_counter(str(task_id)).increment(round_idx)
+
+
+def decrement_interrupt_count(task_id: str | UUID, round_idx: int) -> int:
+    """打断计数 -1(用户取消打断时回补本轮配额),返回更新后的次数"""
+    return _get_counter(str(task_id)).decrement(round_idx)
 
 
 def clear_interrupt_count(task_id: str | UUID) -> None:

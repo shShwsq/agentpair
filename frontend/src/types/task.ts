@@ -288,6 +288,7 @@ export type SSEEventType =
   | 'done'
   | 'error'
   | 'agent_checkpoint'
+  | 'interrupt_cancelled'
 
 /** SSE 事件通用结构 */
 export interface SSEEvent {
@@ -459,6 +460,32 @@ export interface AgentCheckpointEventData {
   reason: string
   /** 打断时的追问指令(interrupt=true 时非空,注入 react_agent 作为 user 消息) */
   query: string | null
+}
+
+/**
+ * interrupt_cancelled 事件 data(用户取消了待生效的检查点打断)
+ *
+ * CLI 执行器的打断入队后要等当前 prompt 结束才注入,期间用户可点
+ * "取消打断"。取消成功后后端推此事件,前端把 pending 卡片切为已取消态。
+ */
+export interface InterruptCancelledEventData {
+  /** 被取消打断所属的协作轮次 */
+  round_idx: number
+  /** 触发打断时的迭代序号 */
+  iteration: number | null
+}
+
+/**
+ * GET /tasks/{id}/pending_interrupt 响应(待生效的检查点打断)
+ *
+ * 刷新页面后恢复前端 pending 卡片用;无待生效打断时接口返回 null。
+ */
+export interface PendingInterruptInfo {
+  round_idx: number
+  iteration: number | null
+  reason: string
+  query: string | null
+  created_at?: string
 }
 
 /**

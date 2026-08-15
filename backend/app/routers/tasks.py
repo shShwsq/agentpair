@@ -25,7 +25,12 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.agent_checkpoint import MAX_MAX_ROUNDS
+from app.agent_checkpoint import INTERRUPT_CANCEL_MARKER, MAX_MAX_ROUNDS
+from app.agent_interrupt import (
+    cancel_pending_interrupt,
+    decrement_interrupt_count,
+    peek_pending_interrupt,
+)
 from app.agents.orchestrator import (
     resume_audit_with_message,
     retry_failed_task,
@@ -1181,6 +1186,117 @@ def skip_pre_clone_endpoint(
         db.commit()
         _publish_task_status(task)
     return {"message": "已提交跳过请求"}
+
+
+# ============================================================
+# 检查点打断取消(CLI 执行器:打断入队后到注入前有可操作窗口)
+# ============================================================
+
+
+@router.get("/tasks/{task_id}/pending_interrupt")
+def get_task_pending_interrupt(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> dict[str, Any] | None:
+    """查询任务当前待生效的检查点打断(刷新页面后恢复前端 pending 态用)
+
+    读 in-memory 中断队列(未 drain 才有);无待生效打断返回 None。
+    内置执行器打断即时注入无取消窗口,直接返回 None。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权访问此任务")
+
+    if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+        return None
+    if task.executor == "builtin":
+        return None
+
+    items = peek_pending_interrupt(task.id)
+    if not items:
+        return None
+    # 新替旧语义下队列通常只有 1 条,取最新一条即可
+    it = items[-1]
+    return {
+        "round_idx": it.get("round_idx", 0),
+        "iteration": it.get("iteration"),
+        "reason": it.get("reason", ""),
+        "query": it.get("query"),
+        "created_at": it.get("created_at"),
+    }
+
+
+@router.post("/tasks/{task_id}/cancel_interrupt")
+def cancel_task_interrupt(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> dict[str, Any]:
+    """取消待生效的检查点打断(仅 CLI 执行器有意义)
+
+    CLI 执行器的打断入队后要等当前 prompt 结束才注入,期间用户可取消。
+    取消与注入共用队列锁,二者互斥:若打断已被 drain 注入,返回
+    cancelled=false,前端据此提示已生效。取消成功后:
+    1) 回补本轮打断计数(不占用 max_interrupts 配额);
+    2) 在对应检查点评估记录 content 追加已取消标记(下次评估注入
+       历史时 user_agent 能看到指令被否决,避免朝同一方向重复打断),
+       并推 conversation_update 让前端实时刷新侧栏徽标;
+    3) 推 interrupt_cancelled 事件,前端把 pending 卡片切为已取消态。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    if task.status not in (TaskStatus.RUNNING, TaskStatus.PAUSED):
+        raise HTTPException(
+            status_code=409,
+            detail=f"任务状态为 {task.status.value},仅运行中/暂停态可取消打断",
+        )
+    if task.executor == "builtin":
+        raise HTTPException(
+            status_code=409,
+            detail="内置执行器的检查点打断即时注入,无取消窗口",
+        )
+
+    items = cancel_pending_interrupt(task.id)
+    if not items:
+        # 竞态:打断刚被 drain 注入(或尚未产生),无法取消
+        return {"cancelled": False, "message": "当前没有待生效的打断(可能已注入生效)"}
+
+    for it in items:
+        # 回补打断计数:取消不算一次有效打断,不占本轮配额
+        decrement_interrupt_count(task.id, it.get("round_idx", 0))
+
+        # 在检查点评估记录上追加已取消标记(定位失败时降级跳过,不影响取消本身)
+        eval_conv_id = it.get("eval_conv_id")
+        if not eval_conv_id:
+            continue
+        try:
+            conv = db.get(Conversation, uuid.UUID(eval_conv_id))
+        except ValueError:
+            continue
+        if conv is None or INTERRUPT_CANCEL_MARKER in (conv.content or ""):
+            continue
+        conv.content = (conv.content or "") + "\n" + INTERRUPT_CANCEL_MARKER
+        db.commit()
+        publish(task.id, "conversation_update", {
+            "id": str(conv.id),
+            "content": conv.content,
+        })
+
+    last = items[-1]
+    publish(task.id, "interrupt_cancelled", {
+        "round_idx": last.get("round_idx", 0),
+        "iteration": last.get("iteration"),
+    })
+    return {"cancelled": True, "message": "已取消打断,追问指令不会下发"}
 
 
 def _publish_task_status(task: Task) -> None:
