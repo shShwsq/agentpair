@@ -68,8 +68,10 @@ const draft = reactive<{
   has_api_key: false,
 })
 
-// 输出上限输入框用字符串承载(空串 = 未设置),提交时转 number | null
-const maxOutputStr = ref('')
+// 输出上限输入框用字符串承载(空串 = 未设置),提交时转 number | null。
+// 注意:输入框为 type="number",Vue 的 v-model 会自动把值转成 number
+//(等价于隐式 .number 修饰符),因此运行时实际类型是 string | number
+const maxOutputStr = ref<string | number>('')
 
 /** open 变 true 时(重新)初始化草稿 */
 watch(
@@ -145,9 +147,14 @@ const maxOutputDefault = computed<number>(() => {
   return m?.outputLimit ?? p.fallbackOutputLimit ?? 16384
 })
 
+/** 统一取值:无论 v-model 回写的是 string 还是 number,都转成 trim 后的字符串 */
+function maxOutputText(): string {
+  return String(maxOutputStr.value ?? '').trim()
+}
+
 /** 输入框 → number | null(空串 = 未设置) */
 function parseMaxOutput(): number | null {
-  const s = maxOutputStr.value.trim()
+  const s = maxOutputText()
   if (!s) return null
   const n = Number(s)
   return Number.isInteger(n) && n > 0 ? n : null
@@ -201,7 +208,7 @@ const validationError = computed<string | null>(() => {
   if (!draft.provider) return '请选择厂商'
   if (!draft.model) return '请输入或选择模型'
   if (!draft.has_api_key && !draft.api_key) return '请填写 API Key'
-  if (maxOutputStr.value.trim() !== '' && parseMaxOutput() === null) {
+  if (maxOutputText() !== '' && parseMaxOutput() === null) {
     return '输出上限需为正整数'
   }
   return null

@@ -424,6 +424,36 @@ def test_build_history_section_formats_records():
     assert "[迭代20] 打断 | 摘要:已打断 | 指令:转向授权" in section
 
 
+def test_build_history_section_marks_cancelled_interrupt():
+    """被用户取消的打断在历史中明确标注,避免 user_agent 误以为指令已下发。"""
+    records = [
+        {"iteration": 20, "interrupt": True, "cancelled": True,
+         "reason": "跑偏", "query": "转向授权", "summary": "已打断"},
+    ]
+    section = _build_history_section(records)
+    assert "[迭代20] 打断(用户已取消,指令未下发) | 摘要:已打断 | 指令:转向授权" in section
+
+
+def test_extract_record_cancelled_flag():
+    """评估记录末尾带取消标记时,提取的 record cancelled=True;无标记为 False。"""
+    from app.agent_checkpoint import INTERRUPT_CANCEL_MARKER
+
+    reasoning = '{"interrupt": true, "reason": "x", "query": "y", "summary": "s"}'
+    cancelled_conv = _make_checkpoint_conv(
+        "[检查点评估 · 第1轮迭代20] 打断\n理由:x\n追问指令:y\n" + INTERRUPT_CANCEL_MARKER,
+        reasoning,
+    )
+    record = _extract_checkpoint_record(cancelled_conv)
+    assert record is not None
+    assert record["cancelled"] is True
+
+    normal_conv = _make_checkpoint_conv(
+        "[检查点评估 · 第1轮迭代20] 打断\n理由:x\n追问指令:y",
+        reasoning,
+    )
+    assert _extract_checkpoint_record(normal_conv)["cancelled"] is False
+
+
 def test_build_history_section_summary_falls_back_to_reason():
     """summary 为空时回退展示 reason。"""
     records = [
