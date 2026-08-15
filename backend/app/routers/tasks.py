@@ -846,8 +846,11 @@ def submit_task_message(
       先让 user_agent 分析这条消息,再决定是否触发新一轮 react_agent 执行
     - pending / failed:拒绝(任务未启动或已失败)
 
-    消息统一落库为 Conversation(role=user, type=message, round_idx=max+0),
-    并推送 SSE conversation 事件,前端会把它追加到当前 round 的对话流末尾。
+    消息统一落库为 Conversation(role=user, type=message):
+    - 运行中/暂停中:round_idx = 当前最大 round(react_agent 下一迭代边界注入)
+    - 完成后:round_idx = 当前最大 round + 1(归入即将开始的新轮,
+      与 resume 的分析评估/首轮 react 执行共享轮号,消息位于轮首与回应连续展示)
+    并推送 SSE conversation 事件,前端实时追加到对话流。
     """
     task = db.get(Task, task_id)
     if not task:
@@ -870,15 +873,20 @@ def submit_task_message(
             message=f"任务状态为 {task.status.value},无法接收消息",
         )
 
-    # 用户消息归到当前最大 round(运行中=当前 round,完成后=最后 round)
-    # 重启后的新 round 从 max+1 开始(由 resume_audit_with_message 处理)
+    # 用户消息归 round:
+    # - 运行中/暂停中:归当前 round(react_agent 迭代边界注入,即时介入)
+    # - 完成后:归 max+1 的新轮(该轮即 resume 的分析评估 + 首轮 react 执行,
+    #   消息位于轮首,与 user_agent 的分析回应连续展示)
     latest_conv = (
         db.query(Conversation)
         .filter(Conversation.task_id == task_id)
         .order_by(Conversation.round_idx.desc())
         .first()
     )
-    msg_round_idx = latest_conv.round_idx if latest_conv else 0
+    if task.status == TaskStatus.COMPLETED:
+        msg_round_idx = (latest_conv.round_idx + 1) if latest_conv else 1
+    else:
+        msg_round_idx = latest_conv.round_idx if latest_conv else 0
 
     # 同步落库(确保刷新时数据库已有记录)
     conv = Conversation(

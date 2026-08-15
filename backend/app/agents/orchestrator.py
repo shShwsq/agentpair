@@ -1185,9 +1185,10 @@ def resume_audit_with_message(
     流程:
     1. task.status: COMPLETED/FAILED → RUNNING
     2. 加载历史上下文(react_summaries / task_checklist / LLM 配置)
-    3. 起始 round_idx = max(Conversation.round_idx) + 1
+    3. 起始 round_idx = max(Conversation.round_idx) + 1(用户消息已归入此轮)
     4. 先调 user_agent 分析用户消息(对照已有 checklist,输出 followup_query)
-    5. 启动协作循环(react_agent + user_agent 评估),最多 MAX_RESUME_ROUNDS 轮
+    5. 启动协作循环(react_agent + user_agent 评估),最多 MAX_RESUME_ROUNDS 轮;
+       分析评估与首轮 react 执行共享起始 round_idx,不单独占轮
     6. done 或达到上限时结束,task.status → COMPLETED
 
     用户消息本身已由 API 端点落库为 Conversation(role=user, type=message),
@@ -1239,7 +1240,9 @@ def resume_audit_with_message(
     # 重启时不复用旧 plan(让 LLM 根据新消息重新规划)
     current_plan: list[dict] = []
 
-    # 起始 round = max(Conversation.round_idx) + 1,最多再跑 MAX_RESUME_ROUNDS 轮
+    # 起始 round = max(Conversation.round_idx) + 1(用户消息已由 API 端点归入此轮)
+    # 分析评估与首轮 react 执行共享该轮号(用户消息 → 分析 → 执行 → 产出评估
+    # 构成一轮完整协作闭环);循环最多跑 MAX_RESUME_ROUNDS 轮 react 执行
     start_round_idx = _get_next_round_idx(db, task.id)
     max_rounds = start_round_idx + MAX_RESUME_ROUNDS - 1
     # [perf] resume 锚点(用户追加消息后重启;与 user_message 锚点配对算总延迟)
@@ -1381,11 +1384,13 @@ def resume_audit_with_message(
         # 启动协作循环:react_agent 执行 + user_agent 评估
         # 降级时直接把用户输入内容交给 react_agent(不经过 user_agent 生成的指令,
         # 它已不可用;react_agent 有历史上下文与 previous_plan 可续接)
+        # 首轮(round_idx == start_round_idx)与前面的分析评估共享轮号:
+        # 用户消息 → 分析评估 → react 执行 → 产出评估,一轮完整协作闭环
         followup = (
             user_message if degraded
             else ua_result.get("followup_query", user_message)
         )
-        for round_idx in range(start_round_idx + 1, max_rounds + 1):
+        for round_idx in range(start_round_idx, max_rounds + 1):
             # 暂停检查点:每轮开始前
             wait_if_paused(task.id)
 
@@ -1400,7 +1405,7 @@ def resume_audit_with_message(
                 followup_query=followup,
                 client=react_client,
                 repo_context=None,  # 重启不传 repo_context(仓库已 clone,react_agent 自行从 sandbox 取)
-                previous_plan=current_plan if round_idx > start_round_idx + 1 else None,
+                previous_plan=current_plan if round_idx > start_round_idx else None,
                 agent_policy=agent_policy,
             )
             perf_log(task.id, "executor_run", time.perf_counter() - _t0, round_idx=round_idx, executor=executor.name)

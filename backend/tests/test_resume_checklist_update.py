@@ -361,3 +361,40 @@ def test_resume_confirmation_cancelled_keeps_old_checklist(monkeypatch):
     assert task.checklist == [_dim("a")]  # 旧清单保留
     # done=False(原始输出)→ 协作循环仍会用旧清单跑(不因取消改变语义)
     executor.run.assert_called()
+
+
+def test_resume_first_react_round_shares_round_idx(monkeypatch):
+    """分析评估与首轮 react 执行共享起始轮号,不单独占轮。"""
+    task = _mk_resume_task()
+
+    ua_results = [
+        {"covered": [], "missing": [], "reasoning": "分析",
+         "followup_query": "查依赖", "done": False, "ask_user": False},
+        {"covered": ["a"], "missing": [], "reasoning": "完成",
+         "followup_query": "", "done": True, "ask_user": False,
+         "results": [], "grouping": None},
+    ]
+    ua_calls = []
+
+    def _ua(*args, **kwargs):
+        ua_calls.append(kwargs)
+        return ua_results[len(ua_calls) - 1]
+
+    executor = MagicMock()
+    executor.name = "builtin"
+    executor.run = MagicMock(return_value=([], "总结", []))
+
+    _patch_resume_env(monkeypatch, executor, _ua)
+
+    db = MagicMock()
+    orchestrator.resume_audit_with_message(task, db, "再查依赖")
+
+    # 分析评估(round_idx=2)后,首轮 react 执行仍在 round_idx=2(共享轮号)
+    assert executor.run.call_args.kwargs["round_idx"] == 2
+    assert executor.run.call_args.kwargs["followup_query"] == "查依赖"
+    # 分析评估落库 round_idx=2(与 react 执行同轮,不单独占轮)
+    added = [
+        c.args[0] for c in db.add.call_args_list
+        if c.args and getattr(c.args[0], "role", None) == "user_agent"
+    ]
+    assert added and added[0].round_idx == 2
