@@ -10,7 +10,7 @@
  * 草稿在 open=true 时按 initial 初始化;确定时 emit confirm,由父组件写回列表并持久化。
  * 编辑态下 api_key 始终从空串开始,留空表示"保留已存的 key"。
  */
-import { computed, reactive, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import ModelCombobox, { type ComboboxOption } from '@/components/ModelCombobox.vue'
 import BaseSelect from '@/components/BaseSelect.vue'
 import type {
@@ -52,6 +52,8 @@ const draft = reactive<{
   base_url: string | null
   enable_thinking: boolean
   dimension: number
+  /** 单次输出上限(null = 未设置,按 catalog/系统默认) */
+  max_output_tokens: number | null
   has_api_key: boolean
 }>({
   id: '',
@@ -62,8 +64,12 @@ const draft = reactive<{
   base_url: null,
   enable_thinking: true,
   dimension: 1024,
+  max_output_tokens: null,
   has_api_key: false,
 })
+
+// 输出上限输入框用字符串承载(空串 = 未设置),提交时转 number | null
+const maxOutputStr = ref('')
 
 /** open 变 true 时(重新)初始化草稿 */
 watch(
@@ -80,6 +86,7 @@ watch(
       draft.base_url = ini.base_url
       draft.enable_thinking = (ini as LLMConfigItem).enable_thinking ?? true
       draft.dimension = (ini as EmbeddingConfigItem).dimension ?? 1024
+      draft.max_output_tokens = (ini as LLMConfigItem).max_output_tokens ?? null
       draft.has_api_key = ini.has_api_key
     } else {
       draft.id = crypto.randomUUID()
@@ -90,8 +97,10 @@ watch(
       draft.base_url = null
       draft.enable_thinking = true
       draft.dimension = 1024
+      draft.max_output_tokens = null
       draft.has_api_key = false
     }
+    maxOutputStr.value = draft.max_output_tokens != null ? String(draft.max_output_tokens) : ''
   },
   { immediate: true },
 )
@@ -127,6 +136,22 @@ const embDimensionHint = computed(() => {
   if (dp) text += ' · 通过 dimensions 参数指定'
   return text
 })
+
+/** 未显式设置时的输出上限默认值:模型级 > 厂商级 > 系统默认 16384 */
+const maxOutputDefault = computed<number>(() => {
+  const p = llmProvider.value
+  if (!p) return 16384
+  const m = p.models.find((x) => x.id === draft.model)
+  return m?.outputLimit ?? p.fallbackOutputLimit ?? 16384
+})
+
+/** 输入框 → number | null(空串 = 未设置) */
+function parseMaxOutput(): number | null {
+  const s = maxOutputStr.value.trim()
+  if (!s) return null
+  const n = Number(s)
+  return Number.isInteger(n) && n > 0 ? n : null
+}
 
 // 当前厂商的可选模型,供 ModelCombobox 渲染。
 // LLM 仅展示 id;Embedding 展示 name(主) + id(副),与原 select 视觉一致。
@@ -176,6 +201,9 @@ const validationError = computed<string | null>(() => {
   if (!draft.provider) return '请选择厂商'
   if (!draft.model) return '请输入或选择模型'
   if (!draft.has_api_key && !draft.api_key) return '请填写 API Key'
+  if (maxOutputStr.value.trim() !== '' && parseMaxOutput() === null) {
+    return '输出上限需为正整数'
+  }
   return null
 })
 
@@ -192,6 +220,7 @@ function handleConfirm(): void {
       model: draft.model,
       enable_thinking: draft.enable_thinking,
       base_url: draft.base_url,
+      max_output_tokens: parseMaxOutput(),
     }
     emit('confirm', { kind: 'llm', config: cfg })
   } else {
@@ -279,6 +308,21 @@ function handleConfirm(): void {
                   :disabled="saving"
                 />
               </div>
+            </div>
+
+            <div v-if="kind === 'llm'" class="field">
+              <label>单次输出上限(token,可选)</label>
+              <input
+                v-model.trim="maxOutputStr"
+                type="number"
+                min="1"
+                step="1"
+                :placeholder="`默认 ${maxOutputDefault}`"
+                :disabled="saving"
+              />
+              <p class="field-hint">
+                模型单次回复的 max_tokens 钳制值,过小会导致长输出被截断;留空用默认上限 {{ maxOutputDefault }}
+              </p>
             </div>
 
             <div v-if="kind === 'llm' && thinkingSupported" class="field field-checkbox">

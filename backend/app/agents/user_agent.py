@@ -38,6 +38,7 @@ import uuid
 from typing import Any
 from uuid import UUID
 
+from json_repair import repair_json
 from sqlalchemy.orm import Session
 
 from app.event_bus import publish
@@ -60,6 +61,11 @@ MAX_HISTORY_TOTAL_CHARS = 12000
 
 # 解析失败兜底时,展示在最终总结里的 user_agent 输出原文截断上限
 MAX_RAW_OUTPUT_CHARS = 3000
+
+# user_agent 评估调用的单次输出上限。done=true 时需输出 results+grouping
+# 大 JSON,2048 容易被截断导致解析失败;16384 预留足够余量。
+# 实际上限还会被 LLMClient.max_output_tokens 按模型输出能力钳制
+UA_EVAL_MAX_TOKENS = 16384
 
 # 固定追加的"是否有其他补充"问题(由后端追加,LLM 不负责生成)
 SUPPLEMENT_QUESTION_ID = "_supplement"
@@ -667,7 +673,7 @@ def _stream_user_agent_llm(
     })
 
     try:
-        for chunk in client.chat_stream(messages, tools=tools, tool_choice="auto", max_tokens=2048):
+        for chunk in client.chat_stream(messages, tools=tools, tool_choice="auto", max_tokens=UA_EVAL_MAX_TOKENS):
             # 思考链增量(推给前端流式卡片显示)
             if chunk.reasoning_delta:
                 reasoning_full += chunk.reasoning_delta
@@ -824,17 +830,36 @@ def _build_user_agent_history(
 
 
 def _parse_json_response(content: str) -> dict[str, Any]:
-    """解析 LLM 输出的 JSON,容忍 markdown 包裹"""
-    text = content.strip()
+    """解析 LLM 输出的 JSON,容忍 markdown 包裹/前后散文/输出截断
 
-    # 去掉 markdown 代码块包裹
-    if text.startswith("```"):
-        # 找到第一行和最后一行
-        lines = text.split("\n")
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        text = "\n".join(lines)
+    依赖 json_repair:它能修复截断(补未闭合引号/括号)、剥离 markdown
+    围栏与前后散文、还原缺引号等常见问题。max_tokens 打满时输出被
+    拦腰截断的场景下,通常能保住已生成的完整字段,避免整体解析失败。
 
-    return json.loads(text)
+    注意:文本中出现多个 JSON 片段(如散文中夹带示例对象)时,json_repair
+    返回 list,此时需从中挑选真正的评估结果。
+    """
+    text = (content or "").strip()
+    if not text:
+        raise ValueError("LLM 输出为空")
+
+    result = repair_json(text, return_objects=True)
+    if isinstance(result, list):
+        result = _pick_eval_dict(result)
+    if not isinstance(result, dict) or not result:
+        raise ValueError("无法从输出中提取有效 JSON 对象")
+    return result
+
+
+def _pick_eval_dict(items: list[Any]) -> dict[str, Any] | None:
+    """从 json_repair 返回的多个候选对象中挑选真正的评估结果
+
+    优先取含评估字段(covered/missing/done 等)且排在最后的对象
+    (散文示例通常出现在真正结果之前)。
+    """
+    dicts = [x for x in items if isinstance(x, dict) and x]
+    if not dicts:
+        return None
+    markers = ("covered", "missing", "done", "followup_query", "results", "grouping")
+    marked = [d for d in dicts if any(k in d for k in markers)]
+    return marked[-1] if marked else dicts[-1]

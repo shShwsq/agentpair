@@ -17,6 +17,7 @@
 设计参考:C:\\Users\\njwjx\\Documents\\BaiduSyncdisk\\course_大四\\pro\\ai-plugin\\lib\\llm.js
 """
 import json
+import logging
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,8 @@ from typing import Any
 from openai import OpenAI
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -117,6 +120,41 @@ def build_thinking_extras(
     return extras
 
 
+# ============================================================
+# 输出上限(max_tokens)解析
+# ============================================================
+
+# 系统默认单次输出上限。user_agent 的 done=true 评估要输出 results+grouping,
+# 上限太低会被截断导致 JSON 解析失败;16384 对绝大多数评估输出已足够。
+DEFAULT_MAX_OUTPUT_TOKENS = 16384
+
+
+def resolve_output_limit(
+    provider: dict[str, Any],
+    model_meta: dict[str, Any] | None,
+    explicit_limit: int | None = None,
+) -> int:
+    """解析模型单次输出上限(max_tokens 钳制值)
+
+    优先级:用户显式设置 > catalog 模型级 outputLimit >
+    provider 级 fallbackOutputLimit(豆包 Endpoint ID 等匹配不上模型时用)>
+    系统默认 DEFAULT_MAX_OUTPUT_TOKENS。
+
+    catalog 中的 outputLimit 按各模型官方能力保守取值,
+    避免传入超过模型输出能力的值导致 API 400。
+    """
+    if explicit_limit is not None and explicit_limit > 0:
+        return explicit_limit
+    if model_meta:
+        limit = model_meta.get("outputLimit")
+        if isinstance(limit, int) and limit > 0:
+            return limit
+    fallback = provider.get("fallbackOutputLimit")
+    if isinstance(fallback, int) and fallback > 0:
+        return fallback
+    return DEFAULT_MAX_OUTPUT_TOKENS
+
+
 def resolve_temperature(
     provider: dict[str, Any],
     model_meta: dict[str, Any] | None,
@@ -184,6 +222,7 @@ class LLMClient:
         model: str | None = None,
         enable_thinking: bool | None = None,
         base_url: str | None = None,
+        max_output_tokens: int | None = None,
     ):
         self.provider_id = provider_id or settings.LLM_PROVIDER
         self.api_key = api_key or settings.LLM_API_KEY
@@ -193,6 +232,8 @@ class LLMClient:
         )
         # 可选:自定义 baseUrl 覆盖 catalog 预设(留空则用 catalog 的 baseUrl)
         self.base_url_override = base_url
+        # 可选:用户显式设置的单次输出上限(None 时构造完 model_meta 后按 catalog 解析)
+        self._explicit_output_limit = max_output_tokens
 
         if not self.api_key:
             raise ValueError("未配置 LLM_API_KEY,请在 .env 中设置或在前端模型设置中配置")
@@ -204,6 +245,11 @@ class LLMClient:
         self.model_meta = find_model_meta(self.provider, self.model)
         # 豆包用 Endpoint ID,model_meta 可能匹配不上,用 fallbackThinking 兜底
         # 此时 thinking_mode 取 fallbackThinking
+
+        # 单次输出上限:用户设置 > catalog 模型级 > provider 级 > 系统默认
+        self.max_output_tokens = resolve_output_limit(
+            self.provider, self.model_meta, self._explicit_output_limit
+        )
 
         # baseUrl 优先级:用户自定义 > catalog 预设
         effective_base_url = self.base_url_override or self.provider["baseUrl"]
@@ -232,6 +278,7 @@ class LLMClient:
             model=cfg.get("model"),
             enable_thinking=cfg.get("enable_thinking", True),
             base_url=cfg.get("base_url"),
+            max_output_tokens=cfg.get("max_output_tokens"),
         )
 
     def chat_stream(
@@ -265,6 +312,15 @@ class LLMClient:
         resolved_temp = resolve_temperature(
             self.provider, self.model_meta, self.enable_thinking, temperature
         )
+
+        # 按模型输出能力钳制:超过上限会被厂商拒绝(400)或截断,
+        # 统一钳制保证所有调用方(含 user_agent 大 JSON 输出)不踩线
+        if max_tokens > self.max_output_tokens:
+            logger.debug(
+                f"max_tokens {max_tokens} 超过模型输出上限,"
+                f"钳制为 {self.max_output_tokens}(model={self.model})"
+            )
+            max_tokens = self.max_output_tokens
 
         kwargs: dict[str, Any] = {
             "model": self.model,

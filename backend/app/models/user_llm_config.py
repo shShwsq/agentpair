@@ -6,7 +6,7 @@
 设计:
 - 一对一关联 User(每个用户一行,首次保存时 upsert)
 - llm_configs / embedding_configs 用 JSONB 存列表,每个元素结构:
-  { id, name, provider, api_key, model, enable_thinking, base_url }
+  { id, name, provider, api_key, model, enable_thinking, base_url, max_output_tokens }
 - API Key 明文存储(后续可接入字段级加密,当前阶段与 password_hash 同表,访问受鉴权保护)
 """
 import uuid
@@ -31,7 +31,8 @@ class UserLLMConfig(Base):
     )
 
     # LLM 配置列表(可多个)
-    # 每个元素: { id, name, provider, api_key, model, enable_thinking, base_url }
+    # 每个元素: { id, name, provider, api_key, model, enable_thinking, base_url,
+    #            max_output_tokens(可选,单次输出上限) }
     # 为空列表表示未配置,任务执行时回退到 env 默认配置
     llm_configs: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
     # Embedding 配置列表(可多个)

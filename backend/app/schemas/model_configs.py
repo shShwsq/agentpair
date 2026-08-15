@@ -34,6 +34,9 @@ class LLMConfigItem(BaseModel):
     enable_thinking: bool = True
     # 可选:自定义 baseUrl 覆盖 catalog 中的预设(留空则用 catalog 的 baseUrl)
     base_url: str | None = None
+    # 可选:单次输出上限(max_tokens 钳制值)。留空则按 catalog
+    # 模型级 outputLimit > provider 级 fallback > 系统默认 16384 解析
+    max_output_tokens: int | None = Field(default=None, ge=1, le=1000000)
 
 
 class EmbeddingConfigItem(BaseModel):
@@ -74,6 +77,8 @@ class LLMConfigItemOut(BaseModel):
     model: str
     enable_thinking: bool = True
     base_url: str | None = None
+    # 单次输出上限(None = 未显式设置,按 catalog/系统默认解析)
+    max_output_tokens: int | None = None
     has_api_key: bool = False
 
 

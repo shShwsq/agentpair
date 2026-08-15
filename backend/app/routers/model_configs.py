@@ -208,6 +208,7 @@ def _merge_llm_configs(existing: list[dict], new_items) -> list[dict]:
             "model": item.model,
             "enable_thinking": item.enable_thinking,
             "base_url": item.base_url,
+            "max_output_tokens": item.max_output_tokens,
         })
     return result
 
@@ -248,6 +249,7 @@ def _to_llm_out(cfg: dict) -> LLMConfigItemOut:
         model=cfg.get("model", ""),
         enable_thinking=cfg.get("enable_thinking", True),
         base_url=cfg.get("base_url"),
+        max_output_tokens=cfg.get("max_output_tokens"),
         has_api_key=bool(cfg.get("api_key")),
     )
 
