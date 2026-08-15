@@ -840,21 +840,62 @@ function toggleReasoning(convId: string): void {
   historyReasoningExpanded.set(convId, !cur)
 }
 
-// ---- plan 提取工具(与后端 _extract_plan 正则一致)----
+// ---- plan 提取工具(与后端 _extract_plan 逻辑一致:优先 JSON 格式,回退逐行格式)----
 
 const PLAN_BLOCK_RE = /<plan>\s*([\s\S]*?)\s*<\/plan>/
 const PLAN_LINE_RE = /^\s*(?:\d+[.、)]\s*)?(?:\[([\w_]+)\]\s*)?(.+)$/
+/** 含文字字符(字母/数字/下划线/中文)才算有效步骤行,纯符号行("["、"]")跳过 */
+const PLAN_LINE_HAS_TEXT_RE = /[\w\u4e00-\u9fff]/
+
+/** 尝试把 plan 块按 JSON 解析(对象数组,或逐行多个对象),失败返回 null
+ *
+ * system prompt 示范的是 JSON 数组格式,模型照做时逐行解析会把整行 JSON
+ * 当成步骤文本;这里优先按 JSON 解析。容错:无包裹数组时补 [ ],
+ * 首次失败后去掉尾逗号重试一次(与后端 json_repair 的常见修复对齐)。
+ */
+function parsePlanJson(block: string): PlanStep[] | null {
+  const trimmed = block.trim()
+  if (!trimmed || (trimmed[0] !== '[' && trimmed[0] !== '{')) return null
+  const candidate = trimmed[0] === '[' ? trimmed : `[${trimmed}]`
+  let parsed: unknown = null
+  for (const attempt of [candidate, candidate.replace(/,\s*([\]}])/g, '$1')]) {
+    try {
+      parsed = JSON.parse(attempt)
+      break
+    } catch {
+      // 尝试下一种修复
+    }
+  }
+  if (!Array.isArray(parsed)) return null
+  const steps: PlanStep[] = []
+  for (const e of parsed) {
+    if (!e || typeof e !== 'object') continue
+    const obj = e as Record<string, unknown>
+    const text = String(obj.text ?? obj.content ?? '').trim()
+    if (!text) continue
+    let status = String(obj.status ?? 'pending').trim() as PlanStep['status']
+    if (status !== 'pending' && status !== 'in_progress' && status !== 'done') {
+      status = 'pending'
+    }
+    steps.push({ id: steps.length + 1, text, status })
+  }
+  return steps.length > 0 ? steps : null
+}
 
 /** 从单段 content 提取 plan 步骤列表,无 plan 块返回 null */
 function parsePlanFromContent(content: string): PlanStep[] | null {
   const m = content.match(PLAN_BLOCK_RE)
   if (!m) return null
   const block = m[1]
+  // 优先 JSON 解析(模型按 system prompt 示范输出 JSON 数组)
+  const jsonSteps = parsePlanJson(block)
+  if (jsonSteps) return jsonSteps
   const steps: PlanStep[] = []
   let id = 0
   for (const line of block.split('\n')) {
     const trimmed = line.trim()
     if (!trimmed) continue
+    if (!PLAN_LINE_HAS_TEXT_RE.test(trimmed)) continue
     const lm = trimmed.match(PLAN_LINE_RE)
     if (!lm) continue
     id += 1

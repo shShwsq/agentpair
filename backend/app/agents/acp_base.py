@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import httpx
+from json_repair import repair_json
 from sqlalchemy.orm import Session
 
 from app.agents.registry import get_agent_meta, get_sandbox_config
@@ -1779,17 +1780,25 @@ class _ACPCollector:
         return intent, detail
 
     def _handle_plan(self, entries: list) -> None:
-        """处理 plan 通知,推送 plan 事件"""
+        """处理 plan 通知,推送 plan 事件
+
+        ACP PlanEntry 状态为 pending/in_progress/completed,
+        前端只认 pending/in_progress/done,completed 需映射为 done。
+        """
         if not entries:
             return
         steps = []
         for i, e in enumerate(entries, 1):
             if not isinstance(e, dict):
                 continue
+            status = str(e.get("status") or "pending")
+            status = _ACP_PLAN_STATUS_MAP.get(status, status)
+            if status not in ("pending", "in_progress", "done"):
+                status = "pending"
             steps.append({
                 "id": i,
                 "text": e.get("content", ""),
-                "status": e.get("status", "pending"),
+                "status": status,
             })
         if steps:
             publish(self.task.id, "plan", {
@@ -1911,29 +1920,71 @@ def _add_conversation(
 
 
 # ============================================================
-# Plan 提取(复用 <plan> 格式)
+# Plan 提取(复用 <plan> 格式,与 react_agent 的解析逻辑保持一致)
 # ============================================================
 
+
+# ACP plan 通知状态 → 前端状态(completed → done)
+_ACP_PLAN_STATUS_MAP = {"completed": "done"}
 
 _PLAN_BLOCK_RE = re.compile(r"<plan>\s*(.*?)\s*</plan>", re.DOTALL)
 _PLAN_LINE_RE = re.compile(
     r"^\s*(?:\d+[.、)]\s*)?(?:\[([\w_]+)\]\s*)?(.+)$"
 )
+# 纯符号行("["、"]"、"," 等)不算步骤,避免 JSON 括号变成无意义步骤
+_PLAN_LINE_HAS_TEXT_RE = re.compile(r"[\w\u4e00-\u9fff]")
+
+
+def _parse_plan_json(block: str) -> list[dict] | None:
+    """尝试把 plan 块按 JSON 解析(对象数组,或逐行多个对象)
+
+    CLI 也可能在文本里输出 JSON 数组格式的 <plan>,逐行解析会把整行 JSON
+    当成步骤文本,这里优先走 JSON 解析。依赖 json_repair 容错修复
+    (尾逗号/截断/缺引号等)。解析失败返回 None,回退逐行解析。
+    """
+    text = block.strip()
+    if not text or text[0] not in "[{":
+        return None
+    candidate = text if text[0] == "[" else f"[{text}]"
+    try:
+        repaired = repair_json(candidate, return_objects=True)
+    except Exception:
+        return None
+    if not isinstance(repaired, list):
+        repaired = [repaired]
+    steps: list[dict] = []
+    for e in repaired:
+        if not isinstance(e, dict):
+            continue
+        step_text = str(e.get("text") or e.get("content") or "").strip()
+        if not step_text:
+            continue
+        status = str(e.get("status") or "pending").strip()
+        if status not in ("pending", "in_progress", "done"):
+            status = "pending"
+        steps.append({"id": len(steps) + 1, "text": step_text, "status": status})
+    return steps or None
 
 
 def _extract_plan(content: str) -> list[dict] | None:
     """从 content 提取 <plan>...</plan> 计划清单
 
+    优先 JSON 格式(对象数组),回退逐行格式([status] 文本)。
     无 plan 块时返回 None。
     """
     m = _PLAN_BLOCK_RE.search(content)
     if not m:
         return None
     block = m.group(1)
+    json_steps = _parse_plan_json(block)
+    if json_steps:
+        return json_steps
     steps: list[dict] = []
     for i, line in enumerate(block.split("\n"), 1):
         line = line.strip()
         if not line:
+            continue
+        if not _PLAN_LINE_HAS_TEXT_RE.search(line):
             continue
         lm = _PLAN_LINE_RE.match(line)
         if not lm:
@@ -1950,7 +2001,7 @@ def _format_plan_reminder(plan_steps: list[dict]) -> str:
     """格式化 plan 状态,注入 prompt 让 CLI 续接进度"""
     if not plan_steps:
         return ""
-    lines = ["[系统提醒] 当前计划清单状态(已完成的请标记 [done]):"]
+    lines = ["[系统提醒] 当前计划清单状态(状态有变化时请在 <plan> 里输出更新后的完整清单,完成的标 done):"]
     sym = {"pending": "○", "in_progress": "◌", "done": "✓"}
     for s in plan_steps:
         lines.append(f"{sym.get(s['status'], '○')} [{s['status']}] {s['text']}")
