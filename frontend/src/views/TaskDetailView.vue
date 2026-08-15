@@ -1285,6 +1285,8 @@ interface DisplayItem {
 interface PlainSegment {
   kind: 'plain'
   item: DisplayItem
+  /** 平铺消息在该轮内的原始位置:位于第几个迭代之后(0 = 轮首,首个迭代之前;轮内无迭代时恒为 0) */
+  afterIterationIdx: number
 }
 
 /** 迭代段:react_agent 一次 ReAct 循环的所有产物 */
@@ -1329,6 +1331,8 @@ interface StepGroup {
   hasStreaming: boolean
   /** 该 step 内的检查点标记(渲染在对应迭代边界处) */
   checkpoints: CheckpointMarker[]
+  /** 该 step 内的平铺消息(如用户追问/回答,位于组内迭代边界;含此消息的组默认展开) */
+  plains: PlainSegment[]
 }
 
 type RoundSegment = PlainSegment | StepGroup
@@ -1486,7 +1490,9 @@ function segmentRoundItems(
         // 第二阶段把横线(评估)/中断追问卡片挂到 step 组内对应迭代边界处
         checkpointMarkers.push({ afterIterationIdx: iterCounter, item })
       } else {
-        plains.push({ kind: 'plain', item })
+        // 记录消息在轮内的原始位置(已完成迭代数),第二阶段按位置穿插,
+        // 避免用户追问等轮首/轮中消息被统一追加到轮末
+        plains.push({ kind: 'plain', item, afterIterationIdx: iterCounter })
       }
     }
   }
@@ -1504,6 +1510,7 @@ function segmentRoundItems(
     iterations: [],
     hasStreaming: false,
     checkpoints: [],
+    plains: [],
   }
 
   /** 迭代序号 → 所属 step 组(用于把检查点标记挂到对应组) */
@@ -1524,6 +1531,7 @@ function segmentRoundItems(
           iterations: [],
           hasStreaming: false,
           checkpoints: [],
+          plains: [],
         }
         stepGroupsMap.set(stepId, group)
       }
@@ -1549,27 +1557,70 @@ function segmentRoundItems(
     if (target) {
       target.checkpoints.push(marker)
     } else {
-      plains.push({ kind: 'plain', item: marker.item })
+      plains.push({ kind: 'plain', item: marker.item, afterIterationIdx: marker.afterIterationIdx })
     }
   }
 
   // 按 plan step 顺序输出 step 组(无 plan 时只有 noStepGroup)
+  const orderedGroups: StepGroup[] = []
   for (const step of planSteps) {
     const group = stepGroupsMap.get(step.id)
     if (group) {
       // 同步最新状态(plan 可能已被 LLM 更新)
       group.status = step.status
-      segments.push(group)
+      orderedGroups.push(group)
     }
   }
   // 追加无法归属的迭代组(如果有)
   if (noStepGroup.iterations.length > 0) {
-    segments.push(noStepGroup)
+    orderedGroups.push(noStepGroup)
   }
-  // 追加 plain 段(检查点标记已挂到 step 组内迭代边界,此处只剩普通平铺段)
-  for (const seg of plains) {
-    segments.push(seg)
+
+  // 平铺消息按原始位置穿插到 step 组之间或组内迭代边界,不再统一追加到轮末
+  // (此前 44f5d7d 重构出 step 分组时丢掉了 plain 的位置语义,导致用户追问等
+  //  轮首/轮中消息显示在所有 react_agent 响应之后)。
+  // 规则(afterIterationIdx = 消息位于第几个迭代之后,0 = 轮首):
+  // - 轮首(0)→ 输出到最前
+  // - 组内边界(下一迭代与它同组)→ 挂到组上,模板在组内迭代边界渲染
+  // - 组间边界 → 插到所属组之后
+  // - 轮末(>= 迭代总数)→ 追加末尾(天然轮末的评估/总结保持原样)
+  const headPlains: PlainSegment[] = []
+  const tailPlains: PlainSegment[] = []
+  const afterGroupPlains = new Map<StepGroup, PlainSegment[]>()
+  for (const p of plains) {
+    const n = p.afterIterationIdx
+    if (n <= 0) {
+      headPlains.push(p)
+    } else if (n >= iterations.length) {
+      tailPlains.push(p)
+    } else {
+      const group = groupByIterIdx.get(n)
+      const nextGroup = groupByIterIdx.get(n + 1)
+      if (group && nextGroup === group) {
+        // 组内边界:挂到组,渲染在迭代 n 与 n+1 之间
+        group.plains.push(p)
+      } else if (group) {
+        // 组间边界:插到所属组之后
+        let list = afterGroupPlains.get(group)
+        if (!list) {
+          list = []
+          afterGroupPlains.set(group, list)
+        }
+        list.push(p)
+      } else {
+        // 兜底(理论上不可达):追加末尾
+        tailPlains.push(p)
+      }
+    }
   }
+
+  segments.push(...headPlains)
+  for (const g of orderedGroups) {
+    segments.push(g)
+    const after = afterGroupPlains.get(g)
+    if (after) segments.push(...after)
+  }
+  segments.push(...tailPlains)
 
   return segments
 }
@@ -1711,7 +1762,8 @@ const userDirective = computed<DisplayItem | null>(() => {
  * OR 任务已结束且是最后一组(最终总结直接可见,不折叠) */
 function isStepExpanded(group: StepGroup): boolean {
   if (collapsedSteps.has(group.id)) return false
-  if (expandedSteps.has(group.id) || group.hasStreaming) return true
+  // 含流式或含组内平铺消息(如用户追问/回答)时自动展开,保证消息可见
+  if (expandedSteps.has(group.id) || group.hasStreaming || group.plains.length > 0) return true
   return !isRunning.value && isLastStepGroup(group)
 }
 
@@ -2437,6 +2489,11 @@ function checkpointsAfter(group: StepGroup, iterIdx: number): CheckpointMarker[]
   return group.checkpoints.filter((c) => c.afterIterationIdx === iterIdx)
 }
 
+/** 筛选 step 组内应显示在迭代 iterIdx 之后的平铺消息(0 = 首个迭代之前) */
+function plainsAfter(group: StepGroup, iterIdx: number): PlainSegment[] {
+  return group.plains.filter((p) => p.afterIterationIdx === iterIdx)
+}
+
 /** 检查点横线 class 列表(打断评估为橙色、继续为主题色) */
 function checkpointDividerClass(marker: CheckpointMarker): (string | Record<string, boolean>)[] {
   return [
@@ -2663,6 +2720,15 @@ function toggleResult(id: string): void {
                         :class="checkpointDividerClass(cp)"
                       />
                     </template>
+                    <!-- 组内平铺消息(如用户追问/回答):渲染在迭代边界处(0 = 首个迭代之前) -->
+                    <template v-for="p in plainsAfter(seg, 0)" :key="`plain-${p.item.id}`">
+                      <div :class="{ 'user-msg-row': isUserMessageItem(p.item) }">
+                        <ConversationMessage
+                          :item="p.item"
+                          @toggle-reasoning="toggleReasoning"
+                        />
+                      </div>
+                    </template>
                     <template v-for="iter in seg.iterations" :key="iter.id">
                     <!-- 迭代内容直接平铺:无摘要行、无边框包装(wrapper 仅作结构容器,
                          保留它以免 step-body 加 gap 影响零高度检查点横线) -->
@@ -2779,6 +2845,15 @@ function toggleResult(id: string): void {
                         :id="`checkpoint-anchor-${cp.item.id}`"
                         :class="checkpointDividerClass(cp)"
                       />
+                    </template>
+                    <!-- 组内平铺消息(如用户追问):渲染在该迭代之后,与迭代内容保持时间顺序 -->
+                    <template v-for="p in plainsAfter(seg, iter.iterationIdx)" :key="`plain-${p.item.id}`">
+                      <div :class="{ 'user-msg-row': isUserMessageItem(p.item) }">
+                        <ConversationMessage
+                          :item="p.item"
+                          @toggle-reasoning="toggleReasoning"
+                        />
+                      </div>
                     </template>
                     </template>
                   </div>
