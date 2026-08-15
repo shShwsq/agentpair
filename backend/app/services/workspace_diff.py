@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 # 单条 artifact 上限(避免超大 diff 撑爆 DB);截断后 patch 不可 git apply,仅用于查看
 _MAX_PATCH_CHARS = 1_000_000
 
+# 仓库树快照条目上限(超大仓库截断,仅用于不可用时兜底展示文件清单)
+_MAX_TREE_ENTRIES = 5000
+
 
 def capture_workspace_diff(task_id: str) -> dict | None:
     """在任务完成的容器里捕获工作区变更,返回 patch 文本 + 元信息。
@@ -126,6 +129,83 @@ def save_workspace_diff_artifact(task, db: Session, task_id_str: str) -> None:
     )
     db.commit()
     logger.info(f"[task={task.id}] 已捕获工作区 diff")
+
+
+def capture_repo_tree(task_id: str) -> dict | None:
+    """捕获仓库文件清单(已跟踪 + 未跟踪且非忽略),返回逐行路径文本 + 元信息。
+
+    用于工作区不可用(会话过期/任务失败/零改动)时侧栏兜底展示文件清单:
+    在沙箱健康时(clone 后/任务结束时)持久化到 DB,事后不依赖沙箱。
+
+    返回 None 的情形:session 不存在、未 clone 仓库、空仓库、git 命令失败。
+    任何异常都 catch + log warning,返回 None(调用方跳过写入)。
+    """
+    ctx = sandbox_tools._sessions.get(task_id)
+    if ctx is None:
+        return None
+    session = ctx["session"]
+    repo_path = ctx.get("repo_path", "")
+    if not repo_path:
+        return None
+
+    try:
+        # -c(已跟踪) + -o(未跟踪) + --exclude-standard(排除忽略项),
+        # git 自身保证去重排序,一条命令拿全清单
+        raw = session.run_command(
+            f"cd {repo_path} && git ls-files -co --exclude-standard",
+            timeout=30,
+        )
+    except Exception as e:
+        logger.warning(f"[task={task_id}] git ls-files 失败,跳过树快照: {e}")
+        return None
+
+    paths = [p for p in (raw or "").splitlines() if p.strip()]
+    if not paths:
+        return None
+
+    truncated = len(paths) > _MAX_TREE_ENTRIES
+    if truncated:
+        paths = paths[:_MAX_TREE_ENTRIES]
+
+    return {
+        "content": "\n".join(paths),
+        "metadata": {
+            "file_count": len(paths),
+            "truncated": truncated,
+        },
+    }
+
+
+def save_repo_tree_artifact(task, db: Session, task_id_str: str) -> None:
+    """捕获仓库文件清单并写入 task_artifacts(kind="repo_tree")。
+
+    写入时机:clone 成功后(保底快照,对抗后续 git 异常/任务失败)+
+    任务结束时(更新为最终态,含新建文件)。
+
+    捕获为 None 时静默返回且不删已有记录——保住 clone 时的保底快照
+    (结束段捕获失败不应让侧栏连兜底清单都丢失)。
+    kind="repo_tree" 在 task 维度唯一:有新结果时先删旧再写。
+    """
+    tree_result = capture_repo_tree(task_id_str)
+    if not tree_result:
+        return
+    db.query(TaskArtifact).filter(
+        TaskArtifact.task_id == task.id,
+        TaskArtifact.kind == "repo_tree",
+    ).delete(synchronize_session=False)
+    db.add(
+        TaskArtifact(
+            task_id=task.id,
+            kind="repo_tree",
+            content=tree_result["content"],
+            metadata_=tree_result["metadata"],
+        )
+    )
+    db.commit()
+    logger.info(
+        f"[task={task.id}] 已捕获仓库树快照 "
+        f"({tree_result['metadata']['file_count']} 个文件)"
+    )
 
 
 # ============================================================

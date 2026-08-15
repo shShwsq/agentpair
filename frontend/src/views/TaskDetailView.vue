@@ -107,6 +107,8 @@ function toggleDetail(): void {
 
 /** 任务的工作区 diff 产物(任务完成时由后端捕获,kind="git_diff") */
 const workspaceArtifact = ref<TaskArtifact | null>(null)
+/** 仓库树快照产物(clone 时保底/任务结束时捕获,kind="repo_tree";无变更时的侧栏兜底) */
+const repoTreeArtifact = ref<TaskArtifact | null>(null)
 /** 工作区变更区折叠状态(默认展开) */
 const workspaceChangesCollapsed = ref(false)
 
@@ -151,6 +153,13 @@ const changedFiles = computed(() => {
   return files
 })
 
+/** 仓库文件清单(repo_tree 快照,逐行路径);无变更文件时传给侧栏二级兜底 */
+const repoFiles = computed(() =>
+  (repoTreeArtifact.value?.content ?? '')
+    .split('\n')
+    .filter((p) => p.trim()),
+)
+
 /** diff 行号 → 锚点 id 映射(仅每个文件块起始行有锚点) */
 const diffAnchorByLine = computed(() => {
   const m = new Map<number, string>()
@@ -169,15 +178,18 @@ async function scrollToDiffFile(path: string): Promise<void> {
     ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
-/** 拉取任务的工作区产物(取第一个 git_diff);静默失败,不影响主流程 */
+/** 拉取任务的工作区产物(git_diff + repo_tree);静默失败,不影响主流程 */
 async function loadArtifact(taskId: string): Promise<void> {
   try {
     const res = await listArtifacts(taskId)
     workspaceArtifact.value =
       res.artifacts.find((a) => a.kind === 'git_diff') ?? null
+    repoTreeArtifact.value =
+      res.artifacts.find((a) => a.kind === 'repo_tree') ?? null
   } catch (err) {
-    console.warn('加载工作区变更失败:', err)
+    console.warn('加载工作区产物失败:', err)
     workspaceArtifact.value = null
+    repoTreeArtifact.value = null
   }
 }
 
@@ -2299,6 +2311,7 @@ function toggleResult(id: string): void {
       v-show="!workspaceCollapsed"
       ref="sidebarRef"
       :changed-files="changedFiles"
+      :repo-files="repoFiles"
       @task-deleted="onSidebarTaskDeleted"
       @task-title-updated="onSidebarTaskTitleUpdated"
       @open-diff-file="scrollToDiffFile"

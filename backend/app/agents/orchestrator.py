@@ -220,8 +220,13 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
 
             # 捕获工作区 diff(失败兜底,不影响任务完成)
             try:
-                from app.services.workspace_diff import save_workspace_diff_artifact
+                from app.services.workspace_diff import (
+                    save_repo_tree_artifact,
+                    save_workspace_diff_artifact,
+                )
                 save_workspace_diff_artifact(task, db, task_id_str)
+                # 树快照:更新为最终态(含新建文件),供不可用时兜底展示
+                save_repo_tree_artifact(task, db, task_id_str)
             except Exception as diff_err:
                 logger.warning(f"[task={task.id}] 捕获工作区 diff 失败(忽略): {diff_err}")
 
@@ -458,8 +463,13 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
 
         # 捕获工作区 diff(失败兜底,不影响任务完成;容器仍存活)
         try:
-            from app.services.workspace_diff import save_workspace_diff_artifact
+            from app.services.workspace_diff import (
+                save_repo_tree_artifact,
+                save_workspace_diff_artifact,
+            )
             save_workspace_diff_artifact(task, db, task_id_str)
+            # 树快照:更新为最终态(含新建文件),供不可用时兜底展示
+            save_repo_tree_artifact(task, db, task_id_str)
         except Exception as diff_err:
             logger.warning(f"[task={task.id}] 捕获工作区 diff 失败(忽略): {diff_err}")
 
@@ -475,6 +485,17 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             role="user_agent", type="error",
             content=f"执行失败: {e}",
         )
+        # 失败也尽量捕获:工作区 diff + 仓库树快照(失败兜底;沙箱通常仍存活,
+        # 会话已死则自然返回 None,不影响失败处理)
+        try:
+            from app.services.workspace_diff import (
+                save_repo_tree_artifact,
+                save_workspace_diff_artifact,
+            )
+            save_workspace_diff_artifact(task, db, task_id_str)
+            save_repo_tree_artifact(task, db, task_id_str)
+        except Exception as diff_err:
+            logger.warning(f"[task={task.id}] 失败时捕获工作区产物失败(忽略): {diff_err}")
     finally:
         # 阶段 8:清理可能残留的待回答问题状态
         try:
@@ -951,6 +972,15 @@ def _prepare_repo_context(
         logger.warning(f"[task={task.id}] list_files 失败,降级为仅 repo_path: {e}")
         files_result = {"entries": [], "total": 0, "truncated": False}
 
+    # 仓库树快照保底:clone 成功、沙箱健康时立即捕获一份落库,
+    # 后续任务失败/零改动/git 异常导致 diff 缺失时,侧栏仍能兜底展示文件清单
+    # (任务结束段会再更新为最终态;此处失败不影响主流程)
+    try:
+        from app.services.workspace_diff import save_repo_tree_artifact
+        save_repo_tree_artifact(task, db, task_id_str)
+    except Exception as tree_err:
+        logger.warning(f"[task={task.id}] 捕获仓库树快照失败(忽略): {tree_err}")
+
     # 仅当仓库非空才注入上下文:根目录无条目(空仓库/list_files 降级)时,
     # 告诉 agent "已 clone、直接开始审计"会误导,降级为仅 repo_path
     if not files_result.get("entries"):
@@ -1313,6 +1343,17 @@ def resume_audit_with_message(
             role="user_agent", type="error",
             content=f"{err_stage}: {e}",
         )
+        # 失败也尽量捕获:工作区 diff + 仓库树快照(失败兜底;沙箱通常仍存活,
+        # 会话已死则自然返回 None,不影响失败处理)
+        try:
+            from app.services.workspace_diff import (
+                save_repo_tree_artifact,
+                save_workspace_diff_artifact,
+            )
+            save_workspace_diff_artifact(task, db, task_id_str)
+            save_repo_tree_artifact(task, db, task_id_str)
+        except Exception as diff_err:
+            logger.warning(f"[task={task.id}] 失败时捕获工作区产物失败(忽略): {diff_err}")
     finally:
         # 清理资源(与 run_dual_agent_audit 对齐)
         for cleanup_fn, name in [
@@ -1449,8 +1490,13 @@ def _finish_resume(
 
     # 捕获工作区 diff(失败兜底,不影响任务完成;容器仍存活)
     try:
-        from app.services.workspace_diff import save_workspace_diff_artifact
+        from app.services.workspace_diff import (
+            save_repo_tree_artifact,
+            save_workspace_diff_artifact,
+        )
         save_workspace_diff_artifact(task, db, str(task.id))
+        # 树快照:更新为最终态(含新建文件),供不可用时兜底展示
+        save_repo_tree_artifact(task, db, str(task.id))
     except Exception as diff_err:
         logger.warning(f"[task={task.id}] 捕获工作区 diff 失败(忽略): {diff_err}")
 

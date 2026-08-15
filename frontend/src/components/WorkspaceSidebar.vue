@@ -53,11 +53,33 @@ const emit = defineEmits<{
 // ============================================================
 
 // 父组件(TaskDetailView)从 git_diff artifact 解析传入;
-// 仅在工作区不可用且任务非运行中时展示,点击跳转主区对应 diff 块
-const props = defineProps<{ changedFiles?: string[] }>()
+// 仅在工作区不可用且任务非运行中时展示,点击跳转主区对应 diff 块。
+// repoFiles 为 repo_tree 快照产物(逐行路径),无变更文件时的二级兜底
+const props = defineProps<{ changedFiles?: string[]; repoFiles?: string[] }>()
 
 /** 变更文件列表(空则不可用分支维持原文案) */
 const changedFileList = computed(() => props.changedFiles ?? [])
+
+/** 仓库文件清单快照(变更文件为空时的兜底展示,点击仅弹轻提示) */
+const repoFileList = computed(() => props.repoFiles ?? [])
+
+// ---- 轻提示(仓库文件行点击:工作区不可用;组件级 toast,同 TaskRuntimeSettings 模式) ----
+const toastMsg = ref('')
+let toastTimer: ReturnType<typeof setTimeout> | null = null
+
+/** 弹轻提示,2s 后自动消失 */
+function showUnavailableToast(): void {
+  toastMsg.value = '工作区不可用，内容不可浏览'
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => {
+    toastMsg.value = ''
+    toastTimer = null
+  }, 2000)
+}
+
+onUnmounted(() => {
+  if (toastTimer) clearTimeout(toastTimer)
+})
 
 // ============================================================
 // 视图状态
@@ -1151,6 +1173,39 @@ defineExpose({ openTaskFile })
               </div>
             </div>
           </div>
+          <!-- 无变更但有仓库树快照:展示仓库文件清单(点击弹轻提示,内容不可浏览) -->
+          <div
+            v-else-if="!selectedTaskRunning && repoFileList.length > 0"
+            class="changed-files-fallback"
+          >
+            <div class="changed-files-title">仓库文件清单（快照，内容不可浏览）</div>
+            <div class="changed-files-list">
+              <div
+                v-for="path in repoFileList"
+                :key="path"
+                class="tree-node tree-file changed-file-row"
+                :title="path"
+                @click="showUnavailableToast"
+              >
+                <span class="tree-icon">
+                  <svg
+                    viewBox="0 0 24 24"
+                    width="13"
+                    height="13"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+                    <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
+                  </svg>
+                </span>
+                <span class="tree-name">{{ path }}</span>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- 文件树(扁平化渲染) -->
@@ -1254,6 +1309,9 @@ defineExpose({ openTaskFile })
         <!-- 错误提示 -->
         <div v-if="errorMsg" class="sidebar-error">{{ errorMsg }}</div>
       </template>
+
+      <!-- 轻提示(工作区不可用时点击仓库文件行;2s 自动消失) -->
+      <div v-if="toastMsg" class="sidebar-toast">{{ toastMsg }}</div>
     </aside>
 
     <!-- 文件查看面板(右侧,仅工作区视图且选中文件且未手动隐藏时显示) -->
@@ -1478,6 +1536,7 @@ defineExpose({ openTaskFile })
 
 /* ---- 侧栏 ---- */
 .workspace-sidebar {
+  position: relative; /* 供底部轻提示绝对定位 */
   flex-shrink: 0;
   width: 280px;
   border-right: 1px solid var(--color-border);
@@ -1664,6 +1723,24 @@ defineExpose({ openTaskFile })
 
 .changed-file-row {
   padding-left: var(--space-2);
+}
+
+/* ---- 侧栏轻提示(工作区不可用时点击仓库文件行) ---- */
+.sidebar-toast {
+  position: absolute;
+  bottom: var(--space-4);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: var(--space-2) var(--space-3);
+  max-width: 90%;
+  font-size: var(--fs-sm);
+  color: var(--color-text-secondary);
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  white-space: nowrap;
+  z-index: 10;
 }
 
 /* ---- 任务列表 ---- */
