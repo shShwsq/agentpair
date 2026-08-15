@@ -145,6 +145,11 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
     all_results_count = 0
     # 修复 4:跨轮 plan 状态(react_agent 之间传递,避免重新规划已完成项)
     current_plan: list[dict] = []
+    # 本轮是否正常完成(内存标志,不受外部状态修改影响):
+    # finally 兜底 error 推送必须用它判定,不能用 task.status ——
+    # 任务完成后用户发追问会把状态改回 RUNNING,若按状态判定,
+    # 已正常完成的任务会被误判为"未完成"而推送 error 并重新标记总线结束
+    normal_completed = False
 
     try:
         # ---------- 预处理:若用户选了仓库,主动 clone + list_files ----------
@@ -211,6 +216,12 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
 
             # 提前推送 done 事件:results 已落库,让前端立即拉取展示
             publish(task.id, "done", {"status": "completed"})
+            # 立即标记总线结束(不等 finally):任务已完成,后续 publish 静默丢弃。
+            # 提前标记可消除竞态 —— 若等 finally 再标记,用户在此期间发追问会触发
+            # reset_task_bus(清 _finished),随后 finally 的 finish_task 又把它重新置 True,
+            # resume 线程后续 publish 全被丢弃(checklist_review 弹窗丢失、任务卡死)。
+            finish_task(task.id)
+            normal_completed = True
 
             # 记忆归纳(失败兜底,不影响任务完成)
             try:
@@ -462,6 +473,10 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         # 提前推送 done 事件:results 已落库,让前端立即拉取展示
         # (归纳记忆和 git diff 是后台兜底任务,不阻塞前端结果清单展示)
         publish(task.id, "done", {"status": "completed"})
+        # 立即标记总线结束(不等 finally):与单 agent 分支同理,消除"用户追问触发的
+        # reset_task_bus 被 finally 的 finish_task 重新覆盖"竞态(详见 finally 注释)。
+        finish_task(task.id)
+        normal_completed = True
 
         # 任务成功完成:自动归纳写入长期记忆(失败兜底,不影响任务完成)
         try:
@@ -559,9 +574,14 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         except Exception as cleanup_err:
             logger.warning(f"[task={task.id}] 标记任务完成失败: {cleanup_err}")
         # 通知事件总线:任务结束
-        # done 事件已在 try 块中提前推送(在归纳记忆/git diff 之前)
-        # 此处仅兜底推送 error 事件(异常路径)
-        if task.status != TaskStatus.COMPLETED:
+        # done 事件已在 try 块中提前推送(在归纳记忆/git diff 之前),正常路径
+        # 也已同步调用 finish_task(提前标记总线结束,消除与 reset_task_bus 的竞态)。
+        # 此处仅兜底:异常路径(本轮未正常完成)推送 error 事件 + 标记总线结束。
+        # 注意:判定必须用本轮执行的内存标志 normal_completed,不能用 task.status ——
+        # 任务完成后用户发追问会把状态改回 RUNNING(API 端点同步落库),若按状态判定,
+        # 已正常完成的任务会被误判为"未完成"而推送 error(前端显示"未知错误"失败横幅),
+        # 并重新标记总线结束(resume 线程后续事件全被静默丢弃,任务卡死)。
+        if not normal_completed:
             # [诊断] error 事件推送日志:前端 onError 的唯一事件源,全量记录
             logger.warning(
                 f"[task={task.id}] finally 兜底推送 error 事件 "
@@ -571,7 +591,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 "status": "failed",
                 "error_message": task.error_message or "未知错误(无异常详情,请查看服务日志)",
             })
-        finish_task(task.id)
+            finish_task(task.id)
 
 
 # ============================================================
@@ -1279,6 +1299,12 @@ def resume_audit_with_message(
     msg_label = "[重试续跑]" if retry else "[用户追加消息]"
     effective_intent = task.user_input + f"\n\n{msg_label}\n{user_message}"
 
+    # 本轮是否正常完成(内存标志):与 run_dual_agent_audit 同理,
+    # finally 兑底 error 推送必须用它判定,不能用 task.status ——
+    # 本轮完成后用户可能又发新追问(状态被改回 RUNNING),旧线程 finally
+    # 按状态判定会误推 error 并重新标记总线结束,导致新 resume 线程事件全丢。
+    normal_completed = False
+
     try:
         # ===== 单 agent 模式:user_agent 已禁用,跳过评估,直接跑 react_agent =====
         if not ua_enabled:
@@ -1314,6 +1340,7 @@ def resume_audit_with_message(
 
             ua_result = None  # 单 agent 模式无 user_agent 评估,_finish_resume 据此写简洁总结
             _finish_resume(task, db, react_summaries, ua_result)
+            normal_completed = True  # 正常完成:finally 不再兑底推 error(见 finally 注释)
             return  # finally 块仍会执行清理
 
         # 先调 user_agent 分析用户消息(round_idx = start_round_idx)
@@ -1386,6 +1413,7 @@ def resume_audit_with_message(
         if ua_result.get("done"):
             _persist_structured_results(db, task, start_round_idx, ua_result)
             _finish_resume(task, db, react_summaries, ua_result)
+            normal_completed = True  # 正常完成
             return
 
         # 启动协作循环:react_agent 执行 + user_agent 评估
@@ -1459,6 +1487,7 @@ def resume_audit_with_message(
             )
 
         _finish_resume(task, db, react_summaries, ua_result)
+        normal_completed = True  # 正常完成(循环结束或 done 分支跳出)
 
     except Exception as e:
         err_stage = "重试执行失败" if retry else "重启执行失败"
@@ -1507,19 +1536,23 @@ def resume_audit_with_message(
         except Exception as cleanup_err:
             logger.warning(f"[task={task.id}] 标记任务完成失败: {cleanup_err}")
         # 推送终止事件
-        # done 事件已在 _finish_resume 中提前推送(在归纳记忆/git diff 之前)
-        # 此处仅兜底推送 error 事件(异常路径)
-        if task.status != TaskStatus.COMPLETED:
+        # done 事件已在 _finish_resume 中提前推送(在归纳记忆/git diff 之前),正常路径
+        # 也已同步调用 finish_task(提前标记总线结束,消除与 reset_task_bus 的竞态)。
+        # 此处仅兑底:异常路径(本轮未正常完成)推送 error 事件 + 标记总线结束。
+        # 判定必须用内存标志 normal_completed,不能用 task.status ——
+        # 本轮完成后用户又发新追问会把状态改回 RUNNING,按状态判定会误推 error
+        # 并重新标记总线结束,导致新 resume 线程事件全被静默丢弃。
+        if not normal_completed:
             # [诊断] error 事件推送日志:前端 onError 的唯一事件源,全量记录
             logger.warning(
-                f"[task={task.id}] resume finally 兜底推送 error 事件 "
+                f"[task={task.id}] resume finally 兑底推送 error 事件 "
                 f"(status={task.status.value}, error_message={task.error_message!r})"
             )
             publish(task.id, "error", {
                 "status": "failed",
                 "error_message": task.error_message or "未知错误(无异常详情,请查看服务日志)",
             })
-        finish_task(task.id)
+            finish_task(task.id)
 
 
 # ============================================================
@@ -1623,10 +1656,14 @@ def _finish_resume(
         )
 
     # 提前推送 done 事件:results 已落库,让前端立即拉取展示
-    # (归纳记忆和 git diff 是后台兜底任务,不阻塞前端结果清单展示)
+    # (归纳记忆和 git diff 是后台兑底任务,不阻塞前端结果清单展示)
     publish(task.id, "done", {"status": "completed"})
-
-    # 重启完成:自动归纳写入长期记忆(失败兜底,不影响;client 用默认,归纳是简单任务)
+    # 立即标记总线结束(不等 resume 线程 finally):与 run_dual_agent_audit 同理,
+    # 消除"用户再发新追问触发的 reset_task_bus 被旧线程 finally 的 finish_task 重新覆盖"
+    # 竞态 —— 否则新 resume 线程 publish 全被丢弃(checklist_review 弹窗丢失、任务卡死)。
+    finish_task(task.id)
+    
+    # 重启完成:自动归纳写入长期记忆(失败兑底,不影响;client 用默认,归纳是简单任务)
     try:
         from app.services.memory_summarize import summarize_and_save_memory
         summarize_and_save_memory(task, db, None)
