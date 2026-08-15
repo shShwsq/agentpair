@@ -80,6 +80,21 @@ SUPPLEMENT_QUESTION = {
 # 单次评估中最多调用 verifier_agent 的次数(防止无限验证)
 MAX_VERIFY_CALLS = 3
 
+# 追问清单更新模式(仅 resume 首次分析用户追加消息时启用):
+# user_agent 判断追问是否引入新覆盖维度,需要时在输出中附带更新后的完整 checklist,
+# orchestrator 据此推送给用户再次编辑确认。详见 CHECKLIST_UPDATE_SECTION。
+CHECKLIST_UPDATE_SECTION = """## 本轮附加规则(追问清单更新模式)
+本轮是分析用户的追问消息:任务本已完成,用户又追加了新消息
+(见用户意图中的「[用户追加消息]」段)。除对照 checklist 评估外,你还需:
+1. 判断追问消息是否引入了现有 checklist 中没有的覆盖维度。
+2. 若需要新增维度或调整现有维度:在输出中附带 `checklist` 字段,
+   给出**更新后的完整清单**(保留原有维度,追加新维度;
+   格式与第 0 轮相同: id/name/description/checklist 子项)。
+   此时 done 必须为 false,followup_query 需指导 react_agent 执行追问需求。
+3. 若追问消息没有引入任何新需求(仅确认/致谢等):不输出 checklist 字段,
+   可按常规评估,允许 done=true 宣布结束。
+注意:新维度 id 用英文下划线命名;已有维度的 id 保持不变(覆盖度看板按 id 匹配)。"""
+
 # verify 工具定义(user_agent 可选调用,仅当 task.verifier_enabled 且 policy.allow_verify 时启用)
 _VERIFY_TOOL_DEFINITION: dict[str, Any] = {
     "type": "function",
@@ -295,6 +310,7 @@ def run_user_agent(
     repo_url: str | None = None,
     task: Task | None = None,
     agent_policy: dict[str, Any] | None = None,
+    checklist_update_mode: bool = False,
 ) -> dict[str, Any]:
     """执行一次 user_agent 评估
 
@@ -314,6 +330,9 @@ def run_user_agent(
             round_idx=0 时传 None(LLM 动态生成);round_idx>=1 时传已确认清单。
         task: 任务对象(可选)。传入时用于读取 verifier 配置(test_env_url / verifier_enabled)。
         agent_policy: agent 策略(可选)。含 allow_verify 开关,控制是否启用 verify 工具。
+        checklist_update_mode: 追问清单更新模式(可选)。仅 resume 首次分析用户追加
+            消息时启用:user_agent 判断追问是否引入新覆盖维度,需要时在输出中附带
+            更新后的完整 checklist,orchestrator 据此推送给用户再次编辑确认。
 
     返回:user_agent 的结构化输出
         {
@@ -332,6 +351,10 @@ def run_user_agent(
     # 场景降级后:用通用 prompt,checklist 从 task_checklist 注入
     checklist_text = _format_checklist_for_prompt(task_checklist)
     system_prompt = USER_AGENT_SYSTEM_PROMPT.replace("{checklist_section}", checklist_text)
+
+    # 追问清单更新模式:附加额外规则(判断追问是否引入新维度,需要时输出更新后 checklist)
+    if checklist_update_mode:
+        system_prompt += "\n\n" + CHECKLIST_UPDATE_SECTION
 
     # 长期记忆注入:User Profile + 全局记忆 + 项目记忆精简版
     # (仅当有内容时,追加到 system prompt 末尾)
@@ -424,6 +447,12 @@ def run_user_agent(
             "\n\n请评估覆盖情况,决定是否追问或结束。"
             + "\n\n[当前不允许提问] react_agent 已开始执行,ask_user 必须为 false。"
         )
+        if checklist_update_mode:
+            user_msg_parts.append(
+                "\n[追问清单更新] 本轮是分析用户的追问消息。若追问引入了新的覆盖维度,"
+                "请在输出中附带更新后的完整 checklist(done=false,followup_query "
+                "指向追问需求);若无新维度,不要输出 checklist。"
+            )
         if history_prefix:
             user_msg_parts.append(
                 "\n[记忆提示] 上面已附上你之前各轮的评估记录,请保持覆盖度判断的连续性:"

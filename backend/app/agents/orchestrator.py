@@ -743,6 +743,10 @@ def _record_user_agent(
         full_eval += f"→ 请求用户澄清({len(ua_result.get('questions') or [])} 个问题)\n"
     if followup:
         full_eval += f"追问: {followup}\n"
+    # 追问清单更新(round_idx>0 时 user_agent 附带更新后 checklist):落库标记便于追溯
+    # (第 0 轮 checklist 是首次生成,另有确认机制,不在此标记)
+    if round_idx > 0 and isinstance(ua_result.get("checklist"), list) and ua_result["checklist"]:
+        full_eval += f"→ 更新覆盖度清单({len(ua_result['checklist'])} 个维度)\n"
     if done:
         full_eval += "→ 宣布完成\n"
 
@@ -1137,6 +1141,29 @@ def _restore_workspace_if_needed(
 # ============================================================
 
 
+def _checklist_changed(
+    old: list[dict] | None, new: list[dict],
+) -> bool:
+    """判断 user_agent 输出的 checklist 与现有清单是否有实质差异
+
+    逐维度比较 id + name + description + 子项,任一不同即视为变更。
+    用于追问清单更新时避免 user_agent 输出与原清单相同的 checklist
+    触发无意义的确认弹窗。
+    """
+    def _norm(cl: list[dict] | None) -> list[tuple]:
+        return [
+            (
+                str(d.get("id", "")),
+                str(d.get("name", "")),
+                str(d.get("description", "")),
+                [str(x) for x in (d.get("checklist") or [])],
+            )
+            for d in (cl or [])
+            if isinstance(d, dict)
+        ]
+    return _norm(old) != _norm(new)
+
+
 def resume_audit_with_message(
     task: Task, db: Session, user_message: str, retry: bool = False,
 ) -> None:
@@ -1285,8 +1312,50 @@ def resume_audit_with_message(
             repo_url=(task.params or {}).get("repo_url"),
             task=task,
             agent_policy=agent_policy,
+            # 追问清单更新模式:仅用户追问启用(重试续跑不是新需求,不更新清单)
+            checklist_update_mode=not retry,
         )
         perf_log(task.id, "ua_eval", time.perf_counter() - _t0, round_idx=start_round_idx, phase="analyze_message")
+
+        # ---------- 追问清单更新:user_agent 输出更新后 checklist,再次向用户确认 ----------
+        # 复用第 0 轮的确认机制(set_pending_checklist → checklist_review 事件 →
+        # 阻塞等待)。确认后的清单覆写 task.checklist,后续 resume 循环评估按新清单。
+        # 在 _record_user_agent 之前处理,确保落库的评估反映最终 done 状态。
+        if not retry:
+            updated_checklist = ua_result.get("checklist")
+            if isinstance(updated_checklist, list):
+                # 过滤畸形条目(至少需有 id)
+                updated_checklist = [
+                    d for d in updated_checklist
+                    if isinstance(d, dict) and d.get("id")
+                ]
+            else:
+                updated_checklist = []
+            if updated_checklist and _checklist_changed(task.checklist, updated_checklist):
+                task.current_stage = "等待用户确认覆盖度清单更新"
+                db.commit()
+                _publish_status(task)
+
+                set_pending_checklist(task.id, updated_checklist)
+                publish(task.id, "checklist_review", {
+                    "checklist": updated_checklist,
+                    "reasoning": ua_result.get("reasoning", ""),
+                })
+
+                # 阻塞后台线程,直到用户提交编辑/直接采用(无限等待)
+                confirmed = wait_for_checklist_confirmation(task.id)
+                if confirmed:
+                    # 落库到 task.checklist,后续循环评估用新清单
+                    task.checklist = confirmed
+                    task_checklist = confirmed
+                    db.commit()
+                    logger.info(
+                        f"[task={task.id}] 追问清单更新已确认,{len(confirmed)} 个维度"
+                    )
+                    # 用户确认了新清单,react_agent 必须跑一轮执行追问需求,
+                    # 不允许直接结束(兜底:LLM 可能同时输出 done=true)
+                    ua_result["done"] = False
+
         _record_user_agent(db, task, start_round_idx, ua_result)
 
         # user_agent 认为用户消息无需新检查,直接结束
