@@ -562,6 +562,11 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         # done 事件已在 try 块中提前推送(在归纳记忆/git diff 之前)
         # 此处仅兜底推送 error 事件(异常路径)
         if task.status != TaskStatus.COMPLETED:
+            # [诊断] error 事件推送日志:前端 onError 的唯一事件源,全量记录
+            logger.warning(
+                f"[task={task.id}] finally 兜底推送 error 事件 "
+                f"(status={task.status.value}, error_message={task.error_message!r})"
+            )
             publish(task.id, "error", {
                 "status": "failed",
                 "error_message": task.error_message or "未知错误(无异常详情,请查看服务日志)",
@@ -1185,7 +1190,8 @@ def resume_audit_with_message(
     流程:
     1. task.status: COMPLETED/FAILED → RUNNING
     2. 加载历史上下文(react_summaries / task_checklist / LLM 配置)
-    3. 起始 round_idx = max(Conversation.round_idx) + 1(用户消息已归入此轮)
+    3. 起始 round_idx:用户追加消息时复用消息所在轮(消息与首轮 react 执行
+       同轮,不隔轮);失败重试时从 max+1 续接新轮
     4. 先调 user_agent 分析用户消息(对照已有 checklist,输出 followup_query)
     5. 启动协作循环(react_agent + user_agent 评估),最多 MAX_RESUME_ROUNDS 轮;
        分析评估与首轮 react 执行共享起始 round_idx,不单独占轮
@@ -1240,10 +1246,11 @@ def resume_audit_with_message(
     # 重启时不复用旧 plan(让 LLM 根据新消息重新规划)
     current_plan: list[dict] = []
 
-    # 起始 round = max(Conversation.round_idx) + 1(用户消息已由 API 端点归入此轮)
-    # 分析评估与首轮 react 执行共享该轮号(用户消息 → 分析 → 执行 → 产出评估
-    # 构成一轮完整协作闭环);循环最多跑 MAX_RESUME_ROUNDS 轮 react 执行
-    start_round_idx = _get_next_round_idx(db, task.id)
+    # 起始轮:用户追加消息时复用消息所在轮(消息已由 API 端点落库为最新轮,
+    # 分析评估与首轮 react 执行与该消息同轮——用户消息 → 分析 → 执行 → 产出评估
+    # 构成一轮完整协作闭环,不隔轮);失败重试时无新消息,从 max+1 续接新轮。
+    # 循环最多跑 MAX_RESUME_ROUNDS 轮 react 执行。
+    start_round_idx = _get_next_round_idx(db, task.id, retry=retry)
     max_rounds = start_round_idx + MAX_RESUME_ROUNDS - 1
     # [perf] resume 锚点(用户追加消息后重启;与 user_message 锚点配对算总延迟)
     perf_log(
@@ -1503,6 +1510,11 @@ def resume_audit_with_message(
         # done 事件已在 _finish_resume 中提前推送(在归纳记忆/git diff 之前)
         # 此处仅兜底推送 error 事件(异常路径)
         if task.status != TaskStatus.COMPLETED:
+            # [诊断] error 事件推送日志:前端 onError 的唯一事件源,全量记录
+            logger.warning(
+                f"[task={task.id}] resume finally 兜底推送 error 事件 "
+                f"(status={task.status.value}, error_message={task.error_message!r})"
+            )
             publish(task.id, "error", {
                 "status": "failed",
                 "error_message": task.error_message or "未知错误(无异常详情,请查看服务日志)",
@@ -1660,8 +1672,13 @@ def _load_react_summaries(db: Session, task_id) -> list[dict]:
     ]
 
 
-def _get_next_round_idx(db: Session, task_id) -> int:
-    """获取下一个 round_idx = max(Conversation.round_idx) + 1
+def _get_next_round_idx(db: Session, task_id, retry: bool = False) -> int:
+    """resume 起始轮计算:
+
+    - 用户追加消息(retry=False):消息已由 API 端点落库到最新轮
+      (round = max(Conversation.round_idx)),此处复用该轮号——
+      分析评估与首轮 react 执行与用户消息同轮,消息位于轮首,不隔轮
+    - 失败重试(retry=True):无新用户消息落库,从 max+1 续接新轮
 
     无对话记录时返回 1(理论上不会发生,因为已完成的任务一定有对话)。
     """
@@ -1671,7 +1688,9 @@ def _get_next_round_idx(db: Session, task_id) -> int:
         .order_by(Conversation.round_idx.desc())
         .first()
     )
-    return (latest.round_idx + 1) if latest else 1
+    if not latest:
+        return 1
+    return latest.round_idx if not retry else latest.round_idx + 1
 
 
 def _persist_structured_results(

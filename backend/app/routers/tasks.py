@@ -15,13 +15,16 @@ import ast
 import html
 import json
 import logging
+import os
 import threading
 import uuid
 from collections.abc import Generator
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -1026,6 +1029,12 @@ def retry_failed_task_endpoint(
             raise HTTPException(status_code=403, detail="无权操作此任务")
 
     if task.status != TaskStatus.FAILED:
+        # [诊断] 重试拒绝日志:与前端 client.log 的"点击重试"记录对拍,
+        # 可定位"前端显示 failed 但后端 running"的状态不一致
+        logger.info(
+            f"[retry] task={task_id} 重试被拒:当前状态={task.status.value}"
+            f"(仅 failed 可重试),error_message={task.error_message!r}"
+        )
         return SendMessageResponse(
             accepted=False,
             message=f"任务状态为 {task.status.value},不支持重试",
@@ -1122,6 +1131,60 @@ def _run_retry_in_background(task_id: str) -> None:
         db.close()
         # 清理 in-memory 暂停状态(防止任务结束但状态卡住)
         clear_pause_state(task_id)
+
+
+# ============================================================
+# 客户端诊断日志上报(前后端日志对拍)
+# ============================================================
+
+
+class ClientLogRequest(BaseModel):
+    """前端诊断日志上报:定位"前端显示失败但后端 running"等状态不一致"""
+
+    task_id: str = ""
+    event: str = ""
+    detail: dict[str, Any] | None = None
+    ts: str = ""
+
+
+@router.post("/debug/client-log")
+def client_log_endpoint(
+    req: ClientLogRequest,
+    current_user: User | None = Depends(get_optional_user),
+) -> dict:
+    """接收前端诊断日志,追加写入 backend/logs/client.log(JSON 行)
+
+    前端 fire-and-forget 上报,失败静默不阻塞业务。
+    与后端 event_bus / SSE 埋点日志按时间 + task_id 对拍,
+    可还原"未知失败"出现时的完整事件序列。
+    """
+    try:
+        detail = dict(req.detail or {})
+        # 截断过大的字段,防止日志膨胀(thinking 流式内容等)
+        for k, v in detail.items():
+            if isinstance(v, str) and len(v) > 200:
+                detail[k] = v[:200] + f"...(截断,共{len(v)}字符)"
+        line = json.dumps(
+            {
+                "ts": req.ts or datetime.now().isoformat(),
+                "task_id": req.task_id,
+                "event": req.event,
+                "detail": detail,
+                "user": str(current_user.id) if current_user else None,
+            },
+            ensure_ascii=False,
+        )
+        logs_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs"
+        )
+        os.makedirs(logs_dir, exist_ok=True)
+        with open(
+            os.path.join(logs_dir, "client.log"), "a", encoding="utf-8"
+        ) as f:
+            f.write(line + "\n")
+    except Exception as e:
+        logger.warning(f"客户端日志写入失败(忽略): {e}")
+    return {"ok": True}
 
 
 # ============================================================
@@ -2240,6 +2303,12 @@ def stream_task_events(
         db.close()
 
     task_id_str = str(task_id)
+    # [诊断] SSE 连接建立日志:记录快照状态与总线结束标记,
+    # 与 event_bus 订阅日志 / 前端 client.log 对拍
+    logger.info(
+        f"[sse] task={task_id_str} 连接建立 initial_status={initial_status.value} "
+        f"initial_stage={initial_stage!r} is_task_finished={is_task_finished(task_id_str)}"
+    )
 
     def event_generator() -> Generator[str, None, None]:
         """SSE 事件生成器(不碰数据库,只用上面的状态快照)"""
@@ -2267,6 +2336,11 @@ def stream_task_events(
                     "data": {"status": initial_status.value},
                     "timestamp": "",
                 }
+                # [诊断] 快照终止事件:记录推了 done 还是 error(前端 onError 的唯一外部来源)
+                logger.info(
+                    f"[sse] task={task_id_str} 按旧快照推送终止事件 "
+                    f"type={done_event['type']}(initial_status={initial_status.value})"
+                )
                 yield _format_sse(done_event)
                 return
 

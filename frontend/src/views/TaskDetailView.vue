@@ -57,6 +57,7 @@ import {
 } from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
 import { listArtifacts } from '@/api/taskArtifacts'
+import { clientLog } from '@/utils/clientLog'
 import { extractErrorMessage } from '@/utils/error'
 import { parseDiffFileSegments } from '@/utils/diffFiles'
 import { renderMarkdown } from '@/utils/markdown'
@@ -634,6 +635,12 @@ async function initTask(): Promise<void> {
     task.value = taskData
     error.value = ''
     loading.value = false
+    // [诊断] 任务快照拉取:记录后端返回的状态(与前端显示对拍)
+    clientLog(taskId, 'task_fetch', {
+      status: taskData.status,
+      error_message: taskData.error_message,
+      current_stage: taskData.current_stage,
+    })
 
     // 从历史对话提取 plan(刷新页面/迟到订阅者回放)
     // react_agent 的 type=thinking content 里可能含 <plan>...</plan>,
@@ -885,6 +892,8 @@ function connectSSE(taskId: string): void {
       }
     },
     onDone: async () => {
+      // [诊断] done 事件处理:记录是否走了 resume 竞态校验分支
+      clientLog(taskId, 'view_on_done', { resuming: resumingRef.value })
       // 竞态防御:completed 追问 / failed 重试后立即重连的 SSE,可能被后端
       // 按旧快照(COMPLETED/FAILED)误推 done 关闭(后端已同步改 RUNNING +
       // 事件总线双重防御,这里作前端兜底)。重新校验任务状态,若实际仍在
@@ -938,6 +947,13 @@ function connectSSE(taskId: string): void {
       void loadArtifact(taskId)
     },
     onError: async (data) => {
+      // [诊断] 前端显示"失败"的唯一入口:记录触发时本地状态,
+      // 与后端 client.log / 事件总线日志对拍定位"未知失败"
+      clientLog(taskId, 'view_on_error', {
+        local_status: task.value?.status,
+        error_message: data.error_message,
+        resuming: resumingRef.value,
+      })
       // 退出 resume 窗口(任务真实失败,不再需要竞态校验)
       resumingRef.value = false
       if (task.value) {
@@ -2194,9 +2210,18 @@ const retrying = ref(false)
  */
 async function handleRetry(): Promise<void> {
   if (!task.value || task.value.status !== 'failed' || retrying.value) return
+  // [诊断] 用户点击重试:与后端 retry 拒绝日志对拍(定位"running 不能重试")
+  clientLog(String(task.value.id), 'retry_clicked', {
+    local_status: task.value.status,
+    error_message: task.value.error_message,
+  })
   retrying.value = true
   try {
     const resp = await retryTask(String(task.value.id))
+    clientLog(String(task.value.id), 'retry_response', {
+      accepted: resp.accepted,
+      message: resp.message,
+    })
     if (resp.accepted) {
       task.value.status = 'running'
       task.value.error_message = null

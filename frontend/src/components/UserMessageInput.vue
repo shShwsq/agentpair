@@ -16,6 +16,7 @@ import { computed, nextTick, ref } from 'vue'
 
 import { sendTaskMessage } from '@/api/task'
 import { extractErrorMessage } from '@/utils/error'
+import { clientLog } from '@/utils/clientLog'
 import type { SendMessageResponse, TaskStatus } from '@/types/task'
 
 const props = defineProps<{
@@ -95,6 +96,12 @@ async function handleSend(): Promise<void> {
   localError.value = ''
   try {
     const resp = await sendTaskMessage(props.taskId, { content })
+    // [诊断] 消息发送结果:与后端 user_message 落库 / resume_start 对拍
+    // (定位"消息已落库但前端提示失败"的响应丢失问题)
+    clientLog(String(props.taskId), 'message_sent', {
+      accepted: resp.accepted,
+      message: resp.message,
+    })
     if (resp.accepted) {
       text.value = ''
       emit('sent', resp)
@@ -107,6 +114,10 @@ async function handleSend(): Promise<void> {
       emit('error', localError.value)
     }
   } catch (err) {
+    // [诊断] 消息发送异常:记录错误详情("未知错误,请稍后重试"的来源之一)
+    clientLog(String(props.taskId), 'message_send_error', {
+      error: extractErrorMessage(err),
+    })
     localError.value = extractErrorMessage(err)
     emit('error', localError.value)
   } finally {
