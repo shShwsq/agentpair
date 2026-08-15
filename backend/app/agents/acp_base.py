@@ -1297,8 +1297,8 @@ class _ACPCollector:
         self._last_tool_intent = "(无工具调用)"
         self._last_tool_result = "(无工具结果)"
         # 最近一次结束迭代的 thinking 摘要(供检查点评估快照使用):
-        # 检查点在 tool_result 落库后触发,此时 content_buf 已被
-        # _start_new_iteration 清空,需在清空前暂存
+        # 检查点在 tool_result 落库后触发,由 _flush_iteration 在迭代
+        # 结束时暂存(content 优先、reasoning 兜底,取前 500 字符)
         self._last_thinking_summary = ""
         # 最近一次 TodoList 工具(kimi code CLI)解析出的计划清单,
         # 供收尾时续接 current_plan 链(content 里无 <plan> 时回退)
@@ -1322,9 +1322,16 @@ class _ACPCollector:
         self._iter_started = True
 
     def _flush_iteration(self) -> None:
-        """结束当前迭代:推送 phase=end + 落库 thinking(若有内容)"""
+        """结束当前迭代:推送 phase=end + 落库 thinking(若有内容)
+
+        同时暂存刚结束迭代的 thinking 摘要(供检查点评估快照):
+        检查点在 tool_result 落库后触发,此时 buf 尚未清空(清空发生
+        在下一段文本开新迭代时),统一在迭代结束时暂存。
+        """
         if not self._iter_started:
             return
+        # 暂存刚结束迭代的 thinking 摘要(供检查点评估快照使用)
+        self._last_thinking_summary = (self.content_buf or self.reasoning_buf)[:500]
         publish(self.task.id, "thinking_delta", {
             "conv_id": self.current_conv_id,
             "round_idx": self.round_idx,
@@ -1345,16 +1352,26 @@ class _ACPCollector:
         self._iter_started = False
 
     def _start_new_iteration(self) -> None:
-        """开新迭代:iteration+1, 新 conv_id, 清空 buf(懒启动,不立即推 start)"""
-        # 暂存刚结束迭代的 thinking 摘要:检查点评估已移到 tool_result
-        # 落库之后触发(_handle_tool_result),届时 content_buf 已清空
-        self._last_thinking_summary = self.content_buf[:500]
-
+        """开新迭代(决策回合):iteration+1, 新 conv_id, 清空 buf
+        (懒启动,不立即推 start)"""
         self.iteration += 1
         self.current_conv_id = str(uuid.uuid4())
         self.reasoning_buf = ""
         self.content_buf = ""
         self._iter_started = False
+
+    def _start_new_iteration_if_needed(self) -> None:
+        """决策回合锚点:一段思考/对话文本的开始 = 一次新迭代的开始。
+
+        CLI 只暴露流式文本与工具事件,不暴露模型内部决策边界,以
+        "思考/对话文本段"作为决策回合的可见标记:当前无活跃迭代时
+        (上一段已在 tool_call 处 flush)开新迭代;同一段文本的连续
+        chunk 直接续写,不重复开迭代。无文本的连续工具调用不产生
+        新迭代,归入发起它们的决策回合(迭代=决策回合的统一口径)。
+        """
+        if self._iter_started:
+            return
+        self._start_new_iteration()
 
     def _maybe_trigger_checkpoint(self, iteration: int) -> None:
         """检查点评估触发:每 K 个迭代边界做轻量评估
@@ -1455,9 +1472,11 @@ class _ACPCollector:
         elif update_type == "agent_message_chunk":
             self._handle_text(text)
         elif update_type == "tool_call":
+            # 工具调用结束当前思考/对话段,但不开启新迭代:
+            # 迭代=决策回合(以思考/对话文本段为锚点),无文本的连续
+            # 工具调用归入发起它们的决策回合,避免按工具调用切迭代
             self._flush_iteration()
             self._handle_tool_call(update)
-            self._start_new_iteration()
         elif update_type == "tool_call_update":
             tool_call_id = update.get("toolCallId", "")
             status = update.get("status", "")
@@ -1478,6 +1497,8 @@ class _ACPCollector:
     def _handle_thinking(self, delta: str) -> None:
         if not delta:
             return
+        # 思考文本段的开始 = 新决策回合(新迭代)的开始
+        self._start_new_iteration_if_needed()
         self._ensure_iter_started()
         self.reasoning_full += delta
         self.reasoning_buf += delta
@@ -1493,6 +1514,8 @@ class _ACPCollector:
     def _handle_text(self, delta: str) -> None:
         if not delta:
             return
+        # 对话文本段的开始 = 新决策回合(新迭代)的开始
+        self._start_new_iteration_if_needed()
         self._ensure_iter_started()
         self.content_full += delta
         self.content_buf += delta
@@ -1545,8 +1568,8 @@ class _ACPCollector:
                 raw_input = {"pattern": title[8:].strip()}
 
         # 缓存,等 tool_call_update 累积输入 / completed 拿输出
-        # iteration:该调用所属迭代序号(tool_result 到达时 self.iteration 已 +1,
-        # 检查点评估需用此序号触发,保证落库顺序为 tool_call → tool_result → 检查点)
+        # iteration:该调用所属决策回合的迭代序号(发起时记录,检查点
+        # 评估用此序号触发,保证落库顺序为 tool_call → tool_result → 检查点)
         self._pending_tool_calls[tool_call_id] = {
             "title": title,
             "kind": kind,

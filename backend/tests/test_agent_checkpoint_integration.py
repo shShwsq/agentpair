@@ -221,6 +221,51 @@ def test_checkpoint_triggered_after_tool_result_with_call_iteration(
     assert "tc2" not in collector._pending_tool_calls
 
 
+def test_decision_round_based_iteration(mock_task, mock_db, checkpoint_callback):
+    """迭代=决策回合:文本段开始才开新迭代,无文本的连续工具调用不递增。
+
+    模拟 codex 事件流:文本段 → 多个无文本工具调用 → 文本段:
+    - 第一段思考文本(连续 chunk 只开一次迭代)→ iteration=1
+    - 无文本的连续工具调用不产生新迭代,归入迭代 1
+    - 第二段对话文本 → iteration=2,其工具结果用 2 触发检查点
+    """
+    collector = _make_collector(
+        mock_task, mock_db, checkpoint_callback,
+        agent_policy={**DEFAULT_AGENT_POLICY, "checkpoint_interval": 1,
+                      "allow_interrupt": True, "max_interrupts_per_round": 100},
+    )
+    with patch("app.agents.acp_base.publish"):
+        # 第一段思考文本:连续 chunk 只开一次迭代
+        collector._handle_thinking("先看一下仓库结构。")
+        collector._handle_thinking("继续读关键文件。")
+        assert collector.iteration == 1
+        assert collector._iter_started is True
+
+        # 无文本的连续工具调用:结束当前段但不递增迭代
+        # (模拟 __call__ 的 tool_call 分支:_flush_iteration + _handle_tool_call)
+        collector._flush_iteration()
+        collector._handle_tool_call({"toolCallId": "tc0", "title": "Bash", "kind": "execute"})
+        collector._flush_iteration()
+        collector._handle_tool_call({"toolCallId": "tc1", "title": "Read", "kind": "other"})
+        assert collector.iteration == 1
+        assert collector._iter_started is False
+
+        # 两个工具结果都归入迭代 1(iteration=1 < 2,检查点跳过)
+        collector._handle_tool_result("tc0", {"rawOutput": "ok"})
+        collector._handle_tool_result("tc1", {"rawOutput": "ok"})
+        assert checkpoint_callback.calls == []
+
+        # 第二段对话文本 → 迭代 2
+        collector._handle_text("发现关键问题,继续验证。")
+        assert collector.iteration == 2
+
+        # 迭代 2 的工具调用 → 检查点用 2 触发(K=1)
+        collector._handle_tool_call({"toolCallId": "tc2", "title": "Grep", "kind": "other"})
+        collector._handle_tool_result("tc2", {"rawOutput": "found"})
+        assert checkpoint_callback.calls == [2]
+        assert collector.iteration == 2  # 工具调用不递增迭代
+
+
 def test_tool_result_persisted_with_tool_call_id(mock_task, mock_db, checkpoint_callback):
     """tool_result 落库时携带对应 tool_call 会话记录的 id。
 
@@ -262,7 +307,7 @@ def test_tool_result_without_conv_id_persisted_with_none(mock_task, mock_db, che
 def test_checkpoint_snapshot_uses_finished_iteration_thinking(
     mock_task, mock_db, checkpoint_callback,
 ):
-    """快照 thinking_summary 用已缓存的上一迭代内容(content_buf 已清空),
+    """快照 thinking_summary 用已结束迭代的摘要(由 _flush_iteration 暂存),
     tool_result_summary 是当前工具的真实结果(不再是上一工具的过期结果)。"""
     collector = _make_collector(
         mock_task, mock_db, checkpoint_callback,
@@ -270,17 +315,19 @@ def test_checkpoint_snapshot_uses_finished_iteration_thinking(
                       "allow_interrupt": True, "max_interrupts_per_round": 100},
     )
     # 迭代 0,1 跳过(<2),只跑到迭代 2
-    for i in range(3):
-        collector.content_buf = f"thinking-{i}"
-        collector._last_tool_intent = f"intent-{i}"
-        collector._start_new_iteration()  # 清空 content_buf 前缓存摘要
-        tid = f"tc{i}"
-        collector._pending_tool_calls[tid] = {
-            "title": "t", "kind": "other", "tool_name": "工具",
-            "raw_input": {}, "input_text": "", "conv_id": None,
-            "iteration": i,
-        }
-        collector._handle_tool_result(tid, {"rawOutput": f"result-{i}"})
+    with patch("app.agents.acp_base.publish"):
+        for i in range(3):
+            collector.content_buf = f"thinking-{i}"
+            collector._last_tool_intent = f"intent-{i}"
+            collector._iter_started = True
+            collector._flush_iteration()  # 结束迭代时暂存 thinking 摘要
+            tid = f"tc{i}"
+            collector._pending_tool_calls[tid] = {
+                "title": "t", "kind": "other", "tool_name": "工具",
+                "raw_input": {}, "input_text": "", "conv_id": None,
+                "iteration": i,
+            }
+            collector._handle_tool_result(tid, {"rawOutput": f"result-{i}"})
 
     assert checkpoint_callback.calls == [2]
     snapshot = checkpoint_callback.call_args[0][1]
