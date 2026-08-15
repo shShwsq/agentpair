@@ -55,6 +55,7 @@ import {
 import { subscribeTaskStream } from '@/api/stream'
 import { listArtifacts } from '@/api/taskArtifacts'
 import { extractErrorMessage } from '@/utils/error'
+import { parseDiffFileSegments } from '@/utils/diffFiles'
 import { renderMarkdown } from '@/utils/markdown'
 import { buildToolSegments, buildToolSummary, parseAgentTrace, toolFileTargetOf } from '@/utils/toolSummary'
 import type {
@@ -132,6 +133,40 @@ function diffLineClass(line: string): string {
   if (line.startsWith('+')) return 'diff-line-add'
   if (line.startsWith('-')) return 'diff-line-del'
   return 'diff-line-ctx'
+}
+
+/** 按文件块解析 diff(路径 + 起始行号),供变更文件列表与点击跳转锚点使用 */
+const diffSegments = computed(() => parseDiffFileSegments(diffLines.value))
+
+/** 变更文件清单(按出现顺序去重);工作区不可用时传给侧栏兜底展示 */
+const changedFiles = computed(() => {
+  const seen = new Set<string>()
+  const files: string[] = []
+  for (const seg of diffSegments.value) {
+    if (!seen.has(seg.path)) {
+      seen.add(seg.path)
+      files.push(seg.path)
+    }
+  }
+  return files
+})
+
+/** diff 行号 → 锚点 id 映射(仅每个文件块起始行有锚点) */
+const diffAnchorByLine = computed(() => {
+  const m = new Map<number, string>()
+  diffSegments.value.forEach((seg, i) => m.set(seg.lineIndex, `diff-file-${i}`))
+  return m
+})
+
+/** 侧栏变更文件点击:展开"工作区变更"并滚动到对应文件的 diff 块 */
+async function scrollToDiffFile(path: string): Promise<void> {
+  const idx = diffSegments.value.findIndex((s) => s.path === path)
+  if (idx < 0) return
+  workspaceChangesCollapsed.value = false
+  await nextTick()
+  document
+    .getElementById(`diff-file-${idx}`)
+    ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 /** 拉取任务的工作区产物(取第一个 git_diff);静默失败,不影响主流程 */
@@ -2247,8 +2282,10 @@ function toggleResult(id: string): void {
     <WorkspaceSidebar
       v-show="!workspaceCollapsed"
       ref="sidebarRef"
+      :changed-files="changedFiles"
       @task-deleted="onSidebarTaskDeleted"
       @task-title-updated="onSidebarTaskTitleUpdated"
+      @open-diff-file="scrollToDiffFile"
     />
 
     <main class="main">
@@ -2569,6 +2606,7 @@ function toggleResult(id: string): void {
             <div
               v-for="(line, i) in diffLines"
               :key="i"
+              :id="diffAnchorByLine.get(i)"
               :class="['diff-line', diffLineClass(line)]"
             >{{ line }}</div>
           </div>

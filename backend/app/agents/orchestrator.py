@@ -1053,6 +1053,33 @@ def _format_repo_context(
     return "\n".join(lines)
 
 
+def _restore_workspace_if_needed(
+    task: Task, db: Session, task_id_str: str, git_tokens: dict | None = None,
+) -> bool:
+    """沙箱会话已被回收且任务配了仓库 → 重新克隆恢复工作区
+
+    判断与 retry_failed_task 一致:无 repo_url 或会话存活时跳过。
+    用户追问(resume)与失败重试共用本助手,消除两条链路在
+    工作区恢复上的不对称——否则追问轮只能新建空沙箱,
+    react_agent 拿不到 repo_path 提示,行为不确定。
+
+    _prepare_repo_context 内部已写记忆文件,且 clone 失败时降级
+    不抛异常(续跑时 react_agent 可自主克隆),故返回 True 后
+    调用方无需再写记忆文件。返回是否执行了恢复动作。
+    """
+    repo_url = (task.params or {}).get("repo_url")
+    if not repo_url or sandbox_tools.get_workspace_info(task_id_str) is not None:
+        return False
+    logger.info(
+        f"[task={task.id}] 沙箱会话已回收,重新克隆仓库恢复工作区"
+    )
+    task.current_stage = "工作区已被回收,正在重新克隆恢复..."
+    db.commit()
+    _publish_status(task)
+    _prepare_repo_context(task, db, task_id_str, git_tokens)
+    return True
+
+
 # ============================================================
 # 完成后重启:用户在 task 完成后追加消息,触发新一轮协作
 # ============================================================
@@ -1133,13 +1160,20 @@ def resume_audit_with_message(
         start_round=start_round_idx,
     )
 
-    # 重启路径不走 _prepare_repo_context,补写记忆文件(幂等:会话存活时覆盖同内容,
-    # 会话已被回收时重建文件,保证执行侧 read_file 能查到全量记忆)
+    # 会话已被回收且配了仓库 → 与重试链路一致,重新克隆恢复工作区
+    # (_prepare_repo_context 内部已写记忆文件);否则幂等补写记忆文件
+    # (会话存活时覆盖同内容,保证执行侧 read_file 能查到全量记忆)
+    # 重试链路进入本函数前已自行恢复过工作区,此处会话存活会自然跳过,不会双重 clone
     _t0 = time.perf_counter()
-    _write_memory_files_for_task(
-        task, db, task_id_str, (task.params or {}).get("repo_url"),
+    repo_url = (task.params or {}).get("repo_url")
+    restored = _restore_workspace_if_needed(task, db, task_id_str, git_tokens)
+    if not restored:
+        _write_memory_files_for_task(task, db, task_id_str, repo_url)
+    perf_log(
+        task.id,
+        "restore_workspace" if restored else "write_memory_files",
+        time.perf_counter() - _t0,
     )
-    perf_log(task.id, "write_memory_files", time.perf_counter() - _t0)
 
     # 把用户消息拼到 user_intent 后面,让 user_agent 把它视为新的检查方向
     # 重试场景用专门标记,避免 user_agent 把续跑当成用户新增需求

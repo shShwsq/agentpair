@@ -45,7 +45,19 @@ const activeTaskId = computed<string | null>(() =>
 const emit = defineEmits<{
   (e: 'task-deleted', taskId: string): void
   (e: 'task-title-updated', taskId: string, title: string | null): void
+  (e: 'open-diff-file', path: string): void
 }>()
+
+// ============================================================
+// 外部输入:工作区不可用时的变更文件兜底列表
+// ============================================================
+
+// 父组件(TaskDetailView)从 git_diff artifact 解析传入;
+// 仅在工作区不可用且任务非运行中时展示,点击跳转主区对应 diff 块
+const props = defineProps<{ changedFiles?: string[] }>()
+
+/** 变更文件列表(空则不可用分支维持原文案) */
+const changedFileList = computed(() => props.changedFiles ?? [])
 
 // ============================================================
 // 视图状态
@@ -1106,6 +1118,39 @@ defineExpose({ openTaskFile })
         <div v-else-if="!available" class="sidebar-status sidebar-status-muted">
           <p>{{ unavailableReason || '工作区不可用' }}</p>
           <p v-if="selectedTaskRunning" class="status-hint">等待 react_agent clone 仓库...</p>
+          <!-- 会话过期但有 diff 产物:展示变更文件列表(点击跳主区 diff,内容不可浏览) -->
+          <div
+            v-if="!selectedTaskRunning && changedFileList.length > 0"
+            class="changed-files-fallback"
+          >
+            <div class="changed-files-title">变更文件（会话已过期，内容不可浏览）</div>
+            <div class="changed-files-list">
+              <div
+                v-for="path in changedFileList"
+                :key="path"
+                class="tree-node tree-file changed-file-row"
+                :title="path"
+                @click="emit('open-diff-file', path)"
+              >
+                <span class="tree-icon">
+                  <svg
+                    viewBox="0 0 24 24"
+                    width="13"
+                    height="13"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+                    <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
+                  </svg>
+                </span>
+                <span class="tree-name">{{ path }}</span>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- 文件树(扁平化渲染) -->
@@ -1594,6 +1639,31 @@ defineExpose({ openTaskFile })
 .status-hint {
   color: var(--color-text-muted);
   font-size: 10px;
+}
+
+/* ---- 变更文件兜底列表(工作区不可用且非运行中时展示) ---- */
+.changed-files-fallback {
+  width: 100%;
+  margin-top: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.changed-files-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  padding: 0 var(--space-2);
+}
+
+.changed-files-list {
+  overflow-y: auto;
+  margin-top: var(--space-1);
+}
+
+.changed-file-row {
+  padding-left: var(--space-2);
 }
 
 /* ---- 任务列表 ---- */
