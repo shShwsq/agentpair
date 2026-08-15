@@ -26,8 +26,8 @@ function call(id: string, intent: string): ToolItem {
   return { id, type: 'tool_call', content: intent }
 }
 
-function result(id: string, content: string): ToolItem {
-  return { id, type: 'tool_result', content }
+function result(id: string, content: string, toolCallId?: string): ToolItem {
+  return { id, type: 'tool_result', content, tool_call_id: toolCallId ?? null }
 }
 
 describe('toolNameOf', () => {
@@ -170,6 +170,55 @@ describe('buildToolSegments', () => {
     const segs = buildToolSegments([result('r1', '孤儿结果')])
     expect(segs).toHaveLength(1)
     expect(segs[0].kind).toBe('plain')
+  })
+
+  it('并行调用:call 集中落库、result 按完成顺序乱序,按 tool_call_id 精确配对', () => {
+    const items = [
+      call('c1', '写入文件 a.py [write_file]'),
+      call('c2', '执行命令: pytest [run_command]\n{"command": "pytest"}'),
+      // c2 先完成,其 result 紧邻 c2 但属于 c2;c1 的 result 最后才到
+      result('r2', 'passed', 'c2'),
+      result('r1', 'ok', 'c1'),
+    ]
+    const segs = buildToolSegments(items)
+    expect(segs).toHaveLength(2)
+    expect(segs[0]).toMatchObject({ kind: 'toolpair', call: { id: 'c1' }, result: { id: 'r1' } })
+    expect(segs[1]).toMatchObject({ kind: 'toolpair', call: { id: 'c2' }, result: { id: 'r2' } })
+  })
+
+  it('并行调用:相邻 result 属于另一个 call 时不错配', () => {
+    const items = [
+      call('c1', '写入文件 a.py [write_file]'),
+      call('c2', '写入文件 b.py [write_file]'),
+      result('r2', '结果B', 'c2'),  // 紧邻 c2,但 c1 也会先扫到它 —— 不能配给 c1
+      result('r1', '结果A', 'c1'),
+    ]
+    const segs = buildToolSegments(items)
+    expect(segs).toHaveLength(2)
+    expect(segs[0]).toMatchObject({ call: { id: 'c1' }, result: { id: 'r1' } })
+    expect(segs[1]).toMatchObject({ call: { id: 'c2' }, result: { id: 'r2' } })
+  })
+
+  it('并行调用:部分 result 未到达,已到 result 仍配到正确 call', () => {
+    const items = [
+      call('c1', '写入文件 a.py [write_file]'),
+      call('c2', '写入文件 b.py [write_file]'),
+      result('r2', 'ok', 'c2'),
+    ]
+    const segs = buildToolSegments(items)
+    expect(segs).toHaveLength(2)
+    expect(segs[0]).toMatchObject({ call: { id: 'c1' }, result: null })
+    expect(segs[1]).toMatchObject({ call: { id: 'c2' }, result: { id: 'r2' } })
+  })
+
+  it('历史数据(无 tool_call_id)仍按相邻配对兜底', () => {
+    const items = [
+      call('c1', '写入文件 a.py [write_file]'),
+      result('r1', 'ok'),
+    ]
+    const segs = buildToolSegments(items)
+    expect(segs).toHaveLength(1)
+    expect(segs[0]).toMatchObject({ call: { id: 'c1' }, result: { id: 'r1' } })
   })
 })
 

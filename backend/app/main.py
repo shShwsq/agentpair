@@ -70,6 +70,10 @@ async def lifespan(app: FastAPI):
     from app.models.user_preference import migrate_user_preference_columns
 
     migrate_user_preference_columns()
+    # 加 conversations.tool_call_id 列(tool_result 关联对应 tool_call,并行调用时前端精确配对)
+    from app.models.task import migrate_conversation_tool_call_id
+
+    migrate_conversation_tool_call_id()
     yield
 
 

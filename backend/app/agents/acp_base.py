@@ -1663,6 +1663,9 @@ class _ACPCollector:
             round_idx=self.round_idx,
             role="react_agent", type="tool_result",
             content=raw_output,
+            # 关联对应 tool_call 会话记录(CLI 并行调用时 result 按完成顺序落库,
+            # 前端靠它精确配对;conv_id 缺失时留空,前端回退相邻配对)
+            tool_call_id=str(conv_id) if conv_id else None,
         )
 
         # 记录最近工具结果(供检查点评估快照使用)
@@ -1887,12 +1890,15 @@ def _extract_json_string_field(text: str, field: str) -> str:
 def _add_conversation(
     db: Session, task: Task, *, round_idx: int, role: str, type: str,
     content: str, reasoning: str | None = None,
+    tool_call_id: str | None = None,
     publish_event: bool = True,
 ) -> Conversation:
     """记录一条对话,可选推送 SSE 事件
 
     - thinking 不推 SSE(流式卡片已展示,避免重复)
     - tool_call / tool_result 推 SSE(前端对话列表实时追加)
+    - tool_call_id:仅 type=tool_result 用,对应 tool_call 会话记录的 id,
+      前端据此配对展示(CLI 并行调用时 result 按完成顺序落库,不再紧跟 call)
 
     返回创建的 Conversation 对象(供调用方后续更新,如 Kimi 增量参数补全)。
     """
@@ -1903,6 +1909,7 @@ def _add_conversation(
         type=type,
         content=content,
         reasoning=reasoning,
+        tool_call_id=tool_call_id,
     )
     db.add(conv)
     db.commit()
@@ -1914,6 +1921,7 @@ def _add_conversation(
             "role": conv.role,
             "type": conv.type,
             "content": conv.content,
+            "tool_call_id": conv.tool_call_id,
             "created_at": conv.created_at.isoformat() if conv.created_at else None,
         })
     return conv

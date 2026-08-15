@@ -206,6 +206,12 @@ export interface Conversation {
    * 刷新页面后从 GET /tasks/{id} 拿到,用于还原流式卡片(只读模式,不再实时打字)。
    */
   reasoning?: string | null
+  /**
+   * 仅 type=tool_result 有:对应 tool_call 会话记录的 id。
+   * 并行工具调用时 result 不再紧跟 call 落库,前端靠它精确配对;
+   * 历史数据为 null,回退相邻配对
+   */
+  tool_call_id?: string | null
   created_at: string
 }
 
@@ -306,6 +312,8 @@ export interface ConversationEventData {
   content: string
   /** 完整评估/思考链(如 user_agent evaluation 的覆盖情况+判断),可折叠回看 */
   reasoning?: string | null
+  /** 仅 type=tool_result 有:对应 tool_call 会话记录的 id */
+  tool_call_id?: string | null
   created_at: string | null
 }
 

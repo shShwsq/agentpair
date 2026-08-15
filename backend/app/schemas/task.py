@@ -110,6 +110,8 @@ class ConversationResponse(BaseModel):
     content: str
     # 思考链(仅 type=thinking 有,模型 reasoning_content 输出)
     reasoning: str | None = None
+    # 仅 type=tool_result 有:对应 tool_call 会话记录的 id,前端据此配对展示
+    tool_call_id: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

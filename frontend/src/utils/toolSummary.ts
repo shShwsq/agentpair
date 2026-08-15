@@ -12,6 +12,8 @@ export interface ToolItem {
   id: string
   type?: string
   content?: string
+  /** 仅 tool_result 有:对应 tool_call 项的 id(并行调用时精确配对;历史数据为空) */
+  tool_call_id?: string | null
 }
 
 /** 紧凑化的工具集合:浏览型只读操作,一行摘要即可表达全部信息 */
@@ -437,13 +439,16 @@ export function toolFileTargetOf(
 
 /**
  * 把迭代内的 tool_call/tool_result 列表转成渲染段序列:
- * 每个 tool_call 与其紧邻的 result 配对(react_agent 执行循环中 result 紧跟 call 落库),
+ * 优先按 result.tool_call_id === call.id 精确配对(并行调用时 result 按完成顺序落库,
+ * 不再紧跟 call);tool_call_id 缺失(历史数据)或无匹配时回退相邻配对;
  * 按调用类型分为 compact(浏览型单行摘要)/agent(子智能体)/toolpair(普通工具)三种卡片段;
  * 尚未到达的 result 为 null,落单的 tool_result 归入 plain 兜底。
  */
 export function buildToolSegments<T extends ToolItem>(items: T[]): ToolSegment<T>[] {
   const segments: ToolSegment<T>[] = []
   let plain: T[] = []
+  // 已被某个 call 配走的 result id(含非相邻匹配,避免重复渲染)
+  const consumed = new Set<string>()
   const flush = () => {
     if (plain.length) {
       segments.push({ kind: 'plain', items: plain })
@@ -452,8 +457,9 @@ export function buildToolSegments<T extends ToolItem>(items: T[]): ToolSegment<T
   }
   for (let i = 0; i < items.length; i++) {
     const it = items[i]
+    if (consumed.has(it.id)) continue  // 已被前面 call 非相邻配走的 result
     if (it.type !== 'tool_call') {
-      // 落单 result(理论上不出现)兜底原渲染
+      // 落单 result(无 call 可配)兜底原渲染
       plain.push(it)
       continue
     }
@@ -463,13 +469,28 @@ export function buildToolSegments<T extends ToolItem>(items: T[]): ToolSegment<T
       : toolNameOf(it) === 'Agent'
         ? 'agent'
         : 'toolpair'
+    let result: T | null = null
     const next = items[i + 1]
-    if (next && next.type === 'tool_result') {
-      segments.push({ kind, call: it, result: next })
-      i++
-    } else {
-      segments.push({ kind, call: it, result: null })
+    if (next && next.type === 'tool_result' && !consumed.has(next.id)) {
+      // 相邻 result:无 tool_call_id(历史数据)直接配;有的话必须指向本 call
+      // (并行场景下相邻 result 可能属于先完成的另一个 call,不能错配)
+      if (!next.tool_call_id || next.tool_call_id === it.id) {
+        result = next
+        consumed.add(next.id)
+      }
     }
+    if (!result) {
+      // 向后找第一个 tool_call_id 指向本 call 的 result(并行完成顺序乱序场景)
+      for (let j = i + 1; j < items.length; j++) {
+        const cand = items[j]
+        if (cand.type === 'tool_result' && cand.tool_call_id === it.id && !consumed.has(cand.id)) {
+          result = cand
+          consumed.add(cand.id)
+          break
+        }
+      }
+    }
+    segments.push({ kind, call: it, result })
   }
   flush()
   return segments

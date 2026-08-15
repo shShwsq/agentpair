@@ -638,6 +638,7 @@ function connectSSE(taskId: string): void {
         type: data.type,
         content: data.content,
         reasoning: data.reasoning ?? null,
+        tool_call_id: data.tool_call_id ?? null,
         created_at: data.created_at || new Date().toISOString(),
       }
       task.value.conversations.push(conv)
@@ -1011,6 +1012,8 @@ interface DisplayItem {
   content?: string
   /** 完整评估/思考链(如 user_agent evaluation),可折叠回看 */
   reasoning?: string | null
+  /** 仅 type=tool_result 有:对应 tool_call 会话记录的 id(并行调用时精确配对) */
+  tool_call_id?: string | null
   /** 流式项字段 */
   streaming?: StreamingItem
 }
@@ -1375,6 +1378,7 @@ const roundGroups = computed<RoundGroup[]>(() => {
         type: c.type,
         content: c.content,
         reasoning: c.reasoning,
+        tool_call_id: c.tool_call_id,
       })
     }
   })

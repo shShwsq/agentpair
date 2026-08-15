@@ -221,6 +221,44 @@ def test_checkpoint_triggered_after_tool_result_with_call_iteration(
     assert "tc2" not in collector._pending_tool_calls
 
 
+def test_tool_result_persisted_with_tool_call_id(mock_task, mock_db, checkpoint_callback):
+    """tool_result 落库时携带对应 tool_call 会话记录的 id。
+
+    CLI 并行调用时 result 按完成顺序落库(不再紧跟 call),
+    前端靠 tool_call_id 精确配对;conv_id 缺失时留空(前端回退相邻配对)。
+    """
+    collector = _make_collector(mock_task, mock_db, checkpoint_callback)
+    call_conv_id = uuid.uuid4()
+    collector._pending_tool_calls["tc0"] = {
+        "title": "t", "kind": "other", "tool_name": "工具",
+        "raw_input": {}, "input_text": "", "conv_id": call_conv_id,
+        "iteration": 0,
+    }
+    with patch("app.agents.acp_base._add_conversation") as mock_add:
+        mock_add.return_value = MagicMock(id=uuid.uuid4())
+        collector._handle_tool_result("tc0", {"rawOutput": "ok"})
+
+    assert mock_add.call_count == 1
+    kwargs = mock_add.call_args.kwargs
+    assert kwargs["type"] == "tool_result"
+    assert kwargs["tool_call_id"] == str(call_conv_id)
+
+
+def test_tool_result_without_conv_id_persisted_with_none(mock_task, mock_db, checkpoint_callback):
+    """pending 无 conv_id(异常兜底)时 tool_call_id 留空,前端回退相邻配对。"""
+    collector = _make_collector(mock_task, mock_db, checkpoint_callback)
+    collector._pending_tool_calls["tc0"] = {
+        "title": "t", "kind": "other", "tool_name": "工具",
+        "raw_input": {}, "input_text": "", "conv_id": None,
+        "iteration": 0,
+    }
+    with patch("app.agents.acp_base._add_conversation") as mock_add:
+        mock_add.return_value = MagicMock(id=uuid.uuid4())
+        collector._handle_tool_result("tc0", {"rawOutput": "ok"})
+
+    assert mock_add.call_args.kwargs["tool_call_id"] is None
+
+
 def test_checkpoint_snapshot_uses_finished_iteration_thinking(
     mock_task, mock_db, checkpoint_callback,
 ):

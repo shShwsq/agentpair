@@ -479,7 +479,7 @@ def run_react_agent(
             # 前端 ConversationMessage 按 \n 拆分:首行高亮为标题,其余作为等宽详情
             intent = _build_tool_intent(fn_name, fn_args)
             call_detail = json.dumps(fn_args, ensure_ascii=False, indent=2)
-            _add_conversation(
+            call_conv = _add_conversation(
                 db, task, round_idx=round_idx,
                 role="react_agent", type="tool_call",
                 content=f"{intent}\n{call_detail}",
@@ -493,6 +493,7 @@ def run_react_agent(
                     db, task, round_idx=round_idx,
                     role="react_agent", type="tool_result",
                     content=result_str,
+                    tool_call_id=str(call_conv.id),
                 )
                 # 完整结果传给 LLM(工具自身已控制返回量:
                 # read_file 默认 200 行、search_code 默认 50 匹配等)
@@ -508,6 +509,7 @@ def run_react_agent(
                     db, task, round_idx=round_idx,
                     role="react_agent", type="tool_result",
                     content=err_msg,
+                    tool_call_id=str(call_conv.id),
                 )
                 messages.append({
                     "role": "tool",
@@ -1634,18 +1636,23 @@ def _get_or_create_compressed(
 def _add_conversation(
     db: Session, task: Task, *, round_idx: int, role: str, type: str, content: str,
     reasoning: str | None = None,
+    tool_call_id: str | None = None,
     publish_event: bool = True,
-) -> None:
+) -> Conversation:
     """记录一条对话(带 round_idx),可选推送事件给前端 SSE
 
     参数:
         reasoning: 思考链(仅 type=thinking 有,模型 reasoning_content 输出)
+        tool_call_id: 仅 type=tool_result 用,对应 tool_call 会话记录的 id,
+            前端据此配对展示(并行调用时 result 不再紧跟 call 落库)
         publish_event: 是否推送 conversation 事件给前端。
             - True(默认):工具调用/结果/提交/用户指令/user_agent 评估等,
               前端通过 SSE 实时追加到对话列表
             - False:react_agent 的 type=thinking 不推 SSE,
               因为流式卡片已经完整展示了 content + reasoning,
               再推会重复。迟到订阅者通过 GET /tasks/{id} 快照拿完整对话。
+
+    返回创建的 Conversation 对象(供调用方拿 id,如 tool_result 关联 tool_call)。
     """
     conv = Conversation(
         task_id=task.id,
@@ -1654,6 +1661,7 @@ def _add_conversation(
         type=type,
         content=content,
         reasoning=reasoning,
+        tool_call_id=tool_call_id,
     )
     db.add(conv)
     db.commit()
@@ -1665,5 +1673,7 @@ def _add_conversation(
             "role": conv.role,
             "type": conv.type,
             "content": conv.content,
+            "tool_call_id": conv.tool_call_id,
             "created_at": conv.created_at.isoformat() if conv.created_at else None,
         })
+    return conv

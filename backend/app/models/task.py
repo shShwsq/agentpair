@@ -166,12 +166,47 @@ class Conversation(Base):
     # 思考链(reasoning_content):仅 type=thinking 有,模型一边想一边输出的临时过程
     # 落库以便刷新页面后仍可查看;其他 type 此字段为 None
     reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 仅 type=tool_result 有:对应 tool_call 会话记录的 id(字符串形式)。
+    # 并行工具调用时 result 不再紧跟 call 落库,前端靠它精确配对 call/result;
+    # 历史数据为 None,前端回退相邻配对
+    tool_call_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     task: Mapped[Task] = relationship(back_populates="conversations")
+
+
+def migrate_conversation_tool_call_id() -> None:
+    """幂等给 conversations 加 tool_call_id 列(tool_result 关联对应 tool_call)
+
+    背景:项目用 Base.metadata.create_all(无 Alembic),已存在的表不会自动加新列。
+    启动时检查缺失列并 ALTER TABLE ADD COLUMN,保证老库平滑升级。
+    全新库(create_all 已建好新列)或已迁过 → 直接返回。
+
+    老数据该列为 NULL,前端回退相邻配对,行为与改动前一致。
+    """
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    from app.database import engine
+
+    log = logging.getLogger(__name__)
+
+    with engine.connect() as conn:
+        insp = inspect(conn)
+        if not insp.has_table("conversations"):
+            return  # 全新库,create_all 会建好新列
+        cols = {c["name"] for c in insp.get_columns("conversations")}
+        if "tool_call_id" in cols:
+            return  # 已迁过
+        conn.execute(
+            text("ALTER TABLE conversations ADD COLUMN tool_call_id VARCHAR(64)")
+        )
+        conn.commit()
+    log.info("conversations.tool_call_id 列迁移完成")
 
 
 class Result(Base):
