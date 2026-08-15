@@ -36,6 +36,7 @@ from app.deps import get_optional_user, get_optional_user_sse
 from app.event_bus import publish, reset_task_bus, subscribe, unsubscribe
 from app.models.task import Conversation, Result, Task, TaskStatus
 from app.models.task_artifact import TaskArtifact
+from app.clone_skip import clear_skip_state, request_skip_clone
 from app.models.user import User
 from app.models.user_llm_config import UserLLMConfig
 from app.pause_controller import (
@@ -1143,6 +1144,45 @@ def resume_task_endpoint(
     return {"status": task.status.value, "message": "任务已恢复"}
 
 
+@router.post("/tasks/{task_id}/skip_pre_clone")
+def skip_pre_clone_endpoint(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> dict[str, Any]:
+    """请求跳过预克隆(仅运行中/暂停态任务有效)
+
+    设置一次性跳过标志,克隆轮询循环在下一个检查点终止当前 clone,
+    orchestrator 降级为 react_agent 自主克隆(与预克隆失败降级同路径)。
+    幂等:重复请求无副作用;若点击时克隆恰好完成,标志不会被消费,
+    任务结束时兜底清理。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    if task.status not in (TaskStatus.RUNNING, TaskStatus.PAUSED):
+        raise HTTPException(
+            status_code=409,
+            detail=f"任务状态为 {task.status.value},仅运行中/暂停态可跳过预克隆",
+        )
+
+    request_skip_clone(task.id)
+
+    # 暂停态:克隆循环阻塞在 wait_if_paused,检测不到跳过标志;
+    # 先唤醒并把状态改回 RUNNING(用户意图是不再等待继续执行)
+    if task.status == TaskStatus.PAUSED:
+        resume_task(task.id)
+        task.status = TaskStatus.RUNNING
+        task.current_stage = "已恢复,正在跳过预克隆..."
+        db.commit()
+        _publish_task_status(task)
+    return {"message": "已提交跳过请求"}
+
+
 def _publish_task_status(task: Task) -> None:
     """推送任务状态变更事件(供 pause/resume 端点复用)"""
     publish(task.id, "status", {
@@ -1203,8 +1243,9 @@ def delete_task(
         if current_user is None or current_user.id != task.user_id:
             raise HTTPException(status_code=403, detail="无权操作此任务")
 
-    # 先清理 in-memory 资源(暂停门控 + 沙箱 session),再删数据库记录
+    # 先清理 in-memory 资源(暂停门控 + 跳过标志 + 沙箱 session),再删数据库记录
     clear_pause_state(str(task_id))
+    clear_skip_state(str(task_id))
     try:
         sandbox_tools.close_session(str(task_id))
     except Exception as e:

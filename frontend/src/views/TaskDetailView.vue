@@ -46,6 +46,7 @@ import {
   pauseTask,
   resumeTask,
   retryTask,
+  skipPreClone,
   submitTaskAnswer,
   submitTaskChecklist,
   submitVerifyAction,
@@ -389,6 +390,28 @@ const submittingCommandConfirm = ref(false)
 // 克隆完成(后端推 status 切换 current_stage)或任务结束时清除。
 const cloneProgress = ref<CloneProgressEventData | null>(null)
 
+// 跳过预克隆:克隆阶段用户不想等时,请求后端终止 clone 并降级为自主克隆
+const skipClonePending = ref(false)
+
+/** 是否处于预克隆阶段(协议回退间隙无进度事件时也显示跳过按钮) */
+const isPreCloning = computed(
+  () =>
+    !!cloneProgress.value ||
+    (task.value?.current_stage || '').includes('正在克隆仓库'),
+)
+
+async function handleSkipPreClone(): Promise<void> {
+  if (!task.value?.id || skipClonePending.value) return
+  skipClonePending.value = true
+  try {
+    await skipPreClone(String(task.value.id))
+    // 阶段切换由 SSE status 事件驱动(后端降级后推新 stage),不本地改写
+  } catch (err) {
+    error.value = extractErrorMessage(err)
+    skipClonePending.value = false
+  }
+}
+
 /** 从 VerifyActionEventData 填充弹窗数据并打开 */
 function openVerifyActionDialog(action: VerifyActionEventData): void {
   verifyActionData.value = action
@@ -723,6 +746,7 @@ function connectSSE(taskId: string): void {
       }
       // 阶段切换(如"正在读取仓库根目录结构...")意味着克隆已完成,清除进度条
       cloneProgress.value = null
+      skipClonePending.value = false
     },
     onThinkingDelta: (data) => {
       handleThinkingDelta(data)
@@ -794,6 +818,7 @@ function connectSSE(taskId: string): void {
       }
       // 清除克隆进度条(任务结束)
       cloneProgress.value = null
+      skipClonePending.value = false
       // 任务完成时后端刚写入工作区 diff,重拉一次展示(失败兜底,静默)
       void loadArtifact(taskId)
     },
@@ -804,6 +829,7 @@ function connectSSE(taskId: string): void {
       }
       // 清除克隆进度条(任务失败)
       cloneProgress.value = null
+      skipClonePending.value = false
     },
   })
 }
@@ -2611,6 +2637,14 @@ function toggleResult(id: string): void {
                   ></div>
                 </div>
                 <div class="clone-progress-msg">{{ cloneProgress.message }}</div>
+                <div class="clone-progress-actions">
+                  <button
+                    class="clone-skip-btn"
+                    :disabled="skipClonePending"
+                    :title="'跳过后改由执行阶段自主克隆(可能多耗时几十秒)'"
+                    @click="handleSkipPreClone"
+                  >{{ skipClonePending ? '正在跳过...' : '跳过预克隆' }}</button>
+                </div>
               </div>
             </template>
             <template v-else>
@@ -2618,6 +2652,13 @@ function toggleResult(id: string): void {
                 <span></span><span></span><span></span>
               </span>
               {{ isPaused ? '已暂停,点击恢复按钮继续执行' : (task?.current_stage || '智能体思考中...') }}
+              <button
+                v-if="!isPaused && isPreCloning"
+                class="clone-skip-btn"
+                :disabled="skipClonePending"
+                :title="'跳过后改由执行阶段自主克隆(可能多耗时几十秒)'"
+                @click="handleSkipPreClone"
+              >{{ skipClonePending ? '正在跳过...' : '跳过预克隆' }}</button>
             </template>
           </div>
         </section>
@@ -4313,6 +4354,32 @@ function toggleResult(id: string): void {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.clone-progress-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.clone-skip-btn {
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md, 6px);
+  padding: 2px 10px;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.clone-skip-btn:hover:not(:disabled) {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+.clone-skip-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* ---- 工作区变更(diff/patch 展示) ---- */

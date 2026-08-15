@@ -34,6 +34,7 @@ from app.agents.user_agent import (
     SUPPLEMENT_QUESTION,
     run_user_agent,
 )
+from app.clone_skip import clear_skip_state
 from app.event_bus import finish_task, publish
 from app.llm.client import LLMClient
 from app.models.task import Conversation, Result, Task, TaskStatus
@@ -512,6 +513,11 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             clear_pause_state(task.id)
         except Exception as cleanup_err:
             logger.warning(f"[task={task.id}] 清理暂停状态失败: {cleanup_err}")
+        # 清理跳过预克隆标志(未消费时兜底清理,防残留影响后续任务)
+        try:
+            clear_skip_state(task.id)
+        except Exception as cleanup_err:
+            logger.warning(f"[task={task.id}] 清理跳过标志失败: {cleanup_err}")
         # 清理用户补充消息队列(防止任务结束时仍有 in-memory 残留)
         try:
             clear_user_messages(task.id)
@@ -933,7 +939,23 @@ def _prepare_repo_context(
     try:
         clone_result = sandbox_tools.clone_repo_with_fallback(
             repo_url, branch=branch, task_id=task_id_str, git_tokens=git_tokens or {},
+            cancellable=True,
         )
+    except sandbox_tools.CloneSkippedError:
+        # 用户主动跳过预克隆:与失败降级同路径,改由 react_agent 自主克隆
+        # (LLM 看报错重试/自适应,历史观察成功率更高)
+        logger.info(
+            f"[task={task.id}] 用户跳过预克隆,降级为 react_agent 自主克隆"
+        )
+        task.current_stage = "已跳过预克隆,改由执行阶段自主克隆..."
+        db.commit()
+        _publish_status(task)
+        _add_conversation(
+            db, task, round_idx=0,
+            role="system", type="warning",
+            content="用户已跳过预克隆,改由执行阶段自主克隆(可能多耗时几十秒)",
+        )
+        return None, ""
     except Exception as e:
         # 降级而非失败:预 clone 一次定生死太脆(网络抖动/分支不符/私有仓库
         # token 问题都会直接挂任务),改为回到 react_agent 自主 clone 路径,
@@ -1360,6 +1382,7 @@ def resume_audit_with_message(
             (clear_pending_question, "待回答问题"),
             (clear_pending_checklist, "待确认清单"),
             (clear_pause_state, "暂停状态"),
+            (clear_skip_state, "跳过预克隆标志"),
             (clear_user_messages, "用户消息队列"),
             (clear_pending_verify_action, "验证待授权状态"),
             (clear_interrupts, "中断队列"),

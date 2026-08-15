@@ -21,6 +21,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from app.clone_skip import consume_skip_clone
 from app.config import settings
 from app.event_bus import publish as publish_event
 from app.git_provider import get_provider_for_url
@@ -384,6 +385,15 @@ def browse_read_file(task_id: str, file_path: str, offset: int = 1, max_lines: i
 # ============================================================
 
 
+class CloneSkippedError(RuntimeError):
+    """用户主动跳过预克隆(克隆轮询检查点抛出)
+
+    由 clone_repo_with_fallback 向上传播,orchestrator 单独捕获并降级为
+    react_agent 自主克隆;回退链内部不得吞掉(否则跳过后会默默再试
+    下一种协议)。
+    """
+
+
 def clone_repo(repo_url: str, branch: str | None = None, task_id: str = "", git_tokens: dict | None = None) -> dict:
     """克隆 Git 仓库(LLM 工具入口)
 
@@ -421,7 +431,10 @@ def _pause_checkpoint(task_id: str, deadline: float) -> float:
     return deadline + paused_for
 
 
-def _clone_repo_local(ctx: dict, clone_url: str, repo_name: str, branch: str | None, task_id: str = "") -> dict:
+def _clone_repo_local(
+    ctx: dict, clone_url: str, repo_name: str, branch: str | None,
+    task_id: str = "", cancellable: bool = False,
+) -> dict:
     """local 模式:本地 git clone(Popen 流式读进度 + 推 SSE)
 
     用 subprocess.Popen 逐行读 git 的 stderr 进度输出(需 --progress 强制非 tty
@@ -430,6 +443,9 @@ def _clone_repo_local(ctx: dict, clone_url: str, repo_name: str, branch: str | N
 
     超时用 deadline + poll 机制(而非 subprocess.run 的 timeout),超时主动 kill
     进程并 join 读线程,避免大仓库卡死时无反馈。
+
+    cancellable=True 时(仅 orchestrator 预克隆路径),轮询中检查跳过标志,
+    用户请求跳过预克隆时 kill 进程并抛 CloneSkippedError。
     """
     local_dir: Path = ctx["local_dir"]
     repo_dir = local_dir / repo_name
@@ -486,6 +502,11 @@ def _clone_repo_local(ctx: dict, clone_url: str, repo_name: str, branch: str | N
                 break
             # 暂停检查点:已暂停则阻塞到恢复,暂停时长不计入超时
             deadline = _pause_checkpoint(task_id, deadline)
+            # 跳过检查点:用户请求跳过预克隆 → kill 进程并抛(向上传播降级)
+            if cancellable and consume_skip_clone(task_id):
+                proc.kill()
+                reader.join(timeout=2)
+                raise CloneSkippedError(f"用户已跳过预克隆: {repo_name}")
             if time.monotonic() > deadline:
                 proc.kill()
                 reader.join(timeout=2)
@@ -523,7 +544,10 @@ def _parse_git_progress(line: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _clone_repo_sandbox(ctx: dict, clone_url: str, repo_name: str, branch: str | None, task_id: str = "") -> dict:
+def _clone_repo_sandbox(
+    ctx: dict, clone_url: str, repo_name: str, branch: str | None,
+    task_id: str = "", cancellable: bool = False,
+) -> dict:
     """sandbox 模式:在沙箱里 git clone(后台命令 + 进度文件轮询流式推进度)
 
     进度采集为何不用 execd 日志(get_background_logs):
@@ -574,6 +598,15 @@ def _clone_repo_sandbox(ctx: dict, clone_url: str, repo_name: str, branch: str |
             # 暂停检查点:已暂停则阻塞到恢复(放在轮询顶部,暂停期间
             # 不发 HTTP 请求),暂停时长不计入超时
             deadline = _pause_checkpoint(task_id, deadline)
+
+            # 跳过检查点:用户请求跳过预克隆 → 中断沙箱内命令并抛
+            # (向上传播降级;finally 会清理进度/退出码临时文件)
+            if cancellable and consume_skip_clone(task_id):
+                try:
+                    session.interrupt_command(exec_id)
+                except Exception:
+                    pass
+                raise CloneSkippedError(f"用户已跳过预克隆: {repo_name}")
 
             # 1) 进度:读进度文件,按 \r/\n 拆行取最新进度行推前端
             try:
@@ -2301,11 +2334,15 @@ def str_replace_editor(
 
 def clone_repo_with_fallback(
     repo_url: str, branch: str | None = None, task_id: str = "",
-    git_tokens: dict | None = None,
+    git_tokens: dict | None = None, cancellable: bool = False,
 ) -> dict:
     """克隆仓库(协议回退:HTTPS+token → SSH → HTTPS 匿名)
 
     供 orchestrator 在 user_agent 评估前主动调用,也供 clone_repo 工具委托。
+
+    cancellable=True 时(仅 orchestrator 预克隆路径),每次尝试前/轮询中
+    检查跳过标志,用户请求跳过预克隆时抛 CloneSkippedError 终止整个回退链
+    (不会继续尝试下一种协议);LLM 工具路径恒为 False,不受影响。
 
     按 repo_url 主机识别 provider(github / gitee / 未知),取该 provider 的
     access_token(git_tokens[provider.id])做 HTTPS 注入;未知主机无 token,
@@ -2366,6 +2403,11 @@ def clone_repo_with_fallback(
                 f"回退为不带分支重试(用远端默认分支)"
             )
         for idx, url in enumerate(candidates):
+            # 跳过检查点(尝试前):已请求跳过则立即终止整个回退链,
+            # 不再启动下一种协议(协议间间隙可能持续数十秒,轮询内
+            # 检查点覆盖不到)
+            if cancellable and consume_skip_clone(task_id):
+                raise CloneSkippedError(f"用户已跳过预克隆: {repo_name}")
             # 日志里不打印 token(脱敏)
             safe_url = url.split("@")[-1] if "@" in url else url
             try:
@@ -2376,14 +2418,19 @@ def clone_repo_with_fallback(
                 if mode == "local":
                     result = _clone_repo_local(
                         ctx, url, repo_name, attempt_branch, task_id=task_id,
+                        cancellable=cancellable,
                     )
                 else:
                     result = _clone_repo_sandbox(
                         ctx, url, repo_name, attempt_branch, task_id=task_id,
+                        cancellable=cancellable,
                     )
                 _set_repo_path(task_id, result["path"])
                 logger.info(f"[clone_fallback] task={task_id} 克隆成功(协议 {safe_url})")
                 return result
+            except CloneSkippedError:
+                # 用户主动跳过:直接向上传播,不进协议回退/错误聚合
+                raise
             except Exception as e:
                 err_msg = str(e)[:300]
                 errors.append(f"[{safe_url}] {err_msg}")

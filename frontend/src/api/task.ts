@@ -185,6 +185,17 @@ export function resumeTask(taskId: string): Promise<{ status: string; message: s
   return client.post(`/tasks/${taskId}/resume`).then((r) => r.data)
 }
 
+/**
+ * 请求跳过预克隆
+ *
+ * 克隆轮询循环在下一个检查点终止当前 clone,orchestrator 降级为
+ * react_agent 自主克隆。幂等:重复请求无副作用;克隆已完成时
+ * 后端静默忽略(标志任务结束时兜底清理)。
+ */
+export function skipPreClone(taskId: string): Promise<{ message: string }> {
+  return client.post(`/tasks/${taskId}/skip_pre_clone`).then((r) => r.data)
+}
+
 // ============================================================
 // 任务标题修改 / 任务删除
 // ============================================================
