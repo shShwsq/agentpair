@@ -18,10 +18,13 @@
 """
 import json
 import logging
+import random
+import time
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
+import openai
 from openai import OpenAI
 
 from app.config import settings
@@ -186,6 +189,68 @@ def resolve_temperature(
 
 
 # ============================================================
+# 429 限流退避重试
+# ============================================================
+
+# 自算退避的参数:base * 2^attempt(带抖动),封顶 _BACKOFF_MAX 秒;
+# 厂商返回 Retry-After 时优先采用(封顶 _RETRY_AFTER_MAX 秒)。
+_BACKOFF_BASE = 1.0
+_BACKOFF_MAX = 20.0
+_RETRY_AFTER_MAX = 60.0
+
+
+def _parse_retry_after(exc: Exception) -> float | None:
+    """从 429 异常的响应头解析 Retry-After(秒),缺失/非法返回 None"""
+    resp = getattr(exc, "response", None)
+    headers = getattr(resp, "headers", None) if resp is not None else None
+    if not headers:
+        return None
+    raw = headers.get("retry-after") or headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return max(0.0, min(float(raw), _RETRY_AFTER_MAX))
+    except (TypeError, ValueError):
+        return None
+
+
+def create_with_rate_limit_retry(create_fn, *, label: str):
+    """带 429 退避重试地调用 create_fn()
+
+    仅处理请求发起阶段的 openai.RateLimitError(RPM/配额限流);
+    连接错误/5xx 等仍由 openai SDK 内置重试处理,不在此重叠。
+    首次之外最多重试 settings.LLM_RATE_LIMIT_MAX_RETRIES 次,
+    耗尽后原样重抛,由上层处理(任务失败/测试提示)。
+
+    退避策略:厂商响应头带 Retry-After 时优先采用(视为等待下限,不加抖动);
+    否则指数退避 base*2^attempt 并带 ±25% 抖动,避免多任务同步重试再次撞限。
+    """
+    max_retries = max(0, settings.LLM_RATE_LIMIT_MAX_RETRIES)
+    for attempt in range(max_retries + 1):
+        try:
+            return create_fn()
+        except openai.RateLimitError as e:
+            if attempt >= max_retries:
+                logger.warning(
+                    "%s 命中 429 限流,已重试 %d 次仍失败,放弃: %s", label, max_retries, e
+                )
+                raise
+            retry_after = _parse_retry_after(e)
+            if retry_after is not None:
+                delay = retry_after
+            else:
+                delay = min(_BACKOFF_BASE * (2 ** attempt), _BACKOFF_MAX)
+                delay *= 0.75 + random.random() * 0.5  # ±25% 抖动
+            logger.info(
+                "%s 命中 429 限流,%.1fs 后重试(%d/%d)%s",
+                label, delay, attempt + 1, max_retries,
+                "(Retry-After)" if retry_after is not None else "",
+            )
+            time.sleep(delay)
+    raise RuntimeError("unreachable")  # 仅为类型检查兜底
+
+
+# ============================================================
 # OpenAI 兼容 baseUrl 拼接
 # ============================================================
 
@@ -337,7 +402,11 @@ class LLMClient:
             kwargs["extra_body"] = extras
 
         # 流式调用,SDK 返回迭代器
-        stream = self.client.chat.completions.create(**kwargs)
+        # 429 限流在请求发起阶段退避重试(流建立后的中途异常不重试,避免已推送内容重复)
+        stream = create_with_rate_limit_retry(
+            lambda: self.client.chat.completions.create(**kwargs),
+            label=f"chat({self.provider_id}/{self.model})",
+        )
 
         # 流式拆分 <think>...</think>:某些端点把思考内嵌在 content 里,
         # 拆分后标签内 → reasoning,标签外 → content(无标签时原样输出,无副作用)
@@ -445,6 +514,8 @@ class LLMClient:
                 self.enable_thinking = thinking_flag
                 try:
                     return self._test_once(prompt, start)
+                except openai.RateLimitError:
+                    raise  # 429 是配额问题而非配置问题,不换思考配置重试(内部已退避重试过)
                 except Exception as e:  # API 层异常(400/401/超时等),尝试下一组配置
                     last_exc = e
             latency_ms = int((time.perf_counter() - start) * 1000)

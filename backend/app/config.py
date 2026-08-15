@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "qwen3.6-flash"
     LLM_ENABLE_THINKING: bool = True
+    # 429 限流退避重试次数(首次失败后最多再重试的次数,0=不重试)
+    # 退避策略见 app/llm/client.py:指数退避+抖动,厂商返回 Retry-After 时优先采用
+    LLM_RATE_LIMIT_MAX_RETRIES: int = 3
 
     # 仓库克隆临时目录
     REPO_CLONE_DIR: str = "./_repos"
