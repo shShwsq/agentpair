@@ -44,10 +44,17 @@ class _InterruptQueue:
         self._items: list[dict[str, Any]] = []
         self._lock = threading.Lock()
 
-    def push(self, item: dict[str, Any]) -> None:
-        """追加一条中断指令(检查点评估调用)"""
+    def push(self, item: dict[str, Any]) -> bool:
+        """追加中断指令(检查点评估调用),新替旧语义
+
+        队列中尚有未 drain 的旧中断时直接替换:后一次检查点评估的
+        快照更新,且其评估时已参考过历史打断记录,旧指令通常已过时。
+        返回 True 表示发生了替换。
+        """
         with self._lock:
-            self._items.append(item)
+            replaced = len(self._items) > 0
+            self._items = [item]
+            return replaced
 
     def drain(self) -> list[dict[str, Any]]:
         """取出并清空所有待处理中断(react_agent 迭代边界调用)
@@ -90,7 +97,11 @@ def push_interrupt(
     reason: str,
     iteration: int,
 ) -> None:
-    """追加 user_agent 中断指令到队列
+    """追加 user_agent 中断指令到队列(新替旧)
+
+    队列中尚有未 drain 的旧中断时,新中断直接替换旧条目(后一次评估
+    快照更新,旧指令通常已过时)。drain 因此通常只返回 1 条,注入侧的
+    多条拼接逻辑保留作防御性兜底。
 
     参数:
         task_id: 任务 ID
@@ -99,14 +110,15 @@ def push_interrupt(
         iteration: 触发打断时的迭代序号
     """
     queue = _get_or_create(str(task_id))
-    queue.push({
+    replaced = queue.push({
         "query": query,
         "reason": reason,
         "iteration": iteration,
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
     logger.info(
-        f"[task={task_id}] user_agent 中断入队(iteration={iteration}, len={len(queue._items)})"
+        f"[task={task_id}] user_agent 中断入队(iteration={iteration}, "
+        f"{'替换未生效旧中断' if replaced else '新增'})"
     )
 
 

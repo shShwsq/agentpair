@@ -2,6 +2,7 @@
 
 覆盖:
 - push/drain/has_pending/clear 行为
+- push 新替旧语义:队列有未 drain 项时新中断替换旧条目
 - drain 后队列清空(不会重复处理)
 - 不存在的 task drain 返回空列表(惰性创建)
 - 打断计数器:per-task + per-round 分别计数
@@ -38,20 +39,43 @@ def test_drain_empty_returns_empty_list(task_id):
     assert has_pending_interrupts(task_id) is False
 
 
-def test_push_then_drain_returns_items_in_order(task_id):
-    """push 多条后 drain 应按 push 顺序返回。"""
+def test_push_then_drain_returns_item(task_id):
+    """push 后 drain 应返回该中断条目。"""
     push_interrupt(task_id, query="q1", reason="r1", iteration=3)
-    push_interrupt(task_id, query="q2", reason="r2", iteration=6)
 
     items = drain_interrupts(task_id)
-    assert len(items) == 2
+    assert len(items) == 1
     assert items[0]["query"] == "q1"
     assert items[0]["reason"] == "r1"
     assert items[0]["iteration"] == 3
-    assert items[1]["query"] == "q2"
-    assert items[1]["iteration"] == 6
     # created_at 应是 ISO 字符串
     assert "T" in items[0]["created_at"]
+
+
+def test_push_replaces_undrained_item(task_id):
+    """新替旧:队列有未 drain 的旧中断时,新 push 直接替换旧条目。
+
+    后一次检查点评估快照更新,旧指令通常已过时;drain 只拿到最新的。
+    """
+    push_interrupt(task_id, query="q-old", reason="r-old", iteration=3)
+    push_interrupt(task_id, query="q-new", reason="r-new", iteration=6)
+
+    items = drain_interrupts(task_id)
+    assert len(items) == 1
+    assert items[0]["query"] == "q-new"
+    assert items[0]["reason"] == "r-new"
+    assert items[0]["iteration"] == 6
+
+
+def test_push_after_drain_is_fresh_append(task_id):
+    """drain 清空后再次 push 是新增(无可替换项),不受新替旧影响。"""
+    push_interrupt(task_id, query="q1", reason="r1", iteration=3)
+    drain_interrupts(task_id)
+
+    push_interrupt(task_id, query="q2", reason="r2", iteration=6)
+    items = drain_interrupts(task_id)
+    assert len(items) == 1
+    assert items[0]["query"] == "q2"
 
 
 def test_drain_clears_queue(task_id):

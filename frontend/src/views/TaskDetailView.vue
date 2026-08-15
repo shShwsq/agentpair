@@ -1129,8 +1129,10 @@ interface IterationSegment {
   hasStreaming: boolean
 }
 
-/** 检查点标记:user_agent 迭代边界轻量评估,不渲染消息卡片,
- * 定位时在对应迭代边界处浮现横线 */
+/** 检查点标记:user_agent 迭代边界轻量评估,挂在对应迭代边界处。
+ * 两种来源,渲染方式不同:
+ * - 检查点评估([检查点评估):不渲染消息卡片,定位时浮现横线
+ * - 检查点中断([检查点中断):实际生效的中断追问,渲染为可见消息卡片 */
 interface CheckpointMarker {
   /** 显示在哪次迭代的 iteration-block 之后(该迭代的 iterationIdx);0 = 首个迭代之前 */
   afterIterationIdx: number
@@ -1252,7 +1254,8 @@ function segmentRoundItems(
   // 第一阶段:按 thinking 起点切迭代(原逻辑)
   const iterations: IterationSegment[] = []
   const plains: PlainSegment[] = []
-  /** 检查点评估:不渲染消息卡片,记录其发生在第几次迭代之后,供第二阶段挂到对应迭代边界 */
+  /** 检查点评估/中断:发生在迭代边界,记录当时已完成的迭代数,
+   * 供第二阶段把横线(评估)/消息卡片(中断)挂到对应迭代边界 */
   const checkpointMarkers: CheckpointMarker[] = []
   let current: IterationSegment | null = null
   let iterCounter = 0
@@ -1303,9 +1306,9 @@ function segmentRoundItems(
       if (isStreamingActive(item)) current.hasStreaming = true
     } else {
       closeCurrent()
-      if (isCheckpointItem(item)) {
-        // 检查点发生在迭代边界:记录当时已完成的迭代数,
-        // 第二阶段把横线插到 step 组内对应迭代边界处
+      if (isCheckpointItem(item) || isCheckpointInterruptItem(item)) {
+        // 检查点评估/中断都发生在迭代边界:记录当时已完成的迭代数,
+        // 第二阶段把横线(评估)/中断追问卡片挂到 step 组内对应迭代边界处
         checkpointMarkers.push({ afterIterationIdx: iterCounter, item })
       } else {
         plains.push({ kind: 'plain', item })
@@ -2067,6 +2070,19 @@ function isCheckpointItem(item: DisplayItem): boolean {
   return (item.content || '').startsWith('[检查点评估')
 }
 
+/**
+ * 判断 DisplayItem 是否为检查点中断的追问记录(实际生效的中断)。
+ *
+ * 后端 acp_base 在 CLI 软中断真正发出追问 prompt 时落库,content 以
+ * "[检查点中断] " 开头。与检查点评估的隐藏横线不同,它要在主对话流
+ * 按时间顺序显示为可见消息卡片(同正常 user_agent 追问)。
+ */
+function isCheckpointInterruptItem(item: DisplayItem): boolean {
+  if (item.is_streaming) return false
+  if (item.role !== 'user_agent' || item.type !== 'evaluation') return false
+  return (item.content || '').startsWith('[检查点中断]')
+}
+
 /** 解析检查点评估 content,提取 interrupt/reason/query */
 function parseCheckpointContent(c: string): {
   isInterrupt: boolean
@@ -2422,13 +2438,20 @@ function toggleResult(id: string): void {
                   <div v-if="isStepExpanded(seg)" class="step-body">
                     <!-- 该 step 下的所有迭代:不再折叠,内容直接平铺
                          (折叠单位上移到 step 组,浏览型工具已单行化) -->
-                    <!-- 检查点横线:渲染在迭代边界处(afterIterationIdx=0 表示首个迭代之前) -->
-                    <div
-                      v-for="cp in checkpointsAfter(seg, 0)"
-                      :key="`cp-${cp.item.id}`"
-                      :id="`checkpoint-anchor-${cp.item.id}`"
-                      :class="checkpointDividerClass(cp)"
-                    />
+                    <!-- 检查点标记:渲染在迭代边界处(afterIterationIdx=0 表示首个迭代之前)。
+                         中断追问 → 可见消息卡片(按时间顺序);评估 → 隐藏横线 -->
+                    <template v-for="cp in checkpointsAfter(seg, 0)" :key="`cp-${cp.item.id}`">
+                      <ConversationMessage
+                        v-if="isCheckpointInterruptItem(cp.item)"
+                        :item="cp.item"
+                        @toggle-reasoning="toggleReasoning"
+                      />
+                      <div
+                        v-else
+                        :id="`checkpoint-anchor-${cp.item.id}`"
+                        :class="checkpointDividerClass(cp)"
+                      />
+                    </template>
                     <template v-for="iter in seg.iterations" :key="iter.id">
                     <!-- 迭代内容直接平铺:无摘要行、无边框包装(wrapper 仅作结构容器,
                          保留它以免 step-body 加 gap 影响零高度检查点横线) -->
@@ -2532,13 +2555,20 @@ function toggleResult(id: string): void {
                         />
                       </div>
                     </div>
-                    <!-- 检查点横线:该迭代为评估边界,平时隐藏,定位时浮现 -->
-                    <div
-                      v-for="cp in checkpointsAfter(seg, iter.iterationIdx)"
-                      :key="`cp-${cp.item.id}`"
-                      :id="`checkpoint-anchor-${cp.item.id}`"
-                      :class="checkpointDividerClass(cp)"
-                    />
+                    <!-- 检查点标记:该迭代为评估/中断边界。
+                         中断追问 → 可见消息卡片;评估 → 隐藏横线(平时隐藏,定位时浮现) -->
+                    <template v-for="cp in checkpointsAfter(seg, iter.iterationIdx)" :key="`cp-${cp.item.id}`">
+                      <ConversationMessage
+                        v-if="isCheckpointInterruptItem(cp.item)"
+                        :item="cp.item"
+                        @toggle-reasoning="toggleReasoning"
+                      />
+                      <div
+                        v-else
+                        :id="`checkpoint-anchor-${cp.item.id}`"
+                        :class="checkpointDividerClass(cp)"
+                      />
+                    </template>
                     </template>
                   </div>
                 </div>

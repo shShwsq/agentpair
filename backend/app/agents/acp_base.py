@@ -2251,6 +2251,50 @@ def _build_memory_section(memory_summary: str = "", global_memory: str = "") -> 
     return section
 
 
+def _build_cli_interrupt_message(
+    interrupts: list[dict[str, Any]],
+) -> tuple[str, str] | None:
+    """把 drain 出的 user_agent 中断指令格式化为追问 prompt + 展示文本
+
+    返回 (发送文本, 展示文本);无可注入内容(所有 query 为空)时返回 None。
+
+    - 发送文本:匿名化措辞(不出现 user_agent 等评估者身份,react_agent
+      不需要知道评估者存在),只含 query;措辞与内置 react_agent 的
+      _format_interrupts 对齐。reason 面向用户展示,措辞不受控,不进 prompt。
+    - 展示文本:面向用户的完整记录(含理由与追问指令),带 "[检查点中断] "
+      前缀供前端/报告识别,不截断。
+    """
+    queries: list[str] = []
+    display_parts: list[str] = []
+    for it in interrupts:
+        query = (it.get("query") or "").strip()
+        if not query:
+            continue
+        queries.append(query)
+        reason = (it.get("reason") or "").strip()
+        if reason:
+            display_parts.append(f"理由:{reason}\n追问指令:{query}")
+        else:
+            display_parts.append(f"追问指令:{query}")
+
+    if not queries:
+        return None
+
+    if len(queries) == 1:
+        body = queries[0]
+    else:
+        body = "\n\n".join(f"[{i + 1}] {q}" for i, q in enumerate(queries))
+
+    send_text = (
+        "[方向调整]\n"
+        "观察你的执行过程后,认为当前方向需要调整。"
+        "请把以下指令纳入当前任务,调整方向继续执行:\n\n"
+        f"{body}"
+    )
+    display_text = "[检查点中断] " + "\n\n".join(display_parts)
+    return send_text, display_text
+
+
 # ============================================================
 # 主入口:通用 ACP agent 运行流程
 # ============================================================
@@ -2579,32 +2623,22 @@ def run_acp_agent(
                         if not pending_interrupts:
                             break  # 无中断,正常结束
 
-                        # 有中断:构造追问 prompt,继续下一轮 prompt
-                        interrupt_parts = []
-                        for it in pending_interrupts:
-                            query = (it.get("query") or "").strip()
-                            if query:
-                                reason = (it.get("reason") or "").strip()
-                                it_text = f"[方向纠正:{reason}]\n{query}" if reason else query
-                                interrupt_parts.append(it_text)
-
-                        if not interrupt_parts:
+                        # 有中断:构造追问 prompt(匿名化,只含 query),继续下一轮 prompt
+                        built = _build_cli_interrupt_message(pending_interrupts)
+                        if not built:
                             break  # 中断内容为空,正常结束
+                        interrupt_msg, interrupt_display = built
 
-                        interrupt_msg = (
-                            "[user_agent 检查点评估:方向纠正]\n"
-                            "user_agent 在观察你的执行过程后,认为当前方向需要调整。"
-                            "请把以下纠正指令纳入当前任务,调整检查方向继续执行:\n\n"
-                            + "\n\n".join(interrupt_parts)
-                        )
                         logger.info(
                             f"[task={task.id}] CLI 软中断:用追问指令发起新 prompt "
                             f"({len(pending_interrupts)} 条中断)"
                         )
+                        # 落库面向用户的完整展示文本(含理由与追问指令,不截断);
+                        # 发送给 CLI 的匿名化文本独立,不落库
                         _add_conversation(
                             db, task, round_idx=round_idx,
                             role="user_agent", type="evaluation",
-                            content=f"[检查点中断] {interrupt_msg[:200]}",
+                            content=interrupt_display,
                         )
                         current_msg = interrupt_msg
 

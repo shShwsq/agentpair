@@ -717,29 +717,28 @@ def _format_interrupts(interrupts: list[dict[str, Any]]) -> str:
     user_agent 检查点评估后若判断方向跑偏,会生成追问指令入中断队列。
     这里取出并格式化,让 react_agent 在下一迭代看到纠正方向。
 
-    与用户消息的区别:这是 user_agent(评估者)的方向纠正,不是用户的直接指令。
+    匿名化要求:react_agent 不需要知道 user_agent(评估者)的存在,
+    措辞不出现任何评估者身份;只注入 query(reason 面向用户展示,
+    措辞不受控,不进 LLM 上下文)。措辞与 acp_base 的 CLI 追问对齐。
     """
     parts: list[str] = []
     for it in interrupts:
         query = (it.get("query") or "").strip()
-        if not query:
-            continue
-        reason = (it.get("reason") or "").strip()
-        iteration = it.get("iteration", "?")
-        if reason:
-            parts.append(f"[迭代{iteration} 方向纠正:{reason}]\n{query}")
-        else:
-            parts.append(f"[迭代{iteration} 方向纠正]\n{query}")
+        if query:
+            parts.append(query)
 
     if not parts:
         return ""
 
-    body = "\n\n".join(parts)
+    if len(parts) == 1:
+        body = parts[0]
+    else:
+        body = "\n\n".join(f"[{i + 1}] {p}" for i, p in enumerate(parts))
 
     return (
-        "[检查点评估:方向纠正]\n"
+        "[方向调整]\n"
         "观察你的执行过程后,认为当前方向需要调整。"
-        "请把以下纠正指令纳入当前任务,调整方向继续执行:\n\n"
+        "请把以下指令纳入当前任务,调整方向继续执行:\n\n"
         f"{body}"
     )
 

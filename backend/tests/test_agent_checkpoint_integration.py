@@ -431,7 +431,7 @@ def test_cleanup_clears_interrupts_and_count_together():
     task_id = f"cleanup-test-{uuid.uuid4()}"
 
     try:
-        # 准备:队列有 2 条中断,计数器 round 1 有 2 次、round 2 有 1 次
+        # 准备:push 2 次(新替旧,队列内只剩最新 1 条),计数器 round 1 有 2 次、round 2 有 1 次
         push_interrupt(task_id, query="q1", reason="r1", iteration=3)
         push_interrupt(task_id, query="q2", reason="r2", iteration=6)
         increment_interrupt_count(task_id, round_idx=1)

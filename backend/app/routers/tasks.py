@@ -1705,7 +1705,8 @@ def _append_result_html(
 #    (thinking 含 reasoning_content 思考链,可能几 KB~几十 KB,塞进报告会让
 #    .md / PDF 体积爆炸,浏览器打印会卡死)
 # 2. evaluation 类型但 content 以 "[检查点评估" / "[检查点中断]" 开头 ——
-#    检查点评估/中断,前端在右侧栏专门聚合展示,不进主对话流
+#    检查点评估/中断过程性内容(评估在右侧栏聚合展示,中断追问卡片
+#    在主对话流按时间顺序展示),不进报告的协作轨迹
 #
 # 结论类消息保留协作决策链:用户提问 → user_agent 评估/追问 → react_agent
 # 提交 → user_agent 总结,读者无需展开每个工具调用细节即可重建协作脉络。
@@ -1733,8 +1734,8 @@ _CONVERSATION_TRACE_TYPES = {
 }
 
 # 检查点评估/中断前缀(与前端 TaskDetailView.vue + agent_checkpoint / acp_base
-# 落库约定一致):这类消息属于检查点过程性内容,前端在右侧栏聚合展示,
-# 报告协作轨迹同步跳过
+# 落库约定一致):这类消息属于检查点过程性内容,评估在前端右侧栏聚合展示,
+# 中断追问卡片在主对话流按时间顺序展示,报告协作轨迹同步跳过
 _CHECKPOINT_CONTENT_PREFIXES = ("[检查点评估", "[检查点中断")
 
 # 跨轮历史记忆注入块标记(react_agent._build_history_context 生成)。
@@ -1770,14 +1771,14 @@ def _is_ua_followup_evaluation(c) -> bool:
 
 
 def _is_checkpoint_evaluation(c) -> bool:
-    """判断是否为检查点评估/中断消息(前端路由到右侧栏检查点聚合区,不进主对话流)
+    """判断是否为检查点评估/中断消息(检查点过程性内容,不进报告协作轨迹)
 
     检查点评估:user_agent 的 thinking 或 evaluation 类型,content 以
-    "[检查点评估" 开头 —— 前端 TaskDetailView.vue:1283-1287 / 1956-1971
-    把这类消息从主对话流过滤掉,聚到右侧栏专门展示。
-    检查点中断:恢复流程中 acp_base 落库的 evaluation,content 以
-    "[检查点中断]" 开头,同属检查点过程通知。
-    报告协作轨迹应同步跳过。
+    "[检查点评估" 开头 —— 前端 TaskDetailView.vue 把这类消息从主对话流
+    过滤掉,聚到右侧栏专门展示。
+    检查点中断:acp_base 软中断生效时落库的 evaluation,content 以
+    "[检查点中断]" 开头,前端在主对话流按时间顺序展示为追问卡片,
+    同属检查点过程通知,报告协作轨迹应同步跳过。
     """
     if c.role != "user_agent":
         return False

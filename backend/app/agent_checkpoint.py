@@ -166,7 +166,9 @@ CHECKPOINT_SYSTEM_PROMPT = """你是 user_agent(用户代理智能体),正在实
 字段说明:
 - interrupt: 是否打断(true 时 query 必填)
 - reason: 判断理由(展示给用户看)
-- query: 打断时的追问指令(注入 react_agent 作为 user 消息),null 表示不打断
+- query: 打断时的追问指令(注入 react_agent 作为 user 消息),null 表示不打断。
+  必须以用户下达指令的口吻表述,不得提及"user_agent""评估者"等身份
+  (react_agent 不知道评估者的存在),也不要复述评估过程,直接给出指令
 - summary: 本次评估的一句话摘要(≤50字,供下次评估参考;打断时写明已发出的指令)
 """
 
