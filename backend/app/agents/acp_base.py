@@ -1300,6 +1300,9 @@ class _ACPCollector:
         # 检查点在 tool_result 落库后触发,此时 content_buf 已被
         # _start_new_iteration 清空,需在清空前暂存
         self._last_thinking_summary = ""
+        # 最近一次 TodoList 工具(kimi code CLI)解析出的计划清单,
+        # 供收尾时续接 current_plan 链(content 里无 <plan> 时回退)
+        self.last_todo_plan: list[dict] | None = None
         # [perf] 首个 ACP 事件到达时间(collector 创建 ≈ prompt 发送前一刻)
         self._perf_t0 = time.perf_counter()
         self._perf_first_logged = False
@@ -1671,6 +1674,19 @@ class _ACPCollector:
         # 记录最近工具结果(供检查点评估快照使用)
         self._last_tool_result = raw_output
 
+        # kimi TodoList 工具:completed 时携带完整计划清单({todos: [...]}),
+        # 全量替换语义,解析后直接覆盖式推送 plan 事件(与 _handle_plan 同款,
+        # 前端复用 react_agent 的计划清单卡片;kimi v2 不发 ACP plan 通知,
+        # 只能从该工具调用提取)
+        if tool_name == "TodoList":
+            todo_steps = self._parse_todo_plan(update.get("rawInput"), input_text)
+            if todo_steps:
+                self.last_todo_plan = todo_steps
+                publish(self.task.id, "plan", {
+                    "round_idx": self.round_idx,
+                    "steps": todo_steps,
+                })
+
         # 检查点评估:在工具结果落库之后触发(而非 tool_call 落库后立即触发),
         # 保证落库顺序 tool_call → tool_result → 检查点评估:
         # 1) 前端按序切迭代时 call/result 同组,检查点横线不会切开工具折叠卡;
@@ -1808,6 +1824,43 @@ class _ACPCollector:
                 "round_idx": self.round_idx,
                 "steps": steps,
             })
+
+    @staticmethod
+    def _parse_todo_plan(raw_input: Any, input_text: str) -> list[dict] | None:
+        """解析 TodoList 工具输入({todos: [{title, status}]})为 plan 步骤
+
+        优先结构化 rawInput;回退解析 input_text(completed 时的累积文本,
+        json_repair 容错)。查询模式(无 todos)/清空模式(空数组)返回 None。
+        status 白名单归一(completed → done,非法值 → pending)。
+        """
+        todos: Any = None
+        if isinstance(raw_input, dict):
+            todos = raw_input.get("todos")
+        if todos is None and input_text:
+            try:
+                parsed: Any = json.loads(input_text)
+            except json.JSONDecodeError:
+                try:
+                    parsed = repair_json(input_text, return_objects=True)
+                except Exception:
+                    parsed = None
+            if isinstance(parsed, dict):
+                todos = parsed.get("todos")
+        if not isinstance(todos, list) or not todos:
+            return None
+        steps: list[dict] = []
+        for item in todos:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("title") or "").strip()
+            if not text:
+                continue
+            status = str(item.get("status") or "pending").strip()
+            status = _ACP_PLAN_STATUS_MAP.get(status, status)
+            if status not in ("pending", "in_progress", "done"):
+                status = "pending"
+            steps.append({"id": len(steps) + 1, "text": text, "status": status})
+        return steps or None
 
     def _handle_error(self, text: str) -> None:
         if not text:
@@ -2009,7 +2062,10 @@ def _format_plan_reminder(plan_steps: list[dict]) -> str:
     """格式化 plan 状态,注入 prompt 让 CLI 续接进度"""
     if not plan_steps:
         return ""
-    lines = ["[系统提醒] 当前计划清单状态(状态有变化时请在 <plan> 里输出更新后的完整清单,完成的标 done):"]
+    lines = [
+        "[系统提醒] 当前计划清单状态(状态有变化时请用自己的方式更新完整清单——"
+        "在 <plan> 里继续输出或更新你的 TodoList 等计划工具,完成的标 done):"
+    ]
     sym = {"pending": "○", "in_progress": "◌", "done": "✓"}
     for s in plan_steps:
         lines.append(f"{sym.get(s['status'], '○')} [{s['status']}] {s['text']}")
@@ -2617,6 +2673,9 @@ def run_acp_agent(
             "round_idx": round_idx,
             "steps": current_plan,
         })
+    elif collector.last_todo_plan:
+        # kimi TodoList 已在 completed 时推送过 plan 事件,这里只续接跨轮链
+        current_plan = [dict(s) for s in collector.last_todo_plan]
 
     logger.info(
         f"[task={task.id}] {agent_type} 第 {round_idx} 轮完成: "

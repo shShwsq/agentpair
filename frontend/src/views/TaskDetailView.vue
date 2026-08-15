@@ -912,14 +912,67 @@ function parsePlanFromContent(content: string): PlanStep[] | null {
   return steps.length > 0 ? steps : null
 }
 
-/** 从历史对话提取 plan,每个 round 取最后一次出现的 plan(可能被更新过状态) */
+/** 从 kimi code CLI 的 TodoList tool_call 提取计划清单
+ *
+ * 落库 content 格式为 intent 首行(`调用 TodoList [TodoList]`)+ 完整入参 JSON
+ * ({todos: [{title, status}]}),jsonrepair 容错解析。
+ * 查询/清空模式(无 todos/空数组)返回 null,保持最后已知计划。
+ */
+function parseTodoListToolCall(content: string): PlanStep[] | null {
+  const nl = content.indexOf('\n')
+  if (nl < 0) return null
+  if (!content.slice(0, nl).trimEnd().endsWith('[TodoList]')) return null
+  const detail = content.slice(nl + 1).trim()
+  if (!detail.startsWith('{') && !detail.startsWith('[')) return null
+  let parsed: unknown = null
+  try {
+    parsed = JSON.parse(detail)
+  } catch {
+    try {
+      parsed = JSON.parse(jsonrepair(detail))
+    } catch {
+      return null
+    }
+  }
+  const todos =
+    parsed && typeof parsed === 'object'
+      ? (parsed as Record<string, unknown>).todos
+      : null
+  if (!Array.isArray(todos) || todos.length === 0) return null
+  const steps: PlanStep[] = []
+  for (const t of todos) {
+    if (!t || typeof t !== 'object') continue
+    const obj = t as Record<string, unknown>
+    const text = String(obj.title ?? '').trim()
+    if (!text) continue
+    let statusStr = String(obj.status ?? 'pending').trim()
+    if (statusStr === 'completed') statusStr = 'done'
+    const status: PlanStep['status'] =
+      statusStr === 'pending' || statusStr === 'in_progress' || statusStr === 'done'
+        ? statusStr
+        : 'pending'
+    steps.push({ id: steps.length + 1, text, status })
+  }
+  return steps.length > 0 ? steps : null
+}
+
+/** 从历史对话提取 plan,每个 round 取最后一次出现的 plan(可能被更新过状态)
+ *
+ * 两个来源:
+ * - 内置 react_agent:thinking content 里的 <plan> 块
+ * - kimi code CLI 等外部执行器:TodoList tool_call 落库的入参 JSON
+ */
 function extractPlanFromHistory(conversations: Conversation[]): void {
-  // 按 round 收集所有含 plan 的 thinking content,保留每个 round 最后一次
+  // 按 round 收集所有含 plan 的记录,保留每个 round 最后一次
   const lastPlanPerRound = new Map<number, PlanStep[]>()
   for (const c of conversations) {
-    if (c.role !== 'react_agent' || c.type !== 'thinking') continue
-    if (!c.content) continue
-    const steps = parsePlanFromContent(c.content)
+    if (c.role !== 'react_agent' || !c.content) continue
+    let steps: PlanStep[] | null = null
+    if (c.type === 'thinking') {
+      steps = parsePlanFromContent(c.content)
+    } else if (c.type === 'tool_call') {
+      steps = parseTodoListToolCall(c.content)
+    }
     if (steps) {
       lastPlanPerRound.set(c.round_idx, steps)
     }
