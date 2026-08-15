@@ -5,6 +5,7 @@
 端点:
 - GET /tasks/{task_id}/workspace          工作区信息(是否可用、repo_path)
 - GET /tasks/{task_id}/workspace/files    列出目录(懒加载树,单层)
+- GET /tasks/{task_id}/workspace/tree     整树快照(首屏一次拉取,带短 TTL 缓存)
 - GET /tasks/{task_id}/workspace/file     读取文件内容(原始文本 + 分页,前端自行渲染行号)
 
 session 生命周期:
@@ -61,7 +62,7 @@ def get_workspace(
     _check_task_access(task_id, db, current_user)
 
     # 惰性清理过期 session
-    sandbox_tools.cleanup_expired_sessions()
+    sandbox_tools.cleanup_expired_sessions_bg()
 
     info = sandbox_tools.get_workspace_info(str(task_id))
     if info is None:
@@ -95,7 +96,7 @@ def list_workspace_files(
     }
     """
     _check_task_access(task_id, db, current_user)
-    sandbox_tools.cleanup_expired_sessions()
+    sandbox_tools.cleanup_expired_sessions_bg()
 
     try:
         return sandbox_tools.browse_files(str(task_id), subdir)
@@ -106,6 +107,36 @@ def list_workspace_files(
     except Exception as e:
         logger.exception(f"[task={task_id}] 列出工作区文件失败: subdir={subdir}")
         raise HTTPException(status_code=500, detail=f"列出文件失败: {e}")
+
+
+@router.get("/tasks/{task_id}/workspace/tree")
+def get_workspace_tree(
+    task_id: uuid.UUID,
+    max_depth: int = Query(default=4, ge=1, le=8, description="快照最大深度"),
+    max_entries: int = Query(default=3000, ge=100, le=10000, description="最大条目数"),
+    refresh: bool = Query(default=False, description="绕过缓存强制重建快照"),
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> dict:
+    """一次性返回整树快照(前端文件树首屏渲染,替代逐级懒加载)
+
+    返回结构:
+    {
+        "entries": [{"path": "src/main.py", "type": "file"|"dir"}, ...],
+        "truncated": bool,   # 超上限截断,前端未覆盖目录退回 /workspace/files 懒加载
+        "max_depth": int,    # 快照实际覆盖深度
+    }
+    """
+    _check_task_access(task_id, db, current_user)
+    sandbox_tools.cleanup_expired_sessions_bg()
+
+    try:
+        return sandbox_tools.browse_tree(str(task_id), max_depth, max_entries, refresh)
+    except RuntimeError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.exception(f"[task={task_id}] 获取工作区树快照失败")
+        raise HTTPException(status_code=500, detail=f"获取文件树失败: {e}")
 
 
 @router.get("/tasks/{task_id}/workspace/file")
@@ -134,7 +165,7 @@ def read_workspace_file(
     若后端再带行号会造成两列行号重复。
     """
     _check_task_access(task_id, db, current_user)
-    sandbox_tools.cleanup_expired_sessions()
+    sandbox_tools.cleanup_expired_sessions_bg()
 
     try:
         return sandbox_tools.browse_read_file(str(task_id), path, offset, max_lines)

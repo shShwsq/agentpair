@@ -44,6 +44,16 @@ _sessions: dict[str, dict[str, Any]] = {}
 # 任务完成后保留 session 的时间(秒),超时后自动清理
 _SESSION_TTL_AFTER_COMPLETE = 3600  # 1 小时
 
+# 整树快照缓存:task_id -> (写入时间戳, payload),TTL 秒。
+# 前端文件树首屏一次拉整树,短 TTL 兼顾运行中任务的变更新鲜度
+_TREE_CACHE_TTL = 30.0
+_tree_cache: dict[str, tuple[float, dict]] = {}
+
+# 后台清理:请求路径限流间隔(秒),避免频繁扫描
+_CLEANUP_SCAN_INTERVAL = 60.0
+_last_cleanup_scan = 0.0
+_cleanup_scan_lock = threading.Lock()
+
 # 项目记忆文件固定路径(沙箱内绝对路径,不分 project_id;每任务启动时覆盖为当前项目记忆)
 # 智能体不知道 project_id,固定路径降低认知负担;"分项目"靠每任务只写当前项目记忆实现。
 _MEMORY_DIR_SANDBOX = "/home/user/.agent_memory"
@@ -118,11 +128,42 @@ def cleanup_expired_sessions() -> int:
     return len(expired)
 
 
+def cleanup_expired_sessions_bg() -> None:
+    """惰性清理(非阻塞版,供 workspace 请求路径调用)
+
+    内联只做时间戳扫描(限流:每 _CLEANUP_SCAN_INTERVAL 最多一次);
+    实际 close_session 销毁丢给 daemon 线程,避免过期沙箱销毁
+    (停 ACP bridge / 销毁容器)阻塞当前 HTTP 请求造成秒级尖刺。
+    """
+    global _last_cleanup_scan
+    with _cleanup_scan_lock:
+        now = time.time()
+        if now - _last_cleanup_scan < _CLEANUP_SCAN_INTERVAL:
+            return
+        _last_cleanup_scan = now
+        expired = [
+            tid for tid, ctx in _sessions.items()
+            if ctx.get("completed_at") and now - ctx["completed_at"] > _SESSION_TTL_AFTER_COMPLETE
+        ]
+    if not expired:
+        return
+
+    def _cleanup() -> None:
+        for tid in expired:
+            try:
+                close_session(tid)
+            except Exception as e:
+                logger.warning(f"[task={tid}] 后台清理过期 session 失败: {e}")
+
+    threading.Thread(target=_cleanup, name="session-cleanup", daemon=True).start()
+
+
 def close_session(task_id: str) -> None:
     """关闭沙箱,清理资源"""
     if task_id not in _sessions:
         return
     ctx = _sessions.pop(task_id)
+    _tree_cache.pop(task_id, None)
     session: SandboxSession = ctx["session"]
     try:
         # 延迟导入避免循环依赖(acp_base 依赖 sandbox_tools)
@@ -191,6 +232,128 @@ def workspace_has_files(task_id: str) -> bool:
         return bool(listing.get("entries"))
     except Exception:
         return False
+
+
+def browse_tree(
+    task_id: str,
+    max_depth: int = 4,
+    max_entries: int = 3000,
+    refresh: bool = False,
+) -> dict:
+    """面向前端的整树快照(首屏一次往返出整树,替代逐级懒加载)
+
+    返回扁平结构:{
+        "entries": [{"path": "src/main.py", "type": "file"|"dir"}, ...],
+        "truncated": bool,       # 条目超上限被截断(前端未覆盖目录退回懒加载)
+        "max_depth": int,        # 快照实际覆盖深度(降级时可能小于请求值)
+    }
+
+    结果带短 TTL 缓存(_TREE_CACHE_TTL),refresh=True 绕过。
+    """
+    cached = _tree_cache.get(task_id)
+    if not refresh and cached is not None and time.time() - cached[0] < _TREE_CACHE_TTL:
+        return cached[1]
+
+    ctx = _sessions.get(task_id)
+    if ctx is None:
+        raise RuntimeError("工作区不可用:任务未 clone 仓库或会话已过期清理")
+
+    repo_path = ctx.get("repo_path", "")
+    if not repo_path:
+        raise RuntimeError("工作区不可用:尚未 clone 仓库")
+
+    if ctx["mode"] == "local":
+        payload = _browse_tree_local(repo_path, max_depth, max_entries)
+    else:
+        payload = _browse_tree_sandbox(ctx, repo_path, max_depth, max_entries)
+
+    _tree_cache[task_id] = (time.time(), payload)
+    return payload
+
+
+def _browse_tree_local(repo_path: str, max_depth: int, max_entries: int) -> dict:
+    """local 模式:os.walk 剪枝遍历,条目上限截断"""
+    root = Path(repo_path).resolve()
+    entries: list[dict] = []
+    truncated = False
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel = os.path.relpath(dirpath, root)
+        parts = [] if rel == "." else rel.replace("\\", "/").split("/")
+        child_depth = len(parts) + 1
+        # 剪噪声目录;超出深度则不再下钻
+        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS_LIST)
+        if child_depth > max_depth:
+            dirnames[:] = []
+            continue
+        for name in dirnames:
+            entries.append({"path": "/".join(parts + [name]), "type": "dir"})
+        for name in sorted(filenames):
+            entries.append({"path": "/".join(parts + [name]), "type": "file"})
+        if len(entries) > max_entries:
+            truncated = True
+            break
+
+    return {
+        "entries": entries[:max_entries],
+        "truncated": truncated,
+        "max_depth": max_depth,
+    }
+
+
+def _browse_tree_sandbox(ctx: dict, repo_path: str, max_depth: int, max_entries: int) -> dict:
+    """sandbox 模式:单条 find 命令拉整树快照(服务端剪枝噪声目录)
+
+    用 find 而非 SDK list_directory(depth=N):find 能在沙箱内剪掉
+    .git/node_modules 等噪声目录,避免大仓库撑爆响应。
+    find 不可用(镜像缺 findutils)时降级为根目录单层列出,树退回懒加载。
+    """
+    session: SandboxSession = ctx["session"]
+    prune_expr = " -o ".join(f"-name {shlex.quote(d)}" for d in sorted(_SKIP_DIRS_LIST))
+    # %y=类型字符 %P=相对起点路径;head 限流防大仓库输出失控
+    cmd = (
+        f"find {shlex.quote(repo_path)} -maxdepth {max_depth} "
+        f"\\( {prune_expr} \\) -prune -o -printf '%y\\t%P\\n' "
+        f"| head -n {max_entries + 1}"
+    )
+
+    def _fallback_single_level() -> dict:
+        listing = _list_files_sandbox(ctx, repo_path, "", max_entries)
+        return {
+            "entries": [
+                {"path": e["name"], "type": e["type"]} for e in listing["entries"]
+            ],
+            "truncated": True,
+            "max_depth": 1,
+        }
+
+    try:
+        output = session.run_command(cmd, timeout=30)
+    except Exception as e:
+        logger.warning(f"[workspace] find 树快照失败,降级根目录单层列出: {e}")
+        return _fallback_single_level()
+
+    # find 正常时至少会输出起点行(d\t);完全没有 tab 分隔行说明 find 不可用/报错
+    lines = output.splitlines()
+    if not any("\t" in ln for ln in lines):
+        logger.warning("[workspace] find 无有效输出,降级根目录单层列出")
+        return _fallback_single_level()
+
+    entries = []
+    for line in lines:
+        if "\t" not in line:
+            continue
+        t, rel = line.split("\t", 1)
+        if not rel:  # 起点行(%P 为空)
+            continue
+        entries.append({"path": rel, "type": "dir" if t == "d" else "file"})
+
+    truncated = len(entries) > max_entries
+    return {
+        "entries": entries[:max_entries],
+        "truncated": truncated,
+        "max_depth": max_depth,
+    }
 
 
 def browse_read_file(task_id: str, file_path: str, offset: int = 1, max_lines: int = 500) -> dict:
@@ -580,7 +743,55 @@ def _list_files_local(repo_path: str, subdir: str, max_entries: int) -> dict:
 def _list_files_sandbox(
     ctx: dict, repo_path: str, subdir: str, max_entries: int
 ) -> dict:
-    """sandbox 模式:用 ls -Ap1 单层列出
+    """sandbox 模式:用 SDK 原生文件系统 API 单层列出(单次 HTTP 往返)
+
+    比旧方案(test -d + ls 两次远程 shell)快得多。
+    SDK 调用异常(非目录不存在)时自动回退 shell 实现,兼容旧 Server。
+    """
+    session: SandboxSession = ctx["session"]
+    full_path = (
+        f"{repo_path.rstrip('/')}/{subdir.lstrip('/')}"
+        if subdir else repo_path
+    )
+
+    try:
+        raw = session.list_directory(full_path)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"目录不存在: {subdir or '(根)'}")
+    except Exception as e:
+        logger.warning(
+            f"SDK list_directory 失败,回退 shell 列出: subdir={subdir or '(根)'} err={e}"
+        )
+        return _list_files_sandbox_shell(ctx, repo_path, subdir, max_entries)
+
+    entries = []
+    for item in raw:
+        if item["is_dir"] and item["name"] in _SKIP_DIRS_LIST:
+            continue
+        entries.append({
+            "name": item["name"],
+            "type": "dir" if item["is_dir"] else "file",
+            # SDK 直接给出真实大小(旧 shell 版为省 N 次 stat 固定返 0)
+            "size": 0 if item["is_dir"] else item["size"],
+        })
+
+    entries.sort(key=lambda e: (e["type"] != "dir", e["name"].lower()))
+
+    truncated = len(entries) > max_entries
+    entries = entries[:max_entries]
+
+    return {
+        "path": (subdir.rstrip("/") + "/") if subdir else ".",
+        "entries": entries,
+        "total": len(entries),
+        "truncated": truncated,
+    }
+
+
+def _list_files_sandbox_shell(
+    ctx: dict, repo_path: str, subdir: str, max_entries: int
+) -> dict:
+    """sandbox 模式 shell 回退:用 ls -Ap1 单层列出(SDK API 不可用时)
 
     -A:列出除 . 和 .. 外的所有条目(含隐藏文件)
     -p:目录名末尾加 /(便于解析)
@@ -839,29 +1050,40 @@ def _read_file_sandbox(
     session: SandboxSession = ctx["session"]
     full_path = f"{repo_path.rstrip('/')}/{file_path.lstrip('/')}"
 
-    check = session.run_command(f"test -f {shlex.quote(full_path)} && echo OK || echo MISSING")
-    if "MISSING" in check:
-        raise FileNotFoundError(f"文件不存在: {file_path}")
-
-    total_lines_str = session.run_command(f"wc -l < {shlex.quote(full_path)}").strip()
-    total_lines = int(total_lines_str) if total_lines_str.isdigit() else 0
-
-    # 用 awk 一次性完成:行号格式化 + 范围截取
     start = max(1, offset)
     end = start + max_lines - 1
-    if with_line_numbers:
-        awk_script = (
-            f"NR>={start} && NR<={end} "
-            f"{{printf \"%6d: %s\\n\", NR, $0}}"
-        )
-    else:
+    p = shlex.quote(full_path)
+
+    if not with_line_numbers:
+        # 前端浏览路径:存在性检查 + 总行数 + 范围截取合并为单条命令(1 次往返替代 3 次)
+        # 输出约定:首行为总行数,其后为内容行;文件不存在时首行 MISSING
         awk_script = (
             f"NR>={start} && NR<={end} "
             f"{{printf \"%s\\n\", $0}}"
         )
-    content = session.run_command(
-        f"awk '{awk_script}' {shlex.quote(full_path)}"
-    )
+        output = session.run_command(
+            f"if [ -f {p} ]; then wc -l < {p}; awk '{awk_script}' {p}; else echo MISSING; fi"
+        )
+        out_lines = output.splitlines()
+        if not out_lines or out_lines[0].strip() == "MISSING":
+            raise FileNotFoundError(f"文件不存在: {file_path}")
+        total_str = out_lines[0].strip()
+        total_lines = int(total_str) if total_str.isdigit() else 0
+        content = "\n".join(out_lines[1:])
+    else:
+        check = session.run_command(f"test -f {p} && echo OK || echo MISSING")
+        if "MISSING" in check:
+            raise FileNotFoundError(f"文件不存在: {file_path}")
+
+        total_lines_str = session.run_command(f"wc -l < {p}").strip()
+        total_lines = int(total_lines_str) if total_lines_str.isdigit() else 0
+
+        # 用 awk 一次性完成:行号格式化 + 范围截取
+        awk_script = (
+            f"NR>={start} && NR<={end} "
+            f"{{printf \"%6d: %s\\n\", NR, $0}}"
+        )
+        content = session.run_command(f"awk '{awk_script}' {p}")
 
     start_line = min(start, total_lines) if total_lines > 0 else 0
     end_line = min(end, total_lines) if total_lines > 0 else 0

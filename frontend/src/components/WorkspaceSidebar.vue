@@ -14,6 +14,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import {
   getWorkspaceInfo,
+  getWorkspaceTree,
   listWorkspaceFiles,
   readWorkspaceFile,
 } from '@/api/workspace'
@@ -24,7 +25,7 @@ import {
 } from '@/api/task'
 import { extractErrorMessage } from '@/utils/error'
 import type { TaskListItem, TaskStatus } from '@/types/task'
-import type { WorkspaceEntry } from '@/types/workspace'
+import type { WorkspaceEntry, WorkspaceTreeResponse } from '@/types/workspace'
 
 const router = useRouter()
 const route = useRoute()
@@ -425,6 +426,9 @@ const fileContentLines = computed<string[]>(() => {
 // ---- 错误提示 ----
 const errorMsg = ref('')
 
+/** 整树快照被截断(条目超上限):提示用户,未覆盖目录展开时退回懒加载 */
+const treeTruncated = ref(false)
+
 function resetFileTree(): void {
   treeRoot.loaded = false
   treeRoot.loading = false
@@ -435,6 +439,7 @@ function resetFileTree(): void {
   available.value = false
   unavailableReason.value = ''
   errorMsg.value = ''
+  treeTruncated.value = false
   initialized = false
   filePanelHidden.value = false
 }
@@ -474,12 +479,85 @@ async function checkAvailable(): Promise<void> {
     available.value = info.available
     unavailableReason.value = info.reason ?? ''
     if (info.available && !treeRoot.loaded) {
-      await loadDir(treeRoot)
+      await loadTreeSnapshot()
     }
   } catch (e) {
     errorMsg.value = extractErrorMessage(e)
   } finally {
     checkingAvailable.value = false
+  }
+}
+
+/**
+ * 拉整树快照一次建好文件树(首屏提速:1 次请求替代逐级懒加载)
+ * 失败时降级为根目录懒加载,功能不受损
+ */
+async function loadTreeSnapshot(refresh: boolean = false): Promise<void> {
+  if (!selectedTaskId.value) return
+  try {
+    const res = await getWorkspaceTree(selectedTaskId.value, refresh)
+    buildTreeFromSnapshot(res)
+  } catch {
+    await loadDir(treeRoot)
+  }
+}
+
+/** 收集当前处于展开态的目录路径(刷新快照时保持展开状态) */
+function collectExpandedPaths(node: TreeNode, acc: Set<string>): void {
+  for (const c of node.children) {
+    if (c.type === 'dir' && c.expanded) {
+      acc.add(c.path)
+      collectExpandedPaths(c, acc)
+    }
+  }
+}
+
+/** 从整树快照(扁平 entries)构建嵌套树;截断/深度边界目录保持可懒加载 */
+function buildTreeFromSnapshot(
+  res: WorkspaceTreeResponse,
+  expandedPaths: Set<string> = new Set(),
+): void {
+  treeRoot.children = []
+  treeRoot.loaded = true
+  treeRoot.expanded = true
+  treeTruncated.value = res.truncated
+
+  const byPath = new Map<string, TreeNode>()
+  byPath.set('', treeRoot)
+
+  for (const e of res.entries) {
+    const parts = e.path.split('/').filter(Boolean)
+    if (parts.length === 0) continue
+    const parent = byPath.get(parts.slice(0, -1).join('/'))
+    if (!parent) continue // 父目录被截断丢弃,跳过孤儿条目
+    const node: TreeNode = {
+      name: parts[parts.length - 1],
+      path: e.path,
+      type: e.type === 'dir' ? 'dir' : 'file',
+      expanded: expandedPaths.has(e.path),
+      loaded: false,
+      loading: false,
+      children: [],
+    }
+    // 目录仅在未截断且未达快照深度边界时子项才算完整,否则展开时重新拉
+    if (node.type === 'dir') {
+      node.loaded = !res.truncated && parts.length < res.max_depth
+    }
+    parent.children.push(node)
+    byPath.set(e.path, node)
+  }
+  sortTreeChildren(treeRoot)
+}
+
+/** 排序与后端 listDir 一致:目录在前、文件在后,各自按名字大小写不敏感 */
+function sortTreeChildren(node: TreeNode): void {
+  node.children.sort((a, b) =>
+    a.type !== b.type
+      ? (a.type === 'dir' ? -1 : 1)
+      : a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
+  )
+  for (const c of node.children) {
+    if (c.type === 'dir') sortTreeChildren(c)
   }
 }
 
@@ -620,19 +698,19 @@ async function loadPrevPage(): Promise<void> {
 
 async function refreshTree(): Promise<void> {
   errorMsg.value = ''
-  await refreshNode(treeRoot)
-}
-
-async function refreshNode(node: TreeNode): Promise<void> {
-  if (node.type === 'dir' && node.loaded) {
-    node.loaded = false
-    node.children = []
-    await loadDir(node)
-    for (const child of node.children) {
-      if (child.expanded) {
-        await refreshNode(child)
-      }
-    }
+  // 保留当前展开状态,用 refresh=true 绕过后端缓存重建整树快照
+  const expandedPaths = new Set<string>()
+  collectExpandedPaths(treeRoot, expandedPaths)
+  treeRoot.loaded = false
+  treeRoot.children = []
+  treeTruncated.value = false
+  try {
+    const res = await getWorkspaceTree(selectedTaskId.value!, true)
+    buildTreeFromSnapshot(res, expandedPaths)
+  } catch {
+    // 快照失败降级:重新拉根目录(懒加载)
+    treeRoot.loaded = false
+    await loadDir(treeRoot)
   }
 }
 
@@ -1032,6 +1110,9 @@ defineExpose({ openTaskFile })
 
         <!-- 文件树(扁平化渲染) -->
         <div v-else class="file-tree">
+          <div v-if="treeTruncated" class="tree-truncated-hint">
+            文件过多,列表已截断;未列出的目录展开时按需加载
+          </div>
           <div
             v-for="item in flatTree"
             :key="item.node.path"
@@ -1708,6 +1789,16 @@ defineExpose({ openTaskFile })
   font-size: var(--fs-xs);
   color: var(--color-text-muted);
   text-align: center;
+}
+
+.tree-truncated-hint {
+  padding: var(--space-1) var(--space-3);
+  margin-bottom: var(--space-1);
+  font-size: var(--fs-xs);
+  color: var(--color-warning, #b45309);
+  background: var(--color-warning-bg, rgba(245, 158, 11, 0.1));
+  border-radius: var(--radius-sm);
+  line-height: 1.5;
 }
 
 .tree-node {

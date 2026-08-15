@@ -2190,9 +2190,9 @@ function toggleResult(id: string): void {
     </AppHeader>
 
     <div class="page-body">
-    <!-- 左侧:历史任务栏 + 按需切换工作区(折叠时完全隐藏) -->
+    <!-- 左侧:历史任务栏 + 按需切换工作区(v-show 保留已加载的任务列表/文件树状态,折叠不销毁) -->
     <WorkspaceSidebar
-      v-if="!workspaceCollapsed"
+      v-show="!workspaceCollapsed"
       ref="sidebarRef"
       @task-deleted="onSidebarTaskDeleted"
       @task-title-updated="onSidebarTaskTitleUpdated"
