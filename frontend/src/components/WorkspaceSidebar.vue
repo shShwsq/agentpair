@@ -63,6 +63,86 @@ const changedFileList = computed(() => props.changedFiles ?? [])
 /** 仓库文件清单快照(变更文件为空时的兜底展示,点击仅弹轻提示) */
 const repoFileList = computed(() => props.repoFiles ?? [])
 
+// ---- 仓库文件清单:按文件树方式渲染(从扁平路径本地构建嵌套树,无懒加载) ----
+
+interface RepoTreeNode {
+  name: string
+  path: string
+  type: 'dir' | 'file'
+  expanded: boolean
+  children: RepoTreeNode[]
+}
+
+const repoTreeRoot = ref<RepoTreeNode | null>(null)
+
+/** 从扁平相对路径构建嵌套树(中间目录由路径段推导) */
+function buildRepoTree(paths: string[]): RepoTreeNode {
+  const root: RepoTreeNode = {
+    name: '', path: '', type: 'dir', expanded: true, children: [],
+  }
+  for (const p of paths) {
+    const parts = p.split('/').filter(Boolean)
+    let node = root
+    let acc = ''
+    parts.forEach((seg, i) => {
+      acc = acc ? `${acc}/${seg}` : seg
+      let child = node.children.find((c) => c.name === seg)
+      if (!child) {
+        child = {
+          name: seg,
+          path: acc,
+          type: i === parts.length - 1 ? 'file' : 'dir',
+          expanded: false,
+          children: [],
+        }
+        node.children.push(child)
+      }
+      node = child
+    })
+  }
+  sortRepoTreeChildren(root)
+  return root
+}
+
+/** 排序与文件树一致:目录在前、名称大小写不敏感 */
+function sortRepoTreeChildren(node: RepoTreeNode): void {
+  node.children.sort((a, b) =>
+    a.type !== b.type
+      ? (a.type === 'dir' ? -1 : 1)
+      : a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
+  )
+  for (const c of node.children) {
+    if (c.type === 'dir') sortRepoTreeChildren(c)
+  }
+}
+
+// 清单变化时重建树(默认仅顶层可见、目录收起,避免大仓库一次性铺满)
+watch(
+  repoFileList,
+  (paths) => {
+    repoTreeRoot.value = paths.length ? buildRepoTree(paths) : null
+  },
+  { immediate: true },
+)
+
+/** 扁平化仓库快照树(仅展开的目录),复用文件树样式渲染 */
+const flatRepoTree = computed(() => {
+  const out: { node: RepoTreeNode; depth: number }[] = []
+  const walk = (n: RepoTreeNode, depth: number) => {
+    for (const child of n.children) {
+      out.push({ node: child, depth })
+      if (child.type === 'dir' && child.expanded) walk(child, depth + 1)
+    }
+  }
+  if (repoTreeRoot.value) walk(repoTreeRoot.value, 0)
+  return out
+})
+
+/** 目录展开/收起(纯前端状态,无请求) */
+function toggleRepoDir(node: RepoTreeNode): void {
+  node.expanded = !node.expanded
+}
+
 // ---- 轻提示(仓库文件行点击:工作区不可用;组件级 toast,同 TaskRuntimeSettings 模式) ----
 const toastMsg = ref('')
 let toastTimer: ReturnType<typeof setTimeout> | null = null
@@ -1173,22 +1253,53 @@ defineExpose({ openTaskFile })
               </div>
             </div>
           </div>
-          <!-- 无变更但有仓库树快照:展示仓库文件清单(点击弹轻提示,内容不可浏览) -->
+          <!-- 无变更但有仓库树快照:按文件树方式渲染(目录展开/收起纯前端;文件点击弹轻提示) -->
           <div
-            v-else-if="!selectedTaskRunning && repoFileList.length > 0"
+            v-else-if="!selectedTaskRunning && repoTreeRoot"
             class="changed-files-fallback"
           >
             <div class="changed-files-title">仓库文件清单（快照，内容不可浏览）</div>
             <div class="changed-files-list">
               <div
-                v-for="path in repoFileList"
-                :key="path"
-                class="tree-node tree-file changed-file-row"
-                :title="path"
-                @click="showUnavailableToast"
+                v-for="item in flatRepoTree"
+                :key="item.node.path"
+                class="tree-node"
+                :class="`tree-${item.node.type}`"
+                :style="{ paddingLeft: `${item.depth * 14 + 8}px` }"
+                :title="item.node.path"
+                @click="item.node.type === 'dir' ? toggleRepoDir(item.node) : showUnavailableToast()"
               >
                 <span class="tree-icon">
+                  <template v-if="item.node.type === 'dir'">
+                    <svg
+                      class="tree-chevron"
+                      :class="{ expanded: item.node.expanded }"
+                      viewBox="0 0 24 24"
+                      width="10"
+                      height="10"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2.5"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <polyline points="9 18 15 12 9 6" />
+                    </svg>
+                    <svg
+                      viewBox="0 0 24 24"
+                      width="13"
+                      height="13"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                    </svg>
+                  </template>
                   <svg
+                    v-else
                     viewBox="0 0 24 24"
                     width="13"
                     height="13"
@@ -1202,7 +1313,7 @@ defineExpose({ openTaskFile })
                     <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
                   </svg>
                 </span>
-                <span class="tree-name">{{ path }}</span>
+                <span class="tree-name">{{ item.node.name }}</span>
               </div>
             </div>
           </div>
