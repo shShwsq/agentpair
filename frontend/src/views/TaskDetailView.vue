@@ -248,8 +248,9 @@ const checkpointsPerRound = reactive<Map<string, AgentCheckpointEventData>>(new 
 
 // ---- 待生效检查点打断(CLI 执行器:入队后到注入前可取消) ----
 // 后端检查点评估 interrupt=true 时推 agent_checkpoint 事件,此时打断已入队但
-// 未注入(要等当前 prompt 结束),窗口内用户可点"取消打断";注入后
-// ([检查点中断] conversation 事件到达)或取消后窗口关闭。
+// 未注入(要等当前 prompt 结束),窗口内用户可点右侧栏检查点条目上的
+// "取消打断"按钮;注入后([检查点中断] conversation 事件到达)或取消后窗口关闭。
+// 主对话流仅在打断真正注入后才展示追问指令卡片。
 interface PendingInterruptState {
   round_idx: number
   iteration: number | null
@@ -272,6 +273,8 @@ async function restorePendingInterrupt(taskId: string): Promise<void> {
     const p = await getPendingInterrupt(taskId)
     if (p) {
       pendingInterrupt.value = { ...p, state: 'pending' }
+      // 展开右侧栏,保证取消按钮可见
+      detailCollapsed.value = false
     }
   } catch {
     // 无待生效打断或任务已结束,静默忽略
@@ -855,7 +858,8 @@ function connectSSE(taskId: string): void {
         console.info(
           `[检查点评估] 第${data.round_idx}轮迭代${data.iteration} 打断: ${data.reason}`,
         )
-        // CLI 执行器:打断已入队但未注入,展示带"取消打断"按钮的 pending 卡片
+        // CLI 执行器:打断已入队但未注入,右侧栏检查点条目进入待生效态(带取消按钮);
+        // 主对话流不展示追问指令,要等打断真正注入后由 [检查点中断] 卡片展示
         if (isCliExecutor.value) {
           pendingInterrupt.value = {
             round_idx: data.round_idx,
@@ -864,12 +868,13 @@ function connectSSE(taskId: string): void {
             query: data.query,
             state: 'pending',
           }
-          nextTick(scrollToBottom)
+          // 展开右侧栏暴露取消按钮(pending 窗口有限,折叠态会错过)
+          detailCollapsed.value = false
         }
       }
     },
     onInterruptCancelled: (data) => {
-      // 后端确认取消成功(本端发起或其他端发起):pending 卡片切为已取消态
+      // 后端确认取消成功(本端发起或其他端发起):侧栏条目切为已取消态
       const p = pendingInterrupt.value
       if (p && p.round_idx === data.round_idx) {
         p.state = 'cancelled'
@@ -2246,6 +2251,21 @@ interface CheckpointEntry {
   pending?: boolean
 }
 
+/** 检查点条目对应的待生效打断状态(null=该条目无对应的 pending 打断)
+ *
+ * 按 round + iteration 匹配 pendingInterrupt(SSE agent_checkpoint 或
+ * 刷新恢复);侧栏"待生效"徽标与"取消打断"按钮均由此驱动。
+ */
+function interruptPendingState(
+  cp: CheckpointEntry,
+): 'pending' | 'cancelling' | 'cancelled' | null {
+  const p = pendingInterrupt.value
+  if (!p || !cp.isInterrupt) return null
+  if (cp.roundIdx !== p.round_idx) return null
+  if (cp.iteration !== null && p.iteration !== null && cp.iteration !== p.iteration) return null
+  return p.state
+}
+
 /** 解析检查点 content 前缀中的轮次/迭代号(与后端落库格式一致) */
 function parseCheckpointPos(content: string): {
   roundIdx: number | null
@@ -2704,35 +2724,6 @@ function toggleResult(id: string): void {
                 </div>
               </template>
             </div>
-            <!-- 待生效检查点打断卡片(CLI 执行器):打断已入队但尚未注入,
-                 窗口内用户可取消;注入后由正式 [检查点中断] 卡片接管 -->
-            <div
-              v-if="pendingInterrupt && pendingInterrupt.round_idx === group.roundIdx"
-              :class="['pending-interrupt', `pending-interrupt-${pendingInterrupt.state}`]"
-            >
-              <div class="pending-interrupt-head">
-                <span class="pending-interrupt-title">
-                  {{ pendingInterrupt.state === 'cancelled' ? '检查点打断已取消' : '检查点打断待生效' }}
-                </span>
-                <span class="pending-interrupt-pos">
-                  第 {{ pendingInterrupt.round_idx }} 轮<template v-if="pendingInterrupt.iteration !== null"> · 迭代 {{ pendingInterrupt.iteration }}</template>
-                </span>
-                <button
-                  v-if="pendingInterrupt.state !== 'cancelled'"
-                  class="pending-interrupt-cancel-btn"
-                  :disabled="pendingInterrupt.state === 'cancelling'"
-                  title="取消后追问指令不会下发给智能体"
-                  @click="handleCancelInterrupt"
-                >{{ pendingInterrupt.state === 'cancelling' ? '正在取消...' : '取消打断' }}</button>
-                <span v-else class="pending-interrupt-done-tag">追问指令不会下发</span>
-              </div>
-              <div v-if="pendingInterrupt.reason" class="pending-interrupt-reason">
-                理由:{{ pendingInterrupt.reason }}
-              </div>
-              <div v-if="pendingInterrupt.query" class="pending-interrupt-query">
-                追问指令:{{ pendingInterrupt.query }}
-              </div>
-            </div>
           </div>
           <!-- 运行中等待提示(没有流式项时才显示) -->
           <!-- 优先用后端推送的 current_stage(如"正在克隆仓库..."),无则回退通用文案 -->
@@ -3056,6 +3047,25 @@ function toggleResult(id: string): void {
                 <span v-if="cp.pending" class="checkpoint-badge checkpoint-badge-pending">
                   评估中
                 </span>
+                <template v-else-if="cp.isInterrupt && interruptPendingState(cp)">
+                  <!-- 待生效窗口:打断已入队未注入,展示取消按钮(已取消态只剩徽标) -->
+                  <span
+                    v-if="interruptPendingState(cp) === 'cancelled'"
+                    class="checkpoint-badge checkpoint-badge-cancelled"
+                  >
+                    已取消
+                  </span>
+                  <span v-else class="checkpoint-badge checkpoint-badge-awaiting">
+                    打断待生效
+                  </span>
+                  <button
+                    v-if="interruptPendingState(cp) !== 'cancelled'"
+                    class="checkpoint-cancel-btn"
+                    :disabled="interruptPendingState(cp) === 'cancelling'"
+                    title="取消后追问指令不会下发给智能体"
+                    @click.stop="handleCancelInterrupt"
+                  >{{ interruptPendingState(cp) === 'cancelling' ? '正在取消...' : '取消打断' }}</button>
+                </template>
                 <span
                   v-else-if="cp.isInterrupt && cp.cancelled"
                   class="checkpoint-badge checkpoint-badge-cancelled"
@@ -4660,49 +4670,14 @@ function toggleResult(id: string): void {
   background: rgba(107, 114, 128, 0.15);
 }
 
-/* 待生效检查点打断卡片(CLI 执行器):pending 态橙色突出可操作,
-   cancelling/cancelled 态降饱和(取消中/已取消) */
-.pending-interrupt {
-  margin-bottom: var(--space-4);
-  padding: var(--space-3);
-  border: 1px solid rgba(234, 88, 12, 0.35);
-  border-radius: var(--radius-md);
-  background: rgba(234, 88, 12, 0.06);
-}
-
-.pending-interrupt-cancelling,
-.pending-interrupt-cancelled {
-  border-color: var(--color-border);
-  background: var(--color-surface-alt);
-}
-
-.pending-interrupt-head {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
-.pending-interrupt-title {
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-semibold);
+.checkpoint-badge-awaiting {
   color: #c2410c;
+  background: rgba(234, 88, 12, 0.15);
 }
 
-.pending-interrupt-cancelling .pending-interrupt-title,
-.pending-interrupt-cancelled .pending-interrupt-title {
-  color: var(--color-text-secondary);
-}
-
-.pending-interrupt-pos {
-  font-size: var(--fs-xs);
-  font-family: var(--font-mono);
-  color: var(--color-text-muted);
-}
-
-.pending-interrupt-cancel-btn {
-  margin-left: auto;
-  padding: 2px var(--space-3);
+/* 打断取消按钮(侧栏检查点条目内):待生效窗口内的橙色小按钮 */
+.checkpoint-cancel-btn {
+  padding: 1px var(--space-2);
   font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
   color: #c2410c;
@@ -4713,44 +4688,13 @@ function toggleResult(id: string): void {
   transition: filter var(--transition-fast);
 }
 
-.pending-interrupt-cancel-btn:hover:not(:disabled) {
+.checkpoint-cancel-btn:hover:not(:disabled) {
   filter: brightness(0.95);
 }
 
-.pending-interrupt-cancel-btn:disabled {
+.checkpoint-cancel-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
-}
-
-.pending-interrupt-done-tag {
-  margin-left: auto;
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-}
-
-.pending-interrupt-reason {
-  margin-top: var(--space-2);
-  font-size: var(--fs-sm);
-  color: #7c2d12;
-  word-break: break-word;
-}
-
-.pending-interrupt-cancelling .pending-interrupt-reason,
-.pending-interrupt-cancelled .pending-interrupt-reason {
-  color: var(--color-text-secondary);
-}
-
-.pending-interrupt-query {
-  margin-top: var(--space-1);
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
-  color: var(--color-text);
-  word-break: break-word;
-}
-
-.pending-interrupt-cancelling .pending-interrupt-query,
-.pending-interrupt-cancelled .pending-interrupt-query {
-  color: var(--color-text-secondary);
 }
 
 /* 检查点思考链(条目内可折叠块;流式中 header 高亮) */
