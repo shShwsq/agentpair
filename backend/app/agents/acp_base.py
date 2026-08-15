@@ -1293,6 +1293,10 @@ class _ACPCollector:
         self._agent_type = agent_type
         self._checkpoint_callback = checkpoint_callback
         self._interrupt_count = 0
+        # 最近一次已评估的迭代序号(同一决策回合内可发起多个工具调用,
+        # 它们的 pending.iteration 相同,每个 tool_result 都会命中 K 边界;
+        # 用此记录保证同一迭代只评估一次,避免重复落库/推送)
+        self._last_checkpoint_iteration: int | None = None
         # 最近工具调用快照(供检查点评估使用)
         self._last_tool_intent = "(无工具调用)"
         self._last_tool_result = "(无工具结果)"
@@ -1398,12 +1402,20 @@ class _ACPCollector:
         # 检查是否达到评估间隔
         if iteration % effective_k != 0:
             return
+        # 同一迭代边界只评估一次:同迭代内多个工具结果共享迭代序号,
+        # 每个 tool_result 完成都会进入本函数,不加防重会重复触发评估
+        # (同一迭代重复落库 + 重复推送,前端右侧栏重复展示)
+        if self._last_checkpoint_iteration == iteration:
+            return
         # 打断上限只拦可打断模式;仅观察模式评估不被拦
         if self._agent_policy.get("allow_interrupt", True):
             max_interrupts = self._agent_policy.get("max_interrupts_per_round", 2)
             if self._interrupt_count >= max_interrupts:
                 return
 
+        # 标记该迭代已评估(即使评估异常也不重复触发,避免同迭代后续
+        # 工具结果反复重试;迭代号单调递增,新迭代自然解除防重)
+        self._last_checkpoint_iteration = iteration
         # 构造快照
         snapshot = self._build_snapshot()
         try:

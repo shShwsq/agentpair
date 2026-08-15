@@ -221,6 +221,48 @@ def test_checkpoint_triggered_after_tool_result_with_call_iteration(
     assert "tc2" not in collector._pending_tool_calls
 
 
+def test_collector_triggers_once_per_iteration_for_multiple_tools(
+    mock_task, mock_db, checkpoint_callback,
+):
+    """同一迭代(决策回合)内多个工具结果共享迭代号,检查点只评估一次。
+
+    回归:CLI 并行/连续工具调用不新开迭代,多个 tool_result 以相同
+    iteration 命中 K 边界,旧实现每个 tool_result 都触发一次评估,
+    导致同一检查点重复落库/推送(前端右侧栏重复显示)。
+    """
+    collector = _make_collector(
+        mock_task, mock_db, checkpoint_callback,
+        agent_policy={**DEFAULT_AGENT_POLICY, "checkpoint_interval": 3,
+                      "allow_interrupt": True, "max_interrupts_per_round": 100},
+    )
+    # 推进到迭代 3(0,1 跳过;3 % 3 == 0 命中 K 边界)
+    for _ in range(3):
+        collector._start_new_iteration()
+    # 迭代 3 内发起 3 个工具(模拟并行),结果依次完成
+    for tid in ("tc-a", "tc-b", "tc-c"):
+        collector._pending_tool_calls[tid] = {
+            "title": "t", "kind": "other", "tool_name": "工具",
+            "raw_input": {}, "input_text": "", "conv_id": None,
+            "iteration": 3,
+        }
+        collector._handle_tool_result(tid, {"rawOutput": "ok"})
+
+    # 只有第一个工具结果触发评估,同迭代后续结果被防重拦截
+    assert checkpoint_callback.calls == [3]
+
+    # 后续迭代不受影响:迭代 6 仍正常触发
+    for i in range(4, 7):
+        collector._start_new_iteration()
+        tid = f"tc{i}"
+        collector._pending_tool_calls[tid] = {
+            "title": "t", "kind": "other", "tool_name": "工具",
+            "raw_input": {}, "input_text": "", "conv_id": None,
+            "iteration": i,
+        }
+        collector._handle_tool_result(tid, {"rawOutput": "ok"})
+    assert checkpoint_callback.calls == [3, 6]
+
+
 def test_decision_round_based_iteration(mock_task, mock_db, checkpoint_callback):
     """迭代=决策回合:文本段开始才开新迭代,无文本的连续工具调用不递增。
 

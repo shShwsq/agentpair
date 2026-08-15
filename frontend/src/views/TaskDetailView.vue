@@ -2416,15 +2416,20 @@ const checkpointList = computed<CheckpointEntry[]>(() => {
     thinkingByKey.set(`${pos.roundIdx}:${pos.iteration}`, c.reasoning)
   }
 
-  // 落库的检查点评估:聚合条目主体
-  const list: CheckpointEntry[] = []
+  // 落库的检查点评估:聚合条目主体。
+  // 同 轮次:迭代 只保留最新一条:历史缺陷曾导致同一迭代边界重复落库
+  // (同一决策回合内多个工具结果各自命中 K 边界,重复评估/推送),
+  // 去重兜底避免右侧栏重复展示;后端新数据已加防重,此处兜底存量数据。
+  const entriesByKey = new Map<string, { entry: CheckpointEntry; created_at: string | null }>()
   for (const c of convs) {
     if (c.role !== 'user_agent' || c.type !== 'evaluation') continue
     const content = c.content || ''
     if (!content.startsWith('[检查点评估')) continue
     const pos = parseCheckpointPos(content)
     const roundIdx = pos.roundIdx ?? c.round_idx
-    list.push({
+    // 迭代号解析失败时按记录 id 为 key(天然唯一,不参与合并)
+    const key = pos.iteration !== null ? `${roundIdx}:${pos.iteration}` : `id:${c.id}`
+    const entry: CheckpointEntry = {
       id: c.id,
       roundIdx,
       iteration: pos.iteration,
@@ -2435,8 +2440,14 @@ const checkpointList = computed<CheckpointEntry[]>(() => {
           : undefined,
       thinkingStreaming: false,
       pending: false,
-    })
+    }
+    const prev = entriesByKey.get(key)
+    // 同 key 保留最新(convs 按 created_at 升序,后者即最新;显式比较兜底乱序)
+    if (!prev || (c.created_at ?? '') >= (prev.created_at ?? '')) {
+      entriesByKey.set(key, { entry, created_at: c.created_at ?? null })
+    }
   }
+  const list = [...entriesByKey.values()].map((v) => v.entry)
 
   // 实时流式中的检查点思考链(source=checkpoint)
   for (const item of streamingItems.values()) {
