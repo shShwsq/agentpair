@@ -32,6 +32,7 @@ from app.agent_interrupt import (
     peek_pending_interrupt,
 )
 from app.agents.orchestrator import (
+    _err_detail,
     resume_audit_with_message,
     retry_failed_task,
     run_dual_agent_audit,
@@ -970,14 +971,14 @@ def _run_resume_in_background(task_id: str, user_message: str) -> None:
             task = db.get(Task, uuid.UUID(task_id))
             if task and task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
                 task.status = TaskStatus.FAILED
-                task.error_message = str(e)[:1000]
+                task.error_message = _err_detail(e)[:1000]
                 task.current_stage = "重启执行失败"
                 db.commit()
                 # 兜底推送终止事件 + 标记总线结束:防止 SSE 订阅者因线程
                 # 在主 try 块前崩溃收不到 error 而永久挂起
                 publish(task.id, "error", {
                     "status": "failed",
-                    "error_message": str(e)[:1000],
+                    "error_message": _err_detail(e)[:1000],
                 })
                 finish_task(task.id)
         except Exception:
@@ -2319,7 +2320,7 @@ def _run_task_in_background(task_id: str) -> None:
             task = db.get(Task, uuid.UUID(task_id))
             if task and task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
                 task.status = TaskStatus.FAILED
-                task.error_message = str(e)[:1000]
+                task.error_message = _err_detail(e)[:1000]
                 task.current_stage = "执行失败"
                 db.commit()
         except Exception:

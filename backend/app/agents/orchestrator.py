@@ -560,7 +560,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             logger.warning(f"[task={task.id}] 标记任务完成失败: {cleanup_err}")
         # 通知事件总线:任务结束
         # done 事件已在 try 块中提前推送(在归纳记忆/git diff 之前)
-        # 此处仅兑底推送 error 事件(异常路径)
+        # 此处仅兜底推送 error 事件(异常路径)
         if task.status != TaskStatus.COMPLETED:
             publish(task.id, "error", {
                 "status": "failed",
@@ -1496,7 +1496,7 @@ def resume_audit_with_message(
             logger.warning(f"[task={task.id}] 标记任务完成失败: {cleanup_err}")
         # 推送终止事件
         # done 事件已在 _finish_resume 中提前推送(在归纳记忆/git diff 之前)
-        # 此处仅兑底推送 error 事件(异常路径)
+        # 此处仅兜底推送 error 事件(异常路径)
         if task.status != TaskStatus.COMPLETED:
             publish(task.id, "error", {
                 "status": "failed",
