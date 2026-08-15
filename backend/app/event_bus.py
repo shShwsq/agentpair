@@ -176,6 +176,22 @@ def finish_task(task_id: str | UUID) -> None:
     _get_bus(str(task_id)).finish()
 
 
+def is_task_finished(task_id: str | UUID) -> bool:
+    """查询任务事件总线是否已标记结束
+
+    resume/retry 启动前 reset_task_bus 会清除 _finished 标记。
+    供 SSE 端点区分"任务确实结束"与"新执行已启动但 DB 状态尚未更新"
+    (时序竞态:后台线程还未把 COMPLETED/FAILED 改成 RUNNING)。
+    """
+    with _buses_lock:
+        bus = _buses.get(str(task_id))
+    if bus is None:
+        # 无总线记录说明从未 publish 过(不可能已结束),保守视为已结束
+        return True
+    with bus._lock:
+        return bus._finished
+
+
 def reset_task_bus(task_id: str | UUID) -> None:
     """重置 task 的事件总线(恢复审计时调用)
 

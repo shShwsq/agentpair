@@ -89,6 +89,10 @@ const task = ref<TaskDetail | null>(null)
 const loading = ref(true)
 const error = ref('')
 let eventSource: EventSource | null = null
+/** 刚发起 resume/retry 的窗口标志:onDone 触发时校验是否竞态误推用 */
+const resumingRef = ref(false)
+/** 组件已卸载标志(onDone 异步窗口内防止泄漏新 SSE 连接) */
+let unmountedFlag = false
 /** 对话流容器引用,用于自动滚动到底部 */
 const conversationRef = ref<HTMLElement | null>(null)
 
@@ -881,6 +885,29 @@ function connectSSE(taskId: string): void {
       }
     },
     onDone: async () => {
+      // 竞态防御:completed 追问 / failed 重试后立即重连的 SSE,可能被后端
+      // 按旧快照(COMPLETED/FAILED)误推 done 关闭(后端已同步改 RUNNING +
+      // 事件总线双重防御,这里作前端兜底)。重新校验任务状态,若实际仍在
+      // 运行则重连 SSE 继续接收新一轮事件,不执行任务结束清理。
+      if (resumingRef.value) {
+        resumingRef.value = false
+        try {
+          const fresh = await getTask(taskId)
+          if (
+            fresh &&
+            (fresh.status === 'running' ||
+              fresh.status === 'paused' ||
+              fresh.status === 'pending')
+          ) {
+            if (unmountedFlag) return // 组件已卸载,不再重连(防止连接泄漏)
+            task.value = fresh
+            connectSSE(taskId)
+            return
+          }
+        } catch {
+          // 拉取失败走正常 done 流程(下方还会再拉一次)
+        }
+      }
       // 任务完成:拉取最终结果(含 results)
       try {
         task.value = await getTask(taskId)
@@ -911,6 +938,8 @@ function connectSSE(taskId: string): void {
       void loadArtifact(taskId)
     },
     onError: async (data) => {
+      // 退出 resume 窗口(任务真实失败,不再需要竞态校验)
+      resumingRef.value = false
       if (task.value) {
         task.value.status = 'failed'
         task.value.error_message = data.error_message || '执行失败'
@@ -1152,6 +1181,7 @@ function scrollToBottom(): void {
 
 onMounted(initTask)
 onUnmounted(() => {
+  unmountedFlag = true
   if (eventSource) eventSource.close()
 })
 
@@ -1174,6 +1204,8 @@ function resetTaskState(): void {
   questionOpen.value = false
   // 关闭清单确认弹窗
   checklistOpen.value = false
+  // 重置 resume 窗口标志(防止跨任务误触发 onDone 校验)
+  resumingRef.value = false
   // 重置任务视图态
   task.value = null
   coverageData.value = null
@@ -2130,6 +2162,8 @@ function handleMessageSent(_resp: SendMessageResponse): void {
     // 后端 resume 线程已把状态改回 RUNNING,本地同步 + 重连 SSE
     task.value.status = 'running'
     task.value.current_stage = '用户追加消息,重启执行'
+    // 标记 resume 窗口:onDone 若在窗口内触发,需校验是否竞态误推
+    resumingRef.value = true
     connectSSE(String(task.value.id))
   }
   nextTick(scrollToBottom)
@@ -2167,6 +2201,8 @@ async function handleRetry(): Promise<void> {
       task.value.status = 'running'
       task.value.error_message = null
       task.value.current_stage = '重试失败任务...'
+      // 标记 resume 窗口(同 handleMessageSent:onDone 校验竞态误推)
+      resumingRef.value = true
       connectSSE(String(task.value.id))
       nextTick(scrollToBottom)
     } else {

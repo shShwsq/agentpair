@@ -38,7 +38,14 @@ from app.agents.orchestrator import (
 )
 from app.database import SessionLocal, get_db
 from app.deps import get_optional_user, get_optional_user_sse
-from app.event_bus import publish, reset_task_bus, subscribe, unsubscribe
+from app.event_bus import (
+    finish_task,
+    is_task_finished,
+    publish,
+    reset_task_bus,
+    subscribe,
+    unsubscribe,
+)
 from app.models.task import Conversation, Result, Task, TaskStatus
 from app.models.task_artifact import TaskArtifact
 from app.clone_skip import clear_skip_state, request_skip_clone
@@ -914,8 +921,17 @@ def submit_task_message(
         )
 
     if task.status == TaskStatus.COMPLETED:
+        # 同步将状态改为 RUNNING 落库后再启动后台线程:
+        # 消除 SSE 端点快照读到 COMPLETED 的竞态窗口 —— 否则前端重连 SSE 时,
+        # stream_task_events 会按旧快照直接推 done 关闭连接,后续
+        # checklist_review 等事件虽进历史缓存却无人接收(需刷新页面才恢复)。
+        # resume_audit_with_message 开头会再设置一次,幂等无冲突。
+        task.status = TaskStatus.RUNNING
+        task.current_stage = "用户追加消息,重启执行"
+        db.commit()
+
         # 启动新的协作 round(后台线程)
-        # resume_audit_with_message 会把 task.status 改回 RUNNING
+        # resume_audit_with_message 会把 task.status 保持 RUNNING
         thread = threading.Thread(
             target=_run_resume_in_background,
             args=(str(task_id), content),
@@ -957,6 +973,13 @@ def _run_resume_in_background(task_id: str, user_message: str) -> None:
                 task.error_message = str(e)[:1000]
                 task.current_stage = "重启执行失败"
                 db.commit()
+                # 兜底推送终止事件 + 标记总线结束:防止 SSE 订阅者因线程
+                # 在主 try 块前崩溃收不到 error 而永久挂起
+                publish(task.id, "error", {
+                    "status": "failed",
+                    "error_message": str(e)[:1000],
+                })
+                finish_task(task.id)
         except Exception:
             pass
     finally:
@@ -1031,6 +1054,15 @@ def retry_failed_task_endpoint(
         "created_at": conv.created_at.isoformat() if conv.created_at else None,
     })
 
+    # 同步将状态改为 RUNNING 落库后再启动后台线程:
+    # 与 completed 发消息同理,消除 SSE 端点快照读到 FAILED 的竞态窗口
+    # (前端重连 SSE 时 stream_task_events 会按旧快照直接推 error 关闭连接)。
+    # 注意:不清空 error_message —— retry_failed_task 需在进入时读取真实
+    # 失败原因拼进续跑消息,清空由后台线程内部分流处理。
+    task.status = TaskStatus.RUNNING
+    task.current_stage = "重试失败任务,恢复执行"
+    db.commit()
+
     thread = threading.Thread(
         target=_run_retry_in_background,
         args=(str(task_id),),
@@ -1068,6 +1100,13 @@ def _run_retry_in_background(task_id: str) -> None:
                 task.error_message = str(e)[:1000]
                 task.current_stage = "重试执行失败"
                 db.commit()
+                # 兜底推送终止事件 + 标记总线结束:防止 SSE 订阅者因线程
+                # 在进入 resume 主 try 块前崩溃收不到 error 而永久挂起
+                publish(task.id, "error", {
+                    "status": "failed",
+                    "error_message": str(e)[:1000],
+                })
+                finish_task(task.id)
         except Exception:
             pass
     finally:
@@ -2139,6 +2178,22 @@ def _append_conversation_trace_html(
         )
 
 
+def _should_force_close_stream(
+    initial_status: TaskStatus, task_id_str: str,
+) -> bool:
+    """SSE 连接建立时是否应直接推终止事件关闭连接
+
+    快照为 COMPLETED/FAILED 且事件总线已标记结束 → 任务确实结束,关闭。
+    快照为 COMPLETED/FAILED 但总线未标记结束 → resume/retry 已启动
+    (API 端点 reset_task_bus 清除了标记),只是后台线程尚未更新 DB 状态,
+    属时序竞态:若按快照关闭,前端刚重连的 SSE 会被误杀,后续
+    checklist_review 等事件虽进历史缓存却无人接收(需刷新页面才恢复)。
+    """
+    if initial_status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+        return False
+    return is_task_finished(task_id_str)
+
+
 @router.get("/tasks/{task_id}/stream")
 def stream_task_events(
     task_id: uuid.UUID,
@@ -2194,7 +2249,9 @@ def stream_task_events(
             yield _format_sse(connected_event)
 
             # 若任务已结束,直接推一个终止事件然后关闭
-            if initial_status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+            # (竞态防御见 _should_force_close_stream:resume/retry 已启动时
+            # 不按旧快照关闭,走正常订阅分支,历史缓存会补播已错过的事件)
+            if _should_force_close_stream(initial_status, task_id_str):
                 done_event = {
                     "type": "done" if initial_status == TaskStatus.COMPLETED else "error",
                     "task_id": task_id_str,
