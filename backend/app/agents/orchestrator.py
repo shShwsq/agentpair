@@ -429,6 +429,14 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 )
                 break
 
+            # 评估降级(流式调用失败重试仍失败):不再追问,以当前进度收尾结束,
+            # 避免每轮都直连 react_agent 造成重复执行
+            if ua_result.get("degraded"):
+                logger.warning(
+                    f"[task={task.id}] 第 {round_idx} 轮 user_agent 评估降级,结束协作循环"
+                )
+                break
+
             followup = ua_result.get("followup_query", "")
         else:
             logger.warning(f"[task={task.id}] 达到最大轮次 {max_rounds}")
@@ -476,15 +484,17 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
 
     except Exception as e:
         logger.exception(f"[task={task.id}] 双智能体协作失败")
+        # 错误详情增强:消息为空时补异常类型名,避免 UI 显示"未知错误"
+        err_detail = _err_detail(e)
         task.status = TaskStatus.FAILED
-        task.error_message = str(e)[:1000]
+        task.error_message = err_detail[:1000]
         task.current_stage = "执行失败"
         db.commit()
         _publish_status(task)
         _add_conversation(
             db, task, round_idx=0,
             role="user_agent", type="error",
-            content=f"执行失败: {e}",
+            content=f"执行失败: {err_detail}",
         )
         # 失败也尽量捕获:工作区 diff + 仓库树快照(失败兜底;沙箱通常仍存活,
         # 会话已死则自然返回 None,不影响失败处理)
@@ -550,11 +560,11 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             logger.warning(f"[task={task.id}] 标记任务完成失败: {cleanup_err}")
         # 通知事件总线:任务结束
         # done 事件已在 try 块中提前推送(在归纳记忆/git diff 之前)
-        # 此处仅兜底推送 error 事件(异常路径)
+        # 此处仅兑底推送 error 事件(异常路径)
         if task.status != TaskStatus.COMPLETED:
             publish(task.id, "error", {
                 "status": "failed",
-                "error_message": task.error_message or "未知错误",
+                "error_message": task.error_message or "未知错误(无异常详情,请查看服务日志)",
             })
         finish_task(task.id)
 
@@ -1317,11 +1327,15 @@ def resume_audit_with_message(
         )
         perf_log(task.id, "ua_eval", time.perf_counter() - _t0, round_idx=start_round_idx, phase="analyze_message")
 
+        # 流式调用降级标记(user_agent 重试仍失败时返回 degraded=true):
+        # 跳过清单确认环节,直接把用户输入内容交给 react_agent 执行
+        degraded = bool(ua_result.get("degraded"))
+
         # ---------- 追问清单更新:user_agent 输出更新后 checklist,再次向用户确认 ----------
         # 复用第 0 轮的确认机制(set_pending_checklist → checklist_review 事件 →
         # 阻塞等待)。确认后的清单覆写 task.checklist,后续 resume 循环评估按新清单。
         # 在 _record_user_agent 之前处理,确保落库的评估反映最终 done 状态。
-        if not retry:
+        if not degraded and not retry:
             updated_checklist = ua_result.get("checklist")
             if isinstance(updated_checklist, list):
                 # 过滤畸形条目(至少需有 id)
@@ -1365,7 +1379,12 @@ def resume_audit_with_message(
             return
 
         # 启动协作循环:react_agent 执行 + user_agent 评估
-        followup = ua_result.get("followup_query", user_message)
+        # 降级时直接把用户输入内容交给 react_agent(不经过 user_agent 生成的指令,
+        # 它已不可用;react_agent 有历史上下文与 previous_plan 可续接)
+        followup = (
+            user_message if degraded
+            else ua_result.get("followup_query", user_message)
+        )
         for round_idx in range(start_round_idx + 1, max_rounds + 1):
             # 暂停检查点:每轮开始前
             wait_if_paused(task.id)
@@ -1413,6 +1432,14 @@ def resume_audit_with_message(
                 _persist_structured_results(db, task, round_idx, ua_result)
                 break
 
+            # 评估降级(流式调用失败重试仍失败):不再追问,以当前进度收尾结束,
+            # 避免每轮都直连 react_agent 造成重复执行
+            if ua_result.get("degraded"):
+                logger.warning(
+                    f"[task={task.id}] 第 {round_idx} 轮 user_agent 评估降级,结束协作循环"
+                )
+                break
+
             followup = ua_result.get("followup_query", "")
         else:
             logger.warning(
@@ -1424,15 +1451,17 @@ def resume_audit_with_message(
     except Exception as e:
         err_stage = "重试执行失败" if retry else "重启执行失败"
         logger.exception(f"[task={task.id}] {err_stage}")
+        # 错误详情增强:消息为空时补异常类型名,避免 UI 显示"未知错误"
+        err_detail = _err_detail(e)
         task.status = TaskStatus.FAILED
-        task.error_message = str(e)[:1000]
+        task.error_message = err_detail[:1000]
         task.current_stage = err_stage
         db.commit()
         _publish_status(task)
         _add_conversation(
             db, task, round_idx=0,
             role="user_agent", type="error",
-            content=f"{err_stage}: {e}",
+            content=f"{err_stage}: {err_detail}",
         )
         # 失败也尽量捕获:工作区 diff + 仓库树快照(失败兜底;沙箱通常仍存活,
         # 会话已死则自然返回 None,不影响失败处理)
@@ -1467,11 +1496,11 @@ def resume_audit_with_message(
             logger.warning(f"[task={task.id}] 标记任务完成失败: {cleanup_err}")
         # 推送终止事件
         # done 事件已在 _finish_resume 中提前推送(在归纳记忆/git diff 之前)
-        # 此处仅兜底推送 error 事件(异常路径)
+        # 此处仅兑底推送 error 事件(异常路径)
         if task.status != TaskStatus.COMPLETED:
             publish(task.id, "error", {
                 "status": "failed",
-                "error_message": task.error_message or "未知错误",
+                "error_message": task.error_message or "未知错误(无异常详情,请查看服务日志)",
             })
         finish_task(task.id)
 
@@ -1501,7 +1530,8 @@ def retry_failed_task(task: Task, db: Session) -> None:
     """
     task_id_str = str(task.id)
     # 先捕获失败原因(后续会清 error_message),拼进续跑消息供 user_agent 参考
-    last_error = task.error_message or "未知错误"
+    # (error_message 已由失败路径增强为非空,这里仅兜底旧数据)
+    last_error = task.error_message or "未知错误(无异常详情)"
     perf_log(task.id, "retry_start", last_error_chars=len(last_error))
 
     has_progress = (
@@ -1546,6 +1576,12 @@ def retry_failed_task(task: Task, db: Session) -> None:
         "请基于已有进度继续完成原任务,不要重做已完成的部分。"
     )
     resume_audit_with_message(task, db, retry_message, retry=True)
+
+
+def _err_detail(e: Exception) -> str:
+    """提取人类可读的错误详情:异常消息为空时补异常类型名,杜绝"未知错误"字面"""
+    text = str(e)
+    return text if text else f"{type(e).__name__}(无错误详情)"
 
 
 def _finish_resume(

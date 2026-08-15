@@ -479,13 +479,31 @@ def run_user_agent(
     tools = [_VERIFY_TOOL_DEFINITION] if verify_enabled else None
 
     # LLM 调用循环:处理 verify 工具调用(验证结果回灌后再调 LLM 输出 JSON 评估)
+    # 流式调用失败降级:首次失败重试一次;重试仍失败返回降级结果
+    # (orchestrator 据此直接把用户输入内容交给 react_agent 执行,不杀死任务)
     content = ""
     verify_count = 0
     reasoning_parts: list[str] = []  # 各次流式调用的真实思考链(含 verify 循环)
+    degraded_error: Exception | None = None
     while True:
-        content, tool_calls, reasoning_chunk = _stream_user_agent_llm(
-            client, messages, task_id=task_id, round_idx=round_idx, tools=tools
-        )
+        try:
+            content, tool_calls, reasoning_chunk = _stream_user_agent_llm(
+                client, messages, task_id=task_id, round_idx=round_idx, tools=tools
+            )
+        except Exception as e:
+            logger.warning(
+                f"[task={task_id}] user_agent 流式调用失败(第 1 次): {e},将重试一次"
+            )
+            try:
+                content, tool_calls, reasoning_chunk = _stream_user_agent_llm(
+                    client, messages, task_id=task_id, round_idx=round_idx, tools=tools
+                )
+            except Exception as e2:
+                degraded_error = e2
+                logger.exception(
+                    f"[task={task_id}] user_agent 流式调用重试仍失败,降级直连 react_agent"
+                )
+                break
         if reasoning_chunk:
             reasoning_parts.append(reasoning_chunk)
 
@@ -552,6 +570,30 @@ def run_user_agent(
             })
 
         # 循环回去:LLM 看到验证结果后,要么再调 verify,要么输出 JSON 评估
+
+    # 流式调用降级:重试仍失败时返回降级结果(不抛异常杀死任务)。
+    # orchestrator 检测到 degraded=true 后,首次分析跳过清单确认、直接把用户
+    # 输入内容交给 react_agent 执行;协作轮评估降级则直接以当前进度收尾结束。
+    if degraded_error is not None:
+        degrade_reason = str(degraded_error) or type(degraded_error).__name__
+        logger.info(
+            f"[task={task_id}] user_agent 流式调用失败已降级"
+            f"(round_idx={round_idx}): {degrade_reason}"
+        )
+        return {
+            "covered": [],
+            "missing": [],
+            "reasoning": (
+                f"user_agent 流式调用失败(重试仍失败),已降级:\n{degrade_reason}\n\n"
+                f"[降级说明] 本轮跳过 user_agent 评估,直接把用户输入内容交给 "
+                f"react_agent 执行。"
+            ),
+            "followup_query": user_intent,
+            "done": False,
+            "ask_user": False,
+            "degraded": True,
+            "degrade_reason": degrade_reason,
+        }
 
     # 解析 JSON(LLM 可能输出带 ```json ``` 包裹的)
     try:
