@@ -134,6 +134,11 @@ CHECKPOINT_SYSTEM_PROMPT = """你是 user_agent(用户代理智能体),正在实
 - 不确定是否该打断时,选择不打断(让 react_agent 继续)
 - **仅观察模式**(用户消息中注明时):照常判断方向,但 interrupt 必须为 false;
   若观察到跑偏,在 reason 中写清偏离了什么、当前在做什么(只记录不干预)
+- 若提供了「已确认的覆盖度清单(checklist)」:
+  - 用它理解用户意图的完整边界,识别 react_agent 长时间只围绕个别维度、
+    明显遗漏清单中其他关键维度的情况
+  - 检查点不做 covered/missing 覆盖度评估(那是 round 边界完整评估的职责);
+    不要因为某维度暂时还没触及就打断,只有方向性明显偏离清单范围时才考虑
 - 若提供了「之前的评估记录」:
   - 避免重复发出相同/相近的打断指令(历史已打断过的方向不再重复)
   - 核查上次打断指令是否已被执行(从当前快照判断),未执行时可换更明确的表述再次提醒
@@ -171,6 +176,37 @@ CHECKPOINT_SYSTEM_PROMPT = """你是 user_agent(用户代理智能体),正在实
   (react_agent 不知道评估者的存在),也不要复述评估过程,直接给出指令
 - summary: 本次评估的一句话摘要(≤50字,供下次评估参考;打断时写明已发出的指令)
 """
+
+
+# ============================================================
+# 覆盖度清单注入(帮助检查点评估理解用户意图的完整边界)
+# ============================================================
+
+# 检查点评估注入 checklist 的总字符数上限(轻量评估,收紧于历史记录的 1500)
+MAX_CHECKLIST_CHARS = 1500
+
+
+def _build_checklist_section(checklist: list[dict[str, Any]] | None) -> str:
+    """把已确认的 checklist 格式化成检查点评估的注入段落;无清单返回空串
+
+    与 user_agent.py 完整评估的 _format_checklist_for_prompt 风格对齐,
+    但去掉 description(检查点只需维度边界,不需细节),控制注入体积。
+    """
+    if not checklist:
+        return ""
+    lines = ["已确认的覆盖度清单(checklist,用户已确认;对照它理解用户意图的完整边界):"]
+    for cat in checklist:
+        name = cat.get("name") or cat.get("id") or "?"
+        items = cat.get("checklist") or []
+        if items:
+            lines.append(f"- {name}:{'; '.join(str(i) for i in items)}")
+        else:
+            lines.append(f"- {name}")
+    while lines and sum(len(x) for x in lines) > MAX_CHECKLIST_CHARS:
+        lines.pop(-1)
+    if len(lines) <= 1:
+        return ""
+    return "\n".join(lines) + "\n\n"
 
 
 # ============================================================
@@ -486,6 +522,14 @@ def run_user_agent_checkpoint(
     else:
         plan_text = "(无 plan)"
 
+    # 覆盖度清单:让检查点评估理解用户意图的完整边界(识别维度级方向遗漏);
+    # 无清单(如第 0 轮尚未确认)时该段为空,不影响评估
+    try:
+        checklist_section = _build_checklist_section(getattr(task, "checklist", None))
+    except Exception as e:
+        logger.warning(f"[task={task.id}] 构造检查点 checklist 段落失败(跳过注入): {e}")
+        checklist_section = ""
+
     # 本轮历史评估记录:注入上下文,避免重复打断、核查上次指令是否执行
     try:
         history_section = _build_history_section(
@@ -514,6 +558,7 @@ def run_user_agent_checkpoint(
 
     user_msg = (
         f"用户原始意图:{task.user_input[:500]}\n\n"
+        f"{checklist_section}"
         f"当前协作轮次:第 {round_idx} 轮,第 {iteration} 次迭代\n\n"
         f"{observe_note}"
         f"{history_section}"

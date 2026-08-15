@@ -921,3 +921,71 @@ def test_run_user_agent_section_failure_degrades_gracefully():
 
     assert result["done"] is False
     assert "检查点观察" not in captured["messages"][1]["content"]
+
+
+# ============================================================
+# 检查点评估注入 checklist(理解用户意图的完整边界)
+# ============================================================
+
+_SAMPLE_CHECKLIST = [
+    {"id": "auth", "name": "认证与授权", "description": "登录与会话",
+     "checklist": ["登录绕过", "会话固定"]},
+    {"id": "injection", "name": "注入类漏洞", "description": "",
+     "checklist": ["SQL 注入", "命令注入"]},
+    {"id": "config", "name": "配置安全", "description": "", "checklist": []},
+]
+
+
+def test_build_checklist_section_empty_when_no_checklist():
+    """无 checklist(None/空列表) → 返回空串(不注入段落)。"""
+    from app.agent_checkpoint import _build_checklist_section
+
+    assert _build_checklist_section(None) == ""
+    assert _build_checklist_section([]) == ""
+
+
+def test_build_checklist_section_formats_dimensions():
+    """维度名+子项格式化进段落;无子项的维度只有名称;不含 description。"""
+    from app.agent_checkpoint import _build_checklist_section
+
+    section = _build_checklist_section(_SAMPLE_CHECKLIST)
+    assert section.startswith("已确认的覆盖度清单")
+    assert "认证与授权:登录绕过; 会话固定" in section
+    assert "注入类漏洞:SQL 注入; 命令注入" in section
+    assert "- 配置安全" in section
+    assert "登录与会话" not in section  # description 不注入
+
+
+def test_build_checklist_section_truncates_over_limit():
+    """总长超上限时从末尾丢弃维度,保留标题 + 部分维度。"""
+    from app.agent_checkpoint import MAX_CHECKLIST_CHARS, _build_checklist_section
+
+    big = [
+        {"id": f"d{i}", "name": f"维度{i}", "checklist": [f"检查项{'x' * 80}_{j}" for j in range(3)]}
+        for i in range(30)
+    ]
+    section = _build_checklist_section(big)
+    assert section
+    assert len(section) <= MAX_CHECKLIST_CHARS + 2  # +\n\n 尾缀
+    assert "维度0" in section
+    assert "维度29" not in section
+
+
+def test_checkpoint_user_msg_contains_checklist(fake_task):
+    """task.checklist 存在时,检查点评估 user 消息包含清单段落(位于意图之后)。"""
+    fake_task.checklist = _SAMPLE_CHECKLIST
+    llm_output = '{"interrupt": false, "reason": "ok", "query": null, "summary": "s"}'
+    _, messages, _ = _run_checkpoint_with_llm_output(fake_task, llm_output, allow_interrupt=True)
+    user_msg = messages[1]["content"]
+    assert "已确认的覆盖度清单" in user_msg
+    assert "认证与授权:登录绕过; 会话固定" in user_msg
+    # 位置:在用户意图之后、轮次信息之前
+    assert user_msg.index("已确认的覆盖度清单") < user_msg.index("当前协作轮次")
+
+
+def test_checkpoint_user_msg_no_checklist_section_when_absent(fake_task):
+    """task.checklist 为 None(如第 0 轮尚未确认) → 不注入清单段落。"""
+    fake_task.checklist = None
+    llm_output = '{"interrupt": false, "reason": "ok", "query": null, "summary": "s"}'
+    _, messages, _ = _run_checkpoint_with_llm_output(fake_task, llm_output, allow_interrupt=True)
+    assert "已确认的覆盖度清单" not in messages[1]["content"]
