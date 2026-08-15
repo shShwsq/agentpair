@@ -11,11 +11,22 @@ import type {
   WorkspaceFileResponse,
   WorkspaceFilesResponse,
   WorkspaceInfo,
+  WorkspaceTreeResponse,
 } from '@/types/workspace'
 
 /** 获取工作区信息(是否可浏览) */
 export function getWorkspaceInfo(taskId: string): Promise<WorkspaceInfo> {
   return client.get(`/tasks/${taskId}/workspace`).then((r) => r.data)
+}
+
+/** 获取整树快照(首屏一次拉取,替代逐级懒加载) */
+export function getWorkspaceTree(
+  taskId: string,
+  refresh: boolean = false,
+): Promise<WorkspaceTreeResponse> {
+  return client
+    .get(`/tasks/${taskId}/workspace/tree`, { params: { refresh } })
+    .then((r) => r.data)
 }
 
 /** 列出工作区某目录下的文件(单层,懒加载树) */

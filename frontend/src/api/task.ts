@@ -9,6 +9,7 @@ import type {
   AnswerRequest,
   AnswerResponse,
   ChecklistDimension,
+  PendingInterruptInfo,
   PendingQuestion,
   Scenario,
   SendMessageRequest,
@@ -25,6 +26,7 @@ import type {
   VerifyActionRequest,
   VerifyActionResponse,
   VerifyConfigUpdateRequest,
+  RuntimeConfigUpdateRequest,
 } from '@/types/task'
 
 /** 列出可用场景 */
@@ -184,6 +186,38 @@ export function resumeTask(taskId: string): Promise<{ status: string; message: s
   return client.post(`/tasks/${taskId}/resume`).then((r) => r.data)
 }
 
+/**
+ * 请求跳过预克隆
+ *
+ * 克隆轮询循环在下一个检查点终止当前 clone,orchestrator 降级为
+ * react_agent 自主克隆。幂等:重复请求无副作用;克隆已完成时
+ * 后端静默忽略(标志任务结束时兜底清理)。
+ */
+export function skipPreClone(taskId: string): Promise<{ message: string }> {
+  return client.post(`/tasks/${taskId}/skip_pre_clone`).then((r) => r.data)
+}
+
+/**
+ * 查询任务当前待生效的检查点打断(刷新页面后恢复 pending 卡片用)
+ *
+ * 仅 CLI 执行器有意义(内置执行器打断即时注入无取消窗口,后端返回 null)。
+ */
+export function getPendingInterrupt(taskId: string): Promise<PendingInterruptInfo | null> {
+  return client.get(`/tasks/${taskId}/pending_interrupt`).then((r) => r.data)
+}
+
+/**
+ * 取消待生效的检查点打断
+ *
+ * CLI 执行器的打断入队后要等当前 prompt 结束才注入,期间可取消。
+ * 若打断已被注入生效,后端返回 cancelled=false(竞态兜底,前端提示已生效)。
+ */
+export function cancelInterrupt(
+  taskId: string,
+): Promise<{ cancelled: boolean; message: string }> {
+  return client.post(`/tasks/${taskId}/cancel_interrupt`).then((r) => r.data)
+}
+
 // ============================================================
 // 任务标题修改 / 任务删除
 // ============================================================
@@ -228,6 +262,24 @@ export function sendTaskMessage(
   req: SendMessageRequest,
 ): Promise<SendMessageResponse> {
   return client.post(`/tasks/${taskId}/messages`, req).then((r) => r.data)
+}
+
+// ============================================================
+// 失败任务重试
+// ============================================================
+
+/**
+ * 重试失败的任务
+ *
+ * 后端按失败阶段自动分流:
+ * - 早期失败(无可续进度):从头重跑
+ * - 执行中途失败:断点续跑(保留已有进度,round_idx 自动续接)
+ *
+ * 仅 failed 状态接受,其他状态返回 accepted=false。
+ * 重试启动后前端需乐观置 running 并重连 SSE(同 completed 发消息后的处理)。
+ */
+export function retryTask(taskId: string): Promise<SendMessageResponse> {
+  return client.post(`/tasks/${taskId}/retry`).then((r) => r.data)
 }
 
 // ============================================================
@@ -297,4 +349,16 @@ export function updateTaskVerifierConfig(
   req: VerifyConfigUpdateRequest,
 ): Promise<TaskDetail> {
   return client.patch(`/tasks/${taskId}/verifier_config`, req).then((r) => r.data)
+}
+
+/**
+ * 更新任务运行时配置(模型 + 协作策略)
+ *
+ * running/paused 时修改在下一轮执行(completed 后追加消息 / failed 重试)生效。
+ */
+export function updateTaskRuntimeConfig(
+  taskId: string,
+  req: RuntimeConfigUpdateRequest,
+): Promise<TaskDetail> {
+  return client.patch(`/tasks/${taskId}/runtime_config`, req).then((r) => r.data)
 }

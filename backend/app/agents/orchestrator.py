@@ -34,6 +34,7 @@ from app.agents.user_agent import (
     SUPPLEMENT_QUESTION,
     run_user_agent,
 )
+from app.clone_skip import clear_skip_state
 from app.event_bus import finish_task, publish
 from app.llm.client import LLMClient
 from app.models.task import Conversation, Result, Task, TaskStatus
@@ -144,6 +145,11 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
     all_results_count = 0
     # 修复 4:跨轮 plan 状态(react_agent 之间传递,避免重新规划已完成项)
     current_plan: list[dict] = []
+    # 本轮是否正常完成(内存标志,不受外部状态修改影响):
+    # finally 兜底 error 推送必须用它判定,不能用 task.status ——
+    # 任务完成后用户发追问会把状态改回 RUNNING,若按状态判定,
+    # 已正常完成的任务会被误判为"未完成"而推送 error 并重新标记总线结束
+    normal_completed = False
 
     try:
         # ---------- 预处理:若用户选了仓库,主动 clone + list_files ----------
@@ -210,6 +216,12 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
 
             # 提前推送 done 事件:results 已落库,让前端立即拉取展示
             publish(task.id, "done", {"status": "completed"})
+            # 立即标记总线结束(不等 finally):任务已完成,后续 publish 静默丢弃。
+            # 提前标记可消除竞态 —— 若等 finally 再标记,用户在此期间发追问会触发
+            # reset_task_bus(清 _finished),随后 finally 的 finish_task 又把它重新置 True,
+            # resume 线程后续 publish 全被丢弃(checklist_review 弹窗丢失、任务卡死)。
+            finish_task(task.id)
+            normal_completed = True
 
             # 记忆归纳(失败兜底,不影响任务完成)
             try:
@@ -220,8 +232,13 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
 
             # 捕获工作区 diff(失败兜底,不影响任务完成)
             try:
-                from app.services.workspace_diff import save_workspace_diff_artifact
+                from app.services.workspace_diff import (
+                    save_repo_tree_artifact,
+                    save_workspace_diff_artifact,
+                )
                 save_workspace_diff_artifact(task, db, task_id_str)
+                # 树快照:更新为最终态(含新建文件),供不可用时兜底展示
+                save_repo_tree_artifact(task, db, task_id_str)
             except Exception as diff_err:
                 logger.warning(f"[task={task.id}] 捕获工作区 diff 失败(忽略): {diff_err}")
 
@@ -423,6 +440,14 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 )
                 break
 
+            # 评估降级(流式调用失败重试仍失败):不再追问,以当前进度收尾结束,
+            # 避免每轮都直连 react_agent 造成重复执行
+            if ua_result.get("degraded"):
+                logger.warning(
+                    f"[task={task.id}] 第 {round_idx} 轮 user_agent 评估降级,结束协作循环"
+                )
+                break
+
             followup = ua_result.get("followup_query", "")
         else:
             logger.warning(f"[task={task.id}] 达到最大轮次 {max_rounds}")
@@ -448,6 +473,10 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         # 提前推送 done 事件:results 已落库,让前端立即拉取展示
         # (归纳记忆和 git diff 是后台兜底任务,不阻塞前端结果清单展示)
         publish(task.id, "done", {"status": "completed"})
+        # 立即标记总线结束(不等 finally):与单 agent 分支同理,消除"用户追问触发的
+        # reset_task_bus 被 finally 的 finish_task 重新覆盖"竞态(详见 finally 注释)。
+        finish_task(task.id)
+        normal_completed = True
 
         # 任务成功完成:自动归纳写入长期记忆(失败兜底,不影响任务完成)
         try:
@@ -458,23 +487,41 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
 
         # 捕获工作区 diff(失败兜底,不影响任务完成;容器仍存活)
         try:
-            from app.services.workspace_diff import save_workspace_diff_artifact
+            from app.services.workspace_diff import (
+                save_repo_tree_artifact,
+                save_workspace_diff_artifact,
+            )
             save_workspace_diff_artifact(task, db, task_id_str)
+            # 树快照:更新为最终态(含新建文件),供不可用时兜底展示
+            save_repo_tree_artifact(task, db, task_id_str)
         except Exception as diff_err:
             logger.warning(f"[task={task.id}] 捕获工作区 diff 失败(忽略): {diff_err}")
 
     except Exception as e:
         logger.exception(f"[task={task.id}] 双智能体协作失败")
+        # 错误详情增强:消息为空时补异常类型名,避免 UI 显示"未知错误"
+        err_detail = _err_detail(e)
         task.status = TaskStatus.FAILED
-        task.error_message = str(e)[:1000]
+        task.error_message = err_detail[:1000]
         task.current_stage = "执行失败"
         db.commit()
         _publish_status(task)
         _add_conversation(
             db, task, round_idx=0,
             role="user_agent", type="error",
-            content=f"执行失败: {e}",
+            content=f"执行失败: {err_detail}",
         )
+        # 失败也尽量捕获:工作区 diff + 仓库树快照(失败兜底;沙箱通常仍存活,
+        # 会话已死则自然返回 None,不影响失败处理)
+        try:
+            from app.services.workspace_diff import (
+                save_repo_tree_artifact,
+                save_workspace_diff_artifact,
+            )
+            save_workspace_diff_artifact(task, db, task_id_str)
+            save_repo_tree_artifact(task, db, task_id_str)
+        except Exception as diff_err:
+            logger.warning(f"[task={task.id}] 失败时捕获工作区产物失败(忽略): {diff_err}")
     finally:
         # 阶段 8:清理可能残留的待回答问题状态
         try:
@@ -491,6 +538,11 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             clear_pause_state(task.id)
         except Exception as cleanup_err:
             logger.warning(f"[task={task.id}] 清理暂停状态失败: {cleanup_err}")
+        # 清理跳过预克隆标志(未消费时兜底清理,防残留影响后续任务)
+        try:
+            clear_skip_state(task.id)
+        except Exception as cleanup_err:
+            logger.warning(f"[task={task.id}] 清理跳过标志失败: {cleanup_err}")
         # 清理用户补充消息队列(防止任务结束时仍有 in-memory 残留)
         try:
             clear_user_messages(task.id)
@@ -522,14 +574,24 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
         except Exception as cleanup_err:
             logger.warning(f"[task={task.id}] 标记任务完成失败: {cleanup_err}")
         # 通知事件总线:任务结束
-        # done 事件已在 try 块中提前推送(在归纳记忆/git diff 之前)
-        # 此处仅兜底推送 error 事件(异常路径)
-        if task.status != TaskStatus.COMPLETED:
+        # done 事件已在 try 块中提前推送(在归纳记忆/git diff 之前),正常路径
+        # 也已同步调用 finish_task(提前标记总线结束,消除与 reset_task_bus 的竞态)。
+        # 此处仅兜底:异常路径(本轮未正常完成)推送 error 事件 + 标记总线结束。
+        # 注意:判定必须用本轮执行的内存标志 normal_completed,不能用 task.status ——
+        # 任务完成后用户发追问会把状态改回 RUNNING(API 端点同步落库),若按状态判定,
+        # 已正常完成的任务会被误判为"未完成"而推送 error(前端显示"未知错误"失败横幅),
+        # 并重新标记总线结束(resume 线程后续事件全被静默丢弃,任务卡死)。
+        if not normal_completed:
+            # [诊断] error 事件推送日志:前端 onError 的唯一事件源,全量记录
+            logger.warning(
+                f"[task={task.id}] finally 兜底推送 error 事件 "
+                f"(status={task.status.value}, error_message={task.error_message!r})"
+            )
             publish(task.id, "error", {
                 "status": "failed",
-                "error_message": task.error_message or "未知错误",
+                "error_message": task.error_message or "未知错误(无异常详情,请查看服务日志)",
             })
-        finish_task(task.id)
+            finish_task(task.id)
 
 
 # ============================================================
@@ -716,6 +778,10 @@ def _record_user_agent(
         full_eval += f"→ 请求用户澄清({len(ua_result.get('questions') or [])} 个问题)\n"
     if followup:
         full_eval += f"追问: {followup}\n"
+    # 追问清单更新(round_idx>0 时 user_agent 附带更新后 checklist):落库标记便于追溯
+    # (第 0 轮 checklist 是首次生成,另有确认机制,不在此标记)
+    if round_idx > 0 and isinstance(ua_result.get("checklist"), list) and ua_result["checklist"]:
+        full_eval += f"→ 更新覆盖度清单({len(ua_result['checklist'])} 个维度)\n"
     if done:
         full_eval += "→ 宣布完成\n"
 
@@ -912,7 +978,23 @@ def _prepare_repo_context(
     try:
         clone_result = sandbox_tools.clone_repo_with_fallback(
             repo_url, branch=branch, task_id=task_id_str, git_tokens=git_tokens or {},
+            cancellable=True,
         )
+    except sandbox_tools.CloneSkippedError:
+        # 用户主动跳过预克隆:与失败降级同路径,改由 react_agent 自主克隆
+        # (LLM 看报错重试/自适应,历史观察成功率更高)
+        logger.info(
+            f"[task={task.id}] 用户跳过预克隆,降级为 react_agent 自主克隆"
+        )
+        task.current_stage = "已跳过预克隆,改由执行阶段自主克隆..."
+        db.commit()
+        _publish_status(task)
+        _add_conversation(
+            db, task, round_idx=0,
+            role="system", type="warning",
+            content="用户已跳过预克隆,改由执行阶段自主克隆(可能多耗时几十秒)",
+        )
+        return None, ""
     except Exception as e:
         # 降级而非失败:预 clone 一次定生死太脆(网络抖动/分支不符/私有仓库
         # token 问题都会直接挂任务),改为回到 react_agent 自主 clone 路径,
@@ -950,6 +1032,15 @@ def _prepare_repo_context(
         # list_files 失败不应让整个任务失败(clone 已成功),降级为只给 repo_path
         logger.warning(f"[task={task.id}] list_files 失败,降级为仅 repo_path: {e}")
         files_result = {"entries": [], "total": 0, "truncated": False}
+
+    # 仓库树快照保底:clone 成功、沙箱健康时立即捕获一份落库,
+    # 后续任务失败/零改动/git 异常导致 diff 缺失时,侧栏仍能兜底展示文件清单
+    # (任务结束段会再更新为最终态;此处失败不影响主流程)
+    try:
+        from app.services.workspace_diff import save_repo_tree_artifact
+        save_repo_tree_artifact(task, db, task_id_str)
+    except Exception as tree_err:
+        logger.warning(f"[task={task.id}] 捕获仓库树快照失败(忽略): {tree_err}")
 
     # 仅当仓库非空才注入上下文:根目录无条目(空仓库/list_files 降级)时,
     # 告诉 agent "已 clone、直接开始审计"会误导,降级为仅 repo_path
@@ -1053,20 +1144,77 @@ def _format_repo_context(
     return "\n".join(lines)
 
 
+def _restore_workspace_if_needed(
+    task: Task, db: Session, task_id_str: str, git_tokens: dict | None = None,
+) -> bool:
+    """沙箱会话已被回收且任务配了仓库 → 重新克隆恢复工作区
+
+    判断与 retry_failed_task 一致:无 repo_url 或会话存活时跳过。
+    用户追问(resume)与失败重试共用本助手,消除两条链路在
+    工作区恢复上的不对称——否则追问轮只能新建空沙箱,
+    react_agent 拿不到 repo_path 提示,行为不确定。
+
+    _prepare_repo_context 内部已写记忆文件,且 clone 失败时降级
+    不抛异常(续跑时 react_agent 可自主克隆),故返回 True 后
+    调用方无需再写记忆文件。返回是否执行了恢复动作。
+    """
+    repo_url = (task.params or {}).get("repo_url")
+    if not repo_url or sandbox_tools.get_workspace_info(task_id_str) is not None:
+        return False
+    logger.info(
+        f"[task={task.id}] 沙箱会话已回收,重新克隆仓库恢复工作区"
+    )
+    task.current_stage = "工作区已被回收,正在重新克隆恢复..."
+    db.commit()
+    _publish_status(task)
+    _prepare_repo_context(task, db, task_id_str, git_tokens)
+    return True
+
+
 # ============================================================
 # 完成后重启:用户在 task 完成后追加消息,触发新一轮协作
 # ============================================================
 
 
-def resume_audit_with_message(task: Task, db: Session, user_message: str) -> None:
+def _checklist_changed(
+    old: list[dict] | None, new: list[dict],
+) -> bool:
+    """判断 user_agent 输出的 checklist 与现有清单是否有实质差异
+
+    逐维度比较 id + name + description + 子项,任一不同即视为变更。
+    用于追问清单更新时避免 user_agent 输出与原清单相同的 checklist
+    触发无意义的确认弹窗。
+    """
+    def _norm(cl: list[dict] | None) -> list[tuple]:
+        return [
+            (
+                str(d.get("id", "")),
+                str(d.get("name", "")),
+                str(d.get("description", "")),
+                [str(x) for x in (d.get("checklist") or [])],
+            )
+            for d in (cl or [])
+            if isinstance(d, dict)
+        ]
+    return _norm(old) != _norm(new)
+
+
+def resume_audit_with_message(
+    task: Task, db: Session, user_message: str, retry: bool = False,
+) -> None:
     """用户在任务完成后追加消息,重启协作循环
 
+    retry=True 时表示失败任务重试(断点续跑),消息措辞与阶段文案
+    改为重试语境,其余流程一致。
+
     流程:
-    1. task.status: COMPLETED → RUNNING
+    1. task.status: COMPLETED/FAILED → RUNNING
     2. 加载历史上下文(react_summaries / task_checklist / LLM 配置)
-    3. 起始 round_idx = max(Conversation.round_idx) + 1
+    3. 起始 round_idx:用户追加消息时复用消息所在轮(消息与首轮 react 执行
+       同轮,不隔轮);失败重试时从 max+1 续接新轮
     4. 先调 user_agent 分析用户消息(对照已有 checklist,输出 followup_query)
-    5. 启动协作循环(react_agent + user_agent 评估),最多 MAX_RESUME_ROUNDS 轮
+    5. 启动协作循环(react_agent + user_agent 评估),最多 MAX_RESUME_ROUNDS 轮;
+       分析评估与首轮 react 执行共享起始 round_idx,不单独占轮
     6. done 或达到上限时结束,task.status → COMPLETED
 
     用户消息本身已由 API 端点落库为 Conversation(role=user, type=message),
@@ -1079,7 +1227,9 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
     task_id_str = str(task.id)
 
     task.status = TaskStatus.RUNNING
-    task.current_stage = "用户追加消息,重启执行"
+    task.current_stage = (
+        "重试失败任务,恢复执行" if retry else "用户追加消息,重启执行"
+    )
     task.error_message = None  # 清除之前的错误信息(若有)
     db.commit()
     _publish_status(task)
@@ -1116,8 +1266,11 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
     # 重启时不复用旧 plan(让 LLM 根据新消息重新规划)
     current_plan: list[dict] = []
 
-    # 起始 round = max(Conversation.round_idx) + 1,最多再跑 MAX_RESUME_ROUNDS 轮
-    start_round_idx = _get_next_round_idx(db, task.id)
+    # 起始轮:用户追加消息时复用消息所在轮(消息已由 API 端点落库为最新轮,
+    # 分析评估与首轮 react 执行与该消息同轮——用户消息 → 分析 → 执行 → 产出评估
+    # 构成一轮完整协作闭环,不隔轮);失败重试时无新消息,从 max+1 续接新轮。
+    # 循环最多跑 MAX_RESUME_ROUNDS 轮 react 执行。
+    start_round_idx = _get_next_round_idx(db, task.id, retry=retry)
     max_rounds = start_round_idx + MAX_RESUME_ROUNDS - 1
     # [perf] resume 锚点(用户追加消息后重启;与 user_message 锚点配对算总延迟)
     perf_log(
@@ -1126,16 +1279,31 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
         start_round=start_round_idx,
     )
 
-    # 重启路径不走 _prepare_repo_context,补写记忆文件(幂等:会话存活时覆盖同内容,
-    # 会话已被回收时重建文件,保证执行侧 read_file 能查到全量记忆)
+    # 会话已被回收且配了仓库 → 与重试链路一致,重新克隆恢复工作区
+    # (_prepare_repo_context 内部已写记忆文件);否则幂等补写记忆文件
+    # (会话存活时覆盖同内容,保证执行侧 read_file 能查到全量记忆)
+    # 重试链路进入本函数前已自行恢复过工作区,此处会话存活会自然跳过,不会双重 clone
     _t0 = time.perf_counter()
-    _write_memory_files_for_task(
-        task, db, task_id_str, (task.params or {}).get("repo_url"),
+    repo_url = (task.params or {}).get("repo_url")
+    restored = _restore_workspace_if_needed(task, db, task_id_str, git_tokens)
+    if not restored:
+        _write_memory_files_for_task(task, db, task_id_str, repo_url)
+    perf_log(
+        task.id,
+        "restore_workspace" if restored else "write_memory_files",
+        time.perf_counter() - _t0,
     )
-    perf_log(task.id, "write_memory_files", time.perf_counter() - _t0)
 
     # 把用户消息拼到 user_intent 后面,让 user_agent 把它视为新的检查方向
-    effective_intent = task.user_input + f"\n\n[用户追加消息]\n{user_message}"
+    # 重试场景用专门标记,避免 user_agent 把续跑当成用户新增需求
+    msg_label = "[重试续跑]" if retry else "[用户追加消息]"
+    effective_intent = task.user_input + f"\n\n{msg_label}\n{user_message}"
+
+    # 本轮是否正常完成(内存标志):与 run_dual_agent_audit 同理,
+    # finally 兑底 error 推送必须用它判定,不能用 task.status ——
+    # 本轮完成后用户可能又发新追问(状态被改回 RUNNING),旧线程 finally
+    # 按状态判定会误推 error 并重新标记总线结束,导致新 resume 线程事件全丢。
+    normal_completed = False
 
     try:
         # ===== 单 agent 模式:user_agent 已禁用,跳过评估,直接跑 react_agent =====
@@ -1172,6 +1340,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
 
             ua_result = None  # 单 agent 模式无 user_agent 评估,_finish_resume 据此写简洁总结
             _finish_resume(task, db, react_summaries, ua_result)
+            normal_completed = True  # 正常完成:finally 不再兑底推 error(见 finally 注释)
             return  # finally 块仍会执行清理
 
         # 先调 user_agent 分析用户消息(round_idx = start_round_idx)
@@ -1190,19 +1359,73 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
             repo_url=(task.params or {}).get("repo_url"),
             task=task,
             agent_policy=agent_policy,
+            # 追问清单更新模式:仅用户追问启用(重试续跑不是新需求,不更新清单)
+            checklist_update_mode=not retry,
         )
         perf_log(task.id, "ua_eval", time.perf_counter() - _t0, round_idx=start_round_idx, phase="analyze_message")
+
+        # 流式调用降级标记(user_agent 重试仍失败时返回 degraded=true):
+        # 跳过清单确认环节,直接把用户输入内容交给 react_agent 执行
+        degraded = bool(ua_result.get("degraded"))
+
+        # ---------- 追问清单更新:user_agent 输出更新后 checklist,再次向用户确认 ----------
+        # 复用第 0 轮的确认机制(set_pending_checklist → checklist_review 事件 →
+        # 阻塞等待)。确认后的清单覆写 task.checklist,后续 resume 循环评估按新清单。
+        # 在 _record_user_agent 之前处理,确保落库的评估反映最终 done 状态。
+        if not degraded and not retry:
+            updated_checklist = ua_result.get("checklist")
+            if isinstance(updated_checklist, list):
+                # 过滤畸形条目(至少需有 id)
+                updated_checklist = [
+                    d for d in updated_checklist
+                    if isinstance(d, dict) and d.get("id")
+                ]
+            else:
+                updated_checklist = []
+            if updated_checklist and _checklist_changed(task.checklist, updated_checklist):
+                task.current_stage = "等待用户确认覆盖度清单更新"
+                db.commit()
+                _publish_status(task)
+
+                set_pending_checklist(task.id, updated_checklist)
+                publish(task.id, "checklist_review", {
+                    "checklist": updated_checklist,
+                    "reasoning": ua_result.get("reasoning", ""),
+                })
+
+                # 阻塞后台线程,直到用户提交编辑/直接采用(无限等待)
+                confirmed = wait_for_checklist_confirmation(task.id)
+                if confirmed:
+                    # 落库到 task.checklist,后续循环评估用新清单
+                    task.checklist = confirmed
+                    task_checklist = confirmed
+                    db.commit()
+                    logger.info(
+                        f"[task={task.id}] 追问清单更新已确认,{len(confirmed)} 个维度"
+                    )
+                    # 用户确认了新清单,react_agent 必须跑一轮执行追问需求,
+                    # 不允许直接结束(兜底:LLM 可能同时输出 done=true)
+                    ua_result["done"] = False
+
         _record_user_agent(db, task, start_round_idx, ua_result)
 
         # user_agent 认为用户消息无需新检查,直接结束
         if ua_result.get("done"):
             _persist_structured_results(db, task, start_round_idx, ua_result)
             _finish_resume(task, db, react_summaries, ua_result)
+            normal_completed = True  # 正常完成
             return
 
         # 启动协作循环:react_agent 执行 + user_agent 评估
-        followup = ua_result.get("followup_query", user_message)
-        for round_idx in range(start_round_idx + 1, max_rounds + 1):
+        # 降级时直接把用户输入内容交给 react_agent(不经过 user_agent 生成的指令,
+        # 它已不可用;react_agent 有历史上下文与 previous_plan 可续接)
+        # 首轮(round_idx == start_round_idx)与前面的分析评估共享轮号:
+        # 用户消息 → 分析评估 → react 执行 → 产出评估,一轮完整协作闭环
+        followup = (
+            user_message if degraded
+            else ua_result.get("followup_query", user_message)
+        )
+        for round_idx in range(start_round_idx, max_rounds + 1):
             # 暂停检查点:每轮开始前
             wait_if_paused(task.id)
 
@@ -1217,7 +1440,7 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
                 followup_query=followup,
                 client=react_client,
                 repo_context=None,  # 重启不传 repo_context(仓库已 clone,react_agent 自行从 sandbox 取)
-                previous_plan=current_plan if round_idx > start_round_idx + 1 else None,
+                previous_plan=current_plan if round_idx > start_round_idx else None,
                 agent_policy=agent_policy,
             )
             perf_log(task.id, "executor_run", time.perf_counter() - _t0, round_idx=round_idx, executor=executor.name)
@@ -1249,6 +1472,14 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
                 _persist_structured_results(db, task, round_idx, ua_result)
                 break
 
+            # 评估降级(流式调用失败重试仍失败):不再追问,以当前进度收尾结束,
+            # 避免每轮都直连 react_agent 造成重复执行
+            if ua_result.get("degraded"):
+                logger.warning(
+                    f"[task={task.id}] 第 {round_idx} 轮 user_agent 评估降级,结束协作循环"
+                )
+                break
+
             followup = ua_result.get("followup_query", "")
         else:
             logger.warning(
@@ -1256,25 +1487,41 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
             )
 
         _finish_resume(task, db, react_summaries, ua_result)
+        normal_completed = True  # 正常完成(循环结束或 done 分支跳出)
 
     except Exception as e:
-        logger.exception(f"[task={task.id}] 重启审计失败")
+        err_stage = "重试执行失败" if retry else "重启执行失败"
+        logger.exception(f"[task={task.id}] {err_stage}")
+        # 错误详情增强:消息为空时补异常类型名,避免 UI 显示"未知错误"
+        err_detail = _err_detail(e)
         task.status = TaskStatus.FAILED
-        task.error_message = str(e)[:1000]
-        task.current_stage = "重启执行失败"
+        task.error_message = err_detail[:1000]
+        task.current_stage = err_stage
         db.commit()
         _publish_status(task)
         _add_conversation(
             db, task, round_idx=0,
             role="user_agent", type="error",
-            content=f"重启执行失败: {e}",
+            content=f"{err_stage}: {err_detail}",
         )
+        # 失败也尽量捕获:工作区 diff + 仓库树快照(失败兜底;沙箱通常仍存活,
+        # 会话已死则自然返回 None,不影响失败处理)
+        try:
+            from app.services.workspace_diff import (
+                save_repo_tree_artifact,
+                save_workspace_diff_artifact,
+            )
+            save_workspace_diff_artifact(task, db, task_id_str)
+            save_repo_tree_artifact(task, db, task_id_str)
+        except Exception as diff_err:
+            logger.warning(f"[task={task.id}] 失败时捕获工作区产物失败(忽略): {diff_err}")
     finally:
         # 清理资源(与 run_dual_agent_audit 对齐)
         for cleanup_fn, name in [
             (clear_pending_question, "待回答问题"),
             (clear_pending_checklist, "待确认清单"),
             (clear_pause_state, "暂停状态"),
+            (clear_skip_state, "跳过预克隆标志"),
             (clear_user_messages, "用户消息队列"),
             (clear_pending_verify_action, "验证待授权状态"),
             (clear_interrupts, "中断队列"),
@@ -1289,14 +1536,102 @@ def resume_audit_with_message(task: Task, db: Session, user_message: str) -> Non
         except Exception as cleanup_err:
             logger.warning(f"[task={task.id}] 标记任务完成失败: {cleanup_err}")
         # 推送终止事件
-        # done 事件已在 _finish_resume 中提前推送(在归纳记忆/git diff 之前)
-        # 此处仅兜底推送 error 事件(异常路径)
-        if task.status != TaskStatus.COMPLETED:
+        # done 事件已在 _finish_resume 中提前推送(在归纳记忆/git diff 之前),正常路径
+        # 也已同步调用 finish_task(提前标记总线结束,消除与 reset_task_bus 的竞态)。
+        # 此处仅兑底:异常路径(本轮未正常完成)推送 error 事件 + 标记总线结束。
+        # 判定必须用内存标志 normal_completed,不能用 task.status ——
+        # 本轮完成后用户又发新追问会把状态改回 RUNNING,按状态判定会误推 error
+        # 并重新标记总线结束,导致新 resume 线程事件全被静默丢弃。
+        if not normal_completed:
+            # [诊断] error 事件推送日志:前端 onError 的唯一事件源,全量记录
+            logger.warning(
+                f"[task={task.id}] resume finally 兑底推送 error 事件 "
+                f"(status={task.status.value}, error_message={task.error_message!r})"
+            )
             publish(task.id, "error", {
                 "status": "failed",
-                "error_message": task.error_message or "未知错误",
+                "error_message": task.error_message or "未知错误(无异常详情,请查看服务日志)",
             })
-        finish_task(task.id)
+            finish_task(task.id)
+
+
+# ============================================================
+# 失败任务重试(断点续跑优先,无进度时从头重跑)
+# ============================================================
+
+
+def retry_failed_task(task: Task, db: Session) -> None:
+    """失败任务重试入口:断点续跑优先,无可续进度时从头重跑
+
+    判定依据:是否已有 user_agent / react_agent 的对话落库
+    - 无(预克隆/沙箱/LLM 配置等早期失败,执行未真正开始):
+      没有可续内容,直接重跑 run_dual_agent_audit
+    - 有(执行中途失败):复用 resume_audit_with_message 断点续跑,
+      以重试续跑消息驱动 user_agent 分析现状、接续未完成工作
+      (round_idx 由 _get_next_round_idx 自动续接,不产生重复轮次)
+
+    续跑前的沙箱探测:失败 finally 已 mark_task_completed,session
+    超 1 小时 TTL 被回收(或后端重启)后已 clone 的仓库丢失;若 session
+    不在且任务配了 repo_url,重新 clone 恢复工作区,避免续跑时执行器
+    找不到仓库。
+
+    注意:本函数由 API 端点在独立后台线程中调用(与 resume 一致),
+    重试时原后台线程已因异常退出,互斥无竞态。
+    """
+    task_id_str = str(task.id)
+    # 先捕获失败原因(后续会清 error_message),拼进续跑消息供 user_agent 参考
+    # (error_message 已由失败路径增强为非空,这里仅兜底旧数据)
+    last_error = task.error_message or "未知错误(无异常详情)"
+    perf_log(task.id, "retry_start", last_error_chars=len(last_error))
+
+    has_progress = (
+        db.query(Conversation.id)
+        .filter(
+            Conversation.task_id == task.id,
+            Conversation.role.in_(("react_agent", "user_agent")),
+        )
+        .first()
+        is not None
+    )
+
+    if not has_progress:
+        # 早期失败:无可续内容,从头重跑(状态流转/清理由其内部处理)
+        logger.info(f"[task={task.id}] 重试:无可续进度,从头重跑")
+        task.error_message = None
+        db.commit()
+        run_dual_agent_audit(task, db)
+        return
+
+    # 执行中途失败:沙箱会话已被回收时,重新 clone 恢复工作区
+    repo_url = (task.params or {}).get("repo_url")
+    if repo_url and sandbox_tools.get_workspace_info(task_id_str) is None:
+        logger.info(
+            f"[task={task.id}] 重试:沙箱会话已回收,重新克隆仓库恢复工作区"
+        )
+        task.status = TaskStatus.RUNNING
+        task.current_stage = "重试失败任务,正在恢复工作区..."
+        task.error_message = None
+        db.commit()
+        _publish_status(task)
+        git_tokens = _load_git_tokens(db, task.user_id)
+        set_current_git_tokens(git_tokens)
+        # clone 失败时 _prepare_repo_context 已降级不抛异常
+        # (续跑时 react_agent 可自主克隆,不阻塞重试)
+        _prepare_repo_context(task, db, task_id_str, git_tokens)
+
+    # 以重试续跑消息恢复执行(状态流转/记忆文件重建/轮次续接由 resume 链路处理)
+    retry_message = (
+        f"该任务上一次执行因错误中断: {last_error}\n"
+        "这是一次失败重试(断点续跑),不是用户的新需求: "
+        "请基于已有进度继续完成原任务,不要重做已完成的部分。"
+    )
+    resume_audit_with_message(task, db, retry_message, retry=True)
+
+
+def _err_detail(e: Exception) -> str:
+    """提取人类可读的错误详情:异常消息为空时补异常类型名,杜绝"未知错误"字面"""
+    text = str(e)
+    return text if text else f"{type(e).__name__}(无错误详情)"
 
 
 def _finish_resume(
@@ -1321,10 +1656,14 @@ def _finish_resume(
         )
 
     # 提前推送 done 事件:results 已落库,让前端立即拉取展示
-    # (归纳记忆和 git diff 是后台兜底任务,不阻塞前端结果清单展示)
+    # (归纳记忆和 git diff 是后台兑底任务,不阻塞前端结果清单展示)
     publish(task.id, "done", {"status": "completed"})
-
-    # 重启完成:自动归纳写入长期记忆(失败兜底,不影响;client 用默认,归纳是简单任务)
+    # 立即标记总线结束(不等 resume 线程 finally):与 run_dual_agent_audit 同理,
+    # 消除"用户再发新追问触发的 reset_task_bus 被旧线程 finally 的 finish_task 重新覆盖"
+    # 竞态 —— 否则新 resume 线程 publish 全被丢弃(checklist_review 弹窗丢失、任务卡死)。
+    finish_task(task.id)
+    
+    # 重启完成:自动归纳写入长期记忆(失败兑底,不影响;client 用默认,归纳是简单任务)
     try:
         from app.services.memory_summarize import summarize_and_save_memory
         summarize_and_save_memory(task, db, None)
@@ -1333,8 +1672,13 @@ def _finish_resume(
 
     # 捕获工作区 diff(失败兜底,不影响任务完成;容器仍存活)
     try:
-        from app.services.workspace_diff import save_workspace_diff_artifact
+        from app.services.workspace_diff import (
+            save_repo_tree_artifact,
+            save_workspace_diff_artifact,
+        )
         save_workspace_diff_artifact(task, db, str(task.id))
+        # 树快照:更新为最终态(含新建文件),供不可用时兜底展示
+        save_repo_tree_artifact(task, db, str(task.id))
     except Exception as diff_err:
         logger.warning(f"[task={task.id}] 捕获工作区 diff 失败(忽略): {diff_err}")
 
@@ -1365,8 +1709,13 @@ def _load_react_summaries(db: Session, task_id) -> list[dict]:
     ]
 
 
-def _get_next_round_idx(db: Session, task_id) -> int:
-    """获取下一个 round_idx = max(Conversation.round_idx) + 1
+def _get_next_round_idx(db: Session, task_id, retry: bool = False) -> int:
+    """resume 起始轮计算:
+
+    - 用户追加消息(retry=False):消息已由 API 端点落库到最新轮
+      (round = max(Conversation.round_idx)),此处复用该轮号——
+      分析评估与首轮 react 执行与用户消息同轮,消息位于轮首,不隔轮
+    - 失败重试(retry=True):无新用户消息落库,从 max+1 续接新轮
 
     无对话记录时返回 1(理论上不会发生,因为已完成的任务一定有对话)。
     """
@@ -1376,7 +1725,9 @@ def _get_next_round_idx(db: Session, task_id) -> int:
         .order_by(Conversation.round_idx.desc())
         .first()
     )
-    return (latest.round_idx + 1) if latest else 1
+    if not latest:
+        return 1
+    return latest.round_idx if not retry else latest.round_idx + 1
 
 
 def _persist_structured_results(

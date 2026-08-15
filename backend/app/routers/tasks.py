@@ -8,29 +8,53 @@
 - POST /tasks  提交任务,立即返回 task_id,后台线程执行
 - GET /tasks/{task_id}  查询任务状态与结果
 - GET /tasks/{task_id}/stream  SSE 实时事件流(对话/状态/结果/完成)
+- POST /tasks/{task_id}/retry  重试失败任务(断点续跑优先)
 - GET /scenarios  列出可用场景
 """
 import ast
 import html
 import json
 import logging
+import os
 import threading
 import uuid
 from collections.abc import Generator
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.agents.orchestrator import resume_audit_with_message, run_dual_agent_audit
+from app.agent_checkpoint import INTERRUPT_CANCEL_MARKER, MAX_MAX_ROUNDS
+from app.agent_interrupt import (
+    cancel_pending_interrupt,
+    decrement_interrupt_count,
+    peek_pending_interrupt,
+)
+from app.agents.orchestrator import (
+    _err_detail,
+    resume_audit_with_message,
+    retry_failed_task,
+    run_dual_agent_audit,
+)
 from app.database import SessionLocal, get_db
 from app.deps import get_optional_user, get_optional_user_sse
-from app.event_bus import publish, reset_task_bus, subscribe, unsubscribe
+from app.event_bus import (
+    finish_task,
+    is_task_finished,
+    publish,
+    reset_task_bus,
+    subscribe,
+    unsubscribe,
+)
 from app.models.task import Conversation, Result, Task, TaskStatus
 from app.models.task_artifact import TaskArtifact
+from app.clone_skip import clear_skip_state, request_skip_clone
 from app.models.user import User
+from app.models.user_llm_config import UserLLMConfig
 from app.pause_controller import (
     clear_pause_state,
     pause_task,
@@ -57,6 +81,7 @@ from app.schemas.task import (
     VerifyActionRequest,
     VerifyActionResponse,
     VerifyConfigUpdateRequest,
+    RuntimeConfigUpdateRequest,
 )
 from app.schemas.task_artifact import TaskArtifactOut
 from app.tools import sandbox_tools
@@ -669,6 +694,78 @@ def update_task_verifier_config(
     return task
 
 
+@router.patch("/tasks/{task_id}/runtime_config", response_model=TaskResponse)
+def update_task_runtime_config(
+    task_id: uuid.UUID,
+    req: RuntimeConfigUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> Task:
+    """更新任务运行时配置(模型 + 协作策略)
+
+    生效时机:running/paused 的当前执行线程使用启动时加载的配置,
+    修改在下一轮执行(completed 后追加消息重启 / failed 重试)时生效。
+
+    - 模型 id 需存在于任务归属用户的 LLM 配置列表,否则 400
+    - react_llm_config_id 仅 executor=builtin 时可改(CLI 执行器模型自管)
+    - agent_policy 增量合并到 task.params._agent_policy(resolve_agent_policy 识别)
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    def _validate_config_id(config_id: str, label: str) -> None:
+        """校验模型配置 id 属于任务归属用户(匿名任务不允许指定模型)"""
+        if task.user_id is None:
+            raise HTTPException(status_code=400, detail="匿名任务不支持指定模型配置")
+        cfg = (
+            db.query(UserLLMConfig)
+            .filter(UserLLMConfig.user_id == task.user_id)
+            .first()
+        )
+        ids = {c.get("id") for c in (cfg.llm_configs if cfg else [])}
+        if config_id not in ids:
+            raise HTTPException(status_code=400, detail=f"{label}不存在或不属于当前用户")
+
+    if req.llm_config_id is not None:
+        if req.llm_config_id:
+            _validate_config_id(req.llm_config_id, "user_agent 模型配置")
+        task.llm_config_id = req.llm_config_id or None
+
+    if req.react_llm_config_id is not None:
+        if task.executor != "builtin":
+            raise HTTPException(
+                status_code=400,
+                detail="当前任务使用外部 CLI 执行器,react 模型由 CLI 自管,不可修改",
+            )
+        if req.react_llm_config_id:
+            _validate_config_id(req.react_llm_config_id, "react_agent 模型配置")
+        task.react_llm_config_id = req.react_llm_config_id or None
+
+    if req.agent_policy is not None:
+        updates = req.agent_policy.model_dump(exclude_none=True)
+        if updates:
+            # 钳制 max_rounds 到 [1, MAX_MAX_ROUNDS](与用户级保存逻辑一致)
+            if "max_rounds" in updates:
+                updates["max_rounds"] = max(1, min(int(updates["max_rounds"]), MAX_MAX_ROUNDS))
+            params = dict(task.params or {})
+            policy = dict(params.get("_agent_policy") or {})
+            policy.update(updates)
+            params["_agent_policy"] = policy
+            task.params = params
+
+    db.commit()
+    db.refresh(task)
+    logger.info(
+        f"[task={task.id}] 运行时配置已更新: llm={task.llm_config_id}, "
+        f"react_llm={task.react_llm_config_id}, policy={req.agent_policy}"
+    )
+    return task
+
+
 def _record_answer(
     db: Session,
     task: Task,
@@ -752,8 +849,11 @@ def submit_task_message(
       先让 user_agent 分析这条消息,再决定是否触发新一轮 react_agent 执行
     - pending / failed:拒绝(任务未启动或已失败)
 
-    消息统一落库为 Conversation(role=user, type=message, round_idx=max+0),
-    并推送 SSE conversation 事件,前端会把它追加到当前 round 的对话流末尾。
+    消息统一落库为 Conversation(role=user, type=message):
+    - 运行中/暂停中:round_idx = 当前最大 round(react_agent 下一迭代边界注入)
+    - 完成后:round_idx = 当前最大 round + 1(归入即将开始的新轮,
+      与 resume 的分析评估/首轮 react 执行共享轮号,消息位于轮首与回应连续展示)
+    并推送 SSE conversation 事件,前端实时追加到对话流。
     """
     task = db.get(Task, task_id)
     if not task:
@@ -776,15 +876,20 @@ def submit_task_message(
             message=f"任务状态为 {task.status.value},无法接收消息",
         )
 
-    # 用户消息归到当前最大 round(运行中=当前 round,完成后=最后 round)
-    # 重启后的新 round 从 max+1 开始(由 resume_audit_with_message 处理)
+    # 用户消息归 round:
+    # - 运行中/暂停中:归当前 round(react_agent 迭代边界注入,即时介入)
+    # - 完成后:归 max+1 的新轮(该轮即 resume 的分析评估 + 首轮 react 执行,
+    #   消息位于轮首,与 user_agent 的分析回应连续展示)
     latest_conv = (
         db.query(Conversation)
         .filter(Conversation.task_id == task_id)
         .order_by(Conversation.round_idx.desc())
         .first()
     )
-    msg_round_idx = latest_conv.round_idx if latest_conv else 0
+    if task.status == TaskStatus.COMPLETED:
+        msg_round_idx = (latest_conv.round_idx + 1) if latest_conv else 1
+    else:
+        msg_round_idx = latest_conv.round_idx if latest_conv else 0
 
     # 同步落库(确保刷新时数据库已有记录)
     conv = Conversation(
@@ -828,8 +933,17 @@ def submit_task_message(
         )
 
     if task.status == TaskStatus.COMPLETED:
+        # 同步将状态改为 RUNNING 落库后再启动后台线程:
+        # 消除 SSE 端点快照读到 COMPLETED 的竞态窗口 —— 否则前端重连 SSE 时,
+        # stream_task_events 会按旧快照直接推 done 关闭连接,后续
+        # checklist_review 等事件虽进历史缓存却无人接收(需刷新页面才恢复)。
+        # resume_audit_with_message 开头会再设置一次,幂等无冲突。
+        task.status = TaskStatus.RUNNING
+        task.current_stage = "用户追加消息,重启执行"
+        db.commit()
+
         # 启动新的协作 round(后台线程)
-        # resume_audit_with_message 会把 task.status 改回 RUNNING
+        # resume_audit_with_message 会把 task.status 保持 RUNNING
         thread = threading.Thread(
             target=_run_resume_in_background,
             args=(str(task_id), content),
@@ -868,15 +982,209 @@ def _run_resume_in_background(task_id: str, user_message: str) -> None:
             task = db.get(Task, uuid.UUID(task_id))
             if task and task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
                 task.status = TaskStatus.FAILED
-                task.error_message = str(e)[:1000]
+                task.error_message = _err_detail(e)[:1000]
                 task.current_stage = "重启执行失败"
                 db.commit()
+                # 兜底推送终止事件 + 标记总线结束:防止 SSE 订阅者因线程
+                # 在主 try 块前崩溃收不到 error 而永久挂起
+                publish(task.id, "error", {
+                    "status": "failed",
+                    "error_message": _err_detail(e)[:1000],
+                })
+                finish_task(task.id)
         except Exception:
             pass
     finally:
         db.close()
         # 清理 in-memory 暂停状态(防止任务结束但状态卡住)
         clear_pause_state(task_id)
+
+
+# ============================================================
+# 失败任务重试
+# ============================================================
+
+
+@router.post("/tasks/{task_id}/retry", response_model=SendMessageResponse)
+def retry_failed_task_endpoint(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> SendMessageResponse:
+    """重试失败的任务(断点续跑优先)
+
+    仅 failed 状态接受(其他状态返回 accepted=false,天然防重复点击)。
+    后台线程调 retry_failed_task 按进度分流:
+    - 无可续进度(早期失败):从头重跑 run_dual_agent_audit
+    - 有进度(执行中途失败):复用 resume 链路断点续跑
+
+    与 send_message 的 completed 分支同理,需先 reset_task_bus:
+    失败任务的事件总线已被 finish_task 标记结束,后续 publish 会被静默丢弃。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    if task.status != TaskStatus.FAILED:
+        # [诊断] 重试拒绝日志:与前端 client.log 的"点击重试"记录对拍,
+        # 可定位"前端显示 failed 但后端 running"的状态不一致
+        logger.info(
+            f"[retry] task={task_id} 重试被拒:当前状态={task.status.value}"
+            f"(仅 failed 可重试),error_message={task.error_message!r}"
+        )
+        return SendMessageResponse(
+            accepted=False,
+            message=f"任务状态为 {task.status.value},不支持重试",
+        )
+
+    perf_log(task_id, "user_retry")
+
+    # 重置事件总线(清除 _finished + 旧历史),让新事件能推送、前端重连 SSE 可接收
+    reset_task_bus(task.id)
+
+    # 重试标记对话落库(对话流可见重试起点),role=system 不被重试进度判定计入
+    latest_conv = (
+        db.query(Conversation)
+        .filter(Conversation.task_id == task_id)
+        .order_by(Conversation.round_idx.desc())
+        .first()
+    )
+    conv = Conversation(
+        task_id=task.id,
+        round_idx=latest_conv.round_idx if latest_conv else 0,
+        role="system",
+        type="info",
+        content="发起失败任务重试(优先断点续跑)...",
+    )
+    db.add(conv)
+    db.commit()
+    db.refresh(conv)
+    publish(task.id, "conversation", {
+        "id": str(conv.id),
+        "round_idx": conv.round_idx,
+        "role": conv.role,
+        "type": conv.type,
+        "content": conv.content,
+        "reasoning": conv.reasoning,
+        "created_at": conv.created_at.isoformat() if conv.created_at else None,
+    })
+
+    # 同步将状态改为 RUNNING 落库后再启动后台线程:
+    # 与 completed 发消息同理,消除 SSE 端点快照读到 FAILED 的竞态窗口
+    # (前端重连 SSE 时 stream_task_events 会按旧快照直接推 error 关闭连接)。
+    # 注意:不清空 error_message —— retry_failed_task 需在进入时读取真实
+    # 失败原因拼进续跑消息,清空由后台线程内部分流处理。
+    task.status = TaskStatus.RUNNING
+    task.current_stage = "重试失败任务,恢复执行"
+    db.commit()
+
+    thread = threading.Thread(
+        target=_run_retry_in_background,
+        args=(str(task_id),),
+        daemon=True,
+        name=f"task-{task_id}-retry",
+    )
+    thread.start()
+    return SendMessageResponse(
+        accepted=True,
+        message="已开始重试",
+    )
+
+
+def _run_retry_in_background(task_id: str) -> None:
+    """后台线程执行失败任务重试(与 _run_resume_in_background 对齐)
+
+    用独立的 DB session(线程安全),执行完毕后关闭。
+    retry_failed_task 内部从头重跑/断点续跑分支各自有异常兜底,
+    这里仅兜底 DB 异常等极端情况。
+    """
+    db = SessionLocal()
+    try:
+        task = db.get(Task, uuid.UUID(task_id))
+        if not task:
+            logger.error(f"重试任务:task {task_id} 不存在")
+            return
+        retry_failed_task(task, db)
+    except Exception as e:
+        logger.exception(f"[task={task_id}] 重试后台执行失败")
+        # 兜底:确保 task 状态被标记为失败
+        try:
+            task = db.get(Task, uuid.UUID(task_id))
+            if task and task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+                task.status = TaskStatus.FAILED
+                task.error_message = str(e)[:1000]
+                task.current_stage = "重试执行失败"
+                db.commit()
+                # 兜底推送终止事件 + 标记总线结束:防止 SSE 订阅者因线程
+                # 在进入 resume 主 try 块前崩溃收不到 error 而永久挂起
+                publish(task.id, "error", {
+                    "status": "failed",
+                    "error_message": str(e)[:1000],
+                })
+                finish_task(task.id)
+        except Exception:
+            pass
+    finally:
+        db.close()
+        # 清理 in-memory 暂停状态(防止任务结束但状态卡住)
+        clear_pause_state(task_id)
+
+
+# ============================================================
+# 客户端诊断日志上报(前后端日志对拍)
+# ============================================================
+
+
+class ClientLogRequest(BaseModel):
+    """前端诊断日志上报:定位"前端显示失败但后端 running"等状态不一致"""
+
+    task_id: str = ""
+    event: str = ""
+    detail: dict[str, Any] | None = None
+    ts: str = ""
+
+
+@router.post("/debug/client-log")
+def client_log_endpoint(
+    req: ClientLogRequest,
+    current_user: User | None = Depends(get_optional_user),
+) -> dict:
+    """接收前端诊断日志,追加写入 backend/logs/client.log(JSON 行)
+
+    前端 fire-and-forget 上报,失败静默不阻塞业务。
+    与后端 event_bus / SSE 埋点日志按时间 + task_id 对拍,
+    可还原"未知失败"出现时的完整事件序列。
+    """
+    try:
+        detail = dict(req.detail or {})
+        # 截断过大的字段,防止日志膨胀(thinking 流式内容等)
+        for k, v in detail.items():
+            if isinstance(v, str) and len(v) > 200:
+                detail[k] = v[:200] + f"...(截断,共{len(v)}字符)"
+        line = json.dumps(
+            {
+                "ts": req.ts or datetime.now().isoformat(),
+                "task_id": req.task_id,
+                "event": req.event,
+                "detail": detail,
+                "user": str(current_user.id) if current_user else None,
+            },
+            ensure_ascii=False,
+        )
+        logs_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs"
+        )
+        os.makedirs(logs_dir, exist_ok=True)
+        with open(
+            os.path.join(logs_dir, "client.log"), "a", encoding="utf-8"
+        ) as f:
+            f.write(line + "\n")
+    except Exception as e:
+        logger.warning(f"客户端日志写入失败(忽略): {e}")
+    return {"ok": True}
 
 
 # ============================================================
@@ -952,6 +1260,156 @@ def resume_task_endpoint(
     return {"status": task.status.value, "message": "任务已恢复"}
 
 
+@router.post("/tasks/{task_id}/skip_pre_clone")
+def skip_pre_clone_endpoint(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> dict[str, Any]:
+    """请求跳过预克隆(仅运行中/暂停态任务有效)
+
+    设置一次性跳过标志,克隆轮询循环在下一个检查点终止当前 clone,
+    orchestrator 降级为 react_agent 自主克隆(与预克隆失败降级同路径)。
+    幂等:重复请求无副作用;若点击时克隆恰好完成,标志不会被消费,
+    任务结束时兜底清理。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    if task.status not in (TaskStatus.RUNNING, TaskStatus.PAUSED):
+        raise HTTPException(
+            status_code=409,
+            detail=f"任务状态为 {task.status.value},仅运行中/暂停态可跳过预克隆",
+        )
+
+    request_skip_clone(task.id)
+
+    # 暂停态:克隆循环阻塞在 wait_if_paused,检测不到跳过标志;
+    # 先唤醒并把状态改回 RUNNING(用户意图是不再等待继续执行)
+    if task.status == TaskStatus.PAUSED:
+        resume_task(task.id)
+        task.status = TaskStatus.RUNNING
+        task.current_stage = "已恢复,正在跳过预克隆..."
+        db.commit()
+        _publish_task_status(task)
+    return {"message": "已提交跳过请求"}
+
+
+# ============================================================
+# 检查点打断取消(CLI 执行器:打断入队后到注入前有可操作窗口)
+# ============================================================
+
+
+@router.get("/tasks/{task_id}/pending_interrupt")
+def get_task_pending_interrupt(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> dict[str, Any] | None:
+    """查询任务当前待生效的检查点打断(刷新页面后恢复前端 pending 态用)
+
+    读 in-memory 中断队列(未 drain 才有);无待生效打断返回 None。
+    内置执行器打断即时注入无取消窗口,直接返回 None。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权访问此任务")
+
+    if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+        return None
+    if task.executor == "builtin":
+        return None
+
+    items = peek_pending_interrupt(task.id)
+    if not items:
+        return None
+    # 新替旧语义下队列通常只有 1 条,取最新一条即可
+    it = items[-1]
+    return {
+        "round_idx": it.get("round_idx", 0),
+        "iteration": it.get("iteration"),
+        "reason": it.get("reason", ""),
+        "query": it.get("query"),
+        "created_at": it.get("created_at"),
+    }
+
+
+@router.post("/tasks/{task_id}/cancel_interrupt")
+def cancel_task_interrupt(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> dict[str, Any]:
+    """取消待生效的检查点打断(仅 CLI 执行器有意义)
+
+    CLI 执行器的打断入队后要等当前 prompt 结束才注入,期间用户可取消。
+    取消与注入共用队列锁,二者互斥:若打断已被 drain 注入,返回
+    cancelled=false,前端据此提示已生效。取消成功后:
+    1) 回补本轮打断计数(不占用 max_interrupts 配额);
+    2) 在对应检查点评估记录 content 追加已取消标记(下次评估注入
+       历史时 user_agent 能看到指令被否决,避免朝同一方向重复打断),
+       并推 conversation_update 让前端实时刷新侧栏徽标;
+    3) 推 interrupt_cancelled 事件,前端把 pending 卡片切为已取消态。
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.user_id is not None:
+        if current_user is None or current_user.id != task.user_id:
+            raise HTTPException(status_code=403, detail="无权操作此任务")
+
+    if task.status not in (TaskStatus.RUNNING, TaskStatus.PAUSED):
+        raise HTTPException(
+            status_code=409,
+            detail=f"任务状态为 {task.status.value},仅运行中/暂停态可取消打断",
+        )
+    if task.executor == "builtin":
+        raise HTTPException(
+            status_code=409,
+            detail="内置执行器的检查点打断即时注入,无取消窗口",
+        )
+
+    items = cancel_pending_interrupt(task.id)
+    if not items:
+        # 竞态:打断刚被 drain 注入(或尚未产生),无法取消
+        return {"cancelled": False, "message": "当前没有待生效的打断(可能已注入生效)"}
+
+    for it in items:
+        # 回补打断计数:取消不算一次有效打断,不占本轮配额
+        decrement_interrupt_count(task.id, it.get("round_idx", 0))
+
+        # 在检查点评估记录上追加已取消标记(定位失败时降级跳过,不影响取消本身)
+        eval_conv_id = it.get("eval_conv_id")
+        if not eval_conv_id:
+            continue
+        try:
+            conv = db.get(Conversation, uuid.UUID(eval_conv_id))
+        except ValueError:
+            continue
+        if conv is None or INTERRUPT_CANCEL_MARKER in (conv.content or ""):
+            continue
+        conv.content = (conv.content or "") + "\n" + INTERRUPT_CANCEL_MARKER
+        db.commit()
+        publish(task.id, "conversation_update", {
+            "id": str(conv.id),
+            "content": conv.content,
+        })
+
+    last = items[-1]
+    publish(task.id, "interrupt_cancelled", {
+        "round_idx": last.get("round_idx", 0),
+        "iteration": last.get("iteration"),
+    })
+    return {"cancelled": True, "message": "已取消打断,追问指令不会下发"}
+
+
 def _publish_task_status(task: Task) -> None:
     """推送任务状态变更事件(供 pause/resume 端点复用)"""
     publish(task.id, "status", {
@@ -1012,8 +1470,9 @@ def delete_task(
         if current_user is None or current_user.id != task.user_id:
             raise HTTPException(status_code=403, detail="无权操作此任务")
 
-    # 先清理 in-memory 资源(暂停门控 + 沙箱 session),再删数据库记录
+    # 先清理 in-memory 资源(暂停门控 + 跳过标志 + 沙箱 session),再删数据库记录
     clear_pause_state(str(task_id))
+    clear_skip_state(str(task_id))
     try:
         sandbox_tools.close_session(str(task_id))
     except Exception as e:
@@ -1514,7 +1973,8 @@ def _append_result_html(
 #    (thinking 含 reasoning_content 思考链,可能几 KB~几十 KB,塞进报告会让
 #    .md / PDF 体积爆炸,浏览器打印会卡死)
 # 2. evaluation 类型但 content 以 "[检查点评估" / "[检查点中断]" 开头 ——
-#    检查点评估/中断,前端在右侧栏专门聚合展示,不进主对话流
+#    检查点评估/中断过程性内容(评估在右侧栏聚合展示,中断追问卡片
+#    在主对话流按时间顺序展示),不进报告的协作轨迹
 #
 # 结论类消息保留协作决策链:用户提问 → user_agent 评估/追问 → react_agent
 # 提交 → user_agent 总结,读者无需展开每个工具调用细节即可重建协作脉络。
@@ -1542,8 +2002,8 @@ _CONVERSATION_TRACE_TYPES = {
 }
 
 # 检查点评估/中断前缀(与前端 TaskDetailView.vue + agent_checkpoint / acp_base
-# 落库约定一致):这类消息属于检查点过程性内容,前端在右侧栏聚合展示,
-# 报告协作轨迹同步跳过
+# 落库约定一致):这类消息属于检查点过程性内容,评估在前端右侧栏聚合展示,
+# 中断追问卡片在主对话流按时间顺序展示,报告协作轨迹同步跳过
 _CHECKPOINT_CONTENT_PREFIXES = ("[检查点评估", "[检查点中断")
 
 # 跨轮历史记忆注入块标记(react_agent._build_history_context 生成)。
@@ -1579,14 +2039,14 @@ def _is_ua_followup_evaluation(c) -> bool:
 
 
 def _is_checkpoint_evaluation(c) -> bool:
-    """判断是否为检查点评估/中断消息(前端路由到右侧栏检查点聚合区,不进主对话流)
+    """判断是否为检查点评估/中断消息(检查点过程性内容,不进报告协作轨迹)
 
     检查点评估:user_agent 的 thinking 或 evaluation 类型,content 以
-    "[检查点评估" 开头 —— 前端 TaskDetailView.vue:1283-1287 / 1956-1971
-    把这类消息从主对话流过滤掉,聚到右侧栏专门展示。
-    检查点中断:恢复流程中 acp_base 落库的 evaluation,content 以
-    "[检查点中断]" 开头,同属检查点过程通知。
-    报告协作轨迹应同步跳过。
+    "[检查点评估" 开头 —— 前端 TaskDetailView.vue 把这类消息从主对话流
+    过滤掉,聚到右侧栏专门展示。
+    检查点中断:acp_base 软中断生效时落库的 evaluation,content 以
+    "[检查点中断]" 开头,前端在主对话流按时间顺序展示为追问卡片,
+    同属检查点过程通知,报告协作轨迹应同步跳过。
     """
     if c.role != "user_agent":
         return False
@@ -1790,6 +2250,22 @@ def _append_conversation_trace_html(
         )
 
 
+def _should_force_close_stream(
+    initial_status: TaskStatus, task_id_str: str,
+) -> bool:
+    """SSE 连接建立时是否应直接推终止事件关闭连接
+
+    快照为 COMPLETED/FAILED 且事件总线已标记结束 → 任务确实结束,关闭。
+    快照为 COMPLETED/FAILED 但总线未标记结束 → resume/retry 已启动
+    (API 端点 reset_task_bus 清除了标记),只是后台线程尚未更新 DB 状态,
+    属时序竞态:若按快照关闭,前端刚重连的 SSE 会被误杀,后续
+    checklist_review 等事件虽进历史缓存却无人接收(需刷新页面才恢复)。
+    """
+    if initial_status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+        return False
+    return is_task_finished(task_id_str)
+
+
 @router.get("/tasks/{task_id}/stream")
 def stream_task_events(
     task_id: uuid.UUID,
@@ -1827,6 +2303,12 @@ def stream_task_events(
         db.close()
 
     task_id_str = str(task_id)
+    # [诊断] SSE 连接建立日志:记录快照状态与总线结束标记,
+    # 与 event_bus 订阅日志 / 前端 client.log 对拍
+    logger.info(
+        f"[sse] task={task_id_str} 连接建立 initial_status={initial_status.value} "
+        f"initial_stage={initial_stage!r} is_task_finished={is_task_finished(task_id_str)}"
+    )
 
     def event_generator() -> Generator[str, None, None]:
         """SSE 事件生成器(不碰数据库,只用上面的状态快照)"""
@@ -1845,13 +2327,20 @@ def stream_task_events(
             yield _format_sse(connected_event)
 
             # 若任务已结束,直接推一个终止事件然后关闭
-            if initial_status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+            # (竞态防御见 _should_force_close_stream:resume/retry 已启动时
+            # 不按旧快照关闭,走正常订阅分支,历史缓存会补播已错过的事件)
+            if _should_force_close_stream(initial_status, task_id_str):
                 done_event = {
                     "type": "done" if initial_status == TaskStatus.COMPLETED else "error",
                     "task_id": task_id_str,
                     "data": {"status": initial_status.value},
                     "timestamp": "",
                 }
+                # [诊断] 快照终止事件:记录推了 done 还是 error(前端 onError 的唯一外部来源)
+                logger.info(
+                    f"[sse] task={task_id_str} 按旧快照推送终止事件 "
+                    f"type={done_event['type']}(initial_status={initial_status.value})"
+                )
                 yield _format_sse(done_event)
                 return
 
@@ -1913,7 +2402,7 @@ def _run_task_in_background(task_id: str) -> None:
             task = db.get(Task, uuid.UUID(task_id))
             if task and task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
                 task.status = TaskStatus.FAILED
-                task.error_message = str(e)[:1000]
+                task.error_message = _err_detail(e)[:1000]
                 task.current_stage = "执行失败"
                 db.commit()
         except Exception:

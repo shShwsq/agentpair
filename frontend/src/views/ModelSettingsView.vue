@@ -156,6 +156,7 @@ function llmFromOut(out: LLMConfigItemOut): LLMConfigEditable {
     model: out.model,
     enable_thinking: out.enable_thinking,
     base_url: out.base_url,
+    max_output_tokens: out.max_output_tokens,
     has_api_key: out.has_api_key,
     testing: false,
   }
@@ -197,6 +198,7 @@ function openEditLlm(cfg: LLMConfigEditable): void {
     model: cfg.model,
     enable_thinking: cfg.enable_thinking,
     base_url: cfg.base_url,
+    max_output_tokens: cfg.max_output_tokens,
     has_api_key: cfg.has_api_key,
   }
   dialogOpen.value = true
@@ -296,6 +298,7 @@ async function handleSave(opts?: { silent?: boolean }): Promise<boolean> {
         model: c.model,
         enable_thinking: c.enable_thinking,
         base_url: c.base_url,
+        max_output_tokens: c.max_output_tokens,
       })),
       embedding_configs: embConfigs.map((c) => ({
         id: c.id,

@@ -14,6 +14,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import {
   getWorkspaceInfo,
+  getWorkspaceTree,
   listWorkspaceFiles,
   readWorkspaceFile,
 } from '@/api/workspace'
@@ -24,7 +25,7 @@ import {
 } from '@/api/task'
 import { extractErrorMessage } from '@/utils/error'
 import type { TaskListItem, TaskStatus } from '@/types/task'
-import type { WorkspaceEntry } from '@/types/workspace'
+import type { WorkspaceEntry, WorkspaceTreeResponse } from '@/types/workspace'
 
 const router = useRouter()
 const route = useRoute()
@@ -44,7 +45,121 @@ const activeTaskId = computed<string | null>(() =>
 const emit = defineEmits<{
   (e: 'task-deleted', taskId: string): void
   (e: 'task-title-updated', taskId: string, title: string | null): void
+  (e: 'open-diff-file', path: string): void
 }>()
+
+// ============================================================
+// 外部输入:工作区不可用时的变更文件兜底列表
+// ============================================================
+
+// 父组件(TaskDetailView)从 git_diff artifact 解析传入;
+// 仅在工作区不可用且任务非运行中时展示,点击跳转主区对应 diff 块。
+// repoFiles 为 repo_tree 快照产物(逐行路径),无变更文件时的二级兜底
+const props = defineProps<{ changedFiles?: string[]; repoFiles?: string[] }>()
+
+/** 变更文件列表(空则不可用分支维持原文案) */
+const changedFileList = computed(() => props.changedFiles ?? [])
+
+/** 仓库文件清单快照(变更文件为空时的兜底展示,点击仅弹轻提示) */
+const repoFileList = computed(() => props.repoFiles ?? [])
+
+// ---- 仓库文件清单:按文件树方式渲染(从扁平路径本地构建嵌套树,无懒加载) ----
+
+interface RepoTreeNode {
+  name: string
+  path: string
+  type: 'dir' | 'file'
+  expanded: boolean
+  children: RepoTreeNode[]
+}
+
+const repoTreeRoot = ref<RepoTreeNode | null>(null)
+
+/** 从扁平相对路径构建嵌套树(中间目录由路径段推导) */
+function buildRepoTree(paths: string[]): RepoTreeNode {
+  const root: RepoTreeNode = {
+    name: '', path: '', type: 'dir', expanded: true, children: [],
+  }
+  for (const p of paths) {
+    const parts = p.split('/').filter(Boolean)
+    let node = root
+    let acc = ''
+    parts.forEach((seg, i) => {
+      acc = acc ? `${acc}/${seg}` : seg
+      let child = node.children.find((c) => c.name === seg)
+      if (!child) {
+        child = {
+          name: seg,
+          path: acc,
+          type: i === parts.length - 1 ? 'file' : 'dir',
+          expanded: false,
+          children: [],
+        }
+        node.children.push(child)
+      }
+      node = child
+    })
+  }
+  sortRepoTreeChildren(root)
+  return root
+}
+
+/** 排序与文件树一致:目录在前、名称大小写不敏感 */
+function sortRepoTreeChildren(node: RepoTreeNode): void {
+  node.children.sort((a, b) =>
+    a.type !== b.type
+      ? (a.type === 'dir' ? -1 : 1)
+      : a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
+  )
+  for (const c of node.children) {
+    if (c.type === 'dir') sortRepoTreeChildren(c)
+  }
+}
+
+// 清单变化时重建树(默认仅顶层可见、目录收起,避免大仓库一次性铺满)
+watch(
+  repoFileList,
+  (paths) => {
+    repoTreeRoot.value = paths.length ? buildRepoTree(paths) : null
+  },
+  { immediate: true },
+)
+
+/** 扁平化仓库快照树(仅展开的目录),复用文件树样式渲染 */
+const flatRepoTree = computed(() => {
+  const out: { node: RepoTreeNode; depth: number }[] = []
+  const walk = (n: RepoTreeNode, depth: number) => {
+    for (const child of n.children) {
+      out.push({ node: child, depth })
+      if (child.type === 'dir' && child.expanded) walk(child, depth + 1)
+    }
+  }
+  if (repoTreeRoot.value) walk(repoTreeRoot.value, 0)
+  return out
+})
+
+/** 目录展开/收起(纯前端状态,无请求) */
+function toggleRepoDir(node: RepoTreeNode): void {
+  node.expanded = !node.expanded
+}
+
+// ---- 轻提示(仓库文件行点击:工作区不可用;组件级 toast,同 TaskRuntimeSettings 模式) ----
+const toastMsg = ref('')
+let toastTimer: ReturnType<typeof setTimeout> | null = null
+
+/** 弹轻提示,2s 后自动消失 */
+function showUnavailableToast(): void {
+  toastMsg.value = '工作区不可用，内容不可浏览'
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => {
+    toastMsg.value = ''
+    toastTimer = null
+  }, 2000)
+}
+
+onUnmounted(() => {
+  if (toastTimer) clearTimeout(toastTimer)
+})
 
 // ============================================================
 // 视图状态
@@ -425,6 +540,9 @@ const fileContentLines = computed<string[]>(() => {
 // ---- 错误提示 ----
 const errorMsg = ref('')
 
+/** 整树快照被截断(条目超上限):提示用户,未覆盖目录展开时退回懒加载 */
+const treeTruncated = ref(false)
+
 function resetFileTree(): void {
   treeRoot.loaded = false
   treeRoot.loading = false
@@ -435,6 +553,7 @@ function resetFileTree(): void {
   available.value = false
   unavailableReason.value = ''
   errorMsg.value = ''
+  treeTruncated.value = false
   initialized = false
   filePanelHidden.value = false
 }
@@ -474,12 +593,85 @@ async function checkAvailable(): Promise<void> {
     available.value = info.available
     unavailableReason.value = info.reason ?? ''
     if (info.available && !treeRoot.loaded) {
-      await loadDir(treeRoot)
+      await loadTreeSnapshot()
     }
   } catch (e) {
     errorMsg.value = extractErrorMessage(e)
   } finally {
     checkingAvailable.value = false
+  }
+}
+
+/**
+ * 拉整树快照一次建好文件树(首屏提速:1 次请求替代逐级懒加载)
+ * 失败时降级为根目录懒加载,功能不受损
+ */
+async function loadTreeSnapshot(refresh: boolean = false): Promise<void> {
+  if (!selectedTaskId.value) return
+  try {
+    const res = await getWorkspaceTree(selectedTaskId.value, refresh)
+    buildTreeFromSnapshot(res)
+  } catch {
+    await loadDir(treeRoot)
+  }
+}
+
+/** 收集当前处于展开态的目录路径(刷新快照时保持展开状态) */
+function collectExpandedPaths(node: TreeNode, acc: Set<string>): void {
+  for (const c of node.children) {
+    if (c.type === 'dir' && c.expanded) {
+      acc.add(c.path)
+      collectExpandedPaths(c, acc)
+    }
+  }
+}
+
+/** 从整树快照(扁平 entries)构建嵌套树;截断/深度边界目录保持可懒加载 */
+function buildTreeFromSnapshot(
+  res: WorkspaceTreeResponse,
+  expandedPaths: Set<string> = new Set(),
+): void {
+  treeRoot.children = []
+  treeRoot.loaded = true
+  treeRoot.expanded = true
+  treeTruncated.value = res.truncated
+
+  const byPath = new Map<string, TreeNode>()
+  byPath.set('', treeRoot)
+
+  for (const e of res.entries) {
+    const parts = e.path.split('/').filter(Boolean)
+    if (parts.length === 0) continue
+    const parent = byPath.get(parts.slice(0, -1).join('/'))
+    if (!parent) continue // 父目录被截断丢弃,跳过孤儿条目
+    const node: TreeNode = {
+      name: parts[parts.length - 1],
+      path: e.path,
+      type: e.type === 'dir' ? 'dir' : 'file',
+      expanded: expandedPaths.has(e.path),
+      loaded: false,
+      loading: false,
+      children: [],
+    }
+    // 目录仅在未截断且未达快照深度边界时子项才算完整,否则展开时重新拉
+    if (node.type === 'dir') {
+      node.loaded = !res.truncated && parts.length < res.max_depth
+    }
+    parent.children.push(node)
+    byPath.set(e.path, node)
+  }
+  sortTreeChildren(treeRoot)
+}
+
+/** 排序与后端 listDir 一致:目录在前、文件在后,各自按名字大小写不敏感 */
+function sortTreeChildren(node: TreeNode): void {
+  node.children.sort((a, b) =>
+    a.type !== b.type
+      ? (a.type === 'dir' ? -1 : 1)
+      : a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
+  )
+  for (const c of node.children) {
+    if (c.type === 'dir') sortTreeChildren(c)
   }
 }
 
@@ -620,19 +812,19 @@ async function loadPrevPage(): Promise<void> {
 
 async function refreshTree(): Promise<void> {
   errorMsg.value = ''
-  await refreshNode(treeRoot)
-}
-
-async function refreshNode(node: TreeNode): Promise<void> {
-  if (node.type === 'dir' && node.loaded) {
-    node.loaded = false
-    node.children = []
-    await loadDir(node)
-    for (const child of node.children) {
-      if (child.expanded) {
-        await refreshNode(child)
-      }
-    }
+  // 保留当前展开状态,用 refresh=true 绕过后端缓存重建整树快照
+  const expandedPaths = new Set<string>()
+  collectExpandedPaths(treeRoot, expandedPaths)
+  treeRoot.loaded = false
+  treeRoot.children = []
+  treeTruncated.value = false
+  try {
+    const res = await getWorkspaceTree(selectedTaskId.value!, true)
+    buildTreeFromSnapshot(res, expandedPaths)
+  } catch {
+    // 快照失败降级:重新拉根目录(懒加载)
+    treeRoot.loaded = false
+    await loadDir(treeRoot)
   }
 }
 
@@ -1028,10 +1220,110 @@ defineExpose({ openTaskFile })
         <div v-else-if="!available" class="sidebar-status sidebar-status-muted">
           <p>{{ unavailableReason || '工作区不可用' }}</p>
           <p v-if="selectedTaskRunning" class="status-hint">等待 react_agent clone 仓库...</p>
+          <!-- 会话过期但有 diff 产物:展示变更文件列表(点击跳主区 diff,内容不可浏览) -->
+          <div
+            v-if="!selectedTaskRunning && changedFileList.length > 0"
+            class="changed-files-fallback"
+          >
+            <div class="changed-files-title">变更文件（会话已过期，内容不可浏览）</div>
+            <div class="changed-files-list">
+              <div
+                v-for="path in changedFileList"
+                :key="path"
+                class="tree-node tree-file changed-file-row"
+                :title="path"
+                @click="emit('open-diff-file', path)"
+              >
+                <span class="tree-icon">
+                  <svg
+                    viewBox="0 0 24 24"
+                    width="13"
+                    height="13"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+                    <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
+                  </svg>
+                </span>
+                <span class="tree-name">{{ path }}</span>
+              </div>
+            </div>
+          </div>
+          <!-- 无变更但有仓库树快照:按文件树方式渲染(目录展开/收起纯前端;文件点击弹轻提示) -->
+          <div
+            v-else-if="!selectedTaskRunning && repoTreeRoot"
+            class="changed-files-fallback"
+          >
+            <div class="changed-files-title">仓库文件清单（快照，内容不可浏览）</div>
+            <div class="changed-files-list">
+              <div
+                v-for="item in flatRepoTree"
+                :key="item.node.path"
+                class="tree-node"
+                :class="`tree-${item.node.type}`"
+                :style="{ paddingLeft: `${item.depth * 14 + 8}px` }"
+                :title="item.node.path"
+                @click="item.node.type === 'dir' ? toggleRepoDir(item.node) : showUnavailableToast()"
+              >
+                <span class="tree-icon">
+                  <template v-if="item.node.type === 'dir'">
+                    <svg
+                      class="tree-chevron"
+                      :class="{ expanded: item.node.expanded }"
+                      viewBox="0 0 24 24"
+                      width="10"
+                      height="10"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2.5"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <polyline points="9 18 15 12 9 6" />
+                    </svg>
+                    <svg
+                      viewBox="0 0 24 24"
+                      width="13"
+                      height="13"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                    </svg>
+                  </template>
+                  <svg
+                    v-else
+                    viewBox="0 0 24 24"
+                    width="13"
+                    height="13"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+                    <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
+                  </svg>
+                </span>
+                <span class="tree-name">{{ item.node.name }}</span>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- 文件树(扁平化渲染) -->
         <div v-else class="file-tree">
+          <div v-if="treeTruncated" class="tree-truncated-hint">
+            文件过多,列表已截断;未列出的目录展开时按需加载
+          </div>
           <div
             v-for="item in flatTree"
             :key="item.node.path"
@@ -1128,6 +1420,9 @@ defineExpose({ openTaskFile })
         <!-- 错误提示 -->
         <div v-if="errorMsg" class="sidebar-error">{{ errorMsg }}</div>
       </template>
+
+      <!-- 轻提示(工作区不可用时点击仓库文件行;2s 自动消失) -->
+      <div v-if="toastMsg" class="sidebar-toast">{{ toastMsg }}</div>
     </aside>
 
     <!-- 文件查看面板(右侧,仅工作区视图且选中文件且未手动隐藏时显示) -->
@@ -1352,6 +1647,7 @@ defineExpose({ openTaskFile })
 
 /* ---- 侧栏 ---- */
 .workspace-sidebar {
+  position: relative; /* 供底部轻提示绝对定位 */
   flex-shrink: 0;
   width: 280px;
   border-right: 1px solid var(--color-border);
@@ -1513,6 +1809,49 @@ defineExpose({ openTaskFile })
 .status-hint {
   color: var(--color-text-muted);
   font-size: 10px;
+}
+
+/* ---- 变更文件兜底列表(工作区不可用且非运行中时展示) ---- */
+.changed-files-fallback {
+  width: 100%;
+  margin-top: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.changed-files-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  padding: 0 var(--space-2);
+}
+
+.changed-files-list {
+  overflow-y: auto;
+  margin-top: var(--space-1);
+}
+
+.changed-file-row {
+  padding-left: var(--space-2);
+}
+
+/* ---- 侧栏轻提示(工作区不可用时点击仓库文件行) ---- */
+.sidebar-toast {
+  position: absolute;
+  bottom: var(--space-4);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: var(--space-2) var(--space-3);
+  max-width: 90%;
+  font-size: var(--fs-sm);
+  color: var(--color-text-secondary);
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  white-space: nowrap;
+  z-index: 10;
 }
 
 /* ---- 任务列表 ---- */
@@ -1708,6 +2047,16 @@ defineExpose({ openTaskFile })
   font-size: var(--fs-xs);
   color: var(--color-text-muted);
   text-align: center;
+}
+
+.tree-truncated-hint {
+  padding: var(--space-1) var(--space-3);
+  margin-bottom: var(--space-1);
+  font-size: var(--fs-xs);
+  color: var(--color-warning, #b45309);
+  background: var(--color-warning-bg, rgba(245, 158, 11, 0.1));
+  border-radius: var(--radius-sm);
+  line-height: 1.5;
 }
 
 .tree-node {

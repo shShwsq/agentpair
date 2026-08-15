@@ -14,6 +14,7 @@
  *   // 组件卸载时:es.close()
  */
 import { getAccessToken } from './client'
+import { clientLog } from '@/utils/clientLog'
 import type {
   AgentCheckpointEventData,
   ChecklistReviewEventData,
@@ -23,6 +24,7 @@ import type {
   ConversationEventData,
   ConversationUpdateEventData,
   DoneEventData,
+  InterruptCancelledEventData,
   PlanEventData,
   QuestionEventData,
   SSEEvent,
@@ -55,6 +57,8 @@ export interface StreamCallbacks {
   onCommandConfirm?: (data: CommandConfirmEventData) => void
   /** user_agent 检查点评估结果(迭代边界轻量评估,interrupt=true 时已注入追问) */
   onAgentCheckpoint?: (data: AgentCheckpointEventData) => void
+  /** 用户取消了待生效的检查点打断(CLI 执行器 pending 窗口内) */
+  onInterruptCancelled?: (data: InterruptCancelledEventData) => void
   onDone?: (data: DoneEventData) => void
   onError?: (data: DoneEventData) => void
 }
@@ -89,6 +93,7 @@ export function subscribeTaskStream(
     'verify_action',
     'command_confirm',
     'agent_checkpoint',
+    'interrupt_cancelled',
     'done',
     'error',
   ]
@@ -101,6 +106,11 @@ export function subscribeTaskStream(
 
         switch (type) {
           case 'connected':
+            // [诊断] SSE 连接快照:与后端 stream_task_events 日志对拍
+            clientLog(taskId, 'sse_connected', {
+              status: data.status,
+              current_stage: data.current_stage,
+            })
             callbacks.onConnected?.(data as unknown as ConnectedData)
             break
           case 'conversation':
@@ -110,6 +120,11 @@ export function subscribeTaskStream(
             callbacks.onConversationUpdate?.(data as unknown as ConversationUpdateEventData)
             break
           case 'status':
+            // [诊断] 状态事件:记录后端推送的状态,与前端本地状态对拍
+            clientLog(taskId, 'sse_status', {
+              status: data.status,
+              current_stage: data.current_stage,
+            })
             callbacks.onStatus?.(data as unknown as StatusEventData)
             break
           case 'thinking_delta':
@@ -136,11 +151,21 @@ export function subscribeTaskStream(
           case 'agent_checkpoint':
             callbacks.onAgentCheckpoint?.(data as unknown as AgentCheckpointEventData)
             break
+          case 'interrupt_cancelled':
+            callbacks.onInterruptCancelled?.(data as unknown as InterruptCancelledEventData)
+            break
           case 'done':
+            // [诊断] done 事件:任务结束,记录触发时前端是否在 resume 窗口
+            clientLog(taskId, 'sse_done', { status: data.status })
             callbacks.onDone?.(data as unknown as DoneEventData)
             es.close()
             break
           case 'error':
+            // [诊断] error 事件:前端显示"失败"的唯一 SSE 来源,全量记录
+            clientLog(taskId, 'sse_error_event', {
+              status: data.status,
+              error_message: data.error_message,
+            })
             callbacks.onError?.(data as unknown as DoneEventData)
             es.close()
             break
@@ -153,9 +178,17 @@ export function subscribeTaskStream(
 
   // EventSource 原生 error 事件(网络断开等)
   es.onerror = () => {
-    // 浏览器会自动重连,但如果任务已结束就不需要重连
-    // 这里不做特殊处理,由调用方通过 done/error 事件管理生命周期
-    // 连接失败时 EventSource 会反复重试,调用方可在 onDone/onError 后 close
+    // [诊断] 原生连接错误:浏览器自动重连;记录供与后端 SSE 断开日志对拍
+    // (排查"前端显示失败但后端 running"时,确认是否有网络断连参与)
+    clientLog(taskId, 'sse_native_error', {
+      readyState: es.readyState,
+      // 1=CONNECTING(自动重连中) 2=OPEN 3=CLOSED
+    })
+  }
+
+  // [诊断] 连接打开(原生 onopen)
+  es.onopen = () => {
+    clientLog(taskId, 'sse_open')
   }
 
   return es

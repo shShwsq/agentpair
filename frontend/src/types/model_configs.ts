@@ -20,6 +20,8 @@ export interface LLMModelMeta {
   /** 思考模式: hybrid(可开关) | only(强制) | none(不支持) */
   thinking?: 'hybrid' | 'only' | 'none'
   thinkingDefault?: boolean
+  /** 单次输出上限(token),按官方能力保守取值;缺失时用厂商 fallback/系统默认 */
+  outputLimit?: number
 }
 
 /** LLM 厂商 */
@@ -35,6 +37,8 @@ export interface LLMProvider {
   nonThinkingTemperature?: number
   fallbackThinking?: string
   reasoningSplit?: boolean
+  /** 模型未列 outputLimit 时的厂商级输出上限兜底 */
+  fallbackOutputLimit?: number
   models: LLMModelMeta[]
 }
 
@@ -78,6 +82,8 @@ export interface LLMConfigItemOut {
   model: string
   enable_thinking: boolean
   base_url: string | null
+  /** 单次输出上限(null = 未显式设置,按 catalog/系统默认解析) */
+  max_output_tokens: number | null
   has_api_key: boolean
 }
 
@@ -110,6 +116,8 @@ export interface LLMConfigItem {
   enable_thinking: boolean
   /** 自定义 baseUrl,留空用 catalog 预设 */
   base_url: string | null
+  /** 单次输出上限(max_tokens 钳制值),null = 用 catalog/系统默认 */
+  max_output_tokens: number | null
 }
 
 export interface EmbeddingConfigItem {

@@ -12,6 +12,7 @@ from app.agents.react_agent import (
     _build_tool_intent,
     _extract_plan,
     _extract_text_tool_calls,
+    _format_interrupts,
     _format_plan_reminder,
     _infer_step_from_tool,
     _merge_plan,
@@ -206,6 +207,92 @@ def test_extract_plan_takes_first_block():
     plan = _extract_plan(content)
     assert plan is not None
     assert plan[0]["text"] == "第一版"
+
+
+# ---- JSON 数组格式(system prompt 示范格式,模型实际常输出)----
+
+def test_extract_plan_json_array():
+    """JSON 数组格式正确解析,text/status 从对象字段取(而非整行 JSON)。"""
+    content = (
+        "思考\n<plan>\n[\n"
+        '{"id": 1, "text": "前端架构设计", "status": "in_progress"},\n'
+        '{"id": 2, "text": "存储层架构", "status": "pending"},\n'
+        '{"id": 3, "text": "安全架构设计", "status": "pending"}\n'
+        "]\n</plan>"
+    )
+    plan = _extract_plan(content)
+    assert plan is not None
+    assert len(plan) == 3
+    assert plan[0] == {"id": 1, "text": "前端架构设计", "status": "in_progress"}
+    assert plan[1] == {"id": 2, "text": "存储层架构", "status": "pending"}
+    assert plan[2] == {"id": 3, "text": "安全架构设计", "status": "pending"}
+
+
+def test_extract_plan_json_single_line_array():
+    """单行 JSON 数组(尾逗号也能容错)。"""
+    content = (
+        '<plan>[{"id": 1, "text": "步骤A", "status": "done"},'
+        '{"id": 2, "text": "步骤B", "status": "pending"},]</plan>'
+    )
+    plan = _extract_plan(content)
+    assert plan is not None
+    assert len(plan) == 2
+    assert plan[0]["status"] == "done"
+    assert plan[1]["status"] == "pending"
+
+
+def test_extract_plan_jsonl_objects_without_array():
+    """无包裹数组的逐行对象(真实事故场景:第二次 plan 更新只有 3 行 JSON)。
+
+    修复前:3 行 JSON 被逐行解析成 3 个文本为原始 JSON 的 pending 步骤,
+    与首次 plan 的 text 不匹配 → _merge_plan 追加 → 清单重复膨胀到 8 条。
+    修复后:按 JSON 解析出干净的 text,跨次合并可按 text 匹配。
+    """
+    content = (
+        "<plan>\n"
+        '{"id": 1, "text": "前端架构设计", "status": "done"},\n'
+        '{"id": 2, "text": "存储层架构", "status": "done"},\n'
+        '{"id": 3, "text": "安全架构设计", "status": "in_progress"}\n'
+        "</plan>"
+    )
+    plan = _extract_plan(content)
+    assert plan is not None
+    assert len(plan) == 3
+    assert plan[0] == {"id": 1, "text": "前端架构设计", "status": "done"}
+    assert plan[2]["status"] == "in_progress"
+
+
+def test_extract_plan_json_invalid_status_defaults_pending():
+    """JSON 里非法 status 降级 pending;缺 text 的条目跳过。"""
+    content = (
+        '<plan>[{"id": 1, "text": "步骤A", "status": "finished"},'
+        '{"id": 2, "status": "done"}]</plan>'
+    )
+    plan = _extract_plan(content)
+    assert plan is not None
+    assert len(plan) == 1
+    assert plan[0]["status"] == "pending"
+
+
+def test_extract_plan_json_content_key_supported():
+    """兼容 content 字段(与 ACP plan entry 字段名对齐)。"""
+    content = '<plan>[{"content": "步骤A", "status": "done"}]</plan>'
+    plan = _extract_plan(content)
+    assert plan is not None
+    assert plan[0]["text"] == "步骤A"
+    assert plan[0]["status"] == "done"
+
+
+def test_extract_plan_line_mode_skips_symbol_lines():
+    """逐行格式里混入纯符号行([ ])时不产生无意义步骤。"""
+    content = (
+        "<plan>\n[\n1. [done] 第一步\n2. 第二步\n]\n</plan>"
+    )
+    plan = _extract_plan(content)
+    assert plan is not None
+    assert len(plan) == 2
+    assert plan[0]["text"] == "第一步"
+    assert plan[1]["text"] == "第二步"
 
 
 # ============================================================
@@ -435,3 +522,43 @@ def test_build_tool_intent_truncates_long_command():
     # 应包含截断后的命令(前 40 字符),不包含完整命令
     assert long_cmd[:40] in intent
     assert long_cmd not in intent
+
+
+# ============================================================
+# _format_interrupts:检查点中断注入文本(匿名化)
+# ============================================================
+
+def test_format_interrupts_single_query_only():
+    """单条中断:只注入 query,reason 不进 LLM 上下文。"""
+    text = _format_interrupts([
+        {"query": "转向检查认证授权", "reason": "方向跑偏", "iteration": 4},
+    ])
+    assert "转向检查认证授权" in text
+    assert "方向跑偏" not in text
+
+
+def test_format_interrupts_anonymized():
+    """注入文本不得暴露评估者身份(react_agent 不知道 user_agent 存在)。"""
+    text = _format_interrupts([
+        {"query": "转向检查认证授权", "reason": "user_agent 认为跑偏", "iteration": 4},
+    ])
+    assert "user_agent" not in text
+    assert "评估" not in text
+    # 匿名化后的中性头部
+    assert "[方向调整]" in text
+
+
+def test_format_interrupts_multiple_numbered():
+    """多条中断(防御性路径)合并为一条消息并编号。"""
+    text = _format_interrupts([
+        {"query": "指令一", "reason": "r1", "iteration": 4},
+        {"query": "指令二", "reason": "r2", "iteration": 6},
+    ])
+    assert "[1] 指令一" in text
+    assert "[2] 指令二" in text
+
+
+def test_format_interrupts_empty_returns_empty_string():
+    """无可注入内容(空列表或 query 全空)返回空字符串。"""
+    assert _format_interrupts([]) == ""
+    assert _format_interrupts([{"query": "  ", "reason": "r", "iteration": 1}]) == ""

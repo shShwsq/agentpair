@@ -148,12 +148,21 @@ def _get_bus(task_id: str) -> _TaskBus:
 
 def subscribe(task_id: str | UUID) -> queue.Queue[dict[str, Any]]:
     """订阅指定 task 的事件流"""
-    return _get_bus(str(task_id)).subscribe()
+    bus = _get_bus(str(task_id))
+    q = bus.subscribe()
+    # [诊断] SSE 连接建立日志:与 stream_task_events 的 initial_status 快照对拍,
+    # 可定位"前端显示失败但后端 running"时是否有历史 error/done 事件被补播
+    logger.info(
+        f"[bus] task={task_id} SSE 订阅建立,订阅者数={len(bus._subscribers)},"
+        f"补播历史条数={len(bus._history)}"
+    )
+    return q
 
 
 def unsubscribe(task_id: str | UUID, q: queue.Queue[dict[str, Any]]) -> None:
     """取消订阅"""
     _get_bus(str(task_id)).unsubscribe(q)
+    logger.info(f"[bus] task={task_id} SSE 订阅断开,剩余订阅者数={len(_get_bus(str(task_id))._subscribers)}")
 
 
 def publish(
@@ -168,12 +177,36 @@ def publish(
         "data": data,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    _get_bus(str(task_id)).publish(event)
+    bus = _get_bus(str(task_id))
+    # [诊断] 终止事件全量记录:error/done 是前端显示失败/结束的唯一事件源,
+    # 记录推送时刻与订阅者数,与前端 client.log 对拍定位"未知失败"
+    if type in ("done", "error"):
+        logger.info(
+            f"[bus] task={task_id} 推送终止事件 type={type} "
+            f"订阅者数={len(bus._subscribers)} data={str(data)[:200]}"
+        )
+    bus.publish(event)
 
 
 def finish_task(task_id: str | UUID) -> None:
     """标记任务结束(后续 publish 静默丢弃)"""
     _get_bus(str(task_id)).finish()
+
+
+def is_task_finished(task_id: str | UUID) -> bool:
+    """查询任务事件总线是否已标记结束
+
+    resume/retry 启动前 reset_task_bus 会清除 _finished 标记。
+    供 SSE 端点区分"任务确实结束"与"新执行已启动但 DB 状态尚未更新"
+    (时序竞态:后台线程还未把 COMPLETED/FAILED 改成 RUNNING)。
+    """
+    with _buses_lock:
+        bus = _buses.get(str(task_id))
+    if bus is None:
+        # 无总线记录说明从未 publish 过(不可能已结束),保守视为已结束
+        return True
+    with bus._lock:
+        return bus._finished
 
 
 def reset_task_bus(task_id: str | UUID) -> None:

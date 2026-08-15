@@ -17,13 +17,19 @@
 设计参考:C:\\Users\\njwjx\\Documents\\BaiduSyncdisk\\course_大四\\pro\\ai-plugin\\lib\\llm.js
 """
 import json
+import logging
+import random
+import time
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
+import openai
 from openai import OpenAI
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -117,6 +123,41 @@ def build_thinking_extras(
     return extras
 
 
+# ============================================================
+# 输出上限(max_tokens)解析
+# ============================================================
+
+# 系统默认单次输出上限。user_agent 的 done=true 评估要输出 results+grouping,
+# 上限太低会被截断导致 JSON 解析失败;16384 对绝大多数评估输出已足够。
+DEFAULT_MAX_OUTPUT_TOKENS = 16384
+
+
+def resolve_output_limit(
+    provider: dict[str, Any],
+    model_meta: dict[str, Any] | None,
+    explicit_limit: int | None = None,
+) -> int:
+    """解析模型单次输出上限(max_tokens 钳制值)
+
+    优先级:用户显式设置 > catalog 模型级 outputLimit >
+    provider 级 fallbackOutputLimit(豆包 Endpoint ID 等匹配不上模型时用)>
+    系统默认 DEFAULT_MAX_OUTPUT_TOKENS。
+
+    catalog 中的 outputLimit 按各模型官方能力保守取值,
+    避免传入超过模型输出能力的值导致 API 400。
+    """
+    if explicit_limit is not None and explicit_limit > 0:
+        return explicit_limit
+    if model_meta:
+        limit = model_meta.get("outputLimit")
+        if isinstance(limit, int) and limit > 0:
+            return limit
+    fallback = provider.get("fallbackOutputLimit")
+    if isinstance(fallback, int) and fallback > 0:
+        return fallback
+    return DEFAULT_MAX_OUTPUT_TOKENS
+
+
 def resolve_temperature(
     provider: dict[str, Any],
     model_meta: dict[str, Any] | None,
@@ -145,6 +186,68 @@ def resolve_temperature(
         return non_thinking_temp if non_thinking_temp is not None else 0.7
 
     return provider.get("defaultTemperature", 0.7)
+
+
+# ============================================================
+# 429 限流退避重试
+# ============================================================
+
+# 自算退避的参数:base * 2^attempt(带抖动),封顶 _BACKOFF_MAX 秒;
+# 厂商返回 Retry-After 时优先采用(封顶 _RETRY_AFTER_MAX 秒)。
+_BACKOFF_BASE = 1.0
+_BACKOFF_MAX = 20.0
+_RETRY_AFTER_MAX = 60.0
+
+
+def _parse_retry_after(exc: Exception) -> float | None:
+    """从 429 异常的响应头解析 Retry-After(秒),缺失/非法返回 None"""
+    resp = getattr(exc, "response", None)
+    headers = getattr(resp, "headers", None) if resp is not None else None
+    if not headers:
+        return None
+    raw = headers.get("retry-after") or headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return max(0.0, min(float(raw), _RETRY_AFTER_MAX))
+    except (TypeError, ValueError):
+        return None
+
+
+def create_with_rate_limit_retry(create_fn, *, label: str):
+    """带 429 退避重试地调用 create_fn()
+
+    仅处理请求发起阶段的 openai.RateLimitError(RPM/配额限流);
+    连接错误/5xx 等仍由 openai SDK 内置重试处理,不在此重叠。
+    首次之外最多重试 settings.LLM_RATE_LIMIT_MAX_RETRIES 次,
+    耗尽后原样重抛,由上层处理(任务失败/测试提示)。
+
+    退避策略:厂商响应头带 Retry-After 时优先采用(视为等待下限,不加抖动);
+    否则指数退避 base*2^attempt 并带 ±25% 抖动,避免多任务同步重试再次撞限。
+    """
+    max_retries = max(0, settings.LLM_RATE_LIMIT_MAX_RETRIES)
+    for attempt in range(max_retries + 1):
+        try:
+            return create_fn()
+        except openai.RateLimitError as e:
+            if attempt >= max_retries:
+                logger.warning(
+                    "%s 命中 429 限流,已重试 %d 次仍失败,放弃: %s", label, max_retries, e
+                )
+                raise
+            retry_after = _parse_retry_after(e)
+            if retry_after is not None:
+                delay = retry_after
+            else:
+                delay = min(_BACKOFF_BASE * (2 ** attempt), _BACKOFF_MAX)
+                delay *= 0.75 + random.random() * 0.5  # ±25% 抖动
+            logger.info(
+                "%s 命中 429 限流,%.1fs 后重试(%d/%d)%s",
+                label, delay, attempt + 1, max_retries,
+                "(Retry-After)" if retry_after is not None else "",
+            )
+            time.sleep(delay)
+    raise RuntimeError("unreachable")  # 仅为类型检查兜底
 
 
 # ============================================================
@@ -184,6 +287,7 @@ class LLMClient:
         model: str | None = None,
         enable_thinking: bool | None = None,
         base_url: str | None = None,
+        max_output_tokens: int | None = None,
     ):
         self.provider_id = provider_id or settings.LLM_PROVIDER
         self.api_key = api_key or settings.LLM_API_KEY
@@ -193,6 +297,8 @@ class LLMClient:
         )
         # 可选:自定义 baseUrl 覆盖 catalog 预设(留空则用 catalog 的 baseUrl)
         self.base_url_override = base_url
+        # 可选:用户显式设置的单次输出上限(None 时构造完 model_meta 后按 catalog 解析)
+        self._explicit_output_limit = max_output_tokens
 
         if not self.api_key:
             raise ValueError("未配置 LLM_API_KEY,请在 .env 中设置或在前端模型设置中配置")
@@ -204,6 +310,11 @@ class LLMClient:
         self.model_meta = find_model_meta(self.provider, self.model)
         # 豆包用 Endpoint ID,model_meta 可能匹配不上,用 fallbackThinking 兜底
         # 此时 thinking_mode 取 fallbackThinking
+
+        # 单次输出上限:用户设置 > catalog 模型级 > provider 级 > 系统默认
+        self.max_output_tokens = resolve_output_limit(
+            self.provider, self.model_meta, self._explicit_output_limit
+        )
 
         # baseUrl 优先级:用户自定义 > catalog 预设
         effective_base_url = self.base_url_override or self.provider["baseUrl"]
@@ -232,6 +343,7 @@ class LLMClient:
             model=cfg.get("model"),
             enable_thinking=cfg.get("enable_thinking", True),
             base_url=cfg.get("base_url"),
+            max_output_tokens=cfg.get("max_output_tokens"),
         )
 
     def chat_stream(
@@ -266,6 +378,15 @@ class LLMClient:
             self.provider, self.model_meta, self.enable_thinking, temperature
         )
 
+        # 按模型输出能力钳制:超过上限会被厂商拒绝(400)或截断,
+        # 统一钳制保证所有调用方(含 user_agent 大 JSON 输出)不踩线
+        if max_tokens > self.max_output_tokens:
+            logger.debug(
+                f"max_tokens {max_tokens} 超过模型输出上限,"
+                f"钳制为 {self.max_output_tokens}(model={self.model})"
+            )
+            max_tokens = self.max_output_tokens
+
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -281,7 +402,11 @@ class LLMClient:
             kwargs["extra_body"] = extras
 
         # 流式调用,SDK 返回迭代器
-        stream = self.client.chat.completions.create(**kwargs)
+        # 429 限流在请求发起阶段退避重试(流建立后的中途异常不重试,避免已推送内容重复)
+        stream = create_with_rate_limit_retry(
+            lambda: self.client.chat.completions.create(**kwargs),
+            label=f"chat({self.provider_id}/{self.model})",
+        )
 
         # 流式拆分 <think>...</think>:某些端点把思考内嵌在 content 里,
         # 拆分后标签内 → reasoning,标签外 → content(无标签时原样输出,无副作用)
@@ -389,6 +514,8 @@ class LLMClient:
                 self.enable_thinking = thinking_flag
                 try:
                     return self._test_once(prompt, start)
+                except openai.RateLimitError:
+                    raise  # 429 是配额问题而非配置问题,不换思考配置重试(内部已退避重试过)
                 except Exception as e:  # API 层异常(400/401/超时等),尝试下一组配置
                     last_exc = e
             latency_ms = int((time.perf_counter() - start) * 1000)

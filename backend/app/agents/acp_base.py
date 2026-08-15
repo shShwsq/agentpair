@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import httpx
+from json_repair import repair_json
 from sqlalchemy.orm import Session
 
 from app.agents.registry import get_agent_meta, get_sandbox_config
@@ -87,6 +88,27 @@ _DEFAULT_BRIDGE = "acp_bridge"
 # 默认 ACP 日志目录:backend/logs/acp/
 _ACP_LOG_DIR = Path(__file__).resolve().parents[2] / "logs" / "acp"
 
+# idle 看门狗轮询间隔(秒):queue.get 超时粒度,也是 idle 检查粒度
+_IDLE_POLL_SECONDS = 5.0
+
+
+class PromptIdleTimeout(Exception):
+    """session/prompt idle 兜底:长时间无数据事件,CLI 疑似挂死
+
+    由 _rpc 的 idle 看门狗抛出;prompt() 捕获后发 session/cancel 并把
+    已累积输出留给调用方收尾(不 fail 任务)。超时阈值按事件状态分级:
+    有活动工具(长命令执行中)用 ACP_IDLE_TIMEOUT_TOOL_SECONDS,
+    无活动工具(等模型输出/最终响应)用 ACP_IDLE_TIMEOUT_OUTPUT_SECONDS。
+    """
+
+    def __init__(self, idle_secs: float, tool_active: bool):
+        self.idle_secs = idle_secs
+        self.tool_active = tool_active
+        super().__init__(
+            f"CLI 已 {int(idle_secs)}s 无数据事件"
+            f"({'工具执行中' if tool_active else '无活动工具'},疑似挂死)"
+        )
+
 
 # ============================================================
 # ACP HTTP 客户端
@@ -125,6 +147,9 @@ class ACPClient:
         # 返回:{"outcome": "selected", "option_id": "allow_once"} 或 {"outcome": "rejected"}
         # None 表示不处理(默认拒绝,兼容 always_approve 模式下 CLI 仍开 yolo 不会发请求的场景)
         self.permission_handler = permission_handler
+        # 最近一次 prompt 是否被 idle 兜底提前终止(截断原因)。
+        # 非 None 时调用方应用已累积输出收尾本轮,并在 summary 里标注。
+        self.last_prompt_truncated: str | None = None
         # read timeout=None:session/prompt 可能长时间流式输出
         self._client = httpx.Client(
             timeout=httpx.Timeout(connect=10, read=None, write=30, pool=30),
@@ -141,6 +166,7 @@ class ACPClient:
         request: dict,
         on_event=None,
         timeout: httpx.Timeout | float | None = None,
+        idle_probe: Callable[[], bool] | None = None,
     ) -> dict:
         """发送 JSON-RPC 请求,可选流式处理通知,返回最终响应 result
 
@@ -152,6 +178,8 @@ class ACPClient:
         (用于 initialize / session/new 等快速调用)。
         timeout: 本次请求的超时(秒或 httpx.Timeout)。None 用 client 默认
         (read=None 无限等待)。测试场景应传有限值,避免模型无响应时卡死。
+        idle_probe: 返回当前是否有活动工具的回调。非 None 时启用 idle
+        看门狗(挂死兜底),超时抛 PromptIdleTimeout;None 不启用。
         """
         request_id = request.get("id")
         method = request.get("method", "?")
@@ -188,7 +216,15 @@ class ACPClient:
             # 不是 ACP 通知,需要走 permission_handler 路径
             current_event_type: str | None = None
 
-            for line in response.iter_lines():
+            # idle 看门狗:idle_probe 非 None 时把阻塞读挪到后台线程,
+            # 主线程按 _IDLE_POLL_SECONDS 检查无数据 idle 时长(挂死兜底)
+            lines = (
+                self._iter_lines_with_watchdog(response, idle_probe)
+                if idle_probe is not None
+                else response.iter_lines()
+            )
+
+            for line in lines:
                 # 最先记录原始行(不解析、不过滤、不截断),
                 # 确保即使后续 JSONDecodeError 或分发逻辑跳过,
                 # 原始 SSE 文本仍完整保留在 JSONL 中。
@@ -255,6 +291,64 @@ class ACPClient:
         if final_result is None:
             final_result = {}
         return final_result
+
+    def _iter_lines_with_watchdog(
+        self,
+        response,
+        idle_probe: Callable[[], bool],
+    ) -> Generator[str, None, None]:
+        """带 idle 检测的 SSE 行读取(读线程 + queue,主线程定期检查)
+
+        httpx 的 iter_lines 阻塞在 socket 读上,无法插入 idle 检查;
+        这里把读取挪到守护线程,主线程用 queue.get(timeout) 周期性检查。
+
+        活动判定:任何 data:/event: 行算活动(bridge 的 `: idle Ns` 心跳
+        注释只证明 bridge 活着,不代表 CLI 有进展,不重置 idle)。
+        阈值按事件状态分级:idle_probe()=True(有工具在跑,如 git clone/
+        构建等长命令本就长时间无输出)用 ACP_IDLE_TIMEOUT_TOOL_SECONDS,
+        否则用 ACP_IDLE_TIMEOUT_OUTPUT_SECONDS;对应配置为 0 则不检查。
+
+        超时抛 PromptIdleTimeout(由 prompt() 捕获善后)。
+        """
+        line_q: queue.Queue = queue.Queue()
+
+        def _pump() -> None:
+            try:
+                for ln in response.iter_lines():
+                    line_q.put(("line", ln))
+            except Exception as e:  # 读取层错误透传给主线程(与原同步行为一致)
+                line_q.put(("error", e))
+            finally:
+                line_q.put(("end", None))
+
+        threading.Thread(
+            target=_pump, daemon=True, name="acp-sse-reader"
+        ).start()
+
+        last_activity = time.monotonic()
+        while True:
+            try:
+                kind, payload = line_q.get(timeout=_IDLE_POLL_SECONDS)
+            except queue.Empty:
+                idle_secs = time.monotonic() - last_activity
+                tool_active = bool(idle_probe())
+                threshold = (
+                    settings.ACP_IDLE_TIMEOUT_TOOL_SECONDS
+                    if tool_active
+                    else settings.ACP_IDLE_TIMEOUT_OUTPUT_SECONDS
+                )
+                if threshold > 0 and idle_secs >= threshold:
+                    raise PromptIdleTimeout(idle_secs, tool_active)
+                continue
+            if kind == "end":
+                return
+            if kind == "error":
+                raise payload
+            line = payload
+            stripped = line.strip()
+            if stripped.startswith(("data:", "event:")):
+                last_activity = time.monotonic()
+            yield line
 
     def _handle_permission_request(self, payload: dict) -> None:
         """处理 bridge 发来的 permission_request SSE 事件。
@@ -387,6 +481,7 @@ class ACPClient:
         prompt: list[dict],
         on_event=None,
         timeout: httpx.Timeout | float | None = None,
+        idle_probe: Callable[[], bool] | None = None,
     ) -> dict:
         """发送 prompt,流式处理通知,返回最终结果
 
@@ -395,16 +490,30 @@ class ACPClient:
         on_event: 接收 session/update 通知的回调
         timeout: 本次请求超时(秒或 httpx.Timeout)。None 用 client 默认
         (read=None 无限等待)。测试场景应传有限值。
+        idle_probe: 返回当前是否有活动工具的回调(如 collector.has_active_tools)。
+        非 None 时启用挂死兜底:分级 idle 超时后发 session/cancel 并返回空结果,
+        同时置 last_prompt_truncated(调用方用已累积输出收尾,不 fail 任务)。
         """
-        return self._rpc({
-            "jsonrpc": "2.0",
-            "method": "session/prompt",
-            "params": {
-                "sessionId": session_id,
-                "prompt": prompt,
-            },
-            "id": self._next_id(),
-        }, on_event=on_event, timeout=timeout)
+        self.last_prompt_truncated = None
+        try:
+            return self._rpc({
+                "jsonrpc": "2.0",
+                "method": "session/prompt",
+                "params": {
+                    "sessionId": session_id,
+                    "prompt": prompt,
+                },
+                "id": self._next_id(),
+            }, on_event=on_event, timeout=timeout, idle_probe=idle_probe)
+        except PromptIdleTimeout as e:
+            # 挂死兜底:记录现场 → cancel CLI(避免沙箱内残留失控进程)→
+            # 返回空结果,由调用方用 collector 已累积的输出收尾本轮
+            logger.warning(f"[acp] prompt idle 兜底触发: {e}")
+            if self.recorder:
+                self.recorder.record_raw(f"idle timeout: {e}", kind="meta")
+            self.cancel(session_id)
+            self.last_prompt_truncated = str(e)
+            return {}
 
     def cancel(self, session_id: str) -> None:
         """取消正在进行的 prompt"""
@@ -1184,13 +1293,20 @@ class _ACPCollector:
         self._agent_type = agent_type
         self._checkpoint_callback = checkpoint_callback
         self._interrupt_count = 0
+        # 最近一次已评估的迭代序号(同一决策回合内可发起多个工具调用,
+        # 它们的 pending.iteration 相同,每个 tool_result 都会命中 K 边界;
+        # 用此记录保证同一迭代只评估一次,避免重复落库/推送)
+        self._last_checkpoint_iteration: int | None = None
         # 最近工具调用快照(供检查点评估使用)
         self._last_tool_intent = "(无工具调用)"
         self._last_tool_result = "(无工具结果)"
         # 最近一次结束迭代的 thinking 摘要(供检查点评估快照使用):
-        # 检查点在 tool_result 落库后触发,此时 content_buf 已被
-        # _start_new_iteration 清空,需在清空前暂存
+        # 检查点在 tool_result 落库后触发,由 _flush_iteration 在迭代
+        # 结束时暂存(content 优先、reasoning 兜底,取前 500 字符)
         self._last_thinking_summary = ""
+        # 最近一次 TodoList 工具(kimi code CLI)解析出的计划清单,
+        # 供收尾时续接 current_plan 链(content 里无 <plan> 时回退)
+        self.last_todo_plan: list[dict] | None = None
         # [perf] 首个 ACP 事件到达时间(collector 创建 ≈ prompt 发送前一刻)
         self._perf_t0 = time.perf_counter()
         self._perf_first_logged = False
@@ -1210,9 +1326,16 @@ class _ACPCollector:
         self._iter_started = True
 
     def _flush_iteration(self) -> None:
-        """结束当前迭代:推送 phase=end + 落库 thinking(若有内容)"""
+        """结束当前迭代:推送 phase=end + 落库 thinking(若有内容)
+
+        同时暂存刚结束迭代的 thinking 摘要(供检查点评估快照):
+        检查点在 tool_result 落库后触发,此时 buf 尚未清空(清空发生
+        在下一段文本开新迭代时),统一在迭代结束时暂存。
+        """
         if not self._iter_started:
             return
+        # 暂存刚结束迭代的 thinking 摘要(供检查点评估快照使用)
+        self._last_thinking_summary = (self.content_buf or self.reasoning_buf)[:500]
         publish(self.task.id, "thinking_delta", {
             "conv_id": self.current_conv_id,
             "round_idx": self.round_idx,
@@ -1233,16 +1356,26 @@ class _ACPCollector:
         self._iter_started = False
 
     def _start_new_iteration(self) -> None:
-        """开新迭代:iteration+1, 新 conv_id, 清空 buf(懒启动,不立即推 start)"""
-        # 暂存刚结束迭代的 thinking 摘要:检查点评估已移到 tool_result
-        # 落库之后触发(_handle_tool_result),届时 content_buf 已清空
-        self._last_thinking_summary = self.content_buf[:500]
-
+        """开新迭代(决策回合):iteration+1, 新 conv_id, 清空 buf
+        (懒启动,不立即推 start)"""
         self.iteration += 1
         self.current_conv_id = str(uuid.uuid4())
         self.reasoning_buf = ""
         self.content_buf = ""
         self._iter_started = False
+
+    def _start_new_iteration_if_needed(self) -> None:
+        """决策回合锚点:一段思考/对话文本的开始 = 一次新迭代的开始。
+
+        CLI 只暴露流式文本与工具事件,不暴露模型内部决策边界,以
+        "思考/对话文本段"作为决策回合的可见标记:当前无活跃迭代时
+        (上一段已在 tool_call 处 flush)开新迭代;同一段文本的连续
+        chunk 直接续写,不重复开迭代。无文本的连续工具调用不产生
+        新迭代,归入发起它们的决策回合(迭代=决策回合的统一口径)。
+        """
+        if self._iter_started:
+            return
+        self._start_new_iteration()
 
     def _maybe_trigger_checkpoint(self, iteration: int) -> None:
         """检查点评估触发:每 K 个迭代边界做轻量评估
@@ -1269,12 +1402,20 @@ class _ACPCollector:
         # 检查是否达到评估间隔
         if iteration % effective_k != 0:
             return
+        # 同一迭代边界只评估一次:同迭代内多个工具结果共享迭代序号,
+        # 每个 tool_result 完成都会进入本函数,不加防重会重复触发评估
+        # (同一迭代重复落库 + 重复推送,前端右侧栏重复展示)
+        if self._last_checkpoint_iteration == iteration:
+            return
         # 打断上限只拦可打断模式;仅观察模式评估不被拦
         if self._agent_policy.get("allow_interrupt", True):
             max_interrupts = self._agent_policy.get("max_interrupts_per_round", 2)
             if self._interrupt_count >= max_interrupts:
                 return
 
+        # 标记该迭代已评估(即使评估异常也不重复触发,避免同迭代后续
+        # 工具结果反复重试;迭代号单调递增,新迭代自然解除防重)
+        self._last_checkpoint_iteration = iteration
         # 构造快照
         snapshot = self._build_snapshot()
         try:
@@ -1296,6 +1437,16 @@ class _ACPCollector:
     def close(self) -> None:
         """prompt 调用结束:flush 最后一段迭代"""
         self._flush_iteration()
+
+    @property
+    def has_active_tools(self) -> bool:
+        """是否有已发起但未结束的 tool_call(idle 超时分级判据)
+
+        True 表示 CLI 在等工具(如 git clone/构建)返回,长时间无输出属正常,
+        idle 兜底用宽松阈值;False 表示模型应在流式输出或已该回最终响应,
+        用严格阈值。failed 状态在 __call__ 里与 completed 同样终结。
+        """
+        return bool(self._pending_tool_calls)
 
     def __call__(self, msg: dict) -> None:
         """处理一条 ACP 通知"""
@@ -1333,16 +1484,20 @@ class _ACPCollector:
         elif update_type == "agent_message_chunk":
             self._handle_text(text)
         elif update_type == "tool_call":
+            # 工具调用结束当前思考/对话段,但不开启新迭代:
+            # 迭代=决策回合(以思考/对话文本段为锚点),无文本的连续
+            # 工具调用归入发起它们的决策回合,避免按工具调用切迭代
             self._flush_iteration()
             self._handle_tool_call(update)
-            self._start_new_iteration()
         elif update_type == "tool_call_update":
             tool_call_id = update.get("toolCallId", "")
             status = update.get("status", "")
             if status == "in_progress":
                 # Kimi 的工具参数经 in_progress 增量构建,累积到 pending 缓存
                 self._accumulate_tool_input(tool_call_id, text)
-            elif status == "completed":
+            elif status in ("completed", "failed"):
+                # failed 同样是终态:落库工具结果(错误输出)并清理 pending,
+                # 否则 pending 泄漏会让 has_active_tools 恒真(idle 兜底误用宽松阈值)
                 self._handle_tool_result(tool_call_id, update)
         elif update_type == "plan":
             self._handle_plan(update.get("entries", []))
@@ -1354,6 +1509,8 @@ class _ACPCollector:
     def _handle_thinking(self, delta: str) -> None:
         if not delta:
             return
+        # 思考文本段的开始 = 新决策回合(新迭代)的开始
+        self._start_new_iteration_if_needed()
         self._ensure_iter_started()
         self.reasoning_full += delta
         self.reasoning_buf += delta
@@ -1369,6 +1526,8 @@ class _ACPCollector:
     def _handle_text(self, delta: str) -> None:
         if not delta:
             return
+        # 对话文本段的开始 = 新决策回合(新迭代)的开始
+        self._start_new_iteration_if_needed()
         self._ensure_iter_started()
         self.content_full += delta
         self.content_buf += delta
@@ -1421,8 +1580,8 @@ class _ACPCollector:
                 raw_input = {"pattern": title[8:].strip()}
 
         # 缓存,等 tool_call_update 累积输入 / completed 拿输出
-        # iteration:该调用所属迭代序号(tool_result 到达时 self.iteration 已 +1,
-        # 检查点评估需用此序号触发,保证落库顺序为 tool_call → tool_result → 检查点)
+        # iteration:该调用所属决策回合的迭代序号(发起时记录,检查点
+        # 评估用此序号触发,保证落库顺序为 tool_call → tool_result → 检查点)
         self._pending_tool_calls[tool_call_id] = {
             "title": title,
             "kind": kind,
@@ -1542,10 +1701,26 @@ class _ACPCollector:
             round_idx=self.round_idx,
             role="react_agent", type="tool_result",
             content=raw_output,
+            # 关联对应 tool_call 会话记录(CLI 并行调用时 result 按完成顺序落库,
+            # 前端靠它精确配对;conv_id 缺失时留空,前端回退相邻配对)
+            tool_call_id=str(conv_id) if conv_id else None,
         )
 
         # 记录最近工具结果(供检查点评估快照使用)
         self._last_tool_result = raw_output
+
+        # kimi TodoList 工具:completed 时携带完整计划清单({todos: [...]}),
+        # 全量替换语义,解析后直接覆盖式推送 plan 事件(与 _handle_plan 同款,
+        # 前端复用 react_agent 的计划清单卡片;kimi v2 不发 ACP plan 通知,
+        # 只能从该工具调用提取)
+        if tool_name == "TodoList":
+            todo_steps = self._parse_todo_plan(update.get("rawInput"), input_text)
+            if todo_steps:
+                self.last_todo_plan = todo_steps
+                publish(self.task.id, "plan", {
+                    "round_idx": self.round_idx,
+                    "steps": todo_steps,
+                })
 
         # 检查点评估:在工具结果落库之后触发(而非 tool_call 落库后立即触发),
         # 保证落库顺序 tool_call → tool_result → 检查点评估:
@@ -1659,23 +1834,68 @@ class _ACPCollector:
         return intent, detail
 
     def _handle_plan(self, entries: list) -> None:
-        """处理 plan 通知,推送 plan 事件"""
+        """处理 plan 通知,推送 plan 事件
+
+        ACP PlanEntry 状态为 pending/in_progress/completed,
+        前端只认 pending/in_progress/done,completed 需映射为 done。
+        """
         if not entries:
             return
         steps = []
         for i, e in enumerate(entries, 1):
             if not isinstance(e, dict):
                 continue
+            status = str(e.get("status") or "pending")
+            status = _ACP_PLAN_STATUS_MAP.get(status, status)
+            if status not in ("pending", "in_progress", "done"):
+                status = "pending"
             steps.append({
                 "id": i,
                 "text": e.get("content", ""),
-                "status": e.get("status", "pending"),
+                "status": status,
             })
         if steps:
             publish(self.task.id, "plan", {
                 "round_idx": self.round_idx,
                 "steps": steps,
             })
+
+    @staticmethod
+    def _parse_todo_plan(raw_input: Any, input_text: str) -> list[dict] | None:
+        """解析 TodoList 工具输入({todos: [{title, status}]})为 plan 步骤
+
+        优先结构化 rawInput;回退解析 input_text(completed 时的累积文本,
+        json_repair 容错)。查询模式(无 todos)/清空模式(空数组)返回 None。
+        status 白名单归一(completed → done,非法值 → pending)。
+        """
+        todos: Any = None
+        if isinstance(raw_input, dict):
+            todos = raw_input.get("todos")
+        if todos is None and input_text:
+            try:
+                parsed: Any = json.loads(input_text)
+            except json.JSONDecodeError:
+                try:
+                    parsed = repair_json(input_text, return_objects=True)
+                except Exception:
+                    parsed = None
+            if isinstance(parsed, dict):
+                todos = parsed.get("todos")
+        if not isinstance(todos, list) or not todos:
+            return None
+        steps: list[dict] = []
+        for item in todos:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("title") or "").strip()
+            if not text:
+                continue
+            status = str(item.get("status") or "pending").strip()
+            status = _ACP_PLAN_STATUS_MAP.get(status, status)
+            if status not in ("pending", "in_progress", "done"):
+                status = "pending"
+            steps.append({"id": len(steps) + 1, "text": text, "status": status})
+        return steps or None
 
     def _handle_error(self, text: str) -> None:
         if not text:
@@ -1758,12 +1978,15 @@ def _extract_json_string_field(text: str, field: str) -> str:
 def _add_conversation(
     db: Session, task: Task, *, round_idx: int, role: str, type: str,
     content: str, reasoning: str | None = None,
+    tool_call_id: str | None = None,
     publish_event: bool = True,
 ) -> Conversation:
     """记录一条对话,可选推送 SSE 事件
 
     - thinking 不推 SSE(流式卡片已展示,避免重复)
     - tool_call / tool_result 推 SSE(前端对话列表实时追加)
+    - tool_call_id:仅 type=tool_result 用,对应 tool_call 会话记录的 id,
+      前端据此配对展示(CLI 并行调用时 result 按完成顺序落库,不再紧跟 call)
 
     返回创建的 Conversation 对象(供调用方后续更新,如 Kimi 增量参数补全)。
     """
@@ -1774,6 +1997,7 @@ def _add_conversation(
         type=type,
         content=content,
         reasoning=reasoning,
+        tool_call_id=tool_call_id,
     )
     db.add(conv)
     db.commit()
@@ -1785,35 +2009,78 @@ def _add_conversation(
             "role": conv.role,
             "type": conv.type,
             "content": conv.content,
+            "tool_call_id": conv.tool_call_id,
             "created_at": conv.created_at.isoformat() if conv.created_at else None,
         })
     return conv
 
 
 # ============================================================
-# Plan 提取(复用 <plan> 格式)
+# Plan 提取(复用 <plan> 格式,与 react_agent 的解析逻辑保持一致)
 # ============================================================
 
+
+# ACP plan 通知状态 → 前端状态(completed → done)
+_ACP_PLAN_STATUS_MAP = {"completed": "done"}
 
 _PLAN_BLOCK_RE = re.compile(r"<plan>\s*(.*?)\s*</plan>", re.DOTALL)
 _PLAN_LINE_RE = re.compile(
     r"^\s*(?:\d+[.、)]\s*)?(?:\[([\w_]+)\]\s*)?(.+)$"
 )
+# 纯符号行("["、"]"、"," 等)不算步骤,避免 JSON 括号变成无意义步骤
+_PLAN_LINE_HAS_TEXT_RE = re.compile(r"[\w\u4e00-\u9fff]")
+
+
+def _parse_plan_json(block: str) -> list[dict] | None:
+    """尝试把 plan 块按 JSON 解析(对象数组,或逐行多个对象)
+
+    CLI 也可能在文本里输出 JSON 数组格式的 <plan>,逐行解析会把整行 JSON
+    当成步骤文本,这里优先走 JSON 解析。依赖 json_repair 容错修复
+    (尾逗号/截断/缺引号等)。解析失败返回 None,回退逐行解析。
+    """
+    text = block.strip()
+    if not text or text[0] not in "[{":
+        return None
+    candidate = text if text[0] == "[" else f"[{text}]"
+    try:
+        repaired = repair_json(candidate, return_objects=True)
+    except Exception:
+        return None
+    if not isinstance(repaired, list):
+        repaired = [repaired]
+    steps: list[dict] = []
+    for e in repaired:
+        if not isinstance(e, dict):
+            continue
+        step_text = str(e.get("text") or e.get("content") or "").strip()
+        if not step_text:
+            continue
+        status = str(e.get("status") or "pending").strip()
+        if status not in ("pending", "in_progress", "done"):
+            status = "pending"
+        steps.append({"id": len(steps) + 1, "text": step_text, "status": status})
+    return steps or None
 
 
 def _extract_plan(content: str) -> list[dict] | None:
     """从 content 提取 <plan>...</plan> 计划清单
 
+    优先 JSON 格式(对象数组),回退逐行格式([status] 文本)。
     无 plan 块时返回 None。
     """
     m = _PLAN_BLOCK_RE.search(content)
     if not m:
         return None
     block = m.group(1)
+    json_steps = _parse_plan_json(block)
+    if json_steps:
+        return json_steps
     steps: list[dict] = []
     for i, line in enumerate(block.split("\n"), 1):
         line = line.strip()
         if not line:
+            continue
+        if not _PLAN_LINE_HAS_TEXT_RE.search(line):
             continue
         lm = _PLAN_LINE_RE.match(line)
         if not lm:
@@ -1830,7 +2097,10 @@ def _format_plan_reminder(plan_steps: list[dict]) -> str:
     """格式化 plan 状态,注入 prompt 让 CLI 续接进度"""
     if not plan_steps:
         return ""
-    lines = ["[系统提醒] 当前计划清单状态(已完成的请标记 [done]):"]
+    lines = [
+        "[系统提醒] 当前计划清单状态(状态有变化时请用自己的方式更新完整清单——"
+        "在 <plan> 里继续输出或更新你的 TodoList 等计划工具,完成的标 done):"
+    ]
     sym = {"pending": "○", "in_progress": "◌", "done": "✓"}
     for s in plan_steps:
         lines.append(f"{sym.get(s['status'], '○')} [{s['status']}] {s['text']}")
@@ -2014,6 +2284,50 @@ def _build_memory_section(memory_summary: str = "", global_memory: str = "") -> 
         )
 
     return section
+
+
+def _build_cli_interrupt_message(
+    interrupts: list[dict[str, Any]],
+) -> tuple[str, str] | None:
+    """把 drain 出的 user_agent 中断指令格式化为追问 prompt + 展示文本
+
+    返回 (发送文本, 展示文本);无可注入内容(所有 query 为空)时返回 None。
+
+    - 发送文本:匿名化措辞(不出现 user_agent 等评估者身份,react_agent
+      不需要知道评估者存在),只含 query;措辞与内置 react_agent 的
+      _format_interrupts 对齐。reason 面向用户展示,措辞不受控,不进 prompt。
+    - 展示文本:面向用户的完整记录(含理由与追问指令),带 "[检查点中断] "
+      前缀供前端/报告识别,不截断。
+    """
+    queries: list[str] = []
+    display_parts: list[str] = []
+    for it in interrupts:
+        query = (it.get("query") or "").strip()
+        if not query:
+            continue
+        queries.append(query)
+        reason = (it.get("reason") or "").strip()
+        if reason:
+            display_parts.append(f"理由:{reason}\n追问指令:{query}")
+        else:
+            display_parts.append(f"追问指令:{query}")
+
+    if not queries:
+        return None
+
+    if len(queries) == 1:
+        body = queries[0]
+    else:
+        body = "\n\n".join(f"[{i + 1}] {q}" for i, q in enumerate(queries))
+
+    send_text = (
+        "[方向调整]\n"
+        "观察你的执行过程后,认为当前方向需要调整。"
+        "请把以下指令纳入当前任务,调整方向继续执行:\n\n"
+        f"{body}"
+    )
+    display_text = "[检查点中断] " + "\n\n".join(display_parts)
+    return send_text, display_text
 
 
 # ============================================================
@@ -2301,6 +2615,8 @@ def run_acp_agent(
                             query=checkpoint_result["query"],
                             reason=checkpoint_result["reason"],
                             iteration=iteration,
+                            round_idx=round_idx,
+                            eval_conv_id=checkpoint_result.get("eval_conv_id"),
                         )
                         increment_interrupt_count(task.id, round_idx)
                         logger.info(
@@ -2323,50 +2639,45 @@ def run_acp_agent(
             try:
                 # 软中断循环:当前 prompt 结束后检查中断队列,
                 # 若有中断则用追问指令发起新 prompt(同 session,CLI 保留对话历史)
+                # auto_renew:prompt 期间 CLI 用自带 bash,不触发后端访问续期,
+                # 单轮长执行可能拖过 TTL,后台线程周期性 renew 沙箱
                 current_msg = user_msg
-                while True:
-                    # [perf] prompt 发送锚点(CLI 侧 TTFT 由 acp_first_event 记录)
-                    perf_log(task.id, "acp_prompt_send", round_idx=round_idx, msg_chars=len(current_msg))
-                    result = client.prompt(
-                        acp_session_id,
-                        [{"type": "text", "text": current_msg}],
-                        on_event=collector,
-                    )
+                with session.auto_renew():
+                    while True:
+                        # [perf] prompt 发送锚点(CLI 侧 TTFT 由 acp_first_event 记录)
+                        perf_log(task.id, "acp_prompt_send", round_idx=round_idx, msg_chars=len(current_msg))
+                        result = client.prompt(
+                            acp_session_id,
+                            [{"type": "text", "text": current_msg}],
+                            on_event=collector,
+                            # 挂死兜底:按活动工具状态分级 idle 超时(见 PromptIdleTimeout)
+                            idle_probe=lambda: collector.has_active_tools,
+                        )
 
-                    # 检查中断队列(软中断:不取消当前 prompt,等它结束后再追问)
-                    from app.agent_interrupt import drain_interrupts
-                    pending_interrupts = drain_interrupts(task.id)
-                    if not pending_interrupts:
-                        break  # 无中断,正常结束
+                        # 检查中断队列(软中断:不取消当前 prompt,等它结束后再追问)
+                        from app.agent_interrupt import drain_interrupts
+                        pending_interrupts = drain_interrupts(task.id)
+                        if not pending_interrupts:
+                            break  # 无中断,正常结束
 
-                    # 有中断:构造追问 prompt,继续下一轮 prompt
-                    interrupt_parts = []
-                    for it in pending_interrupts:
-                        query = (it.get("query") or "").strip()
-                        if query:
-                            reason = (it.get("reason") or "").strip()
-                            it_text = f"[方向纠正:{reason}]\n{query}" if reason else query
-                            interrupt_parts.append(it_text)
+                        # 有中断:构造追问 prompt(匿名化,只含 query),继续下一轮 prompt
+                        built = _build_cli_interrupt_message(pending_interrupts)
+                        if not built:
+                            break  # 中断内容为空,正常结束
+                        interrupt_msg, interrupt_display = built
 
-                    if not interrupt_parts:
-                        break  # 中断内容为空,正常结束
-
-                    interrupt_msg = (
-                        "[user_agent 检查点评估:方向纠正]\n"
-                        "user_agent 在观察你的执行过程后,认为当前方向需要调整。"
-                        "请把以下纠正指令纳入当前任务,调整检查方向继续执行:\n\n"
-                        + "\n\n".join(interrupt_parts)
-                    )
-                    logger.info(
-                        f"[task={task.id}] CLI 软中断:用追问指令发起新 prompt "
-                        f"({len(pending_interrupts)} 条中断)"
-                    )
-                    _add_conversation(
-                        db, task, round_idx=round_idx,
-                        role="user_agent", type="evaluation",
-                        content=f"[检查点中断] {interrupt_msg[:200]}",
-                    )
-                    current_msg = interrupt_msg
+                        logger.info(
+                            f"[task={task.id}] CLI 软中断:用追问指令发起新 prompt "
+                            f"({len(pending_interrupts)} 条中断)"
+                        )
+                        # 落库面向用户的完整展示文本(含理由与追问指令,不截断);
+                        # 发送给 CLI 的匿名化文本独立,不落库
+                        _add_conversation(
+                            db, task, round_idx=round_idx,
+                            role="user_agent", type="evaluation",
+                            content=interrupt_display,
+                        )
+                        current_msg = interrupt_msg
 
             except Exception as e:
                 logger.exception(f"[task={task.id}] ACP prompt 失败 ({agent_type})")
@@ -2404,6 +2715,27 @@ def run_acp_agent(
     if not summary:
         summary = f"第 {round_idx} 轮完成({agent_type},{collector.tool_call_count} 次工具调用)"
 
+    # 挂死兜底提前终止了 prompt:在 summary 里标注截断,让 user_agent 评估时
+    # 知道本轮输出不完整(任务不 fail,照常评估/追问;前端同步推 error 提示)
+    if client.last_prompt_truncated:
+        trunc_reason = client.last_prompt_truncated
+        logger.warning(
+            f"[task={task.id}] {agent_type} 第 {round_idx} 轮被 idle 兜底提前终止: {trunc_reason},"
+            f"用已累积输出({len(collector.content_full)}字符)收尾"
+        )
+        publish(task.id, "thinking_delta", {
+            "conv_id": collector.current_conv_id,
+            "round_idx": round_idx,
+            "role": "react_agent",
+            "phase": "error",
+            "delta": f"[CLI 长时间无响应,本轮已提前终止: {trunc_reason}]",
+            "iteration": collector.iteration,
+        })
+        summary += (
+            f"\n\n[系统注记:本轮执行因 CLI 长时间无响应({trunc_reason})被提前终止,"
+            "以上为终止前已输出的内容,可能不完整]"
+        )
+
     current_plan: list[dict] = [dict(s) for s in (previous_plan or [])]
     extracted = _extract_plan(collector.content_full)
     if extracted:
@@ -2412,6 +2744,9 @@ def run_acp_agent(
             "round_idx": round_idx,
             "steps": current_plan,
         })
+    elif collector.last_todo_plan:
+        # kimi TodoList 已在 completed 时推送过 plan 事件,这里只续接跨轮链
+        current_plan = [dict(s) for s in collector.last_todo_plan]
 
     logger.info(
         f"[task={task.id}] {agent_type} 第 {round_idx} 轮完成: "

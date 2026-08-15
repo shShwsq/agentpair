@@ -38,6 +38,7 @@ import uuid
 from typing import Any
 from uuid import UUID
 
+from json_repair import repair_json
 from sqlalchemy.orm import Session
 
 from app.event_bus import publish
@@ -61,6 +62,11 @@ MAX_HISTORY_TOTAL_CHARS = 12000
 # 解析失败兜底时,展示在最终总结里的 user_agent 输出原文截断上限
 MAX_RAW_OUTPUT_CHARS = 3000
 
+# user_agent 评估调用的单次输出上限。done=true 时需输出 results+grouping
+# 大 JSON,2048 容易被截断导致解析失败;16384 预留足够余量。
+# 实际上限还会被 LLMClient.max_output_tokens 按模型输出能力钳制
+UA_EVAL_MAX_TOKENS = 16384
+
 # 固定追加的"是否有其他补充"问题(由后端追加,LLM 不负责生成)
 SUPPLEMENT_QUESTION_ID = "_supplement"
 SUPPLEMENT_QUESTION = {
@@ -73,6 +79,21 @@ SUPPLEMENT_QUESTION = {
 
 # 单次评估中最多调用 verifier_agent 的次数(防止无限验证)
 MAX_VERIFY_CALLS = 3
+
+# 追问清单更新模式(仅 resume 首次分析用户追加消息时启用):
+# user_agent 判断追问是否引入新覆盖维度,需要时在输出中附带更新后的完整 checklist,
+# orchestrator 据此推送给用户再次编辑确认。详见 CHECKLIST_UPDATE_SECTION。
+CHECKLIST_UPDATE_SECTION = """## 本轮附加规则(追问清单更新模式)
+本轮是分析用户的追问消息:任务本已完成,用户又追加了新消息
+(见用户意图中的「[用户追加消息]」段)。除对照 checklist 评估外,你还需:
+1. 判断追问消息是否引入了现有 checklist 中没有的覆盖维度。
+2. 若需要新增维度或调整现有维度:在输出中附带 `checklist` 字段,
+   给出**更新后的完整清单**(保留原有维度,追加新维度;
+   格式与第 0 轮相同: id/name/description/checklist 子项)。
+   此时 done 必须为 false,followup_query 需指导 react_agent 执行追问需求。
+3. 若追问消息没有引入任何新需求(仅确认/致谢等):不输出 checklist 字段,
+   可按常规评估,允许 done=true 宣布结束。
+注意:新维度 id 用英文下划线命名;已有维度的 id 保持不变(覆盖度看板按 id 匹配)。"""
 
 # verify 工具定义(user_agent 可选调用,仅当 task.verifier_enabled 且 policy.allow_verify 时启用)
 _VERIFY_TOOL_DEFINITION: dict[str, Any] = {
@@ -221,6 +242,10 @@ grouping 可为 null(不分组,平铺展示)。非 null 时各字段说明:
 - missing 列表为空是 done 的必要条件,但非充分条件——还需结果质量足够。
 - followup_query 应具体可执行,指明 react_agent 需要补充哪些维度的分析。
 - 保持覆盖度判断连续性:之前已标 covered 的维度,本轮若 react_agent 未推翻,继续保持。
+- 「本轮执行中的检查点观察」是你在执行过程中做出的实时判断,评估应与之保持一致性。
+- 若检查点已发出纠正指令且 react_agent 总结显示已响应,followup_query 不要重复该指令。
+- 「最后一次检查点之后的工具调用明细」是最近的原始证据,可用于校验总结的真实性;
+  更早的工具细节未传入,以检查点结论和各轮总结为准。
 
 ## 结果整理原则(done=true 时)
 - results 从 react_agent 各轮总结中提取结构化发现。
@@ -285,6 +310,7 @@ def run_user_agent(
     repo_url: str | None = None,
     task: Task | None = None,
     agent_policy: dict[str, Any] | None = None,
+    checklist_update_mode: bool = False,
 ) -> dict[str, Any]:
     """执行一次 user_agent 评估
 
@@ -304,6 +330,9 @@ def run_user_agent(
             round_idx=0 时传 None(LLM 动态生成);round_idx>=1 时传已确认清单。
         task: 任务对象(可选)。传入时用于读取 verifier 配置(test_env_url / verifier_enabled)。
         agent_policy: agent 策略(可选)。含 allow_verify 开关,控制是否启用 verify 工具。
+        checklist_update_mode: 追问清单更新模式(可选)。仅 resume 首次分析用户追加
+            消息时启用:user_agent 判断追问是否引入新覆盖维度,需要时在输出中附带
+            更新后的完整 checklist,orchestrator 据此推送给用户再次编辑确认。
 
     返回:user_agent 的结构化输出
         {
@@ -322,6 +351,10 @@ def run_user_agent(
     # 场景降级后:用通用 prompt,checklist 从 task_checklist 注入
     checklist_text = _format_checklist_for_prompt(task_checklist)
     system_prompt = USER_AGENT_SYSTEM_PROMPT.replace("{checklist_section}", checklist_text)
+
+    # 追问清单更新模式:附加额外规则(判断追问是否引入新维度,需要时输出更新后 checklist)
+    if checklist_update_mode:
+        system_prompt += "\n\n" + CHECKLIST_UPDATE_SECTION
 
     # 长期记忆注入:User Profile + 全局记忆 + 项目记忆精简版
     # (仅当有内容时,追加到 system prompt 末尾)
@@ -389,9 +422,37 @@ def run_user_agent(
         user_msg_parts.append(
             f"\n以下是 react_agent 已执行的 {len(react_agent_summaries)} 轮自然语言总结:\n\n"
             + "\n\n".join(rounds_text)
-            + "\n\n请评估覆盖情况,决定是否追问或结束。"
+        )
+
+        # 本轮检查点观察 + 最后一次检查点之后的工具调用明细(分层窗口注入):
+        # 早期区间由检查点结论覆盖,尾部给原始证据,供校验总结真实性、避免重复追问
+        if db is not None:
+            try:
+                from app.agent_checkpoint import (
+                    build_round_checkpoint_section,
+                    build_tool_tail_section,
+                )
+                ckpt_section = build_round_checkpoint_section(db, task_id, round_idx)
+                tail_section = build_tool_tail_section(db, task_id, round_idx)
+                if ckpt_section:
+                    user_msg_parts.append("\n" + ckpt_section)
+                if tail_section:
+                    user_msg_parts.append("\n" + tail_section)
+            except Exception as e:
+                logger.warning(
+                    f"[task={task_id}] 加载检查点/工具窗口注入失败(跳过): {e}"
+                )
+
+        user_msg_parts.append(
+            "\n\n请评估覆盖情况,决定是否追问或结束。"
             + "\n\n[当前不允许提问] react_agent 已开始执行,ask_user 必须为 false。"
         )
+        if checklist_update_mode:
+            user_msg_parts.append(
+                "\n[追问清单更新] 本轮是分析用户的追问消息。若追问引入了新的覆盖维度,"
+                "请在输出中附带更新后的完整 checklist(done=false,followup_query "
+                "指向追问需求);若无新维度,不要输出 checklist。"
+            )
         if history_prefix:
             user_msg_parts.append(
                 "\n[记忆提示] 上面已附上你之前各轮的评估记录,请保持覆盖度判断的连续性:"
@@ -418,13 +479,31 @@ def run_user_agent(
     tools = [_VERIFY_TOOL_DEFINITION] if verify_enabled else None
 
     # LLM 调用循环:处理 verify 工具调用(验证结果回灌后再调 LLM 输出 JSON 评估)
+    # 流式调用失败降级:首次失败重试一次;重试仍失败返回降级结果
+    # (orchestrator 据此直接把用户输入内容交给 react_agent 执行,不杀死任务)
     content = ""
     verify_count = 0
     reasoning_parts: list[str] = []  # 各次流式调用的真实思考链(含 verify 循环)
+    degraded_error: Exception | None = None
     while True:
-        content, tool_calls, reasoning_chunk = _stream_user_agent_llm(
-            client, messages, task_id=task_id, round_idx=round_idx, tools=tools
-        )
+        try:
+            content, tool_calls, reasoning_chunk = _stream_user_agent_llm(
+                client, messages, task_id=task_id, round_idx=round_idx, tools=tools
+            )
+        except Exception as e:
+            logger.warning(
+                f"[task={task_id}] user_agent 流式调用失败(第 1 次): {e},将重试一次"
+            )
+            try:
+                content, tool_calls, reasoning_chunk = _stream_user_agent_llm(
+                    client, messages, task_id=task_id, round_idx=round_idx, tools=tools
+                )
+            except Exception as e2:
+                degraded_error = e2
+                logger.exception(
+                    f"[task={task_id}] user_agent 流式调用重试仍失败,降级直连 react_agent"
+                )
+                break
         if reasoning_chunk:
             reasoning_parts.append(reasoning_chunk)
 
@@ -491,6 +570,30 @@ def run_user_agent(
             })
 
         # 循环回去:LLM 看到验证结果后,要么再调 verify,要么输出 JSON 评估
+
+    # 流式调用降级:重试仍失败时返回降级结果(不抛异常杀死任务)。
+    # orchestrator 检测到 degraded=true 后,首次分析跳过清单确认、直接把用户
+    # 输入内容交给 react_agent 执行;协作轮评估降级则直接以当前进度收尾结束。
+    if degraded_error is not None:
+        degrade_reason = str(degraded_error) or type(degraded_error).__name__
+        logger.info(
+            f"[task={task_id}] user_agent 流式调用失败已降级"
+            f"(round_idx={round_idx}): {degrade_reason}"
+        )
+        return {
+            "covered": [],
+            "missing": [],
+            "reasoning": (
+                f"user_agent 流式调用失败(重试仍失败),已降级:\n{degrade_reason}\n\n"
+                f"[降级说明] 本轮跳过 user_agent 评估,直接把用户输入内容交给 "
+                f"react_agent 执行。"
+            ),
+            "followup_query": user_intent,
+            "done": False,
+            "ask_user": False,
+            "degraded": True,
+            "degrade_reason": degrade_reason,
+        }
 
     # 解析 JSON(LLM 可能输出带 ```json ``` 包裹的)
     try:
@@ -641,7 +744,7 @@ def _stream_user_agent_llm(
     })
 
     try:
-        for chunk in client.chat_stream(messages, tools=tools, tool_choice="auto", max_tokens=2048):
+        for chunk in client.chat_stream(messages, tools=tools, tool_choice="auto", max_tokens=UA_EVAL_MAX_TOKENS):
             # 思考链增量(推给前端流式卡片显示)
             if chunk.reasoning_delta:
                 reasoning_full += chunk.reasoning_delta
@@ -753,6 +856,12 @@ def _build_user_agent_history(
     # 同时记录每段的"重要性"(用于超限时裁剪):missing 非空 > done=false > 其他
     priorities: list[int] = []
     for c in convs:
+        # 排除检查点评估/中断记录:与完整评估同为 evaluation type,其 reasoning 是
+        # 检查点原始 JSON,混入跨轮记忆是噪声(它们另有专门注入通道:
+        # build_round_checkpoint_section)
+        content_head = (c.content or "")
+        if content_head.startswith("[检查点评估") or content_head.startswith("[检查点中断"):
+            continue
         # reasoning 是 _record_user_agent 写入的 full_eval(含 covered/missing/判断/追问)
         text = c.reasoning or c.content or ""
         if not text:
@@ -792,17 +901,36 @@ def _build_user_agent_history(
 
 
 def _parse_json_response(content: str) -> dict[str, Any]:
-    """解析 LLM 输出的 JSON,容忍 markdown 包裹"""
-    text = content.strip()
+    """解析 LLM 输出的 JSON,容忍 markdown 包裹/前后散文/输出截断
 
-    # 去掉 markdown 代码块包裹
-    if text.startswith("```"):
-        # 找到第一行和最后一行
-        lines = text.split("\n")
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        text = "\n".join(lines)
+    依赖 json_repair:它能修复截断(补未闭合引号/括号)、剥离 markdown
+    围栏与前后散文、还原缺引号等常见问题。max_tokens 打满时输出被
+    拦腰截断的场景下,通常能保住已生成的完整字段,避免整体解析失败。
 
-    return json.loads(text)
+    注意:文本中出现多个 JSON 片段(如散文中夹带示例对象)时,json_repair
+    返回 list,此时需从中挑选真正的评估结果。
+    """
+    text = (content or "").strip()
+    if not text:
+        raise ValueError("LLM 输出为空")
+
+    result = repair_json(text, return_objects=True)
+    if isinstance(result, list):
+        result = _pick_eval_dict(result)
+    if not isinstance(result, dict) or not result:
+        raise ValueError("无法从输出中提取有效 JSON 对象")
+    return result
+
+
+def _pick_eval_dict(items: list[Any]) -> dict[str, Any] | None:
+    """从 json_repair 返回的多个候选对象中挑选真正的评估结果
+
+    优先取含评估字段(covered/missing/done 等)且排在最后的对象
+    (散文示例通常出现在真正结果之前)。
+    """
+    dicts = [x for x in items if isinstance(x, dict) and x]
+    if not dicts:
+        return None
+    markers = ("covered", "missing", "done", "followup_query", "results", "grouping")
+    marked = [d for d in dicts if any(k in d for k in markers)]
+    return marked[-1] if marked else dicts[-1]

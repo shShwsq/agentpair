@@ -22,19 +22,23 @@
  */
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { jsonrepair } from 'jsonrepair'
 
 import AppHeader from '@/components/AppHeader.vue'
 import ChecklistReviewDialog from '@/components/ChecklistReviewDialog.vue'
 import ConversationMessage from '@/components/ConversationMessage.vue'
 import QuestionDialog from '@/components/QuestionDialog.vue'
 import UserMessageInput from '@/components/UserMessageInput.vue'
+import TaskRuntimeSettings from '@/components/TaskRuntimeSettings.vue'
 import CommandConfirmDialog from '@/components/CommandConfirmDialog.vue'
 import VerifyActionDialog from '@/components/VerifyActionDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import {
+  cancelInterrupt,
   downloadTaskReportMarkdown,
   getPendingChecklist,
+  getPendingInterrupt,
   getPendingQuestion,
   getPendingVerifyAction,
   getPendingCommandConfirm,
@@ -43,6 +47,8 @@ import {
   getTaskReportHtml,
   pauseTask,
   resumeTask,
+  retryTask,
+  skipPreClone,
   submitTaskAnswer,
   submitTaskChecklist,
   submitVerifyAction,
@@ -51,7 +57,9 @@ import {
 } from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
 import { listArtifacts } from '@/api/taskArtifacts'
+import { clientLog } from '@/utils/clientLog'
 import { extractErrorMessage } from '@/utils/error'
+import { parseDiffFileSegments } from '@/utils/diffFiles'
 import { renderMarkdown } from '@/utils/markdown'
 import { buildToolSegments, buildToolSummary, parseAgentTrace, toolFileTargetOf } from '@/utils/toolSummary'
 import type {
@@ -82,6 +90,10 @@ const task = ref<TaskDetail | null>(null)
 const loading = ref(true)
 const error = ref('')
 let eventSource: EventSource | null = null
+/** 刚发起 resume/retry 的窗口标志:onDone 触发时校验是否竞态误推用 */
+const resumingRef = ref(false)
+/** 组件已卸载标志(onDone 异步窗口内防止泄漏新 SSE 连接) */
+let unmountedFlag = false
 /** 对话流容器引用,用于自动滚动到底部 */
 const conversationRef = ref<HTMLElement | null>(null)
 
@@ -103,6 +115,8 @@ function toggleDetail(): void {
 
 /** 任务的工作区 diff 产物(任务完成时由后端捕获,kind="git_diff") */
 const workspaceArtifact = ref<TaskArtifact | null>(null)
+/** 仓库树快照产物(clone 时保底/任务结束时捕获,kind="repo_tree";无变更时的侧栏兜底) */
+const repoTreeArtifact = ref<TaskArtifact | null>(null)
 /** 工作区变更区折叠状态(默认展开) */
 const workspaceChangesCollapsed = ref(false)
 
@@ -131,15 +145,59 @@ function diffLineClass(line: string): string {
   return 'diff-line-ctx'
 }
 
-/** 拉取任务的工作区产物(取第一个 git_diff);静默失败,不影响主流程 */
+/** 按文件块解析 diff(路径 + 起始行号),供变更文件列表与点击跳转锚点使用 */
+const diffSegments = computed(() => parseDiffFileSegments(diffLines.value))
+
+/** 变更文件清单(按出现顺序去重);工作区不可用时传给侧栏兜底展示 */
+const changedFiles = computed(() => {
+  const seen = new Set<string>()
+  const files: string[] = []
+  for (const seg of diffSegments.value) {
+    if (!seen.has(seg.path)) {
+      seen.add(seg.path)
+      files.push(seg.path)
+    }
+  }
+  return files
+})
+
+/** 仓库文件清单(repo_tree 快照,逐行路径);无变更文件时传给侧栏二级兜底 */
+const repoFiles = computed(() =>
+  (repoTreeArtifact.value?.content ?? '')
+    .split('\n')
+    .filter((p) => p.trim()),
+)
+
+/** diff 行号 → 锚点 id 映射(仅每个文件块起始行有锚点) */
+const diffAnchorByLine = computed(() => {
+  const m = new Map<number, string>()
+  diffSegments.value.forEach((seg, i) => m.set(seg.lineIndex, `diff-file-${i}`))
+  return m
+})
+
+/** 侧栏变更文件点击:展开"工作区变更"并滚动到对应文件的 diff 块 */
+async function scrollToDiffFile(path: string): Promise<void> {
+  const idx = diffSegments.value.findIndex((s) => s.path === path)
+  if (idx < 0) return
+  workspaceChangesCollapsed.value = false
+  await nextTick()
+  document
+    .getElementById(`diff-file-${idx}`)
+    ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+/** 拉取任务的工作区产物(git_diff + repo_tree);静默失败,不影响主流程 */
 async function loadArtifact(taskId: string): Promise<void> {
   try {
     const res = await listArtifacts(taskId)
     workspaceArtifact.value =
       res.artifacts.find((a) => a.kind === 'git_diff') ?? null
+    repoTreeArtifact.value =
+      res.artifacts.find((a) => a.kind === 'repo_tree') ?? null
   } catch (err) {
-    console.warn('加载工作区变更失败:', err)
+    console.warn('加载工作区产物失败:', err)
     workspaceArtifact.value = null
+    repoTreeArtifact.value = null
   }
 }
 
@@ -192,6 +250,60 @@ const planPerRound = reactive<Map<number, PlanStep[]>>(new Map())
 // conversation 事件已由 onConversation 回调接收并渲染为 user_agent evaluation 卡片,
 // 这里存储 agent_checkpoint 的结构化字段(interrupt/reason/query)供将来扩展可视化。
 const checkpointsPerRound = reactive<Map<string, AgentCheckpointEventData>>(new Map())
+
+// ---- 待生效检查点打断(CLI 执行器:入队后到注入前可取消) ----
+// 后端检查点评估 interrupt=true 时推 agent_checkpoint 事件,此时打断已入队但
+// 未注入(要等当前 prompt 结束),窗口内用户可点右侧栏检查点条目上的
+// "取消打断"按钮;注入后([检查点中断] conversation 事件到达)或取消后窗口关闭。
+// 主对话流仅在打断真正注入后才展示追问指令卡片。
+interface PendingInterruptState {
+  round_idx: number
+  iteration: number | null
+  reason: string
+  query: string | null
+  /** pending=待生效(可取消);cancelling=取消请求已发出;cancelled=已取消 */
+  state: 'pending' | 'cancelling' | 'cancelled'
+}
+const pendingInterrupt = ref<PendingInterruptState | null>(null)
+
+/** 仅 CLI 执行器有可取消窗口(内置执行器打断在迭代边界即时注入) */
+const isCliExecutor = computed(
+  () => !!task.value?.executor && task.value.executor !== 'builtin',
+)
+
+/** 刷新页面后恢复待生效打断卡片(后端 in-memory 队列未 drain 才有) */
+async function restorePendingInterrupt(taskId: string): Promise<void> {
+  if (!isCliExecutor.value) return
+  try {
+    const p = await getPendingInterrupt(taskId)
+    if (p) {
+      pendingInterrupt.value = { ...p, state: 'pending' }
+      // 展开右侧栏,保证取消按钮可见
+      detailCollapsed.value = false
+    }
+  } catch {
+    // 无待生效打断或任务已结束,静默忽略
+  }
+}
+
+/** 用户点击取消打断;竞态输给注入时后端返回 cancelled=false */
+async function handleCancelInterrupt(): Promise<void> {
+  const p = pendingInterrupt.value
+  if (!task.value?.id || !p || p.state !== 'pending') return
+  p.state = 'cancelling'
+  try {
+    const res = await cancelInterrupt(String(task.value.id))
+    if (res.cancelled) {
+      p.state = 'cancelled'
+    } else {
+      // 打断已注入生效:正式 [检查点中断] 卡片会随 conversation 事件展示,清掉 pending 卡片
+      pendingInterrupt.value = null
+    }
+  } catch (err) {
+    p.state = 'pending'
+    error.value = extractErrorMessage(err)
+  }
+}
 
 // ---- 用户澄清提问弹窗(阶段 8)----
 // user_agent 在第 0 轮评估时若 ask_user=true,后端推送 question 事件,
@@ -338,6 +450,28 @@ const submittingCommandConfirm = ref(false)
 // local 模式下后端用 Popen 流式读 git clone 的 stderr,解析百分比后推送。
 // 克隆完成(后端推 status 切换 current_stage)或任务结束时清除。
 const cloneProgress = ref<CloneProgressEventData | null>(null)
+
+// 跳过预克隆:克隆阶段用户不想等时,请求后端终止 clone 并降级为自主克隆
+const skipClonePending = ref(false)
+
+/** 是否处于预克隆阶段(协议回退间隙无进度事件时也显示跳过按钮) */
+const isPreCloning = computed(
+  () =>
+    !!cloneProgress.value ||
+    (task.value?.current_stage || '').includes('正在克隆仓库'),
+)
+
+async function handleSkipPreClone(): Promise<void> {
+  if (!task.value?.id || skipClonePending.value) return
+  skipClonePending.value = true
+  try {
+    await skipPreClone(String(task.value.id))
+    // 阶段切换由 SSE status 事件驱动(后端降级后推新 stage),不本地改写
+  } catch (err) {
+    error.value = extractErrorMessage(err)
+    skipClonePending.value = false
+  }
+}
 
 /** 从 VerifyActionEventData 填充弹窗数据并打开 */
 function openVerifyActionDialog(action: VerifyActionEventData): void {
@@ -501,6 +635,12 @@ async function initTask(): Promise<void> {
     task.value = taskData
     error.value = ''
     loading.value = false
+    // [诊断] 任务快照拉取:记录后端返回的状态(与前端显示对拍)
+    clientLog(taskId, 'task_fetch', {
+      status: taskData.status,
+      error_message: taskData.error_message,
+      current_stage: taskData.current_stage,
+    })
 
     // 从历史对话提取 plan(刷新页面/迟到订阅者回放)
     // react_agent 的 type=thinking content 里可能含 <plan>...</plan>,
@@ -532,6 +672,8 @@ async function initTask(): Promise<void> {
       void restorePendingVerifyAction(taskId)
       // 恢复可能存在的待确认危险命令弹窗(local 模式刷新页面后)
       void restorePendingCommandConfirm(taskId)
+      // 恢复可能存在的待生效检查点打断(CLI 执行器,中断队列未 drain 时)
+      void restorePendingInterrupt(taskId)
     }
 
     // 3. 加载覆盖度看板(task.checklist 存在才拉取)
@@ -635,6 +777,7 @@ function connectSSE(taskId: string): void {
         type: data.type,
         content: data.content,
         reasoning: data.reasoning ?? null,
+        tool_call_id: data.tool_call_id ?? null,
         created_at: data.created_at || new Date().toISOString(),
       }
       task.value.conversations.push(conv)
@@ -651,6 +794,14 @@ function connectSSE(taskId: string): void {
       }
       // 自动滚动到底部
       nextTick(scrollToBottom)
+
+      // 检查点打断正式注入生效([检查点中断] 卡片接管展示)→ 清掉 pending 卡片
+      if (
+        data.role === 'user_agent' &&
+        (data.content || '').startsWith('[检查点中断]')
+      ) {
+        pendingInterrupt.value = null
+      }
 
       // user_agent 评估产出 → 刷新覆盖度看板
       if (data.role === 'user_agent' && data.type === 'evaluation') {
@@ -672,6 +823,7 @@ function connectSSE(taskId: string): void {
       }
       // 阶段切换(如"正在读取仓库根目录结构...")意味着克隆已完成,清除进度条
       cloneProgress.value = null
+      skipClonePending.value = false
     },
     onThinkingDelta: (data) => {
       handleThinkingDelta(data)
@@ -717,9 +869,54 @@ function connectSSE(taskId: string): void {
         console.info(
           `[检查点评估] 第${data.round_idx}轮迭代${data.iteration} 打断: ${data.reason}`,
         )
+        // CLI 执行器:打断已入队但未注入,右侧栏检查点条目进入待生效态(带取消按钮);
+        // 主对话流不展示追问指令,要等打断真正注入后由 [检查点中断] 卡片展示
+        if (isCliExecutor.value) {
+          pendingInterrupt.value = {
+            round_idx: data.round_idx,
+            iteration: data.iteration,
+            reason: data.reason,
+            query: data.query,
+            state: 'pending',
+          }
+          // 展开右侧栏暴露取消按钮(pending 窗口有限,折叠态会错过)
+          detailCollapsed.value = false
+        }
+      }
+    },
+    onInterruptCancelled: (data) => {
+      // 后端确认取消成功(本端发起或其他端发起):侧栏条目切为已取消态
+      const p = pendingInterrupt.value
+      if (p && p.round_idx === data.round_idx) {
+        p.state = 'cancelled'
       }
     },
     onDone: async () => {
+      // [诊断] done 事件处理:记录是否走了 resume 竞态校验分支
+      clientLog(taskId, 'view_on_done', { resuming: resumingRef.value })
+      // 竞态防御:completed 追问 / failed 重试后立即重连的 SSE,可能被后端
+      // 按旧快照(COMPLETED/FAILED)误推 done 关闭(后端已同步改 RUNNING +
+      // 事件总线双重防御,这里作前端兜底)。重新校验任务状态,若实际仍在
+      // 运行则重连 SSE 继续接收新一轮事件,不执行任务结束清理。
+      if (resumingRef.value) {
+        resumingRef.value = false
+        try {
+          const fresh = await getTask(taskId)
+          if (
+            fresh &&
+            (fresh.status === 'running' ||
+              fresh.status === 'paused' ||
+              fresh.status === 'pending')
+          ) {
+            if (unmountedFlag) return // 组件已卸载,不再重连(防止连接泄漏)
+            task.value = fresh
+            connectSSE(taskId)
+            return
+          }
+        } catch {
+          // 拉取失败走正常 done 流程(下方还会再拉一次)
+        }
+      }
       // 任务完成:拉取最终结果(含 results)
       try {
         task.value = await getTask(taskId)
@@ -743,16 +940,30 @@ function connectSSE(taskId: string): void {
       }
       // 清除克隆进度条(任务结束)
       cloneProgress.value = null
+      skipClonePending.value = false
+      // 任务结束,待生效打断不再有意义(队列已随任务结束清理)
+      pendingInterrupt.value = null
       // 任务完成时后端刚写入工作区 diff,重拉一次展示(失败兜底,静默)
       void loadArtifact(taskId)
     },
     onError: async (data) => {
+      // [诊断] 前端显示"失败"的唯一入口:记录触发时本地状态,
+      // 与后端 client.log / 事件总线日志对拍定位"未知失败"
+      clientLog(taskId, 'view_on_error', {
+        local_status: task.value?.status,
+        error_message: data.error_message,
+        resuming: resumingRef.value,
+      })
+      // 退出 resume 窗口(任务真实失败,不再需要竞态校验)
+      resumingRef.value = false
       if (task.value) {
         task.value.status = 'failed'
         task.value.error_message = data.error_message || '执行失败'
       }
       // 清除克隆进度条(任务失败)
       cloneProgress.value = null
+      skipClonePending.value = false
+      pendingInterrupt.value = null
     },
   })
 }
@@ -838,21 +1049,64 @@ function toggleReasoning(convId: string): void {
   historyReasoningExpanded.set(convId, !cur)
 }
 
-// ---- plan 提取工具(与后端 _extract_plan 正则一致)----
+// ---- plan 提取工具(与后端 _extract_plan 逻辑一致:优先 JSON 格式,回退逐行格式)----
 
 const PLAN_BLOCK_RE = /<plan>\s*([\s\S]*?)\s*<\/plan>/
 const PLAN_LINE_RE = /^\s*(?:\d+[.、)]\s*)?(?:\[([\w_]+)\]\s*)?(.+)$/
+/** 含文字字符(字母/数字/下划线/中文)才算有效步骤行,纯符号行("["、"]")跳过 */
+const PLAN_LINE_HAS_TEXT_RE = /[\w\u4e00-\u9fff]/
+
+/** 尝试把 plan 块按 JSON 解析(对象数组,或逐行多个对象),失败返回 null
+ *
+ * system prompt 示范的是 JSON 数组格式,模型照做时逐行解析会把整行 JSON
+ * 当成步骤文本;这里优先按 JSON 解析。容错:无包裹数组时补 [ ],
+ * 原生 JSON.parse 失败后用 jsonrepair 修复(尾逗号/截断/缺引号等,
+ * 与后端 json_repair 对齐)。
+ */
+function parsePlanJson(block: string): PlanStep[] | null {
+  const trimmed = block.trim()
+  if (!trimmed || (trimmed[0] !== '[' && trimmed[0] !== '{')) return null
+  const candidate = trimmed[0] === '[' ? trimmed : `[${trimmed}]`
+  let parsed: unknown = null
+  try {
+    parsed = JSON.parse(candidate)
+  } catch {
+    try {
+      parsed = JSON.parse(jsonrepair(candidate))
+    } catch {
+      return null
+    }
+  }
+  if (!Array.isArray(parsed)) return null
+  const steps: PlanStep[] = []
+  for (const e of parsed) {
+    if (!e || typeof e !== 'object') continue
+    const obj = e as Record<string, unknown>
+    const text = String(obj.text ?? obj.content ?? '').trim()
+    if (!text) continue
+    let status = String(obj.status ?? 'pending').trim() as PlanStep['status']
+    if (status !== 'pending' && status !== 'in_progress' && status !== 'done') {
+      status = 'pending'
+    }
+    steps.push({ id: steps.length + 1, text, status })
+  }
+  return steps.length > 0 ? steps : null
+}
 
 /** 从单段 content 提取 plan 步骤列表,无 plan 块返回 null */
 function parsePlanFromContent(content: string): PlanStep[] | null {
   const m = content.match(PLAN_BLOCK_RE)
   if (!m) return null
   const block = m[1]
+  // 优先 JSON 解析(模型按 system prompt 示范输出 JSON 数组)
+  const jsonSteps = parsePlanJson(block)
+  if (jsonSteps) return jsonSteps
   const steps: PlanStep[] = []
   let id = 0
   for (const line of block.split('\n')) {
     const trimmed = line.trim()
     if (!trimmed) continue
+    if (!PLAN_LINE_HAS_TEXT_RE.test(trimmed)) continue
     const lm = trimmed.match(PLAN_LINE_RE)
     if (!lm) continue
     id += 1
@@ -865,14 +1119,67 @@ function parsePlanFromContent(content: string): PlanStep[] | null {
   return steps.length > 0 ? steps : null
 }
 
-/** 从历史对话提取 plan,每个 round 取最后一次出现的 plan(可能被更新过状态) */
+/** 从 kimi code CLI 的 TodoList tool_call 提取计划清单
+ *
+ * 落库 content 格式为 intent 首行(`调用 TodoList [TodoList]`)+ 完整入参 JSON
+ * ({todos: [{title, status}]}),jsonrepair 容错解析。
+ * 查询/清空模式(无 todos/空数组)返回 null,保持最后已知计划。
+ */
+function parseTodoListToolCall(content: string): PlanStep[] | null {
+  const nl = content.indexOf('\n')
+  if (nl < 0) return null
+  if (!content.slice(0, nl).trimEnd().endsWith('[TodoList]')) return null
+  const detail = content.slice(nl + 1).trim()
+  if (!detail.startsWith('{') && !detail.startsWith('[')) return null
+  let parsed: unknown = null
+  try {
+    parsed = JSON.parse(detail)
+  } catch {
+    try {
+      parsed = JSON.parse(jsonrepair(detail))
+    } catch {
+      return null
+    }
+  }
+  const todos =
+    parsed && typeof parsed === 'object'
+      ? (parsed as Record<string, unknown>).todos
+      : null
+  if (!Array.isArray(todos) || todos.length === 0) return null
+  const steps: PlanStep[] = []
+  for (const t of todos) {
+    if (!t || typeof t !== 'object') continue
+    const obj = t as Record<string, unknown>
+    const text = String(obj.title ?? '').trim()
+    if (!text) continue
+    let statusStr = String(obj.status ?? 'pending').trim()
+    if (statusStr === 'completed') statusStr = 'done'
+    const status: PlanStep['status'] =
+      statusStr === 'pending' || statusStr === 'in_progress' || statusStr === 'done'
+        ? statusStr
+        : 'pending'
+    steps.push({ id: steps.length + 1, text, status })
+  }
+  return steps.length > 0 ? steps : null
+}
+
+/** 从历史对话提取 plan,每个 round 取最后一次出现的 plan(可能被更新过状态)
+ *
+ * 两个来源:
+ * - 内置 react_agent:thinking content 里的 <plan> 块
+ * - kimi code CLI 等外部执行器:TodoList tool_call 落库的入参 JSON
+ */
 function extractPlanFromHistory(conversations: Conversation[]): void {
-  // 按 round 收集所有含 plan 的 thinking content,保留每个 round 最后一次
+  // 按 round 收集所有含 plan 的记录,保留每个 round 最后一次
   const lastPlanPerRound = new Map<number, PlanStep[]>()
   for (const c of conversations) {
-    if (c.role !== 'react_agent' || c.type !== 'thinking') continue
-    if (!c.content) continue
-    const steps = parsePlanFromContent(c.content)
+    if (c.role !== 'react_agent' || !c.content) continue
+    let steps: PlanStep[] | null = null
+    if (c.type === 'thinking') {
+      steps = parsePlanFromContent(c.content)
+    } else if (c.type === 'tool_call') {
+      steps = parseTodoListToolCall(c.content)
+    }
     if (steps) {
       lastPlanPerRound.set(c.round_idx, steps)
     }
@@ -890,6 +1197,7 @@ function scrollToBottom(): void {
 
 onMounted(initTask)
 onUnmounted(() => {
+  unmountedFlag = true
   if (eventSource) eventSource.close()
 })
 
@@ -912,6 +1220,8 @@ function resetTaskState(): void {
   questionOpen.value = false
   // 关闭清单确认弹窗
   checklistOpen.value = false
+  // 重置 resume 窗口标志(防止跨任务误触发 onDone 校验)
+  resumingRef.value = false
   // 重置任务视图态
   task.value = null
   coverageData.value = null
@@ -965,6 +1275,8 @@ interface DisplayItem {
   content?: string
   /** 完整评估/思考链(如 user_agent evaluation),可折叠回看 */
   reasoning?: string | null
+  /** 仅 type=tool_result 有:对应 tool_call 会话记录的 id(并行调用时精确配对) */
+  tool_call_id?: string | null
   /** 流式项字段 */
   streaming?: StreamingItem
 }
@@ -973,6 +1285,8 @@ interface DisplayItem {
 interface PlainSegment {
   kind: 'plain'
   item: DisplayItem
+  /** 平铺消息在该轮内的原始位置:位于第几个迭代之后(0 = 轮首,首个迭代之前;轮内无迭代时恒为 0) */
+  afterIterationIdx: number
 }
 
 /** 迭代段:react_agent 一次 ReAct 循环的所有产物 */
@@ -992,8 +1306,10 @@ interface IterationSegment {
   hasStreaming: boolean
 }
 
-/** 检查点标记:user_agent 迭代边界轻量评估,不渲染消息卡片,
- * 定位时在对应迭代边界处浮现横线 */
+/** 检查点标记:user_agent 迭代边界轻量评估,挂在对应迭代边界处。
+ * 两种来源,渲染方式不同:
+ * - 检查点评估([检查点评估):不渲染消息卡片,定位时浮现横线
+ * - 检查点中断([检查点中断):实际生效的中断追问,渲染为可见消息卡片 */
 interface CheckpointMarker {
   /** 显示在哪次迭代的 iteration-block 之后(该迭代的 iterationIdx);0 = 首个迭代之前 */
   afterIterationIdx: number
@@ -1015,6 +1331,8 @@ interface StepGroup {
   hasStreaming: boolean
   /** 该 step 内的检查点标记(渲染在对应迭代边界处) */
   checkpoints: CheckpointMarker[]
+  /** 该 step 内的平铺消息(如用户追问/回答,位于组内迭代边界;含此消息的组默认展开) */
+  plains: PlainSegment[]
 }
 
 type RoundSegment = PlainSegment | StepGroup
@@ -1115,7 +1433,8 @@ function segmentRoundItems(
   // 第一阶段:按 thinking 起点切迭代(原逻辑)
   const iterations: IterationSegment[] = []
   const plains: PlainSegment[] = []
-  /** 检查点评估:不渲染消息卡片,记录其发生在第几次迭代之后,供第二阶段挂到对应迭代边界 */
+  /** 检查点评估/中断:发生在迭代边界,记录当时已完成的迭代数,
+   * 供第二阶段把横线(评估)/消息卡片(中断)挂到对应迭代边界 */
   const checkpointMarkers: CheckpointMarker[] = []
   let current: IterationSegment | null = null
   let iterCounter = 0
@@ -1166,12 +1485,14 @@ function segmentRoundItems(
       if (isStreamingActive(item)) current.hasStreaming = true
     } else {
       closeCurrent()
-      if (isCheckpointItem(item)) {
-        // 检查点发生在迭代边界:记录当时已完成的迭代数,
-        // 第二阶段把横线插到 step 组内对应迭代边界处
+      if (isCheckpointItem(item) || isCheckpointInterruptItem(item)) {
+        // 检查点评估/中断都发生在迭代边界:记录当时已完成的迭代数,
+        // 第二阶段把横线(评估)/中断追问卡片挂到 step 组内对应迭代边界处
         checkpointMarkers.push({ afterIterationIdx: iterCounter, item })
       } else {
-        plains.push({ kind: 'plain', item })
+        // 记录消息在轮内的原始位置(已完成迭代数),第二阶段按位置穿插,
+        // 避免用户追问等轮首/轮中消息被统一追加到轮末
+        plains.push({ kind: 'plain', item, afterIterationIdx: iterCounter })
       }
     }
   }
@@ -1189,6 +1510,7 @@ function segmentRoundItems(
     iterations: [],
     hasStreaming: false,
     checkpoints: [],
+    plains: [],
   }
 
   /** 迭代序号 → 所属 step 组(用于把检查点标记挂到对应组) */
@@ -1209,6 +1531,7 @@ function segmentRoundItems(
           iterations: [],
           hasStreaming: false,
           checkpoints: [],
+          plains: [],
         }
         stepGroupsMap.set(stepId, group)
       }
@@ -1234,27 +1557,70 @@ function segmentRoundItems(
     if (target) {
       target.checkpoints.push(marker)
     } else {
-      plains.push({ kind: 'plain', item: marker.item })
+      plains.push({ kind: 'plain', item: marker.item, afterIterationIdx: marker.afterIterationIdx })
     }
   }
 
   // 按 plan step 顺序输出 step 组(无 plan 时只有 noStepGroup)
+  const orderedGroups: StepGroup[] = []
   for (const step of planSteps) {
     const group = stepGroupsMap.get(step.id)
     if (group) {
       // 同步最新状态(plan 可能已被 LLM 更新)
       group.status = step.status
-      segments.push(group)
+      orderedGroups.push(group)
     }
   }
   // 追加无法归属的迭代组(如果有)
   if (noStepGroup.iterations.length > 0) {
-    segments.push(noStepGroup)
+    orderedGroups.push(noStepGroup)
   }
-  // 追加 plain 段(检查点标记已挂到 step 组内迭代边界,此处只剩普通平铺段)
-  for (const seg of plains) {
-    segments.push(seg)
+
+  // 平铺消息按原始位置穿插到 step 组之间或组内迭代边界,不再统一追加到轮末
+  // (此前 44f5d7d 重构出 step 分组时丢掉了 plain 的位置语义,导致用户追问等
+  //  轮首/轮中消息显示在所有 react_agent 响应之后)。
+  // 规则(afterIterationIdx = 消息位于第几个迭代之后,0 = 轮首):
+  // - 轮首(0)→ 输出到最前
+  // - 组内边界(下一迭代与它同组)→ 挂到组上,模板在组内迭代边界渲染
+  // - 组间边界 → 插到所属组之后
+  // - 轮末(>= 迭代总数)→ 追加末尾(天然轮末的评估/总结保持原样)
+  const headPlains: PlainSegment[] = []
+  const tailPlains: PlainSegment[] = []
+  const afterGroupPlains = new Map<StepGroup, PlainSegment[]>()
+  for (const p of plains) {
+    const n = p.afterIterationIdx
+    if (n <= 0) {
+      headPlains.push(p)
+    } else if (n >= iterations.length) {
+      tailPlains.push(p)
+    } else {
+      const group = groupByIterIdx.get(n)
+      const nextGroup = groupByIterIdx.get(n + 1)
+      if (group && nextGroup === group) {
+        // 组内边界:挂到组,渲染在迭代 n 与 n+1 之间
+        group.plains.push(p)
+      } else if (group) {
+        // 组间边界:插到所属组之后
+        let list = afterGroupPlains.get(group)
+        if (!list) {
+          list = []
+          afterGroupPlains.set(group, list)
+        }
+        list.push(p)
+      } else {
+        // 兜底(理论上不可达):追加末尾
+        tailPlains.push(p)
+      }
+    }
   }
+
+  segments.push(...headPlains)
+  for (const g of orderedGroups) {
+    segments.push(g)
+    const after = afterGroupPlains.get(g)
+    if (after) segments.push(...after)
+  }
+  segments.push(...tailPlains)
 
   return segments
 }
@@ -1329,6 +1695,7 @@ const roundGroups = computed<RoundGroup[]>(() => {
         type: c.type,
         content: c.content,
         reasoning: c.reasoning,
+        tool_call_id: c.tool_call_id,
       })
     }
   })
@@ -1395,7 +1762,8 @@ const userDirective = computed<DisplayItem | null>(() => {
  * OR 任务已结束且是最后一组(最终总结直接可见,不折叠) */
 function isStepExpanded(group: StepGroup): boolean {
   if (collapsedSteps.has(group.id)) return false
-  if (expandedSteps.has(group.id) || group.hasStreaming) return true
+  // 含流式或含组内平铺消息(如用户追问/回答)时自动展开,保证消息可见
+  if (expandedSteps.has(group.id) || group.hasStreaming || group.plains.length > 0) return true
   return !isRunning.value && isLastStepGroup(group)
 }
 
@@ -1862,6 +2230,8 @@ function handleMessageSent(_resp: SendMessageResponse): void {
     // 后端 resume 线程已把状态改回 RUNNING,本地同步 + 重连 SSE
     task.value.status = 'running'
     task.value.current_stage = '用户追加消息,重启执行'
+    // 标记 resume 窗口:onDone 若在窗口内触发,需校验是否竞态误推
+    resumingRef.value = true
     connectSSE(String(task.value.id))
   }
   nextTick(scrollToBottom)
@@ -1870,6 +2240,56 @@ function handleMessageSent(_resp: SendMessageResponse): void {
 /** 用户消息发送失败:展示错误提示 */
 function handleMessageError(message: string): void {
   error.value = message
+}
+
+/** 运行时设置(模型/协作策略)保存成功:回填后端最新快照 */
+function handleRuntimeConfigSaved(updated: TaskDetail): void {
+  task.value = updated
+}
+
+// ---- 失败任务重试(底部重试条,替换输入框位置)----
+
+/** 重试请求是否进行中(按钮 loading 态,防重复点击) */
+const retrying = ref(false)
+
+/**
+ * 重试失败任务
+ *
+ * 后端按失败阶段自动分流(断点续跑优先,无可续进度从头重跑)。
+ * 启动成功后乐观置 running + 清错误信息 + 重连 SSE
+ * (同 handleMessageSent 的 completed 分支;后端已 reset_task_bus,
+ * 重试标记对话等事件会通过 SSE 历史补播送达)。
+ */
+async function handleRetry(): Promise<void> {
+  if (!task.value || task.value.status !== 'failed' || retrying.value) return
+  // [诊断] 用户点击重试:与后端 retry 拒绝日志对拍(定位"running 不能重试")
+  clientLog(String(task.value.id), 'retry_clicked', {
+    local_status: task.value.status,
+    error_message: task.value.error_message,
+  })
+  retrying.value = true
+  try {
+    const resp = await retryTask(String(task.value.id))
+    clientLog(String(task.value.id), 'retry_response', {
+      accepted: resp.accepted,
+      message: resp.message,
+    })
+    if (resp.accepted) {
+      task.value.status = 'running'
+      task.value.error_message = null
+      task.value.current_stage = '重试失败任务...'
+      // 标记 resume 窗口(同 handleMessageSent:onDone 校验竞态误推)
+      resumingRef.value = true
+      connectSSE(String(task.value.id))
+      nextTick(scrollToBottom)
+    } else {
+      error.value = resp.message || '重试启动失败'
+    }
+  } catch (err) {
+    error.value = extractErrorMessage(err)
+  } finally {
+    retrying.value = false
+  }
 }
 
 /** 判断 DisplayItem 是否为用户补充消息(type=message,需右对齐展示) */
@@ -1890,9 +2310,23 @@ function isCheckpointItem(item: DisplayItem): boolean {
   return (item.content || '').startsWith('[检查点评估')
 }
 
+/**
+ * 判断 DisplayItem 是否为检查点中断的追问记录(实际生效的中断)。
+ *
+ * 后端 acp_base 在 CLI 软中断真正发出追问 prompt 时落库,content 以
+ * "[检查点中断] " 开头。与检查点评估的隐藏横线不同,它要在主对话流
+ * 按时间顺序显示为可见消息卡片(同正常 user_agent 追问)。
+ */
+function isCheckpointInterruptItem(item: DisplayItem): boolean {
+  if (item.is_streaming) return false
+  if (item.role !== 'user_agent' || item.type !== 'evaluation') return false
+  return (item.content || '').startsWith('[检查点中断]')
+}
+
 /** 解析检查点评估 content,提取 interrupt/reason/query */
 function parseCheckpointContent(c: string): {
   isInterrupt: boolean
+  cancelled: boolean
   reason: string
   query: string | null
 } {
@@ -1900,10 +2334,13 @@ function parseCheckpointContent(c: string): {
   //   打断:[检查点评估 · 第N轮迭代M] 打断\n理由:...\n追问指令:...
   //   继续:[检查点评估 · 第N轮迭代M] 继续\n理由:...
   const isInterrupt = c.startsWith('[检查点评估') && /\] 打断/.test(c)
+  // 用户取消待生效打断后,后端在评估记录末尾追加的标记(INTERRUPT_CANCEL_MARKER)
+  const cancelled = c.includes('[用户已取消该打断')
   const reasonMatch = c.match(/理由:([^\n]*)/)
   const queryMatch = c.match(/追问指令:([^\n]*)/)
   return {
     isInterrupt,
+    cancelled,
     reason: reasonMatch ? reasonMatch[1].trim() : '',
     query: queryMatch ? queryMatch[1].trim() : null,
   }
@@ -1915,6 +2352,8 @@ interface CheckpointEntry {
   roundIdx: number
   iteration: number | null
   isInterrupt: boolean
+  /** 打断被用户取消(评估记录带已取消标记) */
+  cancelled: boolean
   reason: string
   query: string | null
   /** 检查点思考链(落库 type=thinking 或实时流式累积) */
@@ -1923,6 +2362,21 @@ interface CheckpointEntry {
   thinkingStreaming?: boolean
   /** 评估尚未落库(思考链正在流式,评估进行中) */
   pending?: boolean
+}
+
+/** 检查点条目对应的待生效打断状态(null=该条目无对应的 pending 打断)
+ *
+ * 按 round + iteration 匹配 pendingInterrupt(SSE agent_checkpoint 或
+ * 刷新恢复);侧栏"待生效"徽标与"取消打断"按钮均由此驱动。
+ */
+function interruptPendingState(
+  cp: CheckpointEntry,
+): 'pending' | 'cancelling' | 'cancelled' | null {
+  const p = pendingInterrupt.value
+  if (!p || !cp.isInterrupt) return null
+  if (cp.roundIdx !== p.round_idx) return null
+  if (cp.iteration !== null && p.iteration !== null && cp.iteration !== p.iteration) return null
+  return p.state
 }
 
 /** 解析检查点 content 前缀中的轮次/迭代号(与后端落库格式一致) */
@@ -1962,15 +2416,20 @@ const checkpointList = computed<CheckpointEntry[]>(() => {
     thinkingByKey.set(`${pos.roundIdx}:${pos.iteration}`, c.reasoning)
   }
 
-  // 落库的检查点评估:聚合条目主体
-  const list: CheckpointEntry[] = []
+  // 落库的检查点评估:聚合条目主体。
+  // 同 轮次:迭代 只保留最新一条:历史缺陷曾导致同一迭代边界重复落库
+  // (同一决策回合内多个工具结果各自命中 K 边界,重复评估/推送),
+  // 去重兜底避免右侧栏重复展示;后端新数据已加防重,此处兜底存量数据。
+  const entriesByKey = new Map<string, { entry: CheckpointEntry; created_at: string | null }>()
   for (const c of convs) {
     if (c.role !== 'user_agent' || c.type !== 'evaluation') continue
     const content = c.content || ''
     if (!content.startsWith('[检查点评估')) continue
     const pos = parseCheckpointPos(content)
     const roundIdx = pos.roundIdx ?? c.round_idx
-    list.push({
+    // 迭代号解析失败时按记录 id 为 key(天然唯一,不参与合并)
+    const key = pos.iteration !== null ? `${roundIdx}:${pos.iteration}` : `id:${c.id}`
+    const entry: CheckpointEntry = {
       id: c.id,
       roundIdx,
       iteration: pos.iteration,
@@ -1981,8 +2440,14 @@ const checkpointList = computed<CheckpointEntry[]>(() => {
           : undefined,
       thinkingStreaming: false,
       pending: false,
-    })
+    }
+    const prev = entriesByKey.get(key)
+    // 同 key 保留最新(convs 按 created_at 升序,后者即最新;显式比较兜底乱序)
+    if (!prev || (c.created_at ?? '') >= (prev.created_at ?? '')) {
+      entriesByKey.set(key, { entry, created_at: c.created_at ?? null })
+    }
   }
+  const list = [...entriesByKey.values()].map((v) => v.entry)
 
   // 实时流式中的检查点思考链(source=checkpoint)
   for (const item of streamingItems.values()) {
@@ -2001,6 +2466,7 @@ const checkpointList = computed<CheckpointEntry[]>(() => {
         roundIdx: item.round_idx,
         iteration: item.iteration,
         isInterrupt: false,
+        cancelled: false,
         reason: '',
         query: null,
         thinking: item.reasoning,
@@ -2032,6 +2498,11 @@ function isCheckpointThinkingExpanded(cp: CheckpointEntry): boolean {
 /** 筛选 step 组内应显示在迭代 iterIdx 之后的检查点标记(0 = 首个迭代之前) */
 function checkpointsAfter(group: StepGroup, iterIdx: number): CheckpointMarker[] {
   return group.checkpoints.filter((c) => c.afterIterationIdx === iterIdx)
+}
+
+/** 筛选 step 组内应显示在迭代 iterIdx 之后的平铺消息(0 = 首个迭代之前) */
+function plainsAfter(group: StepGroup, iterIdx: number): PlainSegment[] {
+  return group.plains.filter((p) => p.afterIterationIdx === iterIdx)
 }
 
 /** 检查点横线 class 列表(打断评估为橙色、继续为主题色) */
@@ -2101,12 +2572,15 @@ function toggleResult(id: string): void {
     </AppHeader>
 
     <div class="page-body">
-    <!-- 左侧:历史任务栏 + 按需切换工作区(折叠时完全隐藏) -->
+    <!-- 左侧:历史任务栏 + 按需切换工作区(v-show 保留已加载的任务列表/文件树状态,折叠不销毁) -->
     <WorkspaceSidebar
-      v-if="!workspaceCollapsed"
+      v-show="!workspaceCollapsed"
       ref="sidebarRef"
+      :changed-files="changedFiles"
+      :repo-files="repoFiles"
       @task-deleted="onSidebarTaskDeleted"
       @task-title-updated="onSidebarTaskTitleUpdated"
+      @open-diff-file="scrollToDiffFile"
     />
 
     <main class="main">
@@ -2243,13 +2717,29 @@ function toggleResult(id: string): void {
                   <div v-if="isStepExpanded(seg)" class="step-body">
                     <!-- 该 step 下的所有迭代:不再折叠,内容直接平铺
                          (折叠单位上移到 step 组,浏览型工具已单行化) -->
-                    <!-- 检查点横线:渲染在迭代边界处(afterIterationIdx=0 表示首个迭代之前) -->
-                    <div
-                      v-for="cp in checkpointsAfter(seg, 0)"
-                      :key="`cp-${cp.item.id}`"
-                      :id="`checkpoint-anchor-${cp.item.id}`"
-                      :class="checkpointDividerClass(cp)"
-                    />
+                    <!-- 检查点标记:渲染在迭代边界处(afterIterationIdx=0 表示首个迭代之前)。
+                         中断追问 → 可见消息卡片(按时间顺序);评估 → 隐藏横线 -->
+                    <template v-for="cp in checkpointsAfter(seg, 0)" :key="`cp-${cp.item.id}`">
+                      <ConversationMessage
+                        v-if="isCheckpointInterruptItem(cp.item)"
+                        :item="cp.item"
+                        @toggle-reasoning="toggleReasoning"
+                      />
+                      <div
+                        v-else
+                        :id="`checkpoint-anchor-${cp.item.id}`"
+                        :class="checkpointDividerClass(cp)"
+                      />
+                    </template>
+                    <!-- 组内平铺消息(如用户追问/回答):渲染在迭代边界处(0 = 首个迭代之前) -->
+                    <template v-for="p in plainsAfter(seg, 0)" :key="`plain-${p.item.id}`">
+                      <div :class="{ 'user-msg-row': isUserMessageItem(p.item) }">
+                        <ConversationMessage
+                          :item="p.item"
+                          @toggle-reasoning="toggleReasoning"
+                        />
+                      </div>
+                    </template>
                     <template v-for="iter in seg.iterations" :key="iter.id">
                     <!-- 迭代内容直接平铺:无摘要行、无边框包装(wrapper 仅作结构容器,
                          保留它以免 step-body 加 gap 影响零高度检查点横线) -->
@@ -2353,13 +2843,29 @@ function toggleResult(id: string): void {
                         />
                       </div>
                     </div>
-                    <!-- 检查点横线:该迭代为评估边界,平时隐藏,定位时浮现 -->
-                    <div
-                      v-for="cp in checkpointsAfter(seg, iter.iterationIdx)"
-                      :key="`cp-${cp.item.id}`"
-                      :id="`checkpoint-anchor-${cp.item.id}`"
-                      :class="checkpointDividerClass(cp)"
-                    />
+                    <!-- 检查点标记:该迭代为评估/中断边界。
+                         中断追问 → 可见消息卡片;评估 → 隐藏横线(平时隐藏,定位时浮现) -->
+                    <template v-for="cp in checkpointsAfter(seg, iter.iterationIdx)" :key="`cp-${cp.item.id}`">
+                      <ConversationMessage
+                        v-if="isCheckpointInterruptItem(cp.item)"
+                        :item="cp.item"
+                        @toggle-reasoning="toggleReasoning"
+                      />
+                      <div
+                        v-else
+                        :id="`checkpoint-anchor-${cp.item.id}`"
+                        :class="checkpointDividerClass(cp)"
+                      />
+                    </template>
+                    <!-- 组内平铺消息(如用户追问):渲染在该迭代之后,与迭代内容保持时间顺序 -->
+                    <template v-for="p in plainsAfter(seg, iter.iterationIdx)" :key="`plain-${p.item.id}`">
+                      <div :class="{ 'user-msg-row': isUserMessageItem(p.item) }">
+                        <ConversationMessage
+                          :item="p.item"
+                          @toggle-reasoning="toggleReasoning"
+                        />
+                      </div>
+                    </template>
                     </template>
                   </div>
                 </div>
@@ -2389,6 +2895,14 @@ function toggleResult(id: string): void {
                   ></div>
                 </div>
                 <div class="clone-progress-msg">{{ cloneProgress.message }}</div>
+                <div class="clone-progress-actions">
+                  <button
+                    class="clone-skip-btn"
+                    :disabled="skipClonePending"
+                    :title="'跳过后改由执行阶段自主克隆(可能多耗时几十秒)'"
+                    @click="handleSkipPreClone"
+                  >{{ skipClonePending ? '正在跳过...' : '跳过预克隆' }}</button>
+                </div>
               </div>
             </template>
             <template v-else>
@@ -2396,6 +2910,13 @@ function toggleResult(id: string): void {
                 <span></span><span></span><span></span>
               </span>
               {{ isPaused ? '已暂停,点击恢复按钮继续执行' : (task?.current_stage || '智能体思考中...') }}
+              <button
+                v-if="!isPaused && isPreCloning"
+                class="clone-skip-btn"
+                :disabled="skipClonePending"
+                :title="'跳过后改由执行阶段自主克隆(可能多耗时几十秒)'"
+                @click="handleSkipPreClone"
+              >{{ skipClonePending ? '正在跳过...' : '跳过预克隆' }}</button>
             </template>
           </div>
         </section>
@@ -2427,6 +2948,7 @@ function toggleResult(id: string): void {
             <div
               v-for="(line, i) in diffLines"
               :key="i"
+              :id="diffAnchorByLine.get(i)"
               :class="['diff-line', diffLineClass(line)]"
             >{{ line }}</div>
           </div>
@@ -2434,7 +2956,16 @@ function toggleResult(id: string): void {
       </template>
       </div>
 
-      <!-- 用户补充消息输入框(running/paused/completed 可见,pending/failed 隐藏) -->
+      <!-- 运行时设置面板(输入框上方箭头展开:react/user_agent 模型 + 协作策略;
+           运行中/暂停中修改在下一轮执行生效,组件内 toast 提示) -->
+      <TaskRuntimeSettings
+        v-if="task && (task.status === 'running' || task.status === 'paused' || task.status === 'completed' || task.status === 'failed')"
+        :key="String(task.id)"
+        :task="task"
+        @saved="handleRuntimeConfigSaved"
+      />
+
+      <!-- 用户补充消息输入框(running/paused/completed 可见,pending 隐藏) -->
       <UserMessageInput
         v-if="task && (task.status === 'running' || task.status === 'paused' || task.status === 'completed')"
         :task-id="String(task.id)"
@@ -2442,6 +2973,21 @@ function toggleResult(id: string): void {
         @sent="handleMessageSent"
         @error="handleMessageError"
       />
+
+      <!-- 失败任务重试条(failed 状态替换输入框位置) -->
+      <div v-if="task && task.status === 'failed'" class="retry-bar">
+        <div class="retry-bar-text">
+          <span class="retry-bar-label">任务执行失败,可重试</span>
+          <span
+            v-if="task.error_message"
+            class="retry-bar-error"
+            :title="task.error_message"
+          >{{ truncateInput(task.error_message, 80) }}</span>
+        </div>
+        <button class="retry-btn" :disabled="retrying" @click="handleRetry">
+          {{ retrying ? '重试启动中...' : '重试' }}
+        </button>
+      </div>
     </main>
 
     <!-- 右侧:任务详情 + 覆盖度看板(抽屉把手式;展开时顶部条带标题+折叠按钮,折叠时悬浮把手在 page-body 右上角) -->
@@ -2647,6 +3193,31 @@ function toggleResult(id: string): void {
                 </span>
                 <span v-if="cp.pending" class="checkpoint-badge checkpoint-badge-pending">
                   评估中
+                </span>
+                <template v-else-if="cp.isInterrupt && interruptPendingState(cp)">
+                  <!-- 待生效窗口:打断已入队未注入,展示取消按钮(已取消态只剩徽标) -->
+                  <span
+                    v-if="interruptPendingState(cp) === 'cancelled'"
+                    class="checkpoint-badge checkpoint-badge-cancelled"
+                  >
+                    已取消
+                  </span>
+                  <span v-else class="checkpoint-badge checkpoint-badge-awaiting">
+                    打断待生效
+                  </span>
+                  <button
+                    v-if="interruptPendingState(cp) !== 'cancelled'"
+                    class="checkpoint-cancel-btn"
+                    :disabled="interruptPendingState(cp) === 'cancelling'"
+                    title="取消后追问指令不会下发给智能体"
+                    @click.stop="handleCancelInterrupt"
+                  >{{ interruptPendingState(cp) === 'cancelling' ? '正在取消...' : '取消打断' }}</button>
+                </template>
+                <span
+                  v-else-if="cp.isInterrupt && cp.cancelled"
+                  class="checkpoint-badge checkpoint-badge-cancelled"
+                >
+                  已取消
                 </span>
                 <span
                   v-else
@@ -3006,6 +3577,64 @@ function toggleResult(id: string): void {
 .badge-paused { background: var(--color-warning-light); color: var(--color-warning); }
 .badge-completed { background: var(--color-success-light); color: var(--color-success); }
 .badge-failed { background: var(--color-danger-light); color: var(--color-danger); }
+
+/* ---- 失败任务重试条(failed 状态替换底部补充消息输入框位置) ---- */
+.retry-bar {
+  width: 94%;
+  margin: 0 auto var(--space-4);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-3);
+  box-shadow: var(--shadow-md);
+  background: var(--color-danger-light);
+}
+
+.retry-bar-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.retry-bar-label {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--color-danger);
+}
+
+.retry-bar-error {
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.retry-btn {
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--color-text-inverse);
+  background: var(--color-primary);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.retry-btn:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+}
+
+.retry-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
 
 /* ---- 提示 ---- */
 .alert {
@@ -4010,6 +4639,32 @@ function toggleResult(id: string): void {
   text-overflow: ellipsis;
 }
 
+.clone-progress-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.clone-skip-btn {
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md, 6px);
+  padding: 2px 10px;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.clone-skip-btn:hover:not(:disabled) {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+.clone-skip-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 /* ---- 工作区变更(diff/patch 展示) ---- */
 .workspace-changes-section {
   background: var(--color-surface);
@@ -4155,6 +4810,38 @@ function toggleResult(id: string): void {
 .checkpoint-badge-pending {
   color: var(--color-text-muted);
   background: var(--color-border);
+}
+
+.checkpoint-badge-cancelled {
+  color: #6b7280;
+  background: rgba(107, 114, 128, 0.15);
+}
+
+.checkpoint-badge-awaiting {
+  color: #c2410c;
+  background: rgba(234, 88, 12, 0.15);
+}
+
+/* 打断取消按钮(侧栏检查点条目内):待生效窗口内的橙色小按钮 */
+.checkpoint-cancel-btn {
+  padding: 1px var(--space-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: #c2410c;
+  background: rgba(234, 88, 12, 0.12);
+  border: 1px solid rgba(234, 88, 12, 0.4);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: filter var(--transition-fast);
+}
+
+.checkpoint-cancel-btn:hover:not(:disabled) {
+  filter: brightness(0.95);
+}
+
+.checkpoint-cancel-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* 检查点思考链(条目内可折叠块;流式中 header 高亮) */

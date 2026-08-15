@@ -28,6 +28,21 @@ export interface WorkspaceInfo {
   mode: string
 }
 
+/** 整树快照条目(相对仓库根的路径) */
+export interface WorkspaceTreeEntry {
+  path: string
+  type: 'file' | 'dir'
+}
+
+/** 整树快照的响应 */
+export interface WorkspaceTreeResponse {
+  entries: WorkspaceTreeEntry[]
+  /** 超上限截断(未覆盖目录前端退回懒加载) */
+  truncated: boolean
+  /** 快照实际覆盖深度(降级时可能小于请求值) */
+  max_depth: number
+}
+
 /** 读取文件的响应 */
 export interface WorkspaceFileResponse {
   path: string

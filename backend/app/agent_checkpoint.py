@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import uuid
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -133,10 +134,19 @@ CHECKPOINT_SYSTEM_PROMPT = """你是 user_agent(用户代理智能体),正在实
 - 不确定是否该打断时,选择不打断(让 react_agent 继续)
 - **仅观察模式**(用户消息中注明时):照常判断方向,但 interrupt 必须为 false;
   若观察到跑偏,在 reason 中写清偏离了什么、当前在做什么(只记录不干预)
+- 若提供了「已确认的覆盖度清单(checklist)」:
+  - 用它理解用户意图的完整边界,识别 react_agent 长时间只围绕个别维度、
+    明显遗漏清单中其他关键维度的情况
+  - 检查点不做 covered/missing 覆盖度评估(那是 round 边界完整评估的职责);
+    不要因为某维度暂时还没触及就打断,只有方向性明显偏离清单范围时才考虑
 - 若提供了「之前的评估记录」:
   - 避免重复发出相同/相近的打断指令(历史已打断过的方向不再重复)
   - 核查上次打断指令是否已被执行(从当前快照判断),未执行时可换更明确的表述再次提醒
   - 历史记录仅供参考,以当前快照为主要判断依据
+- 若提供了「上一次检查点以来的工具调用」窗口:
+  - 用它核查该区间 react_agent 的实际动作:识别重复无效操作
+    (相同/相近意图反复出现)、核对上次打断指令是否被执行
+  - 判断以当前快照 + 窗口为主;窗口内细节不要逐条复述到 reason 中
 
 ## 输出格式(严格 JSON)
 ```json
@@ -161,9 +171,42 @@ CHECKPOINT_SYSTEM_PROMPT = """你是 user_agent(用户代理智能体),正在实
 字段说明:
 - interrupt: 是否打断(true 时 query 必填)
 - reason: 判断理由(展示给用户看)
-- query: 打断时的追问指令(注入 react_agent 作为 user 消息),null 表示不打断
+- query: 打断时的追问指令(注入 react_agent 作为 user 消息),null 表示不打断。
+  必须以用户下达指令的口吻表述,不得提及"user_agent""评估者"等身份
+  (react_agent 不知道评估者的存在),也不要复述评估过程,直接给出指令
 - summary: 本次评估的一句话摘要(≤50字,供下次评估参考;打断时写明已发出的指令)
 """
+
+
+# ============================================================
+# 覆盖度清单注入(帮助检查点评估理解用户意图的完整边界)
+# ============================================================
+
+# 检查点评估注入 checklist 的总字符数上限(轻量评估,收紧于历史记录的 1500)
+MAX_CHECKLIST_CHARS = 1500
+
+
+def _build_checklist_section(checklist: list[dict[str, Any]] | None) -> str:
+    """把已确认的 checklist 格式化成检查点评估的注入段落;无清单返回空串
+
+    与 user_agent.py 完整评估的 _format_checklist_for_prompt 风格对齐,
+    但去掉 description(检查点只需维度边界,不需细节),控制注入体积。
+    """
+    if not checklist:
+        return ""
+    lines = ["已确认的覆盖度清单(checklist,用户已确认;对照它理解用户意图的完整边界):"]
+    for cat in checklist:
+        name = cat.get("name") or cat.get("id") or "?"
+        items = cat.get("checklist") or []
+        if items:
+            lines.append(f"- {name}:{'; '.join(str(i) for i in items)}")
+        else:
+            lines.append(f"- {name}")
+    while lines and sum(len(x) for x in lines) > MAX_CHECKLIST_CHARS:
+        lines.pop(-1)
+    if len(lines) <= 1:
+        return ""
+    return "\n".join(lines) + "\n\n"
 
 
 # ============================================================
@@ -172,6 +215,11 @@ CHECKPOINT_SYSTEM_PROMPT = """你是 user_agent(用户代理智能体),正在实
 
 # 检查点评估落库的 content 前缀(用于与 round 边界完整评估区分,两者同为 evaluation type)
 _CHECKPOINT_CONTENT_PREFIX = "[检查点评估"
+
+# 用户取消待生效打断后,追加到对应检查点评估记录 content 末尾的标记。
+# 作用:1) 下次检查点评估注入历史记录时 user_agent 能看到指令被否决;
+# 2) 前端侧栏据此把徽标从"已打断"改为"已取消"。
+INTERRUPT_CANCEL_MARKER = "[用户已取消该打断,追问指令未下发]"
 
 # 注入的历史评估记录条数上限(取最近 N 条)
 MAX_HISTORY_RECORDS = 5
@@ -227,6 +275,7 @@ def _extract_checkpoint_record(conv: Conversation) -> dict[str, Any] | None:
         "reason": parsed["reason"],
         "query": parsed["query"],
         "summary": parsed["summary"],
+        "cancelled": INTERRUPT_CANCEL_MARKER in str(conv.content),
     }
 
 
@@ -241,7 +290,10 @@ def _build_history_section(records: list[dict[str, Any]]) -> str:
     for r in records[-MAX_HISTORY_RECORDS:]:
         loc = f"迭代{r['iteration']}" if r.get("iteration") else "早期迭代"
         if r.get("interrupt"):
-            line = f"- [{loc}] 打断 | 摘要:{r.get('summary') or r.get('reason', '')} | 指令:{r.get('query', '')}"
+            # 用户取消过的打断明确标注,避免 user_agent 误以为指令已下发
+            # 而只核查执行情况,或朝同一方向重复打断
+            action = "打断(用户已取消,指令未下发)" if r.get("cancelled") else "打断"
+            line = f"- [{loc}] {action} | 摘要:{r.get('summary') or r.get('reason', '')} | 指令:{r.get('query', '')}"
         else:
             line = f"- [{loc}] 继续 | 摘要:{r.get('summary') or r.get('reason', '')}"
         lines.append(line)
@@ -250,6 +302,172 @@ def _build_history_section(records: list[dict[str, Any]]) -> str:
     if not lines:
         return ""
     return "你之前的评估记录:\n" + "\n".join(lines) + "\n\n"
+
+
+# ============================================================
+# 工具调用窗口构造(检查点评估 / 完整评估共用)
+#
+# 分层信息策略:上一次观察点(检查点)之前的区间由检查点结论覆盖,
+# 观察点之后的工具调用作为明细窗口注入。窗口量由检查点间隔 K 自然钳制,
+# 无检查点时靠条数/字符上限兜底。
+# ============================================================
+
+# 完整评估注入本轮检查点观察的上限(比检查点间互参的 5 条/1500 字符放宽)
+ROUND_CHECKPOINT_MAX_RECORDS = 10
+ROUND_CHECKPOINT_MAX_CHARS = 2400
+
+
+def build_round_checkpoint_section(db: Session, task_id, round_idx: int) -> str:
+    """把本轮全部检查点评估记录格式化成完整评估的注入段落
+
+    供 user_agent.py 完整评估调用:让 round 边界评估看到自己在执行过程中
+    做出的实时判断(含打断指令),保持评估连续性、避免重复追问。
+
+    与 _build_history_section(检查点间互参,5 条/1500 字符)独立实现,
+    上限放宽到 10 条/2400 字符,超限从最早丢弃。
+    无记录返回空串。
+    """
+    records = _load_checkpoint_history(db, task_id, round_idx)
+    if not records:
+        return ""
+    lines: list[str] = []
+    for r in records[-ROUND_CHECKPOINT_MAX_RECORDS:]:
+        loc = f"迭代{r['iteration']}" if r.get("iteration") else "早期迭代"
+        if r.get("interrupt"):
+            line = f"- [{loc}] 打断 | 摘要:{r.get('summary') or r.get('reason', '')} | 指令:{r.get('query', '')}"
+        else:
+            line = f"- [{loc}] 继续 | 摘要:{r.get('summary') or r.get('reason', '')}"
+        lines.append(line)
+    while lines and sum(len(x) for x in lines) > ROUND_CHECKPOINT_MAX_CHARS:
+        lines.pop(0)
+    if not lines:
+        return ""
+    return (
+        "[本轮执行中的检查点观察(你自己在执行过程中做出的判断)]\n"
+        + "\n".join(lines)
+    )
+
+
+def build_tool_window_section(
+    db: Session,
+    task_id,
+    round_idx: int,
+    boundary: datetime | None,
+    *,
+    title: str,
+    max_calls: int = 30,
+    max_chars: int = 6000,
+    result_limit: int = 300,
+) -> str:
+    """构造指定时间窗口内的工具调用明细段落(通用构造器,两处复用)
+
+    查询本轮 boundary 之后(含;None=整轮)的 react_agent tool_call/tool_result
+    记录,格式化为"意图行 + 结果摘要":
+    - tool_call 只取 content 首行(工具意图),丢弃参数 JSON 详情
+    - tool_result 紧随其后截断至 result_limit 字符
+    - 超 max_calls 条 tool_call 或总长超 max_chars 时从最早丢弃(尾部最新最有价值)
+
+    builtin 与 CLI(acp_base)执行器落库格式一致(role=react_agent、首行意图),
+    两条执行路径均可用。无记录返回空串。
+    """
+    q = db.query(Conversation).filter(
+        Conversation.task_id == task_id,
+        Conversation.round_idx == round_idx,
+        Conversation.role == "react_agent",
+        Conversation.type.in_(["tool_call", "tool_result"]),
+    )
+    if boundary is not None:
+        q = q.filter(Conversation.created_at >= boundary)
+    convs = q.order_by(Conversation.created_at).all()
+    if not convs:
+        return ""
+
+    # 逐条格式化:tool_call 取首行意图,tool_result 截断作结果摘要
+    items: list[tuple[bool, str]] = []  # (is_tool_call, formatted_line)
+    for c in convs:
+        content = (c.content or "").strip()
+        if not content:
+            continue
+        if c.type == "tool_call":
+            items.append((True, f"- {content.splitlines()[0]}"))
+        else:
+            summary = content[:result_limit]
+            if len(content) > result_limit:
+                summary += "[...truncated...]"
+            items.append((False, f"  结果摘要: {summary}"))
+
+    # 兜底裁剪:tool_call 条数超限 / 总长超限,均从最早丢弃
+    while sum(1 for is_call, _ in items if is_call) > max_calls and items:
+        items.pop(0)
+    while items and sum(len(t) for _, t in items) > max_chars:
+        items.pop(0)
+    # 裁剪后若开头残留孤立的 tool_result(其 tool_call 已被丢),一并丢弃
+    while items and not items[0][0]:
+        items.pop(0)
+    if not items:
+        return ""
+
+    return title + "\n" + "\n".join(text for _, text in items)
+
+
+def build_tool_tail_section(db: Session, task_id, round_idx: int) -> str:
+    """完整评估专用:最后一次检查点之后的工具调用明细(无检查点=整轮截尾)
+
+    boundary 取本轮最后一条检查点记录的 created_at(检查点在迭代边界落库,
+    严格早于后续工具调用,时间切分可靠)。
+    """
+    last_ckpt = (
+        db.query(Conversation)
+        .filter(
+            Conversation.task_id == task_id,
+            Conversation.round_idx == round_idx,
+            Conversation.role == "user_agent",
+            Conversation.type == "evaluation",
+            Conversation.content.like(f"{_CHECKPOINT_CONTENT_PREFIX}%"),
+        )
+        .order_by(Conversation.created_at.desc())
+        .first()
+    )
+    if last_ckpt is not None:
+        return build_tool_window_section(
+            db, task_id, round_idx, last_ckpt.created_at,
+            title="[最后一次检查点之后的工具调用明细]",
+        )
+    return build_tool_window_section(
+        db, task_id, round_idx, None,
+        title="[本轮全部工具调用明细(截尾)]",
+    )
+
+
+def _build_checkpoint_tool_window(db: Session, task_id, round_idx: int) -> str:
+    """检查点评估专用:上一次检查点至今的工具调用窗口(无上一条=轮起点至今)
+
+    本条检查点尚未落库,本轮"最后一条"检查点记录即"上一条"。
+    检查点定位为轻量评估,上限比完整评估收紧(15 条/3500 字符/结果 200 字符)。
+    """
+    prev_ckpt = (
+        db.query(Conversation)
+        .filter(
+            Conversation.task_id == task_id,
+            Conversation.round_idx == round_idx,
+            Conversation.role == "user_agent",
+            Conversation.type == "evaluation",
+            Conversation.content.like(f"{_CHECKPOINT_CONTENT_PREFIX}%"),
+        )
+        .order_by(Conversation.created_at.desc())
+        .first()
+    )
+    if prev_ckpt is not None:
+        return build_tool_window_section(
+            db, task_id, round_idx, prev_ckpt.created_at,
+            title="[上一次检查点以来的工具调用]",
+            max_calls=15, max_chars=3500, result_limit=200,
+        )
+    return build_tool_window_section(
+        db, task_id, round_idx, None,
+        title="[本轮开始以来的工具调用(截尾)]",
+        max_calls=15, max_chars=3500, result_limit=200,
+    )
 
 
 # ============================================================
@@ -304,6 +522,14 @@ def run_user_agent_checkpoint(
     else:
         plan_text = "(无 plan)"
 
+    # 覆盖度清单:让检查点评估理解用户意图的完整边界(识别维度级方向遗漏);
+    # 无清单(如第 0 轮尚未确认)时该段为空,不影响评估
+    try:
+        checklist_section = _build_checklist_section(getattr(task, "checklist", None))
+    except Exception as e:
+        logger.warning(f"[task={task.id}] 构造检查点 checklist 段落失败(跳过注入): {e}")
+        checklist_section = ""
+
     # 本轮历史评估记录:注入上下文,避免重复打断、核查上次指令是否执行
     try:
         history_section = _build_history_section(
@@ -320,11 +546,23 @@ def run_user_agent_checkpoint(
         if not allow_interrupt else ""
     )
 
+    # 上一次检查点至今的工具调用窗口:让"重复无效操作"判据有真实数据可查
+    # (原来只给最近一条 tool_intent,无法判断重复);查库失败降级为空不阻断评估
+    try:
+        tool_window_section = _build_checkpoint_tool_window(db, task.id, round_idx)
+        if tool_window_section:
+            tool_window_section += "\n\n"
+    except Exception as e:
+        logger.warning(f"[task={task.id}] 加载检查点工具窗口失败(跳过注入): {e}")
+        tool_window_section = ""
+
     user_msg = (
         f"用户原始意图:{task.user_input[:500]}\n\n"
+        f"{checklist_section}"
         f"当前协作轮次:第 {round_idx} 轮,第 {iteration} 次迭代\n\n"
         f"{observe_note}"
         f"{history_section}"
+        f"{tool_window_section}"
         f"react_agent 当前思考:\n{thinking}\n\n"
         f"最近工具调用:{tool_intent}\n\n"
         f"最近工具结果:\n{tool_result}\n\n"
@@ -391,11 +629,13 @@ def run_user_agent_checkpoint(
         except Exception as e:
             logger.warning(f"[task={task.id}] 落库检查点思考链失败(忽略): {e}")
 
-    # 落库 + 推送 agent_checkpoint 事件
-    _record_checkpoint(
+    # 落库 + 推送 agent_checkpoint 事件;返回评估记录 id,
+    # 供调用方 push_interrupt 时携带(用户取消待生效打断时定位该记录追加标记)
+    eval_conv_id = _record_checkpoint(
         db, task, round_idx, iteration, result, reasoning=content_full
     )
 
+    result["eval_conv_id"] = str(eval_conv_id) if eval_conv_id else None
     return result
 
 
@@ -513,11 +753,11 @@ def _record_checkpoint(
     result: dict[str, Any],
     *,
     reasoning: str = "",
-) -> None:
+) -> Any:
     """落库检查点评估结果 + 推送 agent_checkpoint 事件
 
     落库为 Conversation(role=user_agent, type=evaluation),content 记录
-    评估摘要,reasoning 记录完整 JSON 输出供回查。
+    评估摘要,reasoning 记录完整 JSON 输出供回查。返回落库记录 id。
     """
     interrupt = result.get("interrupt", False)
     reason = result.get("reason", "")
@@ -566,3 +806,5 @@ def _record_checkpoint(
         "content": content,
         "reasoning": reasoning,
     })
+
+    return conv.id

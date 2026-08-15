@@ -206,6 +206,12 @@ export interface Conversation {
    * 刷新页面后从 GET /tasks/{id} 拿到,用于还原流式卡片(只读模式,不再实时打字)。
    */
   reasoning?: string | null
+  /**
+   * 仅 type=tool_result 有:对应 tool_call 会话记录的 id。
+   * 并行工具调用时 result 不再紧跟 call 落库,前端靠它精确配对;
+   * 历史数据为 null,回退相邻配对
+   */
+  tool_call_id?: string | null
   created_at: string
 }
 
@@ -282,6 +288,7 @@ export type SSEEventType =
   | 'done'
   | 'error'
   | 'agent_checkpoint'
+  | 'interrupt_cancelled'
 
 /** SSE 事件通用结构 */
 export interface SSEEvent {
@@ -306,6 +313,8 @@ export interface ConversationEventData {
   content: string
   /** 完整评估/思考链(如 user_agent evaluation 的覆盖情况+判断),可折叠回看 */
   reasoning?: string | null
+  /** 仅 type=tool_result 有:对应 tool_call 会话记录的 id */
+  tool_call_id?: string | null
   created_at: string | null
 }
 
@@ -454,6 +463,32 @@ export interface AgentCheckpointEventData {
 }
 
 /**
+ * interrupt_cancelled 事件 data(用户取消了待生效的检查点打断)
+ *
+ * CLI 执行器的打断入队后要等当前 prompt 结束才注入,期间用户可点
+ * "取消打断"。取消成功后后端推此事件,前端把 pending 卡片切为已取消态。
+ */
+export interface InterruptCancelledEventData {
+  /** 被取消打断所属的协作轮次 */
+  round_idx: number
+  /** 触发打断时的迭代序号 */
+  iteration: number | null
+}
+
+/**
+ * GET /tasks/{id}/pending_interrupt 响应(待生效的检查点打断)
+ *
+ * 刷新页面后恢复前端 pending 卡片用;无待生效打断时接口返回 null。
+ */
+export interface PendingInterruptInfo {
+  round_idx: number
+  iteration: number | null
+  reason: string
+  query: string | null
+  created_at?: string
+}
+
+/**
  * verify_action 事件 data(动态验证动作授权)
  *
  * verifier_agent 在 per_action 模式下,每次执行 http_request / run_python_code 前
@@ -550,6 +585,32 @@ export interface VerifyConfigUpdateRequest {
   test_env_url?: string
   /** 登录凭证列表(可选):传入则整体覆盖;空数组清空;undefined=不修改 */
   verifier_auth_tokens?: VerifierAuthToken[]
+}
+
+/** 运行时可调整的协作策略字段(任务级覆盖,增量合并到 task.params._agent_policy) */
+export interface RuntimePolicyUpdate {
+  /** 统一 K 值,每 K 个迭代评估一次(1-20) */
+  checkpoint_interval?: number
+  /** user_agent 是否能打断 react_agent */
+  allow_interrupt?: boolean
+  /** user_agent 协作总轮次(1-10) */
+  max_rounds?: number
+}
+
+/**
+ * 更新任务运行时配置请求(PATCH /tasks/{id}/runtime_config)
+ *
+ * 任务进行中修改 react_agent / user_agent 模型与协作策略。
+ * 生效时机:running/paused 的当前执行仍用启动时配置,
+ * 修改在下一轮执行(completed 后追加消息 / failed 重试)时生效。
+ */
+export interface RuntimeConfigUpdateRequest {
+  /** user_agent 模型配置 id;空字符串=清除(回退 env 默认);undefined=不修改 */
+  llm_config_id?: string
+  /** react_agent 模型配置 id(仅 executor=builtin);空字符串=清除(回退 llm_config_id) */
+  react_llm_config_id?: string
+  /** 协作策略(增量合并) */
+  agent_policy?: RuntimePolicyUpdate
 }
 
 /**

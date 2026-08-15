@@ -21,6 +21,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from app.clone_skip import consume_skip_clone
 from app.config import settings
 from app.event_bus import publish as publish_event
 from app.git_provider import get_provider_for_url
@@ -44,6 +45,16 @@ _sessions: dict[str, dict[str, Any]] = {}
 # 任务完成后保留 session 的时间(秒),超时后自动清理
 _SESSION_TTL_AFTER_COMPLETE = 3600  # 1 小时
 
+# 整树快照缓存:task_id -> (写入时间戳, payload),TTL 秒。
+# 前端文件树首屏一次拉整树,短 TTL 兼顾运行中任务的变更新鲜度
+_TREE_CACHE_TTL = 30.0
+_tree_cache: dict[str, tuple[float, dict]] = {}
+
+# 后台清理:请求路径限流间隔(秒),避免频繁扫描
+_CLEANUP_SCAN_INTERVAL = 60.0
+_last_cleanup_scan = 0.0
+_cleanup_scan_lock = threading.Lock()
+
 # 项目记忆文件固定路径(沙箱内绝对路径,不分 project_id;每任务启动时覆盖为当前项目记忆)
 # 智能体不知道 project_id,固定路径降低认知负担;"分项目"靠每任务只写当前项目记忆实现。
 _MEMORY_DIR_SANDBOX = "/home/user/.agent_memory"
@@ -53,7 +64,12 @@ _GLOBAL_MEMORY_FILE = "global_memory.md"
 
 
 def _get_or_create_session(task_id: str) -> dict[str, Any]:
-    """获取或创建任务的沙箱上下文"""
+    """获取或创建任务的沙箱上下文
+
+    复用已有会话时顺带做"访问续期":距上次续期超过
+    SANDBOX_RENEW_INTERVAL_MINUTES 就 renew 一次 TTL,防长任务
+    (多轮协作/用户等待)拖过创建时的 TTL 被 Server 回收(回收后 404)。
+    """
     if task_id not in _sessions:
         # [perf] 新建沙箱会话(拉镜像/启容器/等 healthy,可能是大耗时点)
         with perf_timer(task_id, "sandbox_session", reused=False, mode=settings.SANDBOX_MODE):
@@ -63,10 +79,21 @@ def _get_or_create_session(task_id: str) -> dict[str, Any]:
         # 避免过去 session 一份、ctx 一份的双份临时目录问题)
         if settings.SANDBOX_MODE == "local":
             ctx["local_dir"] = session.local_dir
+        # 创建即起算 TTL,记下起点供后续访问续期节流判断
+        ctx["_last_renew"] = time.monotonic()
         _sessions[task_id] = ctx
     else:
         # [perf] 复用已有会话(无容器创建开销)
         perf_log(task_id, "sandbox_session", reused=True)
+        ctx = _sessions[task_id]
+        # 访问续期(节流):sandbox 模式才需要,间隔内不重复调 Server API
+        renew_interval = settings.SANDBOX_RENEW_INTERVAL_MINUTES * 60
+        if (
+            ctx.get("mode") == "sandbox"
+            and time.monotonic() - ctx.get("_last_renew", 0.0) >= renew_interval
+        ):
+            if ctx["session"].renew():
+                ctx["_last_renew"] = time.monotonic()
     return _sessions[task_id]
 
 
@@ -102,11 +129,42 @@ def cleanup_expired_sessions() -> int:
     return len(expired)
 
 
+def cleanup_expired_sessions_bg() -> None:
+    """惰性清理(非阻塞版,供 workspace 请求路径调用)
+
+    内联只做时间戳扫描(限流:每 _CLEANUP_SCAN_INTERVAL 最多一次);
+    实际 close_session 销毁丢给 daemon 线程,避免过期沙箱销毁
+    (停 ACP bridge / 销毁容器)阻塞当前 HTTP 请求造成秒级尖刺。
+    """
+    global _last_cleanup_scan
+    with _cleanup_scan_lock:
+        now = time.time()
+        if now - _last_cleanup_scan < _CLEANUP_SCAN_INTERVAL:
+            return
+        _last_cleanup_scan = now
+        expired = [
+            tid for tid, ctx in _sessions.items()
+            if ctx.get("completed_at") and now - ctx["completed_at"] > _SESSION_TTL_AFTER_COMPLETE
+        ]
+    if not expired:
+        return
+
+    def _cleanup() -> None:
+        for tid in expired:
+            try:
+                close_session(tid)
+            except Exception as e:
+                logger.warning(f"[task={tid}] 后台清理过期 session 失败: {e}")
+
+    threading.Thread(target=_cleanup, name="session-cleanup", daemon=True).start()
+
+
 def close_session(task_id: str) -> None:
     """关闭沙箱,清理资源"""
     if task_id not in _sessions:
         return
     ctx = _sessions.pop(task_id)
+    _tree_cache.pop(task_id, None)
     session: SandboxSession = ctx["session"]
     try:
         # 延迟导入避免循环依赖(acp_base 依赖 sandbox_tools)
@@ -177,6 +235,128 @@ def workspace_has_files(task_id: str) -> bool:
         return False
 
 
+def browse_tree(
+    task_id: str,
+    max_depth: int = 4,
+    max_entries: int = 3000,
+    refresh: bool = False,
+) -> dict:
+    """面向前端的整树快照(首屏一次往返出整树,替代逐级懒加载)
+
+    返回扁平结构:{
+        "entries": [{"path": "src/main.py", "type": "file"|"dir"}, ...],
+        "truncated": bool,       # 条目超上限被截断(前端未覆盖目录退回懒加载)
+        "max_depth": int,        # 快照实际覆盖深度(降级时可能小于请求值)
+    }
+
+    结果带短 TTL 缓存(_TREE_CACHE_TTL),refresh=True 绕过。
+    """
+    cached = _tree_cache.get(task_id)
+    if not refresh and cached is not None and time.time() - cached[0] < _TREE_CACHE_TTL:
+        return cached[1]
+
+    ctx = _sessions.get(task_id)
+    if ctx is None:
+        raise RuntimeError("工作区不可用:任务未 clone 仓库或会话已过期清理")
+
+    repo_path = ctx.get("repo_path", "")
+    if not repo_path:
+        raise RuntimeError("工作区不可用:尚未 clone 仓库")
+
+    if ctx["mode"] == "local":
+        payload = _browse_tree_local(repo_path, max_depth, max_entries)
+    else:
+        payload = _browse_tree_sandbox(ctx, repo_path, max_depth, max_entries)
+
+    _tree_cache[task_id] = (time.time(), payload)
+    return payload
+
+
+def _browse_tree_local(repo_path: str, max_depth: int, max_entries: int) -> dict:
+    """local 模式:os.walk 剪枝遍历,条目上限截断"""
+    root = Path(repo_path).resolve()
+    entries: list[dict] = []
+    truncated = False
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel = os.path.relpath(dirpath, root)
+        parts = [] if rel == "." else rel.replace("\\", "/").split("/")
+        child_depth = len(parts) + 1
+        # 剪噪声目录;超出深度则不再下钻
+        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS_LIST)
+        if child_depth > max_depth:
+            dirnames[:] = []
+            continue
+        for name in dirnames:
+            entries.append({"path": "/".join(parts + [name]), "type": "dir"})
+        for name in sorted(filenames):
+            entries.append({"path": "/".join(parts + [name]), "type": "file"})
+        if len(entries) > max_entries:
+            truncated = True
+            break
+
+    return {
+        "entries": entries[:max_entries],
+        "truncated": truncated,
+        "max_depth": max_depth,
+    }
+
+
+def _browse_tree_sandbox(ctx: dict, repo_path: str, max_depth: int, max_entries: int) -> dict:
+    """sandbox 模式:单条 find 命令拉整树快照(服务端剪枝噪声目录)
+
+    用 find 而非 SDK list_directory(depth=N):find 能在沙箱内剪掉
+    .git/node_modules 等噪声目录,避免大仓库撑爆响应。
+    find 不可用(镜像缺 findutils)时降级为根目录单层列出,树退回懒加载。
+    """
+    session: SandboxSession = ctx["session"]
+    prune_expr = " -o ".join(f"-name {shlex.quote(d)}" for d in sorted(_SKIP_DIRS_LIST))
+    # %y=类型字符 %P=相对起点路径;head 限流防大仓库输出失控
+    cmd = (
+        f"find {shlex.quote(repo_path)} -maxdepth {max_depth} "
+        f"\\( {prune_expr} \\) -prune -o -printf '%y\\t%P\\n' "
+        f"| head -n {max_entries + 1}"
+    )
+
+    def _fallback_single_level() -> dict:
+        listing = _list_files_sandbox(ctx, repo_path, "", max_entries)
+        return {
+            "entries": [
+                {"path": e["name"], "type": e["type"]} for e in listing["entries"]
+            ],
+            "truncated": True,
+            "max_depth": 1,
+        }
+
+    try:
+        output = session.run_command(cmd, timeout=30)
+    except Exception as e:
+        logger.warning(f"[workspace] find 树快照失败,降级根目录单层列出: {e}")
+        return _fallback_single_level()
+
+    # find 正常时至少会输出起点行(d\t);完全没有 tab 分隔行说明 find 不可用/报错
+    lines = output.splitlines()
+    if not any("\t" in ln for ln in lines):
+        logger.warning("[workspace] find 无有效输出,降级根目录单层列出")
+        return _fallback_single_level()
+
+    entries = []
+    for line in lines:
+        if "\t" not in line:
+            continue
+        t, rel = line.split("\t", 1)
+        if not rel:  # 起点行(%P 为空)
+            continue
+        entries.append({"path": rel, "type": "dir" if t == "d" else "file"})
+
+    truncated = len(entries) > max_entries
+    return {
+        "entries": entries[:max_entries],
+        "truncated": truncated,
+        "max_depth": max_depth,
+    }
+
+
 def browse_read_file(task_id: str, file_path: str, offset: int = 1, max_lines: int = 500) -> dict:
     """面向前端的文件读取(复用 read_file 逻辑,但不带行号)
 
@@ -203,6 +383,15 @@ def browse_read_file(task_id: str, file_path: str, offset: int = 1, max_lines: i
 # ============================================================
 # 工具 1:clone_repo
 # ============================================================
+
+
+class CloneSkippedError(RuntimeError):
+    """用户主动跳过预克隆(克隆轮询检查点抛出)
+
+    由 clone_repo_with_fallback 向上传播,orchestrator 单独捕获并降级为
+    react_agent 自主克隆;回退链内部不得吞掉(否则跳过后会默默再试
+    下一种协议)。
+    """
 
 
 def clone_repo(repo_url: str, branch: str | None = None, task_id: str = "", git_tokens: dict | None = None) -> dict:
@@ -242,7 +431,10 @@ def _pause_checkpoint(task_id: str, deadline: float) -> float:
     return deadline + paused_for
 
 
-def _clone_repo_local(ctx: dict, clone_url: str, repo_name: str, branch: str | None, task_id: str = "") -> dict:
+def _clone_repo_local(
+    ctx: dict, clone_url: str, repo_name: str, branch: str | None,
+    task_id: str = "", cancellable: bool = False,
+) -> dict:
     """local 模式:本地 git clone(Popen 流式读进度 + 推 SSE)
 
     用 subprocess.Popen 逐行读 git 的 stderr 进度输出(需 --progress 强制非 tty
@@ -251,6 +443,9 @@ def _clone_repo_local(ctx: dict, clone_url: str, repo_name: str, branch: str | N
 
     超时用 deadline + poll 机制(而非 subprocess.run 的 timeout),超时主动 kill
     进程并 join 读线程,避免大仓库卡死时无反馈。
+
+    cancellable=True 时(仅 orchestrator 预克隆路径),轮询中检查跳过标志,
+    用户请求跳过预克隆时 kill 进程并抛 CloneSkippedError。
     """
     local_dir: Path = ctx["local_dir"]
     repo_dir = local_dir / repo_name
@@ -307,6 +502,11 @@ def _clone_repo_local(ctx: dict, clone_url: str, repo_name: str, branch: str | N
                 break
             # 暂停检查点:已暂停则阻塞到恢复,暂停时长不计入超时
             deadline = _pause_checkpoint(task_id, deadline)
+            # 跳过检查点:用户请求跳过预克隆 → kill 进程并抛(向上传播降级)
+            if cancellable and consume_skip_clone(task_id):
+                proc.kill()
+                reader.join(timeout=2)
+                raise CloneSkippedError(f"用户已跳过预克隆: {repo_name}")
             if time.monotonic() > deadline:
                 proc.kill()
                 reader.join(timeout=2)
@@ -344,7 +544,10 @@ def _parse_git_progress(line: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _clone_repo_sandbox(ctx: dict, clone_url: str, repo_name: str, branch: str | None, task_id: str = "") -> dict:
+def _clone_repo_sandbox(
+    ctx: dict, clone_url: str, repo_name: str, branch: str | None,
+    task_id: str = "", cancellable: bool = False,
+) -> dict:
     """sandbox 模式:在沙箱里 git clone(后台命令 + 进度文件轮询流式推进度)
 
     进度采集为何不用 execd 日志(get_background_logs):
@@ -395,6 +598,15 @@ def _clone_repo_sandbox(ctx: dict, clone_url: str, repo_name: str, branch: str |
             # 暂停检查点:已暂停则阻塞到恢复(放在轮询顶部,暂停期间
             # 不发 HTTP 请求),暂停时长不计入超时
             deadline = _pause_checkpoint(task_id, deadline)
+
+            # 跳过检查点:用户请求跳过预克隆 → 中断沙箱内命令并抛
+            # (向上传播降级;finally 会清理进度/退出码临时文件)
+            if cancellable and consume_skip_clone(task_id):
+                try:
+                    session.interrupt_command(exec_id)
+                except Exception:
+                    pass
+                raise CloneSkippedError(f"用户已跳过预克隆: {repo_name}")
 
             # 1) 进度:读进度文件,按 \r/\n 拆行取最新进度行推前端
             try:
@@ -564,7 +776,55 @@ def _list_files_local(repo_path: str, subdir: str, max_entries: int) -> dict:
 def _list_files_sandbox(
     ctx: dict, repo_path: str, subdir: str, max_entries: int
 ) -> dict:
-    """sandbox 模式:用 ls -Ap1 单层列出
+    """sandbox 模式:用 SDK 原生文件系统 API 单层列出(单次 HTTP 往返)
+
+    比旧方案(test -d + ls 两次远程 shell)快得多。
+    SDK 调用异常(非目录不存在)时自动回退 shell 实现,兼容旧 Server。
+    """
+    session: SandboxSession = ctx["session"]
+    full_path = (
+        f"{repo_path.rstrip('/')}/{subdir.lstrip('/')}"
+        if subdir else repo_path
+    )
+
+    try:
+        raw = session.list_directory(full_path)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"目录不存在: {subdir or '(根)'}")
+    except Exception as e:
+        logger.warning(
+            f"SDK list_directory 失败,回退 shell 列出: subdir={subdir or '(根)'} err={e}"
+        )
+        return _list_files_sandbox_shell(ctx, repo_path, subdir, max_entries)
+
+    entries = []
+    for item in raw:
+        if item["is_dir"] and item["name"] in _SKIP_DIRS_LIST:
+            continue
+        entries.append({
+            "name": item["name"],
+            "type": "dir" if item["is_dir"] else "file",
+            # SDK 直接给出真实大小(旧 shell 版为省 N 次 stat 固定返 0)
+            "size": 0 if item["is_dir"] else item["size"],
+        })
+
+    entries.sort(key=lambda e: (e["type"] != "dir", e["name"].lower()))
+
+    truncated = len(entries) > max_entries
+    entries = entries[:max_entries]
+
+    return {
+        "path": (subdir.rstrip("/") + "/") if subdir else ".",
+        "entries": entries,
+        "total": len(entries),
+        "truncated": truncated,
+    }
+
+
+def _list_files_sandbox_shell(
+    ctx: dict, repo_path: str, subdir: str, max_entries: int
+) -> dict:
+    """sandbox 模式 shell 回退:用 ls -Ap1 单层列出(SDK API 不可用时)
 
     -A:列出除 . 和 .. 外的所有条目(含隐藏文件)
     -p:目录名末尾加 /(便于解析)
@@ -823,29 +1083,40 @@ def _read_file_sandbox(
     session: SandboxSession = ctx["session"]
     full_path = f"{repo_path.rstrip('/')}/{file_path.lstrip('/')}"
 
-    check = session.run_command(f"test -f {shlex.quote(full_path)} && echo OK || echo MISSING")
-    if "MISSING" in check:
-        raise FileNotFoundError(f"文件不存在: {file_path}")
-
-    total_lines_str = session.run_command(f"wc -l < {shlex.quote(full_path)}").strip()
-    total_lines = int(total_lines_str) if total_lines_str.isdigit() else 0
-
-    # 用 awk 一次性完成:行号格式化 + 范围截取
     start = max(1, offset)
     end = start + max_lines - 1
-    if with_line_numbers:
-        awk_script = (
-            f"NR>={start} && NR<={end} "
-            f"{{printf \"%6d: %s\\n\", NR, $0}}"
-        )
-    else:
+    p = shlex.quote(full_path)
+
+    if not with_line_numbers:
+        # 前端浏览路径:存在性检查 + 总行数 + 范围截取合并为单条命令(1 次往返替代 3 次)
+        # 输出约定:首行为总行数,其后为内容行;文件不存在时首行 MISSING
         awk_script = (
             f"NR>={start} && NR<={end} "
             f"{{printf \"%s\\n\", $0}}"
         )
-    content = session.run_command(
-        f"awk '{awk_script}' {shlex.quote(full_path)}"
-    )
+        output = session.run_command(
+            f"if [ -f {p} ]; then wc -l < {p}; awk '{awk_script}' {p}; else echo MISSING; fi"
+        )
+        out_lines = output.splitlines()
+        if not out_lines or out_lines[0].strip() == "MISSING":
+            raise FileNotFoundError(f"文件不存在: {file_path}")
+        total_str = out_lines[0].strip()
+        total_lines = int(total_str) if total_str.isdigit() else 0
+        content = "\n".join(out_lines[1:])
+    else:
+        check = session.run_command(f"test -f {p} && echo OK || echo MISSING")
+        if "MISSING" in check:
+            raise FileNotFoundError(f"文件不存在: {file_path}")
+
+        total_lines_str = session.run_command(f"wc -l < {p}").strip()
+        total_lines = int(total_lines_str) if total_lines_str.isdigit() else 0
+
+        # 用 awk 一次性完成:行号格式化 + 范围截取
+        awk_script = (
+            f"NR>={start} && NR<={end} "
+            f"{{printf \"%6d: %s\\n\", NR, $0}}"
+        )
+        content = session.run_command(f"awk '{awk_script}' {p}")
 
     start_line = min(start, total_lines) if total_lines > 0 else 0
     end_line = min(end, total_lines) if total_lines > 0 else 0
@@ -2063,11 +2334,15 @@ def str_replace_editor(
 
 def clone_repo_with_fallback(
     repo_url: str, branch: str | None = None, task_id: str = "",
-    git_tokens: dict | None = None,
+    git_tokens: dict | None = None, cancellable: bool = False,
 ) -> dict:
     """克隆仓库(协议回退:HTTPS+token → SSH → HTTPS 匿名)
 
     供 orchestrator 在 user_agent 评估前主动调用,也供 clone_repo 工具委托。
+
+    cancellable=True 时(仅 orchestrator 预克隆路径),每次尝试前/轮询中
+    检查跳过标志,用户请求跳过预克隆时抛 CloneSkippedError 终止整个回退链
+    (不会继续尝试下一种协议);LLM 工具路径恒为 False,不受影响。
 
     按 repo_url 主机识别 provider(github / gitee / 未知),取该 provider 的
     access_token(git_tokens[provider.id])做 HTTPS 注入;未知主机无 token,
@@ -2128,6 +2403,11 @@ def clone_repo_with_fallback(
                 f"回退为不带分支重试(用远端默认分支)"
             )
         for idx, url in enumerate(candidates):
+            # 跳过检查点(尝试前):已请求跳过则立即终止整个回退链,
+            # 不再启动下一种协议(协议间间隙可能持续数十秒,轮询内
+            # 检查点覆盖不到)
+            if cancellable and consume_skip_clone(task_id):
+                raise CloneSkippedError(f"用户已跳过预克隆: {repo_name}")
             # 日志里不打印 token(脱敏)
             safe_url = url.split("@")[-1] if "@" in url else url
             try:
@@ -2138,14 +2418,19 @@ def clone_repo_with_fallback(
                 if mode == "local":
                     result = _clone_repo_local(
                         ctx, url, repo_name, attempt_branch, task_id=task_id,
+                        cancellable=cancellable,
                     )
                 else:
                     result = _clone_repo_sandbox(
                         ctx, url, repo_name, attempt_branch, task_id=task_id,
+                        cancellable=cancellable,
                     )
                 _set_repo_path(task_id, result["path"])
                 logger.info(f"[clone_fallback] task={task_id} 克隆成功(协议 {safe_url})")
                 return result
+            except CloneSkippedError:
+                # 用户主动跳过:直接向上传播,不进协议回退/错误聚合
+                raise
             except Exception as e:
                 err_msg = str(e)[:300]
                 errors.append(f"[{safe_url}] {err_msg}")

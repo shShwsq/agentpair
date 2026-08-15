@@ -26,6 +26,8 @@ import sys
 import tempfile
 import threading
 import uuid
+from contextlib import contextmanager
+from collections.abc import Generator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -125,6 +127,57 @@ class SandboxSession:
         else:
             return self._local_read_file(path)
 
+    def list_directory(self, path: str, depth: int | None = None) -> list[dict]:
+        """列出目录内容(SDK 原生文件系统 API,单次 HTTP,无需起 shell 进程)
+
+        仅 sandbox 模式可用(local 模式调用方直接用 Python 列目录)。
+        depth=None 单层;depth=N 递归到 N 层(由 SDK DirectoryListEntry 支持)。
+
+        返回归一化条目列表:[{"name": str, "is_dir": bool, "size": int, "path": str}]
+        path 为 SDK 返回的沙箱内绝对路径。
+
+        目录不存在时抛 FileNotFoundError;其他 SDK 异常原样抛出(调用方可回退 shell)。
+        """
+        if self._closed:
+            raise RuntimeError("沙箱已关闭")
+        if self.mode != "sandbox":
+            raise RuntimeError("list_directory 仅 sandbox 模式可用")
+
+        from opensandbox.models.filesystem import DirectoryListEntry
+
+        try:
+            infos = self.sandbox.files.list_directory(
+                DirectoryListEntry(path=path, depth=depth)
+            )
+        except FileNotFoundError:
+            raise
+        except Exception as e:
+            # 目录不存在的 SDK 异常形态多样(404 / not exist 等),归一为 FileNotFoundError
+            msg = str(e).lower()
+            if "not exist" in msg or "no such" in msg or "404" in msg:
+                raise FileNotFoundError(f"目录不存在: {path}") from e
+            raise
+
+        entries = []
+        for info in infos:
+            abs_path = getattr(info, "path", "") or ""
+            name = abs_path.rstrip("/").rsplit("/", 1)[-1]
+            if not name:
+                continue
+            mode_val = getattr(info, "mode", 0) or 0
+            # 目录判定:优先 mode 的 S_IFDIR 位(比 entry_type 字符串更可靠)
+            is_dir = (mode_val & 0o170000) == 0o040000
+            if not is_dir:
+                entry_type = str(getattr(info, "entry_type", "") or "").lower()
+                is_dir = entry_type in ("directory", "dir")
+            entries.append({
+                "name": name,
+                "is_dir": is_dir,
+                "size": int(getattr(info, "size", 0) or 0),
+                "path": abs_path,
+            })
+        return entries
+
     def get_endpoint(self, port: int) -> tuple[str, dict[str, str]]:
         """获取沙箱内端口的外部访问端点(端口转发)
 
@@ -222,6 +275,64 @@ class SandboxSession:
             proc = self._local_bg_procs.pop(execution_id, None)
             if proc:
                 proc.terminate()
+
+    def renew(self, timeout_minutes: int | None = None) -> bool:
+        """续期沙箱 TTL:新过期时间 = 当前时间 + timeout(SDK renew 语义)
+
+        长任务(多轮协作/用户等待确认/CLI 长时间执行)可能拖过创建时的
+        TTL 被 Server 自动回收,回收后任何 run_command 都会 404。
+        调用方应在会话被活跃使用时周期性续期(sandbox_tools 的访问续期
+        + acp_base 的 prompt 期间后台续期)。
+
+        timeout_minutes:续期时长,默认用 SANDBOX_TIMEOUT_MINUTES。
+        返回是否成功。失败不抛异常(可能已过期,由后续命令自行报错);
+        local 模式无 TTL 概念,直接返回 True。
+        """
+        if self._closed:
+            return False
+        if self.mode != "sandbox" or self.sandbox is None:
+            return True
+
+        minutes = timeout_minutes or settings.SANDBOX_TIMEOUT_MINUTES
+        try:
+            resp = self.sandbox.renew(timedelta(minutes=minutes))
+            expires = getattr(resp, "expires_at", None) or getattr(resp, "expiration_time", None)
+            logger.info(f"[sandbox] TTL 已续期 +{minutes} 分钟(过期时间: {expires})")
+            return True
+        except Exception as e:
+            logger.warning(f"[sandbox] TTL 续期失败(沙箱可能已被回收): {e}")
+            return False
+
+    @contextmanager
+    def auto_renew(self, interval_minutes: float | None = None) -> Generator[None, None, None]:
+        """后台周期性续期上下文管理器(供 CLI prompt 等长时间阻塞段使用)
+
+        prompt 期间 CLI 自带 bash 执行命令,不会触发后端 sandbox_tools 的
+        访问续期;若单轮执行超过 TTL,沙箱会被中途回收。用此上下文包裹
+        长阻塞段,后台线程按 interval 周期性 renew。
+
+        interval_minutes:续期间隔,默认 SANDBOX_RENEW_INTERVAL_MINUTES。
+        local 模式/已关闭会话:不开线程,直接 yield(no-op)。
+        """
+        if self._closed or self.mode != "sandbox" or self.sandbox is None:
+            yield
+            return
+
+        interval = (interval_minutes or settings.SANDBOX_RENEW_INTERVAL_MINUTES) * 60
+        stop_event = threading.Event()
+
+        def _loop() -> None:
+            while not stop_event.wait(interval):
+                if self._closed:
+                    break
+                self.renew()
+
+        worker = threading.Thread(target=_loop, daemon=True, name="sandbox-auto-renew")
+        worker.start()
+        try:
+            yield
+        finally:
+            stop_event.set()
 
     def close(self) -> None:
         """关闭沙箱,释放资源
