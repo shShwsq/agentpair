@@ -250,7 +250,7 @@ function handleCancel(loading: boolean): void {
               </div>
 
               <!-- 清空全部数据:连题库一并删除,需输入「清空」;说明由问号气泡展示 -->
-              <div class="danger-row danger-row-col">
+              <div class="danger-row">
                 <div class="danger-row-head">
                   <span class="danger-name">清空全部数据</span>
                   <button
@@ -270,7 +270,7 @@ function handleCancel(loading: boolean): void {
                   @click="confirmMode = 'all'"
                 >清空全部</button>
                 <div v-else class="danger-all-confirm">
-                  <span class="danger-confirm-text">输入「清空」以确认删除全部题目与记录:</span>
+                  <span class="danger-confirm-text">输入「清空」确认删除:</span>
                   <div class="danger-all-actions">
                     <input
                       v-model="confirmText"
@@ -666,14 +666,10 @@ function handleCancel(loading: boolean): void {
 
 .danger-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-3);
-}
-
-.danger-row-col {
-  flex-direction: column;
-  align-items: stretch;
 }
 
 .danger-name {
@@ -756,8 +752,10 @@ function handleCancel(loading: boolean): void {
 }
 
 .danger-all-confirm {
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
+  align-items: flex-end;
   gap: var(--space-2);
 }
 

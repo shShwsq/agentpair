@@ -15,6 +15,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import AppHeader from '@/components/AppHeader.vue'
 import PracticeCodeSidebar from '@/components/PracticeCodeSidebar.vue'
+import PracticeGenerateDialog from '@/components/PracticeGenerateDialog.vue'
 import PracticeGenerateSidebar from '@/components/PracticeGenerateSidebar.vue'
 import PracticeSettingsDialog from '@/components/PracticeSettingsDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
@@ -91,6 +92,23 @@ async function pollGenerateJobs(): Promise<void> {
 
 function toggleGenSidebar(): void {
   genSidebarOpen.value = !genSidebarOpen.value
+}
+
+// ---- 题目入库弹窗(复用任务详情页的 PracticeGenerateDialog)----
+// 出题进度侧栏完成的 job 点「确认入库」→ 携带来源任务 id 打开预览勾选
+const practiceDialogOpen = ref(false)
+const practiceDialogTaskId = ref('')
+
+function handleConfirmPreview(taskId: string): void {
+  practiceDialogTaskId.value = taskId
+  practiceDialogOpen.value = true
+}
+
+/** 弹窗关闭(无论是否确认):刷新题库与统计,让新入库的题即时可见 */
+function handlePracticeDialogClose(): void {
+  practiceDialogOpen.value = false
+  loadQuestionBank()
+  loadStats()
 }
 
 // ============================================================
@@ -1165,6 +1183,7 @@ onBeforeUnmount(() => {
         v-if="genSidebarOpen && !(mode === 'session' && codeSidebarOpen)"
         :jobs="generateJobs"
         @close="genSidebarOpen = false"
+        @confirm-preview="handleConfirmPreview"
       />
     </div>
 
@@ -1186,6 +1205,15 @@ onBeforeUnmount(() => {
       @clear-records="handleClearPractice(false)"
       @clear-all="handleClearPractice(true)"
       @cancel="settingsOpen = false"
+    />
+
+    <!-- ============ 题目入库弹窗(出题进度侧栏入口,与任务详情页同款) ============ -->
+    <PracticeGenerateDialog
+      v-if="practiceDialogTaskId"
+      :open="practiceDialogOpen"
+      :task-id="practiceDialogTaskId"
+      @close="handlePracticeDialogClose"
+      @confirmed="handlePracticeDialogClose"
     />
 
     <!-- ============ 浮动提示 ============ -->

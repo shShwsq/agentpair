@@ -29,6 +29,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: []
+  /** 请求打开题目入库弹窗(携带 job 的来源任务 id,由父组件展示 PracticeGenerateDialog) */
+  'confirm-preview': [taskId: string]
 }>()
 
 // ============================================================
@@ -292,6 +294,12 @@ function statusLabel(job: GenerateJobSummary): string {
   if (job.status === 'done') return `已完成 · ${job.created_count} 题`
   return '失败'
 }
+
+/** 打开题目入库弹窗(仅 job 关联了来源任务时可用) */
+function handleConfirmPreview(): void {
+  const taskId = selectedJob.value?.task_id
+  if (taskId) emit('confirm-preview', taskId)
+}
 </script>
 
 <template>
@@ -354,8 +362,15 @@ function statusLabel(job: GenerateJobSummary): string {
 
         <!-- 终止态提示 -->
         <div v-if="status === 'done'" class="gen-footer gen-footer-done">
-          已生成 {{ doneInfo?.created ?? 0 }} 道题<template v-if="(doneInfo?.skipped ?? 0) > 0">(另有 {{ doneInfo?.skipped }} 条发现未能出题)</template>。
-          草稿需前往任务详情页或题库管理确认后入库。
+          <p class="gen-done-text">
+            已生成 {{ doneInfo?.created ?? 0 }} 道题<template v-if="(doneInfo?.skipped ?? 0) > 0">(另有 {{ doneInfo?.skipped }} 条发现未能出题)</template>
+          </p>
+          <button
+            v-if="selectedJob?.task_id"
+            class="btn-primary btn-small gen-confirm-btn"
+            title="预览候选题并勾选入库"
+            @click="handleConfirmPreview"
+          >确认入库</button>
         </div>
         <div v-else-if="status === 'error'" class="gen-footer gen-footer-error">
           生成失败:{{ errorMsg || '未知错误' }}
@@ -579,6 +594,14 @@ function statusLabel(job: GenerateJobSummary): string {
 .gen-footer-done {
   color: var(--color-success, #16a34a);
   background: var(--color-bg-secondary);
+}
+
+.gen-done-text {
+  margin: 0 0 var(--space-2);
+}
+
+.gen-confirm-btn {
+  width: 100%;
 }
 
 .gen-footer-error {
