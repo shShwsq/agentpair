@@ -39,6 +39,12 @@ const selectedJobId = ref('')
 const userPicked = ref(false)
 let es: EventSource | null = null
 
+// [诊断] 重放/直播事件是否被 snapshotTerminal 正确拦截:
+// skip 应远大于 render;若终态 job 的 render 持续增长,说明拦截失效。
+// 注意:必须声明在 immediate watch 之前,否则首次触发时访问会报 TDZ 错误
+const diagCounters = { tokenRendered: 0, tokenSkipped: 0, findingRendered: 0, findingSkipped: 0 }
+let diagLogTimer: ReturnType<typeof setInterval> | null = null
+
 const selectedJob = computed<GenerateJobSummary | null>(
   () => props.jobs.find((j) => j.job_id === selectedJobId.value) ?? null,
 )
@@ -120,11 +126,7 @@ function appendOutput(text: string): void {
   scheduleScroll()
 }
 
-// [诊断] 重放/直播事件是否被 snapshotTerminal 正确拦截:
-// skip 应远大于 render;若终态 job 的 render 持续增长,说明拦截失效
-const diagCounters = { tokenRendered: 0, tokenSkipped: 0, findingRendered: 0, findingSkipped: 0 }
-let diagLogTimer: ReturnType<typeof setInterval> | null = null
-
+// [诊断] 每 2 秒汇总输出一次事件处理计数(状态声明在文件前部)
 function ensureDiagLog(): void {
   if (diagLogTimer) return
   diagLogTimer = setInterval(() => {
