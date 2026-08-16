@@ -183,6 +183,12 @@ bash scripts/build-sandbox-image.sh --ssh --ssh-key ~/.ssh/id_ed25519
 # 两者可叠加;预克隆的 URL 会成为 origin remote(install.sh 的 fetch 也走它),建议给镜像 URL
 bash scripts/build-sandbox-image.sh --hermes-clone-url https://ghfast.top/https://github.com/NousResearch/hermes-agent.git --cn-mirror
 
+# 宿主机已 clone 好源码时(如 /usr/local/lib/hermes-agent),可直接复用,构建时 COPY 进容器:
+#   --hermes-local-dir <dir>  直接把宿主机目录 COPY 进容器(含 .git,install.sh 跳过 clone 直接装依赖)
+#   注意:install.sh 的 update 流程会 git fetch origin(走 origin URL),容器内必须可达,
+#   建议搭配 --github-mirror 把 SSH/HTTPS 都重写到镜像;与 --hermes-clone-url 互斥
+bash scripts/build-sandbox-image.sh --hermes-local-dir /usr/local/lib/hermes-agent --github-mirror https://ghfast.top --cn-mirror
+
 # 或仅换 Docker 基础镜像源(apt/npm 仍用官方源)
 bash scripts/build-sandbox-image.sh --registry docker.m.daocloud.io
 ```
