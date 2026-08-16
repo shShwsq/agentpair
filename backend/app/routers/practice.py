@@ -150,7 +150,12 @@ def _run_generate_job(job_id: str, task_id: UUID, user_id: UUID, max_findings: i
         ).first()
         if not task:
             gen_jobs.update_job(job_id, status="error", error="任务不存在或无权访问")
+            logger.warning("[practice] 手动出题 job=%s 任务不存在或无权访问 task=%s", job_id, task_id)
             return
+        logger.info(
+            "[practice] 手动出题开始 job=%s task=%s user=%s max_findings=%d",
+            job_id, task_id, user_id, max_findings,
+        )
         created, skipped = generate_questions_for_task(
             db, task, user_id, max_findings=max_findings,
             progress_callback=lambda done, total: gen_jobs.update_job(
@@ -188,6 +193,10 @@ def _run_generate_job(job_id: str, task_id: UUID, user_id: UUID, max_findings: i
         # done/total 由进度回调维护,此处不覆盖
         gen_jobs.update_job(
             job_id, status="done", questions=items, skipped_findings=skipped
+        )
+        logger.info(
+            "[practice] 手动出题完成 job=%s task=%s: %d 题(%d 条 finding 未出题)",
+            job_id, task_id, len(items), skipped,
         )
     except Exception as e:
         logger.exception("[practice] 异步出题失败 job=%s", job_id)

@@ -615,24 +615,55 @@ def _normalize_raw_question(raw: Any, finding_meta: dict) -> dict | None:
     }
 
 
-def _parse_llm_questions(content: str, finding_meta: dict) -> list[dict]:
-    """json_repair 容错解析 LLM 输出 → 规范题目列表"""
+def _parse_llm_questions(content: str, finding_meta: dict, finding_id=None) -> list[dict]:
+    """json_repair 容错解析 LLM 输出 → 规范题目列表
+
+    解析/校验的每个丢弃分支都落日志(出题专用日志文件),
+    便于排查“一道题也没生成”是模型输出问题还是校验过严。
+    """
     text = (content or "").strip()
     if not text:
+        logger.warning("[practice] finding=%s LLM 输出为空,无法出题", finding_id)
         return []
     try:
         result = repair_json(text, return_objects=True)
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            "[practice] finding=%s json_repair 解析失败: %s; 输出样例: %r",
+            finding_id, e, text[:300],
+        )
         return []
     if isinstance(result, dict):
         result = [result]
     if not isinstance(result, list):
+        logger.warning(
+            "[practice] finding=%s LLM 输出解析结果非数组(%s),样例: %r",
+            finding_id, type(result).__name__, text[:300],
+        )
         return []
     questions = []
+    invalid: list[Any] = []
     for raw in result:
         q = _normalize_raw_question(raw, finding_meta)
         if q:
             questions.append(q)
+        else:
+            invalid.append(raw)
+    if invalid:
+        try:
+            sample = json.dumps(invalid[0], ensure_ascii=False, default=str)[:300]
+        except Exception:
+            sample = str(invalid[0])[:300]
+        logger.warning(
+            "[practice] finding=%s 结构校验丢弃 %d/%d 题,首个无效元素样例: %s",
+            finding_id, len(invalid), len(result), sample,
+        )
+    if not questions and not invalid:
+        # 模型主动返回空数组(提示词约定:判定误报/不适合出题时返回 [])
+        logger.info(
+            "[practice] finding=%s LLM 返回空数组(可能判定为误报或不适合出题)",
+            finding_id,
+        )
     return questions[:MAX_QUESTIONS_PER_FINDING]
 
 
@@ -696,6 +727,13 @@ def generate_questions_for_task(
     )[:max_findings]
     total_findings = len(findings)
 
+    # 出题起始快照:模型/主题/工作区/发现数(排查无题产出时的第一手上下文)
+    logger.info(
+        "[practice] 开始出题 task=%s user=%s model=%s topic=%s workspace=%s findings=%d",
+        task.id, user_id, getattr(client, "model", "?"), topic,
+        bool(repo_path), total_findings,
+    )
+
     # 已有 dedup_hash(同用户),避免重复入库
     existing_hashes = {
         row[0] for row in db.query(Question.dedup_hash).filter(
@@ -724,6 +762,7 @@ def generate_questions_for_task(
 
         questions: list[dict] = []
         user_prompt = prompt
+        content = ""
         for attempt in range(PARSE_RETRY + 1):
             try:
                 content = _call_llm(
@@ -733,15 +772,25 @@ def generate_questions_for_task(
             except Exception as e:
                 logger.warning(
                     "[practice] finding=%s LLM 调用失败(第 %d 次): %s",
-                    finding.id, attempt + 1, e,
+                    finding.id, attempt + 1, e, exc_info=True,
                 )
                 content = ""
-            questions = _parse_llm_questions(content, meta)
+            questions = _parse_llm_questions(content, meta, finding_id=finding.id)
             # 质量关卡:工作区可用时无 code_snippet 的题不合格(常识题拦截)
             if repo_path and questions:
                 qualified = [q for q in questions if q["code_snippet"]]
+                dropped = len(questions) - len(qualified)
+                if dropped:
+                    logger.info(
+                        "[practice] finding=%s 质量关卡: %d/%d 题缺 code_snippet 被丢弃",
+                        finding.id, dropped, len(questions),
+                    )
                 if not qualified and attempt < PARSE_RETRY:
                     # 全部缺代码上下文:带质量反馈重试一次
+                    logger.info(
+                        "[practice] finding=%s 全部题目缺代码上下文,带质量反馈重试",
+                        finding.id,
+                    )
                     user_prompt = prompt + _NO_CODE_FEEDBACK
                     continue
                 questions = qualified
@@ -750,13 +799,20 @@ def generate_questions_for_task(
 
         if not questions:
             skipped += 1
+            logger.warning(
+                "[practice] finding=%s 未能产出任何题目(共 %d 次尝试);"
+                "最后一次 LLM 输出样例: %r",
+                finding.id, PARSE_RETRY + 1, (content or "")[:300],
+            )
             if progress_callback:
                 progress_callback(idx + 1, total_findings)
             continue
 
+        dup_skipped = 0
         for q in questions:
             dedup_hash = compute_dedup_hash(q["stem"], q["code_snippet"])
             if dedup_hash in existing_hashes:
+                dup_skipped += 1
                 continue
             existing_hashes.add(dedup_hash)
 
@@ -786,10 +842,20 @@ def generate_questions_for_task(
             db.add(question)
             created.append(question)
 
+        if dup_skipped:
+            logger.info(
+                "[practice] finding=%s 去重跳过 %d 题(同用户已有相同题目)",
+                finding.id, dup_skipped,
+            )
+
         if progress_callback:
             progress_callback(idx + 1, total_findings)
 
     db.commit()
     for q in created:
         db.refresh(q)
+    logger.info(
+        "[practice] 出题结束 task=%s: 生成 %d 题, %d/%d 条 finding 未出题",
+        task.id, len(created), skipped, total_findings,
+    )
     return created, skipped
