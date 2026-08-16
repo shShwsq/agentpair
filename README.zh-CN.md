@@ -326,6 +326,29 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 生产环境建议用 `gunicorn -k uvicorn.workers.UvicornWorker`(Linux)或容器化部署。
 
+> **注意**:后端存在进程内存态(出题 job、任务 SSE 事件流),**不要启用多 worker**;gunicorn 时用 `--workers 1`,容器部署见下方 Docker 方案。
+
+### Docker 一键部署(推荐)
+
+生产环境推荐 `deploy/` 下的 Docker Compose 方案:2 个容器(`backend` + `frontend/nginx`),外部依赖(阿里云 RDS PostgreSQL、另一台服务器的 OpenSandbox)不进编排,经环境变量直连。
+
+```bash
+# 在 Linux 服务器上(需预装 Docker + Compose 插件)
+git clone <repo-url> AgentPair && cd AgentPair/deploy
+cp .env.production.example .env.production   # 填写数据库/密钥/沙箱地址/OAuth 等
+bash deploy.sh                               # 一键构建 + 启动
+```
+
+要点:
+
+- **后端强制单 worker**(uvicorn `--workers 1`):出题 job 与任务 SSE 事件流是进程内存态,多 worker 会导致事件流错连、job 丢失
+- **nginx 关闭 `proxy_buffering`**:任务流/出题流是 SSE 实时推送,缓冲会卡住前端
+- **`/api` 前缀反代去前缀**:前端 baseURL 为 `/api`,nginx 反代到后端时自动去掉
+- **持久化卷**:`backend/logs`(practice_generate.log / perf.log / acp)、`user_skills`(用户上传 skill)、`_repos`
+- 修改 OAuth 回调等 `VITE_*` 变量后需重新执行 `bash deploy.sh`(构建期注入)
+
+各配置项逐条注释见 [deploy/.env.production.example](deploy/.env.production.example)。
+
 ## 文档
 
 - [规格说明](docs/spec.md) —— 完整产品规格与架构设计

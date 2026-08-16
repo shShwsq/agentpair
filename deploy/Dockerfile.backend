@@ -1,0 +1,31 @@
+# AgentPair 后端镜像(Python 3.13 + uvicorn)
+# 构建:docker build -f deploy/Dockerfile.backend -t agentpair-backend .
+FROM python:3.13-slim
+
+# git:沙箱未启用时本地 clone / 部分工具链需要;curl:可选排查用
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app/backend
+
+# 先装依赖,利用 Docker 层缓存(requirements.txt 不变时不会重装)
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY backend/ .
+
+# 非 root 运行 + 预创建可写目录
+# (named volume 首次挂载会继承这些目录的所有权,user_skills 必须可写)
+RUN useradd -m -u 1000 appuser \
+    && mkdir -p logs user_skills _repos \
+    && chown -R appuser:appuser /app/backend
+USER appuser
+
+EXPOSE 8000
+
+# 重要:出题 job 与 SSE 事件流是进程内存态,必须单 worker,禁止 --workers N
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=5 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
