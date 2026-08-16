@@ -57,7 +57,7 @@ import {
   updateTaskVerifierConfig,
 } from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
-import { listDrafts } from '@/api/practice'
+import { listDrafts, listGenerateJobs } from '@/api/practice'
 import { ensureFeaturesLoaded, practiceEnabled } from '@/composables/useFeatures'
 import { listArtifacts } from '@/api/taskArtifacts'
 import { clientLog } from '@/utils/clientLog'
@@ -85,6 +85,7 @@ import type {
   CommandConfirmEventData,
 } from '@/types/task'
 import type { TaskArtifact } from '@/types/taskArtifact'
+import type { GenerateJobSummary } from '@/types/practice'
 
 const route = useRoute()
 const router = useRouter()
@@ -2580,9 +2581,56 @@ async function refreshPracticeDraftCount(): Promise<void> {
 watch(
   () => task.value?.status,
   (status) => {
-    if (status === 'completed') refreshPracticeDraftCount()
+    if (status === 'completed') {
+      refreshPracticeDraftCount()
+      // 自动出题在任务完成时触发:开始轮询本任务关联的运行中 job,展示跳转入口
+      startGenJobPoll()
+    } else {
+      stopGenJobPoll()
+    }
   },
 )
+
+// ---- 出题进度跳转入口:轮询本任务关联的出题 job(手动/自动),运行中时展示 ----
+const runningGenJob = ref<GenerateJobSummary | null>(null)
+let genJobPollTimer: ReturnType<typeof setInterval> | null = null
+
+async function pollRunningGenJob(): Promise<void> {
+  if (!practiceEnabled.value || !task.value || task.value.status !== 'completed') {
+    runningGenJob.value = null
+    return
+  }
+  try {
+    const res = await listGenerateJobs()
+    const taskId = String(task.value.id)
+    runningGenJob.value = res.jobs.find(
+      (j) => j.task_id === taskId && (j.status === 'pending' || j.status === 'running'),
+    ) ?? null
+  } catch {
+    runningGenJob.value = null  // 匿名/失败不提示
+  }
+}
+
+function startGenJobPoll(): void {
+  if (genJobPollTimer) return
+  void pollRunningGenJob()
+  genJobPollTimer = setInterval(pollRunningGenJob, 5000)
+}
+
+function stopGenJobPoll(): void {
+  if (genJobPollTimer) {
+    clearInterval(genJobPollTimer)
+    genJobPollTimer = null
+  }
+  runningGenJob.value = null
+}
+
+onUnmounted(stopGenJobPoll)
+
+/** 跳转自适应练习页查看出题进度(练习页会自动展开出题进度侧栏) */
+function goToPracticeProgress(): void {
+  router.push({ name: 'practice' })
+}
 
 function openPracticeGenerate(): void {
   practiceDialogOpen.value = true
@@ -3101,6 +3149,17 @@ function toggleResult(id: string): void {
 
         <!-- 任务详情(扁平化,无卡片外框):状态徽标与下载/打印按钮已移至标题行,用户意图卡片已移除 -->
         <section class="overview-section">
+          <!-- 出题进度跳转:本任务关联的出题 job(手动/自动)运行中时,跳去练习页看实时进度 -->
+          <button
+            v-if="runningGenJob && !practiceDialogOpen"
+            class="gen-progress-entry"
+            title="跳转到自适应练习查看出题进度"
+            @click="goToPracticeProgress"
+          >
+            <span class="gen-pulse-dot" aria-hidden="true" />
+            正在出题<template v-if="runningGenJob.total">({{ runningGenJob.done }}/{{ runningGenJob.total }})</template>
+            · 查看进度
+          </button>
           <dl class="overview-meta">
             <div>
               <dt>场景</dt>
@@ -3548,6 +3607,46 @@ function toggleResult(id: string): void {
 /* ---- 任务详情概览(扁平化) ---- */
 .overview-section {
   padding: var(--space-2) 0;
+}
+
+/* 出题进度跳转入口(风格对齐练习页 gen-toggle-btn;呼吸红点提示运行中) */
+.gen-progress-entry {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-bottom: var(--space-3);
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.gen-progress-entry:hover {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+.gen-progress-entry .gen-pulse-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  animation: gen-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes gen-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.7); }
 }
 
 .overview-actions {
