@@ -71,7 +71,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
     # 先解析 agent 策略(检查点评估频率、打断权限等):
     # 启动阶段文案必须在推送前由 user_agent 启停决定,
     # 否则单 agent 模式会先闪现"双智能体协作启动"误导前端
-    # 合并用户级默认(UserPreference.agent_policy)+ 任务级覆盖(task.params["_agent_policy"])
+    # 合并用户级默认(agent_policies 表)+ 任务级覆盖(task.params["_agent_policy"])
     agent_policy = resolve_agent_policy(task, db)
     logger.info(
         f"[task={task.id}] agent_policy: K={agent_policy.get('checkpoint_interval')}, "
@@ -1261,7 +1261,7 @@ def resume_audit_with_message(
     executor = get_executor(task)
 
     # 加载 agent 策略(检查点评估频率、打断权限等)
-    # 合并用户级默认(UserPreference.agent_policy)+ 任务级覆盖(task.params["_agent_policy"])
+    # 合并用户级默认(agent_policies 表)+ 任务级覆盖(task.params["_agent_policy"])
     agent_policy = resolve_agent_policy(task, db)
     logger.info(
         f"[task={task.id}] resume agent_policy: K={agent_policy.get('checkpoint_interval')}, "

@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import get_current_user
+from app.models.agent_policy import AgentPolicy
 from app.models.project import Project
 from app.models.user import User
 from app.models.user_memory import UserMemory
@@ -59,14 +60,7 @@ def get_preferences(
     db: Session = Depends(get_db),
 ) -> UserPreferenceOut:
     """获取当前用户的偏好(未配置则返回空默认值)"""
-    row = (
-        db.query(UserPreference)
-        .filter(UserPreference.user_id == current_user.id)
-        .first()
-    )
-    if row is None:
-        return UserPreferenceOut()
-    return UserPreferenceOut.model_validate(row)
+    return _build_preference_out(db, current_user.id)
 
 
 @router.put("/preferences", response_model=UserPreferenceOut)
@@ -92,7 +86,7 @@ def save_preferences(
     db.commit()
     db.refresh(row)
     logger.info("用户 %s 更新了偏好", current_user.id)
-    return UserPreferenceOut.model_validate(row)
+    return _build_preference_out(db, current_user.id, pref_row=row)
 
 
 @router.put("/preferences/practice", response_model=UserPreferenceOut)
@@ -123,7 +117,7 @@ def save_practice_settings(
     db.refresh(row)
     logger.info("用户 %s 更新练习设置: auto_generate_practice=%s",
                 current_user.id, req.auto_generate_practice)
-    return UserPreferenceOut.model_validate(row)
+    return _build_preference_out(db, current_user.id, pref_row=row)
 
 
 @router.put("/preferences/agent_policy", response_model=UserPreferenceOut)
@@ -134,30 +128,28 @@ def save_agent_policy(
 ) -> UserPreferenceOut:
     """保存/更新 agent 策略配置(检查点评估频率、打断权限等)
 
-    作为用户级默认值,任务级可通过 task.params["_agent_policy"] 覆盖。
-    get_or_create:若用户无 UserPreference 行,自动创建(user_profile 为空)。
+    作为用户级默认值(存 agent_policies 独立表),
+    任务级可通过 task.params["_agent_policy"] 覆盖。
+    get_or_create:若用户无策略记录,自动创建。
     """
-    row = (
-        db.query(UserPreference)
-        .filter(UserPreference.user_id == current_user.id)
-        .first()
-    )
     policy_dict = req.model_dump()
     # 钳制 max_rounds 到 [1, MAX_MAX_ROUNDS](防御前端送超界值)
     policy_dict["max_rounds"] = max(1, min(int(policy_dict.get("max_rounds", 4)), MAX_MAX_ROUNDS))
+    row = (
+        db.query(AgentPolicy)
+        .filter(AgentPolicy.user_id == current_user.id)
+        .first()
+    )
     if row is None:
-        row = UserPreference(
-            user_id=current_user.id,
-            user_profile="",
-            agent_policy=policy_dict,
-        )
+        row = AgentPolicy(user_id=current_user.id, **policy_dict)
         db.add(row)
     else:
-        row.agent_policy = policy_dict
+        for key, value in policy_dict.items():
+            setattr(row, key, value)
     db.commit()
     db.refresh(row)
     logger.info("用户 %s 更新了 agent_policy", current_user.id)
-    return UserPreferenceOut.model_validate(row)
+    return _build_preference_out(db, current_user.id)
 
 
 # ============================================================
@@ -302,6 +294,41 @@ def delete_project(
 # ============================================================
 # 辅助函数
 # ============================================================
+
+
+def _build_preference_out(
+    db: Session, user_id, pref_row: UserPreference | None = None
+) -> UserPreferenceOut:
+    """组装 UserPreferenceOut(数据跨两表:user_preferences + agent_policies)
+
+    - user_profile / auto_generate_practice 来自 user_preferences(可能无行)
+    - agent_policy 来自 agent_policies 独立表(可能无行 → None,前端用系统默认)
+    - updated_at 取两行中较新的(哪边最后保存,就算最后更新)
+    """
+    if pref_row is None:
+        pref_row = (
+            db.query(UserPreference)
+            .filter(UserPreference.user_id == user_id)
+            .first()
+        )
+    policy_row = (
+        db.query(AgentPolicy)
+        .filter(AgentPolicy.user_id == user_id)
+        .first()
+    )
+    if pref_row is None and policy_row is None:
+        return UserPreferenceOut()
+    updated_at = None
+    for r in (pref_row, policy_row):
+        if r is not None and r.updated_at is not None:
+            if updated_at is None or r.updated_at > updated_at:
+                updated_at = r.updated_at
+    return UserPreferenceOut(
+        user_profile=pref_row.user_profile if pref_row else "",
+        agent_policy=policy_row.to_dict() if policy_row else None,
+        auto_generate_practice=pref_row.auto_generate_practice if pref_row else True,
+        updated_at=updated_at,
+    )
 
 
 def _find_project(db: Session, user_id, project_id: str) -> Project | None:

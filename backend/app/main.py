@@ -42,6 +42,7 @@ async def lifespan(app: FastAPI):
     生产环境应切换到 Alembic 迁移管理 schema 变更。
     """
     from app.models import email_token, task, user  # noqa: F401
+    from app.models import agent_policy  # noqa: F401  # 用户级协作策略独立表
     from app.models import task_artifact  # noqa: F401
     from app.models import user_agent_config  # noqa: F401
     from app.models import user_git_binding  # noqa: F401
@@ -72,6 +73,11 @@ async def lifespan(app: FastAPI):
     from app.models.user_preference import migrate_user_preference_columns
 
     migrate_user_preference_columns()
+    # 迁移用户级 agent_policy:user_preferences.agent_policy JSONB → agent_policies 独立表
+    # (拷数据后删旧列;必须晚于 migrate_user_preference_columns,新表已由 create_all 建好)
+    from app.models.agent_policy import migrate_agent_policy_table
+
+    migrate_agent_policy_table()
     # 加 conversations.tool_call_id 列(tool_result 关联对应 tool_call,并行调用时前端精确配对)
     from app.models.task import migrate_conversation_tool_call_id
 

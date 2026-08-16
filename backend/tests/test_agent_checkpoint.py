@@ -53,13 +53,13 @@ def _make_task_with_overrides(user_id=None, params=None):
     return task
 
 
-def _mock_db_with_user_pref(user_pref=None):
-    """构造 mock db:db.query(UserPreference).filter(...).first() 返回 user_pref。
+def _mock_db_with_policy(policy_row=None):
+    """构造 mock db:db.query(AgentPolicy).filter(...).first() 返回 policy_row。
 
-    user_pref=None 表示用户未配置偏好(查无记录)。
+    policy_row=None 表示用户未保存过协作策略(查无记录)。
     """
     db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = user_pref
+    db.query.return_value.filter.return_value.first.return_value = policy_row
     return db
 
 
@@ -101,7 +101,7 @@ def test_default_policy_has_all_required_fields():
 
 def test_resolve_returns_defaults_for_anonymous_task(fake_task):
     """匿名任务(user_id=None)+ 无 params → 纯默认值。"""
-    db = _mock_db_with_user_pref(user_pref=None)
+    db = _mock_db_with_policy(policy_row=None)
     policy = resolve_agent_policy(fake_task, db)
 
     # 应等于默认值
@@ -113,12 +113,12 @@ def test_resolve_returns_defaults_for_anonymous_task(fake_task):
 def test_resolve_uses_user_level_defaults_when_no_overrides():
     """有用户级默认 + 无任务级覆盖 → 用用户级默认。"""
     task = _make_task_with_overrides(user_id=uuid.uuid4(), params=None)
-    user_pref = MagicMock()
-    user_pref.agent_policy = {
+    policy_row = MagicMock()
+    policy_row.to_dict.return_value = {
         "checkpoint_interval": 5,
         "allow_interrupt": False,
     }
-    db = _mock_db_with_user_pref(user_pref=user_pref)
+    db = _mock_db_with_policy(policy_row=policy_row)
 
     policy = resolve_agent_policy(task, db)
     assert policy["checkpoint_interval"] == 5
@@ -133,13 +133,13 @@ def test_resolve_task_overrides_win_over_user_defaults():
         user_id=uuid.uuid4(),
         params={"_agent_policy": {"allow_interrupt": False, "checkpoint_interval": 10}},
     )
-    user_pref = MagicMock()
-    user_pref.agent_policy = {
+    policy_row = MagicMock()
+    policy_row.to_dict.return_value = {
         "checkpoint_interval": 5,
         "allow_interrupt": True,  # 应被任务级 False 覆盖
         "max_interrupts_per_round": 4,  # 任务级未覆盖,应保留 4
     }
-    db = _mock_db_with_user_pref(user_pref=user_pref)
+    db = _mock_db_with_policy(policy_row=policy_row)
 
     policy = resolve_agent_policy(task, db)
     assert policy["checkpoint_interval"] == 10  # 任务级覆盖
@@ -153,29 +153,29 @@ def test_resolve_task_overrides_win_over_defaults_for_anonymous():
         user_id=None,
         params={"_agent_policy": {"checkpoint_interval": 7}},
     )
-    db = _mock_db_with_user_pref(user_pref=None)
+    db = _mock_db_with_policy(policy_row=None)
 
     policy = resolve_agent_policy(task, db)
     assert policy["checkpoint_interval"] == 7
     assert policy["allow_interrupt"] is True  # 未覆盖,用默认
 
 
-def test_resolve_handles_empty_user_pref_agent_policy():
-    """用户有 UserPreference 行但 agent_policy=None → 用 DEFAULT。"""
+def test_resolve_handles_saved_default_policy():
+    """用户保存过策略但值等于系统默认(to_dict 返回 DEFAULT)→ 结果仍为 DEFAULT。"""
     task = _make_task_with_overrides(user_id=uuid.uuid4(), params=None)
-    user_pref = MagicMock()
-    user_pref.agent_policy = None
-    db = _mock_db_with_user_pref(user_pref=user_pref)
+    policy_row = MagicMock()
+    policy_row.to_dict.return_value = dict(DEFAULT_AGENT_POLICY)
+    db = _mock_db_with_policy(policy_row=policy_row)
 
     policy = resolve_agent_policy(task, db)
     assert policy["checkpoint_interval"] == 10
     assert policy["allow_interrupt"] is True
 
 
-def test_resolve_handles_no_user_pref_row():
-    """用户无 UserPreference 行(first() 返回 None)→ 用 DEFAULT。"""
+def test_resolve_handles_no_policy_row():
+    """用户无 AgentPolicy 行(first() 返回 None)→ 用 DEFAULT。"""
     task = _make_task_with_overrides(user_id=uuid.uuid4(), params=None)
-    db = _mock_db_with_user_pref(user_pref=None)
+    db = _mock_db_with_policy(policy_row=None)
 
     policy = resolve_agent_policy(task, db)
     assert policy["checkpoint_interval"] == 10
@@ -184,7 +184,7 @@ def test_resolve_handles_no_user_pref_row():
 def test_resolve_handles_empty_params_dict():
     """task.params = {} (空字典,非 None) → 无任务级覆盖,用 DEFAULT。"""
     task = _make_task_with_overrides(user_id=None, params={})
-    db = _mock_db_with_user_pref(user_pref=None)
+    db = _mock_db_with_policy(policy_row=None)
 
     policy = resolve_agent_policy(task, db)
     assert policy["checkpoint_interval"] == 10
@@ -193,7 +193,7 @@ def test_resolve_handles_empty_params_dict():
 def test_resolve_handles_empty_agent_policy_in_params():
     """task.params = {"_agent_policy": {}} (空覆盖) → 用 DEFAULT。"""
     task = _make_task_with_overrides(user_id=None, params={"_agent_policy": {}})
-    db = _mock_db_with_user_pref(user_pref=None)
+    db = _mock_db_with_policy(policy_row=None)
 
     policy = resolve_agent_policy(task, db)
     assert policy["checkpoint_interval"] == 10
