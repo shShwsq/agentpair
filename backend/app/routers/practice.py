@@ -32,6 +32,7 @@ from app.models.user import User
 from app.schemas.practice import (
     ActivateQuestionsRequest,
     ActivateQuestionsResponse,
+    ClearRecordsResponse,
     ConfirmQuestionsRequest,
     ConfirmQuestionsResponse,
     DraftQuestionResponse,
@@ -1015,3 +1016,57 @@ def archive_question(
     question.status = QuestionStatus.ARCHIVED
     db.commit()
     return {"archived": True}
+
+
+# ============================================================
+# 清空练习记录(进度归零;可选连题库一并删除)
+# ============================================================
+
+
+@router.delete("/records", response_model=ClearRecordsResponse)
+def clear_records(
+    include_questions: bool = Query(default=False),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ClearRecordsResponse:
+    """清空当前用户的练习记录
+
+    基础档:删除答题流水 / 会话 / SM-2 记忆状态,题库保留但难度重置回初值;
+    include_questions=true 时连题目与知识点词典一并删除,回到完全空白。
+    practice_settings 不受影响。
+    """
+    deleted_attempts = (
+        db.query(Attempt).filter(Attempt.user_id == current_user.id).delete()
+    )
+    deleted_sessions = (
+        db.query(PracticeSession)
+        .filter(PracticeSession.user_id == current_user.id)
+        .delete()
+    )
+    db.query(UserKnowledgeState).filter(
+        UserKnowledgeState.user_id == current_user.id
+    ).delete()
+
+    deleted_questions = 0
+    if include_questions:
+        deleted_questions = (
+            db.query(Question).filter(Question.user_id == current_user.id).delete()
+        )
+        db.query(KnowledgePoint).filter(
+            KnowledgePoint.user_id == current_user.id
+        ).delete()
+    else:
+        # 难度由作答动态调整过,进度归零时重置回默认初值
+        db.query(Question).filter(Question.user_id == current_user.id).update(
+            {"difficulty": 3.0}
+        )
+    db.commit()
+    logger.info(
+        "练习记录已清空: user=%s sessions=%s attempts=%s questions=%s",
+        current_user.id, deleted_sessions, deleted_attempts, deleted_questions,
+    )
+    return ClearRecordsResponse(
+        deleted_sessions=deleted_sessions,
+        deleted_attempts=deleted_attempts,
+        deleted_questions=deleted_questions,
+    )

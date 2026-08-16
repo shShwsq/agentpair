@@ -315,3 +315,11 @@ class TrendResponse(BaseModel):
     """最近 N 周作答趋势(旧到新)"""
 
     weeks: list[TrendPoint] = []
+
+
+class ClearRecordsResponse(BaseModel):
+    """清空练习记录的删除计数(DELETE /practice/records)"""
+
+    deleted_sessions: int = 0
+    deleted_attempts: int = 0
+    deleted_questions: int = 0

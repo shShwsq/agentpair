@@ -270,3 +270,10 @@ export interface TrendPoint {
 export interface TrendResponse {
   weeks: TrendPoint[]
 }
+
+/** 清空练习记录的删除计数(DELETE /practice/records) */
+export interface ClearRecordsResponse {
+  deleted_sessions: number
+  deleted_attempts: number
+  deleted_questions: number
+}

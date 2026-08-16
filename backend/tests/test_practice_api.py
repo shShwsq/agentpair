@@ -221,6 +221,7 @@ def test_unauthenticated_returns_401(ctx):
     ctx.logout()
     assert ctx.client.get("/practice/stats").status_code == 401
     assert ctx.client.get("/practice/summary").status_code == 401
+    assert ctx.client.delete("/practice/records").status_code == 401
 
 
 # ============================================================
@@ -365,3 +366,120 @@ def test_generate_job_of_other_user_404(ctx, ctx_b):
     assert ctx_b.client.get(f"/practice/generate/{job_id}").status_code == 404
     # 等后台线程跑完,避免与下个用例的 TRUNCATE 冲突
     _wait_job(ctx.client, job_id)
+
+
+# ============================================================
+# 清空练习记录
+# ============================================================
+
+
+def _play_one_round(ctx, n: int):
+    """辅助:出题→确认→组卷并全部答错,产生流水/记忆状态/难度调整"""
+    _generate_and_confirm(ctx)
+    r = ctx.client.post("/practice/sessions", json={"count": n})
+    assert r.status_code == 200
+    body = r.json()
+    for q in body["questions"]:
+        resp = ctx.client.post(f"/practice/sessions/{body['session_id']}/answers", json={
+            "question_id": q["id"], "chosen_idx": 1,  # 正确答案为 0,故全部答错
+        })
+        assert resp.status_code == 200
+    return body["session_id"]
+
+
+def test_clear_records_keeps_questions(ctx):
+    """基础档:流水/会话/记忆状态清空,题库保留且难度重置回 3.0"""
+    ctx.login()
+    _play_one_round(ctx, 3)
+    stats = ctx.client.get("/practice/stats").json()
+    assert stats["total_attempts"] == 3
+    assert len(stats["weak_points"]) == 3
+
+    r = ctx.client.delete("/practice/records")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["deleted_sessions"] == 1
+    assert body["deleted_attempts"] == 3
+    assert body["deleted_questions"] == 0
+
+    # 统计归零,题库仍在
+    stats = ctx.client.get("/practice/stats").json()
+    assert stats["total_attempts"] == 0
+    assert stats["weak_points"] == []
+    assert stats["active_question_count"] == 3
+    assert stats["due_count"] == 0
+
+    # 历史/错题/趋势均清空
+    assert ctx.client.get("/practice/sessions").json() == []
+    assert ctx.client.get("/practice/questions?mistake=true").json() == []
+    assert all(w["attempts"] == 0 for w in ctx.client.get("/practice/trend").json()["weeks"])
+
+    # 难度重置回初值 3.0(fake 出题为 1.5,答错后已被调高)
+    questions = ctx.client.get("/practice/questions").json()
+    assert len(questions) == 3
+    assert all(q["difficulty"] == 3.0 for q in questions)
+    assert all(q["attempts"] == 0 for q in questions)
+
+    # SM-2 记忆状态已删
+    db = ctx.session_factory()
+    states = db.query(UserKnowledgeState).filter(
+        UserKnowledgeState.user_id == ctx.user.id
+    ).count()
+    db.close()
+    assert states == 0
+
+
+def test_clear_records_include_questions(ctx):
+    """全清档:连题目与知识点词典一并删除"""
+    ctx.login()
+    _play_one_round(ctx, 3)
+
+    r = ctx.client.delete("/practice/records", params={"include_questions": "true"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["deleted_questions"] == 3
+    assert body["deleted_attempts"] == 3
+
+    # 题库与知识点全部清空
+    assert ctx.client.get("/practice/questions").json() == []
+    assert ctx.client.get("/practice/stats").json()["active_question_count"] == 0
+    db = ctx.session_factory()
+    kps = db.query(KnowledgePoint).filter(
+        KnowledgePoint.user_id == ctx.user.id
+    ).count()
+    qs = db.query(Question).filter(Question.user_id == ctx.user.id).count()
+    db.close()
+    assert kps == 0 and qs == 0
+
+
+def test_clear_records_user_isolation(ctx, ctx_b):
+    """多用户隔离:Alice 清空不影响 Bob 的记录"""
+    ctx.login()
+    _play_one_round(ctx, 3)
+
+    # Bob 只有 1 条 finding,单走一轮出题→确认→作答
+    r = ctx_b.client.post("/practice/generate", json={"task_id": str(ctx_b.task.id)})
+    job = _wait_job(ctx_b.client, r.json()["job_id"])
+    assert job["status"] == "done" and len(job["questions"]) == 1
+    qid = job["questions"][0]["id"]
+    r = ctx_b.client.post("/practice/questions/confirm", json={
+        "task_id": str(ctx_b.task.id), "question_ids": [qid],
+    })
+    assert r.json()["confirmed"] == 1
+    session_id = ctx_b.client.post(
+        "/practice/sessions", json={"count": 1}
+    ).json()["session_id"]
+    resp = ctx_b.client.post(f"/practice/sessions/{session_id}/answers", json={
+        "question_id": qid, "chosen_idx": 1,
+    })
+    assert resp.status_code == 200
+
+    r = ctx.client.delete("/practice/records")
+    assert r.status_code == 200
+
+    # Bob 的会话/统计/题库均不受影响
+    assert len(ctx_b.client.get("/practice/sessions").json()) == 1
+    assert ctx_b.client.get("/practice/stats").json()["total_attempts"] == 1
+    assert len(ctx_b.client.get("/practice/questions").json()) == 1
+    # Alice 已清空
+    assert ctx.client.get("/practice/sessions").json() == []

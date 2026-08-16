@@ -8,6 +8,7 @@ import client from './client'
 import type {
   ActivateQuestionsRequest,
   ActivateQuestionsResponse,
+  ClearRecordsResponse,
   ConfirmQuestionsRequest,
   ConfirmQuestionsResponse,
   DraftQuestion,
@@ -122,4 +123,16 @@ export function getSessionDetail(sessionId: string): Promise<SessionDetail> {
 /** 归档题目(不再参与组卷) */
 export function archiveQuestion(questionId: string): Promise<{ archived: boolean }> {
   return client.post(`/practice/questions/${questionId}/archive`).then((r) => r.data)
+}
+
+/**
+ * 清空练习记录(不可恢复)
+ *
+ * includeQuestions=false:进度归零(流水/会话/记忆状态),题库保留但难度重置;
+ * includeQuestions=true:连题目与知识点词典一并删除。
+ */
+export function clearPracticeRecords(includeQuestions = false): Promise<ClearRecordsResponse> {
+  return client
+    .delete('/practice/records', { params: { include_questions: includeQuestions } })
+    .then((r) => r.data)
 }

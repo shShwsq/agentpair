@@ -11,10 +11,12 @@
  *
  * emit 由父组件调 API 持久化并 toast,父组件更新 props 后弹窗内状态同步。
  */
+import { computed, ref, watch } from 'vue'
+
 import type { LLMConfigItemOut } from '@/types/model_configs'
 import type { LearningTopic } from '@/types/memory'
 
-defineProps<{
+const props = defineProps<{
   /** 是否显示 */
   open: boolean
   /** 自动生成练习题当前开关状态 */
@@ -29,6 +31,8 @@ defineProps<{
   llmConfigs: LLMConfigItemOut[]
   /** 保存中状态(禁用交互与关闭) */
   loading: boolean
+  /** 清空中状态(同 loading,禁用交互与关闭) */
+  clearing: boolean
   /** 错误信息(父组件 API 失败时传入) */
   error?: string
 }>()
@@ -38,8 +42,29 @@ const emit = defineEmits<{
   (e: 'topic', topic: LearningTopic): void
   (e: 'toggle-restore'): void
   (e: 'model', configId: string): void
+  (e: 'clear-records'): void
+  (e: 'clear-all'): void
   (e: 'cancel'): void
 }>()
+
+/** 保存或清空中:统一禁用全部交互 */
+const busy = computed(() => props.loading || props.clearing)
+
+// ---- 危险操作:展开的确认态,重新打开弹窗时重置 ----
+/** 当前展开的确认:none / 清空练习记录 / 清空全部数据 */
+const confirmMode = ref<'none' | 'records' | 'all'>('none')
+/** 清空全部数据的输入确认(输入「清空」后方可执行) */
+const confirmText = ref('')
+
+watch(
+  () => props.open,
+  (open) => {
+    if (open) {
+      confirmMode.value = 'none'
+      confirmText.value = ''
+    }
+  },
+)
 
 /** 主题选项(与后端 LEARNING_TOPICS 对齐) */
 const TOPIC_OPTIONS: Array<{ value: LearningTopic; label: string; desc: string }> = [
@@ -82,20 +107,20 @@ function handleCancel(loading: boolean): void {
 <template>
   <Teleport to="body">
     <Transition name="dialog-fade">
-      <div v-if="open" class="dialog-mask" @click.self="handleCancel(loading)">
+      <div v-if="open" class="dialog-mask" @click.self="handleCancel(busy)">
         <div class="dialog-card" role="dialog" aria-modal="true">
           <header class="dialog-header">
             <h3>练习设置</h3>
             <button
               class="dialog-close"
-              :disabled="loading"
+              :disabled="busy"
               aria-label="关闭"
-              @click="handleCancel(loading)"
+              @click="handleCancel(busy)"
             >×</button>
           </header>
 
           <div class="dialog-body">
-            <div class="setting-row" @click="handleToggle(loading)">
+            <div class="setting-row" @click="handleToggle(busy)">
               <div class="setting-info">
                 <span class="setting-title">自动生成练习题</span>
                 <span class="setting-desc">
@@ -107,8 +132,8 @@ function handleCancel(loading: boolean): void {
                 role="switch"
                 :aria-checked="autoGenerate"
                 :class="['switch', { 'switch-on': autoGenerate }]"
-                :disabled="loading"
-                @click.stop="handleToggle(loading)"
+                :disabled="busy"
+                @click.stop="handleToggle(busy)"
               >
                 <span class="switch-thumb" />
               </button>
@@ -126,8 +151,8 @@ function handleCancel(loading: boolean): void {
                   role="radio"
                   :aria-checked="learningTopic === opt.value"
                   :class="['topic-option', { 'topic-active': learningTopic === opt.value }]"
-                  :disabled="loading"
-                  @click="handleTopic(loading, opt.value, learningTopic)"
+                  :disabled="busy"
+                  @click="handleTopic(busy, opt.value, learningTopic)"
                 >
                   <span class="topic-radio">
                     <span v-if="learningTopic === opt.value" class="topic-radio-dot" />
@@ -140,7 +165,7 @@ function handleCancel(loading: boolean): void {
               </div>
             </div>
 
-            <div class="setting-row" @click="handleToggleRestore(loading)">
+            <div class="setting-row" @click="handleToggleRestore(busy)">
               <div class="setting-info">
                 <span class="setting-title">出题前恢复工作区</span>
                 <span class="setting-desc">
@@ -153,8 +178,8 @@ function handleCancel(loading: boolean): void {
                 role="switch"
                 :aria-checked="restoreWorkspace"
                 :class="['switch', { 'switch-on': restoreWorkspace }]"
-                :disabled="loading"
-                @click.stop="handleToggleRestore(loading)"
+                :disabled="busy"
+                @click.stop="handleToggleRestore(busy)"
               >
                 <span class="switch-thumb" />
               </button>
@@ -171,8 +196,8 @@ function handleCancel(loading: boolean): void {
                 class="model-select"
                 aria-label="默认出题模型"
                 :value="defaultModelId"
-                :disabled="loading"
-                @change="handleModelChange(loading, $event, defaultModelId)"
+                :disabled="busy"
+                @change="handleModelChange(busy, $event, defaultModelId)"
               >
                 <option value="">跟随系统默认</option>
                 <option v-for="cfg in llmConfigs" :key="cfg.id" :value="cfg.id">
@@ -184,8 +209,74 @@ function handleCancel(loading: boolean): void {
               </span>
             </div>
 
+            <!-- 危险操作:数据清空不可逆,均需二次确认 -->
+            <div class="danger-block">
+              <span class="setting-title danger-title">危险操作</span>
+
+              <!-- 清空练习记录:进度归零,保留题库 -->
+              <div class="danger-row">
+                <div class="setting-info">
+                  <span class="danger-name">清空练习记录</span>
+                  <span class="setting-desc">
+                    清除历史会话与作答记录,重置知识点掌握度与复习计划;题库保留,题目难度重置
+                  </span>
+                </div>
+                <button
+                  v-if="confirmMode !== 'records'"
+                  class="btn-danger"
+                  :disabled="busy"
+                  @click="confirmMode = 'records'"
+                >清空</button>
+                <div v-else class="danger-confirm">
+                  <span class="danger-confirm-text">不可恢复,确认清空?</span>
+                  <div class="danger-confirm-actions">
+                    <button class="btn-danger" :disabled="busy" @click="emit('clear-records')">确认清空</button>
+                    <button class="btn-plain" :disabled="busy" @click="confirmMode = 'none'">取消</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 清空全部数据:连题库一并删除,需输入「清空」 -->
+              <div class="danger-row danger-row-col">
+                <div class="setting-info">
+                  <span class="danger-name">清空全部数据</span>
+                  <span class="setting-desc">
+                    在上面基础上连题库(含待确认候选题)与知识点一并删除,回到全新状态
+                  </span>
+                </div>
+                <button
+                  v-if="confirmMode !== 'all'"
+                  class="btn-danger"
+                  :disabled="busy"
+                  @click="confirmMode = 'all'"
+                >清空全部</button>
+                <div v-else class="danger-all-confirm">
+                  <span class="danger-confirm-text">输入「清空」以确认删除全部题目与记录:</span>
+                  <div class="danger-all-actions">
+                    <input
+                      v-model="confirmText"
+                      class="danger-input"
+                      type="text"
+                      placeholder="清空"
+                      :disabled="busy"
+                      @keyup.enter="confirmText === '清空' && emit('clear-all')"
+                    >
+                    <button
+                      class="btn-danger"
+                      :disabled="busy || confirmText !== '清空'"
+                      @click="emit('clear-all')"
+                    >确认删除</button>
+                    <button class="btn-plain" :disabled="busy" @click="confirmMode = 'none'">取消</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <p v-if="loading" class="saving-hint">
               <span class="btn-spinner" /> 保存中...
+            </p>
+            <p v-else-if="clearing" class="saving-hint">
+              <span class="btn-spinner" /> 清空中...
             </p>
           </div>
 
@@ -195,8 +286,8 @@ function handleCancel(loading: boolean): void {
             <div class="footer-actions">
               <button
                 class="btn btn-primary"
-                :disabled="loading"
-                @click="handleCancel(loading)"
+                :disabled="busy"
+                @click="handleCancel(busy)"
               >完成</button>
             </div>
           </footer>
@@ -537,6 +628,134 @@ function handleCancel(loading: boolean): void {
 
 @keyframes btn-spin {
   to { transform: rotate(360deg); }
+}
+
+/* ---- 危险操作区 ---- */
+.danger-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--color-danger) 40%, var(--color-border));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-danger) 3%, transparent);
+}
+
+.danger-title {
+  color: var(--color-danger);
+}
+
+.danger-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.danger-row-col {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.danger-name {
+  font-size: var(--fs-base);
+  font-weight: var(--fw-medium);
+  color: var(--color-text);
+}
+
+.danger-confirm {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-1);
+}
+
+.danger-confirm-text {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--color-danger);
+}
+
+.danger-confirm-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.danger-all-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.danger-all-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.danger-input {
+  width: 88px;
+  height: 30px;
+  padding: 0 var(--space-2);
+  font-size: var(--fs-xs);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  outline: none;
+}
+
+.danger-input:focus {
+  border-color: var(--color-danger);
+}
+
+.danger-input:disabled {
+  opacity: 0.5;
+}
+
+.btn-danger {
+  flex-shrink: 0;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--color-danger);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--color-danger) 50%, transparent);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+}
+
+.btn-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-plain {
+  flex-shrink: 0;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.btn-plain:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.btn-plain:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* 弹窗淡入淡出 */

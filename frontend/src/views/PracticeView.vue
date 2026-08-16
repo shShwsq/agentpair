@@ -24,6 +24,7 @@ import { getMyModels } from '@/api/model_configs'
 import {
   activateQuestions,
   archiveQuestion,
+  clearPracticeRecords,
   getSessionDetail,
   getPracticeStats,
   getPracticeTrend,
@@ -262,6 +263,49 @@ async function selectModel(configId: string): Promise<void> {
     settingsError.value = extractErrorMessage(err)
   } finally {
     autoGenLoading.value = false
+  }
+}
+
+// ---- 危险操作:清空练习数据(不可逆,弹窗内已二次确认) ----
+/** 清空中(禁用弹窗交互) */
+const clearing = ref(false)
+
+/**
+ * 清空练习数据
+ *
+ * includeQuestions=false:进度归零,保留题库;
+ * includeQuestions=true:连题库一并删除。
+ * 正在作答的会话已被清除,直接退回首页;成功后重拉全部联动数据。
+ */
+async function handleClearPractice(includeQuestions: boolean): Promise<void> {
+  if (clearing.value || autoGenLoading.value) return
+  clearing.value = true
+  settingsError.value = ''
+  try {
+    await clearPracticeRecords(includeQuestions)
+    // 进行中的会话与明细缓存均已失效,退回首页
+    mode.value = 'home'
+    sessionId.value = ''
+    sessionQuestions.value = []
+    sessionResults.value = []
+    feedback.value = null
+    codeSidebarOpen.value = false
+    codeTaskOverride.value = null
+    sessionDetails.value = {}
+    settingsOpen.value = false
+    showToast(
+      includeQuestions ? '已清空全部练习数据' : '已清空练习记录',
+      'success',
+    )
+    loadStats()
+    loadQuestionBank()
+    loadMistakes()
+    loadSessions()
+    loadTrend()
+  } catch (err) {
+    settingsError.value = extractErrorMessage(err)
+  } finally {
+    clearing.value = false
   }
 }
 
@@ -1133,11 +1177,14 @@ onBeforeUnmount(() => {
       :default-model-id="defaultModelId"
       :llm-configs="llmConfigs"
       :loading="autoGenLoading"
+      :clearing="clearing"
       :error="settingsError"
       @toggle="togglePracticeAuto"
       @topic="selectTopic"
       @toggle-restore="toggleRestoreWorkspace"
       @model="selectModel"
+      @clear-records="handleClearPractice(false)"
+      @clear-all="handleClearPractice(true)"
       @cancel="settingsOpen = false"
     />
 
