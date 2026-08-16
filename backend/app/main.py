@@ -11,7 +11,6 @@ from app.routers import git_provider as git_provider_router
 from app.routers import model_configs as model_configs_router
 from app.routers import workspace as workspace_router
 from app.routers import memory as memory_router
-from app.routers import practice as practice_router
 
 # 日志配置:开发期 DEBUG,生产期 INFO
 # 通过 LOG_LEVEL 环境变量覆盖(默认按 APP_ENV 决定)
@@ -106,7 +105,11 @@ app.include_router(git_provider_router.router)
 app.include_router(workspace_router.router)
 app.include_router(agent_configs.router)
 app.include_router(memory_router.router)
-app.include_router(practice_router.router)
+# 出题 & 练习功能总开关:关闭时 /practice/* 全部 404(路由不注册)
+if settings.PRACTICE_ENABLED:
+    from app.routers import practice as practice_router
+
+    app.include_router(practice_router.router)
 
 
 @app.get("/")

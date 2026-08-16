@@ -35,6 +35,7 @@ from app.agents.user_agent import (
     run_user_agent,
 )
 from app.clone_skip import clear_skip_state
+from app.config import settings
 from app.event_bus import finish_task, publish
 from app.llm.client import LLMClient
 from app.models.task import Conversation, Result, Task, TaskStatus
@@ -231,11 +232,12 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 logger.warning(f"[task={task.id}] 归纳写入记忆失败(忽略): {mem_err}")
 
             # 自动生成练习题 draft(失败兜底,不影响任务完成;产出仍需用户确认)
-            try:
-                from app.services.practice.auto_generate import auto_generate_practice_for_task
-                auto_generate_practice_for_task(task, db)
-            except Exception as practice_err:
-                logger.warning(f"[task={task.id}] 自动生成练习题失败(忽略): {practice_err}")
+            if settings.PRACTICE_ENABLED:
+                try:
+                    from app.services.practice.auto_generate import auto_generate_practice_for_task
+                    auto_generate_practice_for_task(task, db)
+                except Exception as practice_err:
+                    logger.warning(f"[task={task.id}] 自动生成练习题失败(忽略): {practice_err}")
 
             # 捕获工作区 diff(失败兜底,不影响任务完成)
             try:
@@ -493,11 +495,12 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             logger.warning(f"[task={task.id}] 归纳写入记忆失败(忽略): {mem_err}")
 
         # 自动生成练习题 draft(失败兜底,不影响任务完成;产出仍需用户确认)
-        try:
-            from app.services.practice.auto_generate import auto_generate_practice_for_task
-            auto_generate_practice_for_task(task, db)
-        except Exception as practice_err:
-            logger.warning(f"[task={task.id}] 自动生成练习题失败(忽略): {practice_err}")
+        if settings.PRACTICE_ENABLED:
+            try:
+                from app.services.practice.auto_generate import auto_generate_practice_for_task
+                auto_generate_practice_for_task(task, db)
+            except Exception as practice_err:
+                logger.warning(f"[task={task.id}] 自动生成练习题失败(忽略): {practice_err}")
 
         # 捕获工作区 diff(失败兜底,不影响任务完成;容器仍存活)
         try:

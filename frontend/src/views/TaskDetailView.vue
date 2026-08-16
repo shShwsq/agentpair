@@ -58,6 +58,7 @@ import {
 } from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
 import { listDrafts } from '@/api/practice'
+import { ensureFeaturesLoaded, practiceEnabled } from '@/composables/useFeatures'
 import { listArtifacts } from '@/api/taskArtifacts'
 import { clientLog } from '@/utils/clientLog'
 import { extractErrorMessage } from '@/utils/error'
@@ -2550,11 +2551,17 @@ async function locateCheckpoint(id: string): Promise<void> {
 const expandedResults = reactive<Set<string>>(new Set())
 
 // ---- 生成练习题(把结果清单的真实发现转为自适应练习题,见 PracticeGenerateDialog) ----
+// 后端 PRACTICE_ENABLED=false 时隐藏入口并跳过 draft 拉取
+ensureFeaturesLoaded()
 const practiceDialogOpen = ref(false)
 /** 该任务待确认 draft 数(>0 时按钮提示「确认练习题(N)」,含任务完成后自动生成的) */
 const pendingDraftCount = ref(0)
 
 async function refreshPracticeDraftCount(): Promise<void> {
+  if (!practiceEnabled.value) {
+    pendingDraftCount.value = 0
+    return
+  }
   if (!task.value || task.value.status !== 'completed') {
     pendingDraftCount.value = 0
     return
@@ -3171,7 +3178,7 @@ function toggleResult(id: string): void {
           <h2>
             结果清单 <span class="count">({{ task.results.length }})</span>
             <button
-              v-if="task.status === 'completed'"
+              v-if="task.status === 'completed' && practiceEnabled"
               class="practice-generate-btn"
               :title="pendingDraftCount > 0 ? '存在待确认的候选题,点击预览入库' : '把审计发现改编为自适应练习题'"
               @click="openPracticeGenerate"

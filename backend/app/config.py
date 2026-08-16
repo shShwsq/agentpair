@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = ""
     # 邮件链接的基础 URL(开发期指向前端 dev server 或后端)
     APP_BASE_URL: str = "http://localhost:5173"
+    # 出题 & 练习功能总开关(false 时 /practice/* 路由不注册、任务完成不自动出题;
+    # 已建表与题库数据保留,重新开启后可继续使用;用户级偏好 auto_generate_practice 在此开关之下)
+    PRACTICE_ENABLED: bool = True
 
     # JWT(阶段 6 用)
     JWT_SECRET: str = "change_me_in_production"

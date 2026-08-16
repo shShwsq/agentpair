@@ -12,6 +12,7 @@
  */
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
+import { ensureFeaturesLoaded, practiceEnabled } from '@/composables/useFeatures'
 import { useAuthStore } from '@/stores/auth'
 import { useUnsavedGuardStore } from '@/stores/unsavedGuard'
 
@@ -144,6 +145,12 @@ router.beforeEach(async (to, from) => {
       name: 'login',
       query: { redirect: to.fullPath },
     }
+  }
+
+  // 练习功能开关:后端关闭时直连 /practice 回首页(入口已隐藏,此处兜底)
+  if (to.name === 'practice') {
+    await ensureFeaturesLoaded()
+    if (!practiceEnabled.value) return { name: 'home' }
   }
 
   // 已登录访问登录页 → 跳首页

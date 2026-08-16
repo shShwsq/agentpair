@@ -21,6 +21,7 @@ import BrandLogo from '@/components/BrandLogo.vue'
 import HelpDialog from '@/components/HelpDialog.vue'
 import { useTheme } from '@/composables/useTheme'
 import type { ThemeMode } from '@/composables/useTheme'
+import { ensureFeaturesLoaded, practiceEnabled } from '@/composables/useFeatures'
 import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
@@ -31,8 +32,12 @@ const { mode, resolved, setMode } = useTheme()
 /** 到期复习题数(「自适应练习」导航项红色徽标;0 时隐藏) */
 const practiceDueCount = ref(0)
 
-/** 静默拉取练习概览刷新徽标(未登录/网络异常不提示) */
+/** 静默拉取练习概览刷新徽标(未登录/网络异常不提示;练习功能关闭时跳过) */
 async function refreshPracticeBadge(): Promise<void> {
+  if (!practiceEnabled.value) {
+    practiceDueCount.value = 0
+    return
+  }
   try {
     const summary = await getPracticeSummary()
     practiceDueCount.value = summary.due_count
@@ -41,7 +46,8 @@ async function refreshPracticeBadge(): Promise<void> {
   }
 }
 
-refreshPracticeBadge()
+// 先拿功能开关再刷徽标(后端关闭练习功能时不拉概览、隐藏导航项)
+ensureFeaturesLoaded().then(refreshPracticeBadge)
 // 路由切换时刷新(任务完成后题库/到期数会变化)
 watch(
   () => route.path,
@@ -119,7 +125,7 @@ function handleCloseHelp(): void {
             <RouterLink to="/cli">CLI 设置</RouterLink>
             <RouterLink to="/agent-policy">协作策略</RouterLink>
             <RouterLink to="/skills">技能管理</RouterLink>
-            <RouterLink to="/practice">
+            <RouterLink v-if="practiceEnabled" to="/practice">
               自适应练习
               <span v-if="practiceDueCount > 0" class="practice-badge">{{
                 practiceDueCount > 99 ? '99+' : practiceDueCount
