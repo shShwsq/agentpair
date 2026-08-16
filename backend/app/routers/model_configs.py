@@ -12,6 +12,7 @@
 安全约定见 schemas/settings.py 模块文档。
 """
 import logging
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -201,7 +202,9 @@ def _merge_llm_configs(existing: list[dict], new_items) -> list[dict]:
                     detail=f"配置 '{item.name or item.id}' 缺少 api_key,首次保存必须填写",
                 )
         result.append({
-            "id": item.id,
+            # 防御性兜底:前端在非 Secure Context(http://服务器IP,如 Docker 部署)下
+            # crypto.randomUUID 不可用,可能传空串;此处补 UUID 避免落库 id 为空。
+            "id": item.id or str(uuid.uuid4()),
             "name": item.name,
             "provider": item.provider,
             "api_key": api_key,
@@ -229,7 +232,7 @@ def _merge_embedding_configs(existing: list[dict], new_items) -> list[dict]:
                     detail=f"配置 '{item.name or item.id}' 缺少 api_key,首次保存必须填写",
                 )
         result.append({
-            "id": item.id,
+            "id": item.id or str(uuid.uuid4()),
             "name": item.name,
             "provider": item.provider,
             "api_key": api_key,
