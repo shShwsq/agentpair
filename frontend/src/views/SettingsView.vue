@@ -25,7 +25,6 @@ import {
   syncGitProviderEmail,
   unbindGitProvider,
 } from '@/api/git_provider'
-import { getPreferences, savePracticeSettings } from '@/api/memory'
 import type { GitProvider, GitProviderStatus } from '@/types/git_provider'
 import { useAuthStore } from '@/stores/auth'
 import { extractErrorMessage } from '@/utils/error'
@@ -204,36 +203,6 @@ async function handleRefresh(p: GitProvider): Promise<void> {
 }
 
 // ============================================================
-// 自动生成练习题开关(任务完成后自动出 draft,仍需用户预览确认)
-// ============================================================
-const autoGenPractice = ref(true)
-const autoGenLoading = ref(false)
-
-async function loadPracticeSettings(): Promise<void> {
-  try {
-    const pref = await getPreferences()
-    autoGenPractice.value = pref.auto_generate_practice
-  } catch {
-    // 静默失败,保持默认开
-  }
-}
-
-async function togglePracticeAuto(): Promise<void> {
-  if (autoGenLoading.value) return
-  autoGenLoading.value = true
-  const next = !autoGenPractice.value
-  try {
-    const latest = await savePracticeSettings({ auto_generate_practice: next })
-    autoGenPractice.value = latest.auto_generate_practice
-    showToast(next ? '已开启自动生成练习题' : '已关闭自动生成练习题', 'success')
-  } catch (err) {
-    showToast(extractErrorMessage(err), 'error')
-  } finally {
-    autoGenLoading.value = false
-  }
-}
-
-// ============================================================
 // 表格行
 // ============================================================
 interface SettingRow {
@@ -282,16 +251,6 @@ const rows = computed<SettingRow[]>(() => {
     }
   })
 
-  const practiceRow: SettingRow = {
-    key: 'practice-auto',
-    item: '自动生成练习题',
-    desc: '审计任务完成后自动生成练习题候选题(仍需预览确认才入库)',
-    status: autoGenPractice.value ? '已开启' : '已关闭',
-    statusType: autoGenPractice.value ? 'ok' : 'neutral',
-    actionText: autoGenPractice.value ? '关闭' : '开启',
-    loading: autoGenLoading.value,
-  }
-
   const tail: SettingRow[] = [
     {
       key: 'delete',
@@ -303,15 +262,14 @@ const rows = computed<SettingRow[]>(() => {
     },
   ]
 
-  return [...fixed, ...gitRows, practiceRow, ...tail]
+  return [...fixed, ...gitRows, ...tail]
 })
 
 function openRow(row: SettingRow): void {
   if (row.key === 'password') openPasswordDialog()
   else if (row.key.startsWith('git:')) {
     openProviderDialog(row.key.slice(4) as GitProvider)
-  } else if (row.key === 'practice-auto') togglePracticeAuto()
-  else if (row.key === 'delete') openDeleteDialog()
+  } else if (row.key === 'delete') openDeleteDialog()
 }
 
 // ============================================================
@@ -376,7 +334,6 @@ async function handleSyncConfirm(): Promise<void> {
 onMounted(() => {
   // 预加载所有 git provider 状态(用于表格状态列展示)
   refreshAllProviderStatus()
-  loadPracticeSettings()
 
   // 检测 OAuthCallbackView 带来的邮箱不一致 query → 弹窗询问
   // (仅 GitHub 会触发;Gitee 不支持可验证邮箱,恒为 false)

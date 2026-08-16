@@ -14,8 +14,10 @@
 import { computed, onMounted, ref } from 'vue'
 
 import AppHeader from '@/components/AppHeader.vue'
+import PracticeSettingsDialog from '@/components/PracticeSettingsDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
+import { getPreferences, savePracticeSettings } from '@/api/memory'
 import {
   activateQuestions,
   archiveQuestion,
@@ -57,6 +59,39 @@ function showToast(msg: string, type: 'success' | 'error'): void {
   setTimeout(() => {
     toast.value = null
   }, 4000)
+}
+
+// ============================================================
+// 练习设置弹窗(自动生成练习题开关,切换即保存)
+// ============================================================
+const settingsOpen = ref(false)
+const autoGenPractice = ref(true)
+const autoGenLoading = ref(false)
+const settingsError = ref('')
+
+async function loadPracticeSettings(): Promise<void> {
+  try {
+    const pref = await getPreferences()
+    autoGenPractice.value = pref.auto_generate_practice
+  } catch {
+    // 静默失败,保持默认开
+  }
+}
+
+async function togglePracticeAuto(): Promise<void> {
+  if (autoGenLoading.value) return
+  autoGenLoading.value = true
+  settingsError.value = ''
+  const next = !autoGenPractice.value
+  try {
+    const latest = await savePracticeSettings({ auto_generate_practice: next })
+    autoGenPractice.value = latest.auto_generate_practice
+    showToast(next ? '已开启自动生成练习题' : '已关闭自动生成练习题', 'success')
+  } catch (err) {
+    settingsError.value = extractErrorMessage(err)
+  } finally {
+    autoGenLoading.value = false
+  }
 }
 
 // ============================================================
@@ -426,6 +461,7 @@ onMounted(() => {
   loadQuestionBank()
   loadMistakes()
   loadTrend()
+  loadPracticeSettings()
 })
 </script>
 
@@ -574,7 +610,20 @@ onMounted(() => {
       <!-- ============ 首页 ============ -->
       <template v-else>
         <header class="page-head">
-          <h1>自适应练习</h1>
+          <div class="page-head-row">
+            <h1>自适应练习</h1>
+            <button
+              class="practice-settings-btn"
+              title="练习设置"
+              @click="settingsOpen = true"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+              练习设置
+            </button>
+          </div>
           <p>题目来自审计任务的真实发现 · 到期复习优先,薄弱点强化,按能力匹配难度</p>
         </header>
 
@@ -836,6 +885,16 @@ onMounted(() => {
       </main>
     </div>
 
+    <!-- ============ 练习设置弹窗 ============ -->
+    <PracticeSettingsDialog
+      :open="settingsOpen"
+      :auto-generate="autoGenPractice"
+      :loading="autoGenLoading"
+      :error="settingsError"
+      @toggle="togglePracticeAuto"
+      @cancel="settingsOpen = false"
+    />
+
     <!-- ============ 浮动提示 ============ -->
     <Teleport to="body">
       <Transition name="toast-slide">
@@ -883,11 +942,40 @@ onMounted(() => {
   margin-bottom: var(--space-6);
 }
 
+.page-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
 .page-head h1 {
   margin: 0 0 var(--space-1);
   font-size: var(--fs-xl);
   font-weight: var(--fw-semibold);
   color: var(--color-text);
+}
+
+/* 页头右侧「练习设置」入口(打开自动生成练习题开关弹窗) */
+.practice-settings-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.practice-settings-btn:hover {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  background: var(--color-primary-light);
 }
 
 .page-head p {

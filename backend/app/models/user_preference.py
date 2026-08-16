@@ -8,12 +8,13 @@
 - user_profile: 自由文本 Markdown(用户在记忆管理页编辑),注入 user_agent
 
 agent 策略配置已拆到独立表 agent_policies(见 models/agent_policy.py),
-老数据由 migrate_agent_policy_table() 迁移。
+练习设置已拆到独立表 practice_settings(见 models/practice.py),
+老数据分别由 migrate_agent_policy_table() / migrate_practice_settings_table() 迁移。
 """
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Text, func
+from sqlalchemy import DateTime, ForeignKey, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -36,10 +37,6 @@ class UserPreference(Base):
     user_profile: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="", default=""
     )
-    # 任务完成后是否自动生成练习题 draft(默认开启;产出仍需用户预览确认才转 active)
-    auto_generate_practice: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default="true", default=True
-    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -53,8 +50,7 @@ class UserPreference(Base):
 
 
 def migrate_user_preference_columns() -> None:
-    """幂等迁移 user_preferences:删遗留 preferences 列,custom_prompt 改名 user_profile,
-    新增 auto_generate_practice 布尔列。
+    """幂等迁移 user_preferences:删遗留 preferences 列,custom_prompt 改名 user_profile。
 
     背景:项目用 Base.metadata.create_all(无 Alembic),已存在的表不会自动改列。
     启动时检查并 ALTER TABLE,保证老库平滑升级。
@@ -63,7 +59,8 @@ def migrate_user_preference_columns() -> None:
     老数据:custom_prompt 原值经 RENAME 平滑保留为 user_profile;preferences 列直接删除
     (代码已不再读写,内容无副作用)。
     agent_policy 列的迁移(拷入 agent_policies 独立表后删列)见
-    agent_policy.migrate_agent_policy_table(),在本函数之后执行。
+    agent_policy.migrate_agent_policy_table(),在本函数之后执行;
+    auto_generate_practice 列的迁移见 practice.migrate_practice_settings_table()。
     """
     import logging
 
@@ -93,13 +90,4 @@ def migrate_user_preference_columns() -> None:
                 )
             )
             log.info("user_preferences 改名: custom_prompt -> user_profile")
-        # 3) 新增 auto_generate_practice 布尔列(任务完成自动生成练习题开关,默认开)
-        if "auto_generate_practice" not in cols:
-            conn.execute(
-                text(
-                    "ALTER TABLE user_preferences "
-                    "ADD COLUMN auto_generate_practice BOOLEAN NOT NULL DEFAULT TRUE"
-                )
-            )
-            log.info("user_preferences 加列: auto_generate_practice")
         conn.commit()

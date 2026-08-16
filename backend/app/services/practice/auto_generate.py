@@ -10,9 +10,8 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from app.models.practice import Question
+from app.models.practice import PracticeSettings, Question
 from app.models.task import Result, Task
-from app.models.user_preference import UserPreference
 from app.services.practice.generator import generate_questions_for_task
 
 logger = logging.getLogger(__name__)
@@ -42,9 +41,9 @@ def auto_generate_practice_for_task(task: Task, db: Session) -> int:
     if task.user_id is None:
         return 0
 
-    # 2) 用户开关
-    pref = db.query(UserPreference).filter(
-        UserPreference.user_id == task.user_id
+    # 2) 用户开关(practice_settings 独立表,1:1)
+    pref = db.query(PracticeSettings).filter(
+        PracticeSettings.user_id == task.user_id
     ).first()
     if pref is not None and not pref.auto_generate_practice:
         logger.info("[task=%s] 用户关闭了自动生成练习题,跳过", task.id)

@@ -73,6 +73,11 @@ async def lifespan(app: FastAPI):
     from app.models.user_preference import migrate_user_preference_columns
 
     migrate_user_preference_columns()
+    # 迁移练习设置:user_preferences.auto_generate_practice → practice_settings 独立表
+    # (拷数据后删旧列;新表已由 create_all 建好)
+    from app.models.practice import migrate_practice_settings_table
+
+    migrate_practice_settings_table()
     # 迁移用户级 agent_policy:user_preferences.agent_policy JSONB → agent_policies 独立表
     # (拷数据后删旧列;必须晚于 migrate_user_preference_columns,新表已由 create_all 建好)
     from app.models.agent_policy import migrate_agent_policy_table

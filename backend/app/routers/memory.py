@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.deps import get_current_user
 from app.models.agent_policy import AgentPolicy
+from app.models.practice import PracticeSettings
 from app.models.project import Project
 from app.models.user import User
 from app.models.user_memory import UserMemory
@@ -97,17 +98,16 @@ def save_practice_settings(
 ) -> UserPreferenceOut:
     """保存/更新练习设置(任务完成后自动生成练习题开关)
 
-    get_or_create:若用户无 UserPreference 行,自动创建(user_profile 为空)。
+    存于 practice_settings 独立表(1:1),get_or_create:无行时自动创建。
     """
     row = (
-        db.query(UserPreference)
-        .filter(UserPreference.user_id == current_user.id)
+        db.query(PracticeSettings)
+        .filter(PracticeSettings.user_id == current_user.id)
         .first()
     )
     if row is None:
-        row = UserPreference(
+        row = PracticeSettings(
             user_id=current_user.id,
-            user_profile="",
             auto_generate_practice=req.auto_generate_practice,
         )
         db.add(row)
@@ -117,7 +117,7 @@ def save_practice_settings(
     db.refresh(row)
     logger.info("用户 %s 更新练习设置: auto_generate_practice=%s",
                 current_user.id, req.auto_generate_practice)
-    return _build_preference_out(db, current_user.id, pref_row=row)
+    return _build_preference_out(db, current_user.id, settings_row=row)
 
 
 @router.put("/preferences/agent_policy", response_model=UserPreferenceOut)
@@ -297,13 +297,16 @@ def delete_project(
 
 
 def _build_preference_out(
-    db: Session, user_id, pref_row: UserPreference | None = None
+    db: Session, user_id,
+    pref_row: UserPreference | None = None,
+    settings_row: PracticeSettings | None = None,
 ) -> UserPreferenceOut:
-    """组装 UserPreferenceOut(数据跨两表:user_preferences + agent_policies)
+    """组装 UserPreferenceOut(数据跨三表:user_preferences + agent_policies + practice_settings)
 
-    - user_profile / auto_generate_practice 来自 user_preferences(可能无行)
+    - user_profile 来自 user_preferences(可能无行)
     - agent_policy 来自 agent_policies 独立表(可能无行 → None,前端用系统默认)
-    - updated_at 取两行中较新的(哪边最后保存,就算最后更新)
+    - auto_generate_practice 来自 practice_settings 独立表(可能无行 → 默认开)
+    - updated_at 取各行中较新的(哪边最后保存,就算最后更新)
     """
     if pref_row is None:
         pref_row = (
@@ -316,17 +319,23 @@ def _build_preference_out(
         .filter(AgentPolicy.user_id == user_id)
         .first()
     )
-    if pref_row is None and policy_row is None:
+    if settings_row is None:
+        settings_row = (
+            db.query(PracticeSettings)
+            .filter(PracticeSettings.user_id == user_id)
+            .first()
+        )
+    if pref_row is None and policy_row is None and settings_row is None:
         return UserPreferenceOut()
     updated_at = None
-    for r in (pref_row, policy_row):
+    for r in (pref_row, policy_row, settings_row):
         if r is not None and r.updated_at is not None:
             if updated_at is None or r.updated_at > updated_at:
                 updated_at = r.updated_at
     return UserPreferenceOut(
         user_profile=pref_row.user_profile if pref_row else "",
         agent_policy=policy_row.to_dict() if policy_row else None,
-        auto_generate_practice=pref_row.auto_generate_practice if pref_row else True,
+        auto_generate_practice=settings_row.auto_generate_practice if settings_row else True,
         updated_at=updated_at,
     )
 

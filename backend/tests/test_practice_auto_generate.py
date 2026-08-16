@@ -16,7 +16,7 @@ from app.services.practice.auto_generate import auto_generate_practice_for_task
 
 def _mock_db(pref_row=None, existing_question=None, result_metas=None):
     """按 auto_generate 内的 query 顺序注入:
-    1) UserPreference 2) Question.id 3) Result.metadata_
+    1) PracticeSettings 2) Question.id 3) Result.metadata_
     """
     q_pref = MagicMock()
     q_pref.filter.return_value.first.return_value = pref_row

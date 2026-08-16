@@ -1,4 +1,4 @@
-"""练习模块数据模型(题库 / 知识点 / 遗忘曲线状态 / 答题流水)
+"""练习模块数据模型(题库 / 知识点 / 遗忘曲线状态 / 答题流水 / 用户级设置)
 
 设计:
 - 题目来源于审计任务的真实发现(Result),由 LLM 改编为客观题(draft),
@@ -6,14 +6,17 @@
 - 知识点按 CWE 编号归类(无 CWE 时回退分类),per-user 隔离
 - user_knowledge_states 承载 SM-2 遗忘曲线调度状态(ease_factor / interval / due_at)
 - attempts 记录每次作答,供薄弱点统计与能力值估计
+- practice_settings 存用户级练习设置(1:1,如自动生成练习题开关)
 
-全新表,随 Base.metadata.create_all 自动建表,无需迁移函数。
+题库类表全新,随 Base.metadata.create_all 自动建表;
+practice_settings 由 user_preferences.auto_generate_practice 拆出,
+老数据由 migrate_practice_settings_table() 启动时迁移。
 """
 import uuid
 from datetime import datetime
 from enum import Enum as PyEnum
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -222,3 +225,97 @@ class Attempt(Base):
     answered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class PracticeSettings(Base):
+    """用户级练习设置 (per-user, 1:1)
+
+    目前只有一项:任务完成后是否自动生成练习题 draft
+    (默认开启;产出仍需用户预览确认才转 active)。
+    后续练习域的用户级设置(如默认组卷题数)可加在本表。
+
+    迁移:老数据存于 user_preferences.auto_generate_practice 布尔列,
+    migrate_practice_settings_table() 启动时把数据拷入本表后删除旧列(幂等)。
+    """
+
+    __tablename__ = "practice_settings"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        unique=True,  # 1:1
+        nullable=False,
+    )
+    # 任务完成后是否自动生成练习题 draft(默认开启)
+    auto_generate_practice: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true", default=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+# ============================================================
+# 迁移:user_preferences.auto_generate_practice → 独立表
+# ============================================================
+
+
+def migrate_practice_settings_table() -> None:
+    """幂等迁移:把 user_preferences.auto_generate_practice 拷入 practice_settings 表,
+    完成后删除旧列。
+
+    背景:项目用 Base.metadata.create_all(无 Alembic),新表随 create_all 建好,
+    但老库的数据还在 user_preferences.auto_generate_practice 列里。
+
+    - user_preferences 不存在 / 无该列(全新库或已迁过)→ 直接返回
+    - 拷贝用 INSERT ... ON CONFLICT (user_id) DO UPDATE,中途失败重跑安全
+    """
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    from app.database import engine
+
+    log = logging.getLogger(__name__)
+
+    with engine.connect() as conn:
+        insp = inspect(conn)
+        if not insp.has_table("user_preferences"):
+            return  # 全新库,无老数据
+        cols = {c["name"] for c in insp.get_columns("user_preferences")}
+        if "auto_generate_practice" not in cols:
+            return  # 全新库或已迁过
+        conn.execute(
+            text(
+                """
+                INSERT INTO practice_settings
+                    (id, user_id, auto_generate_practice, created_at, updated_at)
+                SELECT id, user_id, auto_generate_practice, now(), now()
+                FROM user_preferences
+                ON CONFLICT (user_id) DO UPDATE
+                SET auto_generate_practice = EXCLUDED.auto_generate_practice,
+                    updated_at = now()
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE user_preferences "
+                "DROP COLUMN auto_generate_practice"
+            )
+        )
+        log.info(
+            "practice_settings 迁移: user_preferences.auto_generate_practice "
+            "→ practice_settings(旧列已删)"
+        )
+        conn.commit()
