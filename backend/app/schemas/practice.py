@@ -87,6 +87,10 @@ class DraftQuestionResponse(BaseModel):
     difficulty: float
     knowledge_key: str | None = None
     knowledge_name: str | None = None
+    # 出题形式:repo=基于真实源码,synthetic=改编题(虚构代码)
+    origin: str = "repo"
+    # 知识点编程语言标签(如 ["python", "sql"];来自知识点累积)
+    languages: list[str] = []
     # 题目引用的源码定位(预览时校对出处用;老题为 None)
     source_file: str | None = None
     source_lines: str | None = None
@@ -159,6 +163,10 @@ class SessionQuestionResponse(BaseModel):
     options: list[str]
     difficulty: float
     knowledge_name: str | None = None
+    # 知识点编程语言标签(做题页标签展示用)
+    languages: list[str] = []
+    # 出题形式:repo=真实代码题,synthetic=改编题
+    origin: str = "repo"
     source_task_id: uuid.UUID | None = None
     source_file: str | None = None
     source_lines: str | None = None
@@ -185,6 +193,8 @@ class KnowledgeStateResponse(BaseModel):
 
     knowledge_key: str
     knowledge_name: str
+    # 知识点编程语言标签
+    languages: list[str] = []
     ease_factor: float
     interval_days: float
     repetitions: int
@@ -217,6 +227,8 @@ class WeakPointItem(BaseModel):
 
     knowledge_key: str
     knowledge_name: str
+    # 知识点编程语言标签
+    languages: list[str] = []
     attempts: int
     correct_count: int
     accuracy: float
@@ -249,6 +261,10 @@ class QuestionListItem(BaseModel):
     difficulty: float
     status: str
     knowledge_name: str | None = None
+    # 知识点编程语言标签
+    languages: list[str] = []
+    # 出题形式:repo=真实代码题,synthetic=改编题(老题为 None)
+    origin: str | None = None
     attempts: int = 0
     accuracy: float | None = None
     created_at: datetime

@@ -63,6 +63,9 @@ class KnowledgePoint(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     # 粗分类(前端分组展示用,如 injection / auth / crypto)
     category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 编程语言标签(多值,如 ["python", "sql"]);出题时由 LLM 给出,
+    # 同知识点多次出题做并集累积;老数据为空列表
+    languages: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -113,6 +116,11 @@ class Question(Base):
     difficulty: Mapped[float] = mapped_column(Float, nullable=False, default=3.0)
     # 出题时使用的学习主题(security/architecture/coding;老数据为 NULL)
     learning_topic: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 题目来源形式:repo=基于真实源码出题,synthetic=改编题
+    # (LLM 原创含同类问题的虚构代码,脱离原仓库);老题为 NULL 视为 repo
+    origin: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, default="repo", server_default="repo"
+    )
     # 题目引用的源码定位(仓库内相对路径 + 行区间,如 "120-150";老题为 NULL),
     # 做题页右侧代码栏据此自动打开并滚动定位
     source_file: Mapped[str | None] = mapped_column(String(512), nullable=True)
@@ -402,6 +410,14 @@ def migrate_practice_learning_columns() -> None:
                     "default_llm_config_id VARCHAR(36)"
                 ))
                 log.info("practice_settings.default_llm_config_id 列迁移完成")
+        if insp.has_table("knowledge_points"):
+            cols = {c["name"] for c in insp.get_columns("knowledge_points")}
+            if "languages" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE knowledge_points ADD COLUMN languages "
+                    "JSONB NOT NULL DEFAULT '[]'"
+                ))
+                log.info("knowledge_points.languages 列迁移完成")
         if insp.has_table("practice_questions"):
             cols = {c["name"] for c in insp.get_columns("practice_questions")}
             if "learning_topic" not in cols:
@@ -422,4 +438,10 @@ def migrate_practice_learning_columns() -> None:
                     "source_lines VARCHAR(32)"
                 ))
                 log.info("practice_questions.source_lines 列迁移完成")
+            if "origin" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE practice_questions ADD COLUMN origin "
+                    "VARCHAR(16) DEFAULT 'repo'"
+                ))
+                log.info("practice_questions.origin 列迁移完成")
         conn.commit()

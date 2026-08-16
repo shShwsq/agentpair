@@ -21,6 +21,10 @@ export interface DraftQuestion {
   difficulty: number
   knowledge_key: string | null
   knowledge_name: string | null
+  /** 出题形式:repo=基于真实源码,synthetic=改编题(虚构代码) */
+  origin: 'repo' | 'synthetic'
+  /** 知识点编程语言标签(如 ["python", "sql"]) */
+  languages: string[]
   /** 题目引用的源码定位(工作区可用时出题产生;老题为 null) */
   source_file: string | null
   source_lines: string | null
@@ -146,6 +150,10 @@ export interface SessionQuestion {
   options: string[]
   difficulty: number
   knowledge_name: string | null
+  /** 知识点编程语言标签 */
+  languages: string[]
+  /** 出题形式:repo=真实代码题,synthetic=改编题 */
+  origin: 'repo' | 'synthetic'
   /** 题目来源任务(右侧代码栏据此打开对应工作区;老题为 null) */
   source_task_id: string | null
   /** 题目引用的源码文件(仓库内相对路径;无则不自动定位) */
@@ -169,6 +177,8 @@ export interface SubmitAnswerRequest {
 export interface KnowledgeState {
   knowledge_key: string
   knowledge_name: string
+  /** 知识点编程语言标签 */
+  languages: string[]
   ease_factor: number
   interval_days: number
   repetitions: number
@@ -192,6 +202,8 @@ export interface SubmitAnswerResponse {
 export interface WeakPointItem {
   knowledge_key: string
   knowledge_name: string
+  /** 知识点编程语言标签 */
+  languages: string[]
   attempts: number
   correct_count: number
   /** 错误率 0-1 */
@@ -218,6 +230,10 @@ export interface QuestionListItem {
   difficulty: number
   status: 'draft' | 'active' | 'archived'
   knowledge_name: string | null
+  /** 知识点编程语言标签 */
+  languages: string[]
+  /** 出题形式:repo=真实代码题,synthetic=改编题(老题为 null) */
+  origin: 'repo' | 'synthetic' | null
   attempts: number
   accuracy: number | null
   created_at: string

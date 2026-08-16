@@ -180,6 +180,10 @@ def _run_generate_job(job_id: str, task_id: UUID, user_id: UUID, max_findings: i
                 difficulty=q.difficulty,
                 knowledge_key=kp.key if kp else None,
                 knowledge_name=kp.name if kp else None,
+                origin=q.origin or "repo",
+                languages=(kp.languages if kp else None) or [],
+                source_file=q.source_file,
+                source_lines=q.source_lines,
             ))
         # done/total 由进度回调维护,此处不覆盖
         gen_jobs.update_job(
@@ -351,6 +355,10 @@ def list_drafts(
             difficulty=q.difficulty,
             knowledge_key=kp.key if kp else None,
             knowledge_name=kp.name if kp else None,
+            origin=q.origin or "repo",
+            languages=(kp.languages if kp else None) or [],
+            source_file=q.source_file,
+            source_lines=q.source_lines,
         ))
     return items
 
@@ -511,6 +519,8 @@ def start_session(
                 options=c.question.options,
                 difficulty=c.question.difficulty,
                 knowledge_name=kps[c.kp_id].name if c.kp_id in kps else None,
+                languages=(kps[c.kp_id].languages if c.kp_id in kps else None) or [],
+                origin=c.question.origin or "repo",
                 source_task_id=c.question.source_task_id,
                 source_file=c.question.source_file,
                 source_lines=c.question.source_lines,
@@ -550,6 +560,11 @@ def _start_session_from_pool(
                 difficulty=q.difficulty,
                 knowledge_name=kps[q.knowledge_point_id].name
                 if q.knowledge_point_id in kps else None,
+                languages=(
+                    kps[q.knowledge_point_id].languages
+                    if q.knowledge_point_id in kps else None
+                ) or [],
+                origin=q.origin or "repo",
                 source_task_id=q.source_task_id,
                 source_file=q.source_file,
                 source_lines=q.source_lines,
@@ -678,6 +693,7 @@ def submit_answer(
         state=KnowledgeStateResponse(
             knowledge_key=kp.key if kp else "general",
             knowledge_name=kp.name if kp else "未分类",
+            languages=(kp.languages if kp else None) or [],
             ease_factor=new_state.ease_factor,
             interval_days=new_state.interval_days,
             repetitions=new_state.repetitions,
@@ -884,6 +900,7 @@ def get_stats(
         weak_points.append(WeakPointItem(
             knowledge_key=kp.key if kp else "general",
             knowledge_name=kp.name if kp else "未分类",
+            languages=(kp.languages if kp else None) or [],
             attempts=s.attempts,
             correct_count=s.correct_count,
             accuracy=round(1.0 - s.correct_count / s.attempts, 4),
@@ -993,6 +1010,8 @@ def list_questions(
             difficulty=q.difficulty,
             status=q.status.value,
             knowledge_name=kp.name if kp else None,
+            languages=(kp.languages if kp else None) or [],
+            origin=q.origin,
             attempts=attempts or 0,
             accuracy=(correct / attempts) if attempts else None,
             created_at=q.created_at,

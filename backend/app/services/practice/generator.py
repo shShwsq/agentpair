@@ -97,9 +97,11 @@ _TOOL_SECTION = """## 源码查阅工具(仓库已 clone,必须使用)
 - find_files(pattern):按 glob 递归查文件路径(如 **/*.py)
 要求:
 1. 每道题出题前至少 read_file 一次相关源文件,确认代码真实存在
-2. 题干与 code_snippet 必须引用读到的真实源码,不得虚构
-3. 每题在输出中给出 source_file(仓库内相对路径)与
+2. 真实代码题(origin=repo):题干与 code_snippet 必须引用读到的真实源码,
+   不得虚构,并给出 source_file(仓库内相对路径)与
    source_lines(行区间如 "120-150" 或单行号 "42",取自 read_file 结果)
+3. 改编题(origin=synthetic):先读原代码确认问题形态,再原创虚构代码,
+   不给 source_file/source_lines
 确实在仓库中找不到相关代码时,才退回基于发现描述出题(此时不给 source_file)。"""
 
 # 三主题共享的输出规则段
@@ -107,20 +109,29 @@ _COMMON_RULES = """## 通用要求
 1. 出 1~3 道题,题型限定:
    - single_choice(单选):如「该代码片段存在哪种问题」「正确的改进方式是」
    - true_false(判断):选项固定为 ["正确", "错误"],题干为一个可判定真伪的陈述
-2. 题目必须阅读真实代码才能作答:题干要落到具体代码细节(函数名、调用关系、
+2. 题目必须阅读代码才能作答:题干要落到具体代码细节(函数名、调用关系、
    变量/字面量、分支逻辑等),禁止不看代码也能答对的通用概念题、常识题
-3. 题干必须引用发现中的真实代码/场景,不要泛泛而谈;代码片段单独放 code_snippet
-4. 干扰项要有迷惑性但明确错误,正确答案唯一
-5. explanation 讲清原理与改进要点,100 字以内
-6. difficulty 评估难度(1-5 整数):1=概念识别,3=需理解代码逻辑,5=需深入细节
-7. knowledge_name:知识点中文展示名(如 "SQL 注入")
-8. 元信息中若标注 verified: false 或判定为误报的发现,不要出题,直接返回空数组 []
+3. 代码片段单独放 code_snippet,必须自包含:含必要的函数签名、导入与上下文,
+   脱离原仓库也能读懂;题干不得依赖仓库特有路径、内部业务命名才可作答
+4. 出题形式由你自主决定,鼓励真实代码题与改编题混合:
+   - origin="repo"(真实代码题):基于发现中的真实代码/场景出题
+   - origin="synthetic"(改编题):原创一段含同类漏洞/问题的完整虚构代码,
+     业务场景与命名与原仓库完全不同,题干不得提及原仓库;考察用户把知识
+     泛化应用到新代码的能力
+5. 干扰项要有迷惑性但明确错误,正确答案唯一
+6. explanation 讲清原理与改进要点,100 字以内
+7. difficulty 评估难度(1-5 整数):1=概念识别,3=需理解代码逻辑,5=需深入细节
+8. knowledge_name:知识点中文展示名(如 "SQL 注入")
+9. languages:该题涉及的全部编程语言,小写短名数组(如 ["python", "sql"])
+10. 元信息中若标注 verified: false 或判定为误报的发现,不要出题,直接返回空数组 []
 
 只输出 JSON 数组,不要任何其他文字。每个元素结构:
-{"qtype": "single_choice|true_false", "stem": "...", "code_snippet": "...",
+{"qtype": "single_choice|true_false", "origin": "repo|synthetic",
+ "stem": "...", "code_snippet": "...",
  "source_file": "仓库内相对路径"或null, "source_lines": "120-150"或null,
  "options": ["...", "..."], "answer_idx": 0, "explanation": "...",
- "difficulty": 3, "knowledge_key": "...", "knowledge_name": "..."}"""
+ "difficulty": 3, "knowledge_key": "...", "knowledge_name": "...",
+ "languages": ["python", "sql"]}"""
 
 
 def build_system_prompt(topic: str, workspace_available: bool) -> str:
@@ -429,8 +440,38 @@ def compute_dedup_hash(stem: str, code_snippet: str | None) -> str:
     ).hexdigest()
 
 
+# 文件扩展名 → 语言短名(LLM 未给 languages 时从 source_file 推断用)
+_EXT_LANGUAGES: dict[str, str] = {
+    ".py": "python", ".js": "javascript", ".jsx": "javascript",
+    ".ts": "typescript", ".tsx": "typescript", ".java": "java",
+    ".go": "go", ".rs": "rust", ".c": "c", ".h": "c", ".cpp": "cpp",
+    ".cc": "cpp", ".cs": "csharp", ".php": "php", ".rb": "ruby",
+    ".sql": "sql", ".sh": "shell", ".html": "html", ".vue": "vue",
+}
+
+# 语言标签规范化上限(防 LLM 乱输出)
+_MAX_LANGUAGES = 5
+_MAX_LANGUAGE_LEN = 24
+
+
+def _normalize_languages(raw: Any, source_file: str | None) -> list[str]:
+    """规范化 LLM 输出的语言标签:小写/去重/截断;未给时从 source_file 扩展名推断"""
+    langs: list[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            s = str(item or "").strip().lower()
+            if s and s not in langs:
+                langs.append(s[:_MAX_LANGUAGE_LEN])
+    if not langs and source_file:
+        ext = source_file[source_file.rfind("."):].lower() if "." in source_file else ""
+        lang = _EXT_LANGUAGES.get(ext)
+        if lang:
+            langs.append(lang)
+    return langs[:_MAX_LANGUAGES]
+
+
 def _get_or_create_knowledge_point(
-    db: Session, user_id, key: str, name: str
+    db: Session, user_id, key: str, name: str, languages: list[str] | None = None,
 ) -> KnowledgePoint:
     key = (key or "").strip() or "general"
     kp = db.query(KnowledgePoint).filter(
@@ -438,12 +479,18 @@ def _get_or_create_knowledge_point(
         KnowledgePoint.key == key,
     ).first()
     if kp:
+        # 已有知识点:语言标签并集累积(保持原顺序追加新语言)
+        merged = list(kp.languages or [])
+        added = [l for l in (languages or []) if l not in merged]
+        if added:
+            kp.languages = merged + added
         return kp
     kp = KnowledgePoint(
         user_id=user_id,
         key=key,
         name=(name or "").strip() or key,
         category="cwe" if key.upper().startswith("CWE-") else "general",
+        languages=list(languages or []),
     )
     db.add(kp)
     db.flush()
@@ -503,6 +550,11 @@ def _normalize_raw_question(raw: Any, finding_meta: dict) -> dict | None:
     source_file = str(raw.get("source_file") or "").strip()[:512] or None
     source_lines = str(raw.get("source_lines") or "").strip()[:32] or None
 
+    # 出题形式:repo=真实代码题,synthetic=改编题;白名单外回退 repo
+    origin = str(raw.get("origin") or "").strip()
+    if origin not in ("repo", "synthetic"):
+        origin = "repo"
+
     return {
         "qtype": qtype,
         "stem": stem,
@@ -515,6 +567,8 @@ def _normalize_raw_question(raw: Any, finding_meta: dict) -> dict | None:
         "knowledge_name": str(raw.get("knowledge_name") or "").strip(),
         "source_file": source_file,
         "source_lines": source_lines,
+        "origin": origin,
+        "languages": _normalize_languages(raw.get("languages"), source_file),
     }
 
 
@@ -661,7 +715,8 @@ def generate_questions_for_task(
             existing_hashes.add(dedup_hash)
 
             kp = _get_or_create_knowledge_point(
-                db, user_id, q["knowledge_key"], q["knowledge_name"]
+                db, user_id, q["knowledge_key"], q["knowledge_name"],
+                languages=q["languages"],
             )
             question = Question(
                 user_id=user_id,
@@ -678,6 +733,7 @@ def generate_questions_for_task(
                 status=QuestionStatus.DRAFT,
                 dedup_hash=dedup_hash,
                 learning_topic=topic,
+                origin=q["origin"],
                 source_file=q["source_file"],
                 source_lines=q["source_lines"],
             )

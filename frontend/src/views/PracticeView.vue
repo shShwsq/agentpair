@@ -766,6 +766,12 @@ onBeforeUnmount(() => {
             <span v-if="currentQuestion.knowledge_name" class="tag tag-kp">
               {{ currentQuestion.knowledge_name }}
             </span>
+            <span
+              v-for="lang in (currentQuestion.languages ?? [])"
+              :key="lang"
+              class="tag tag-lang"
+            >{{ lang }}</span>
+            <span v-if="currentQuestion.origin === 'synthetic'" class="tag tag-synthetic" title="智能体原创的虚构代码,脱离原仓库">改编</span>
             <span class="tag">{{ currentQuestion.qtype === 'true_false' ? '判断题' : '单选题' }}</span>
             <span class="tag">难度 {{ formatDifficulty(currentQuestion.difficulty) }}</span>
             <button
@@ -984,6 +990,11 @@ onBeforeUnmount(() => {
                 <div class="weak-info">
                   <span class="weak-name">{{ w.knowledge_name }}</span>
                   <span class="weak-key">{{ w.knowledge_key }}</span>
+                  <span
+                    v-for="lang in (w.languages ?? [])"
+                    :key="lang"
+                    class="tag tag-lang"
+                  >{{ lang }}</span>
                   <span v-if="isDue(w.due_at)" class="tag tag-due">待复习</span>
                 </div>
                 <div class="weak-bar-wrap" :title="`错误率 ${formatPercent(w.accuracy)}`">
@@ -1024,6 +1035,12 @@ onBeforeUnmount(() => {
                   <span class="bank-stem">{{ q.stem }}</span>
                   <span class="bank-meta">
                     <span v-if="q.knowledge_name" class="tag tag-kp">{{ q.knowledge_name }}</span>
+                    <span
+                      v-for="lang in (q.languages ?? [])"
+                      :key="lang"
+                      class="tag tag-lang"
+                    >{{ lang }}</span>
+                    <span v-if="q.origin === 'synthetic'" class="tag tag-synthetic" title="智能体原创的虚构代码,脱离原仓库">改编</span>
                     <span>{{ q.qtype === 'true_false' ? '判断' : '单选' }}</span>
                     <span>作答 {{ q.attempts }} 次 · 正确率 {{ formatPercent(q.accuracy) }}</span>
                   </span>
@@ -1141,6 +1158,12 @@ onBeforeUnmount(() => {
                   <span class="bank-stem">{{ q.stem }}</span>
                   <span class="bank-meta">
                     <span v-if="q.knowledge_name" class="tag tag-kp">{{ q.knowledge_name }}</span>
+                    <span
+                      v-for="lang in (q.languages ?? [])"
+                      :key="lang"
+                      class="tag tag-lang"
+                    >{{ lang }}</span>
+                    <span v-if="q.origin === 'synthetic'" class="tag tag-synthetic" title="智能体原创的虚构代码,脱离原仓库">改编</span>
                     <span>{{ q.qtype === 'true_false' ? '判断' : '单选' }}</span>
                     <span>难度 {{ formatDifficulty(q.difficulty) }}</span>
                     <template v-if="q.attempts > 0">
@@ -1896,6 +1919,18 @@ onBeforeUnmount(() => {
 .tag-kp {
   color: var(--color-primary);
   background: var(--color-primary-light);
+}
+
+/* 编程语言标签:低权重中性样式 */
+.tag-lang {
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+
+/* 改编题标签:区分虚构代码来源 */
+.tag-synthetic {
+  color: var(--color-warning, #b45309);
+  background: color-mix(in srgb, var(--color-warning, #b45309) 10%, transparent);
 }
 
 .tag-due {
