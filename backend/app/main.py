@@ -11,6 +11,7 @@ from app.routers import git_provider as git_provider_router
 from app.routers import model_configs as model_configs_router
 from app.routers import workspace as workspace_router
 from app.routers import memory as memory_router
+from app.routers import practice as practice_router
 
 # 日志配置:开发期 DEBUG,生产期 INFO
 # 通过 LOG_LEVEL 环境变量覆盖(默认按 APP_ENV 决定)
@@ -46,6 +47,7 @@ async def lifespan(app: FastAPI):
     from app.models import user_git_binding  # noqa: F401
     from app.models import user_llm_config  # noqa: F401
     from app.models import project  # noqa: F401
+    from app.models import practice  # noqa: F401  # 练习模块全新表,随 create_all 建表
 
     if settings.DB_REBUILD_ON_START:
         Base.metadata.drop_all(bind=engine)
@@ -93,6 +95,7 @@ app.include_router(git_provider_router.router)
 app.include_router(workspace_router.router)
 app.include_router(agent_configs.router)
 app.include_router(memory_router.router)
+app.include_router(practice_router.router)
 
 
 @app.get("/")
