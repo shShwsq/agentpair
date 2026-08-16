@@ -13,11 +13,16 @@
 - 泛化出题与改编题(origin/languages)指引及字段解析
 - 知识点语言标签并集累积
 - 质量关卡过滤(工作区可用时无 code_snippet 的题被丢弃 + 反馈重试)
+- 致命错误快速失败(401/403 额度类错误立即中止并冒泡友好原因)
 - 迷你工具循环(_call_llm / _execute_practice_tool)
 - 出题前工作区保障(_ensure_workspace 重新 clone 恢复)
 """
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+
+import httpx
+import openai
+import pytest
 
 import app.models.task_artifact  # noqa: F401  让 Task mapper 能解析 TaskArtifact 关联
 import app.services.practice.generator as gen
@@ -27,6 +32,7 @@ from app.services.practice.generator import (
     _call_llm,
     _ensure_workspace,
     _execute_practice_tool,
+    _fatal_llm_reason,
     _normalize_raw_question,
     _parse_llm_questions,
     build_system_prompt,
@@ -281,22 +287,25 @@ def test_origin_and_kp_languages_persisted_in_pipeline(monkeypatch):
 # ============================================================
 
 
-def _gen_db():
-    """构造 mock db:按查询目标返回不同链(单条 finding、无已有题目)"""
+def _gen_db(finding_count=1):
+    """构造 mock db:按查询目标返回不同链(可指定 finding 条数)"""
     db = MagicMock()
-    finding = SimpleNamespace(
-        id="r1",
-        title="SQL 注入风险",
-        content="cursor.execute(sql) 直接拼接用户输入构造查询",
-        metadata_={"cwe": "CWE-89"},
-    )
+    findings = [
+        SimpleNamespace(
+            id=f"r{i}",
+            title="SQL 注入风险",
+            content="cursor.execute(sql) 直接拼接用户输入构造查询",
+            metadata_={"cwe": "CWE-89"},
+        )
+        for i in range(finding_count)
+    ]
 
     def _query(model):
         q = MagicMock()
         if model is gen.PracticeSettings:
             q.filter.return_value.first.return_value = None
         elif model is gen.Result:
-            q.filter.return_value.order_by.return_value.all.return_value = [finding]
+            q.filter.return_value.order_by.return_value.all.return_value = findings
         elif model is gen.KnowledgePoint:
             q.filter.return_value.first.return_value = None
         else:  # Question.dedup_hash 列查询:无已入库题目
@@ -373,6 +382,60 @@ def test_quality_gate_skipped_without_workspace(monkeypatch):
     )
     assert len(created) == 1
     assert skipped == 0
+
+
+# ============================================================
+# 致命错误快速失败(401/403 额度类:立即中止并冒泡友好原因)
+# ============================================================
+
+
+def _http_response(status=403):
+    return httpx.Response(status, request=httpx.Request("POST", "http://test"))
+
+
+def test_fatal_llm_reason_detection():
+    quota_403 = openai.PermissionDeniedError(
+        "Error code: 403 - {'type': 'AllocationQuota.FreeTierOnly'}",
+        response=_http_response(), body=None,
+    )
+    assert "免费额度" in _fatal_llm_reason(quota_403)
+    perm_403 = openai.PermissionDeniedError(
+        "Error code: 403 - access denied", response=_http_response(), body=None,
+    )
+    assert "403" in _fatal_llm_reason(perm_403)
+    auth_401 = openai.AuthenticationError(
+        "Error code: 401", response=_http_response(401), body=None,
+    )
+    assert "API Key" in _fatal_llm_reason(auth_401)
+    # 非致命错误(超时/运行时异常)仍走重试丢弃路径
+    assert _fatal_llm_reason(RuntimeError("timeout")) is None
+
+
+def test_fatal_llm_error_aborts_without_retry(monkeypatch):
+    """首次调用即额度耗尽:不重试、不处理后续 finding,冒泡友好错误"""
+    monkeypatch.setattr(gen.sandbox_tools, "get_workspace_info", lambda tid: None)
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(1)
+        raise openai.PermissionDeniedError(
+            "Error code: 403 - {'type': 'AllocationQuota.FreeTierOnly'}",
+            response=_http_response(), body=None,
+        )
+
+    monkeypatch.setattr(gen, "_call_llm", boom)
+    client = MagicMock()
+    client.model = "MiniMax-M2.5"
+    # 3 条 finding:只在第 1 条第 1 次尝试就中止(共 1 次调用,
+    # 而非 3 条 × 2 次尝试 = 6 次空转)
+    with pytest.raises(gen.PracticeGenerateError) as ei:
+        gen.generate_questions_for_task(
+            _gen_db(finding_count=3), _gen_task(), "u1", client=client,
+        )
+    assert len(calls) == 1
+    msg = str(ei.value)
+    assert "MiniMax-M2.5" in msg
+    assert "免费额度" in msg
 
 
 # ============================================================

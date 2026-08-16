@@ -10,8 +10,10 @@
      沙箱已清理且用户开启「出题前恢复工作区」时先重新 clone 恢复
 3. json_repair 容错解析 + 字段校验,失败重试 1 次,仍失败丢弃该 finding;
    工作区可用时无 code_snippet 的题判为不合格,带质量反馈重试 1 次后丢弃
-4. 知识点 get_or_create(优先 CWE 编号)+ 同用户 sha256 去重
-5. 落库为 draft(记录出题时主题与源码定位),前端预览确认后转 active
+4. 致命错误快速失败:模型 401/403(额度耗尽/Key 失效)等不可重试错误
+   立即中止剩余 finding,抛 PracticeGenerateError 由 job 层展示原因
+5. 知识点 get_or_create(优先 CWE 编号)+ 同用户 sha256 去重
+6. 落库为 draft(记录出题时主题与源码定位),前端预览确认后转 active
 
 出题模型解析:task.llm_config_id > 用户级默认出题模型
 (practice_settings.default_llm_config_id) > env 默认,逐级回退。
@@ -25,6 +27,7 @@ from typing import Any
 from json_repair import repair_json
 from sqlalchemy.orm import Session
 
+import openai
 from app.llm.client import LLMClient
 from app.models.practice import (
     DEFAULT_LEARNING_TOPIC,
@@ -54,6 +57,31 @@ PARSE_RETRY = 1
 MAX_TOOL_ROUNDS = 6
 # 单次工具结果回传 LLM 的截断阈值(防上下文爆炸)
 _MAX_TOOL_RESULT_CHARS = 3000
+
+
+class PracticeGenerateError(Exception):
+    """出题过程遇到不可重试的致命错误(已生成的题目照常落库)
+
+    异常消息为面向用户的友好原因,由 job 层捕获后置 error 终态,
+    前端出题进度侧栏直接展示。
+    """
+
+
+def _fatal_llm_reason(e: Exception) -> str | None:
+    """识别出题模型的不可重试致命错误(认证/额度),返回面向用户的原因
+
+    额度耗尽/Key 失效类错误后续所有 finding 必然同样失败,
+    应立即中止(快速失败)而非逐条重试空转;其他错误(超时/
+    5xx/429 等)返回 None,走原有重试与丢弃路径。
+    """
+    if isinstance(e, openai.AuthenticationError):
+        return "API Key 无效或已失效(401),请检查出题模型配置"
+    if isinstance(e, openai.PermissionDeniedError):
+        text = str(e).lower()
+        if "quota" in text or "free tier" in text:
+            return "免费额度已用尽(403),请充值或更换出题模型"
+        return "无权访问该模型(403),请检查出题模型配置"
+    return None
 
 # ============================================================
 # 提示词:按学习主题切换出题视角(通用规则段共享)
@@ -743,6 +771,7 @@ def generate_questions_for_task(
 
     created: list[Question] = []
     skipped = 0
+    fatal_reason = ""  # 非空表示遇到不可重试致命错误,需中止并冒泡原因
     for idx, finding in enumerate(findings):
         meta = finding.metadata_ or {}
         if event_callback:
@@ -770,9 +799,20 @@ def generate_questions_for_task(
                     on_event=event_callback,
                 )
             except Exception as e:
+                fatal = _fatal_llm_reason(e)
+                if fatal is not None:
+                    # 额度/认证类错误:后续 finding 必然同样失败,立即中止
+                    # 避免空转(原因经 PracticeGenerateError 推给前端展示)
+                    logger.error(
+                        "[practice] 出题模型致命错误,中止剩余 finding: %s", e,
+                    )
+                    fatal_reason = (
+                        f"出题模型 {getattr(client, 'model', '?')} {fatal}"
+                    )
+                    break
                 logger.warning(
                     "[practice] finding=%s LLM 调用失败(第 %d 次): %s",
-                    finding.id, attempt + 1, e, exc_info=True,
+                    finding.id, attempt + 1, e,
                 )
                 content = ""
             questions = _parse_llm_questions(content, meta, finding_id=finding.id)
@@ -796,6 +836,9 @@ def generate_questions_for_task(
                 questions = qualified
             if questions:
                 break
+
+        if fatal_reason:
+            break
 
         if not questions:
             skipped += 1
@@ -855,7 +898,12 @@ def generate_questions_for_task(
     for q in created:
         db.refresh(q)
     logger.info(
-        "[practice] 出题结束 task=%s: 生成 %d 题, %d/%d 条 finding 未出题",
+        "[practice] 出题结束 task=%s: 生成 %d 题, %d/%d 条 finding 未出题%s",
         task.id, len(created), skipped, total_findings,
+        f"(致命错误中止: {fatal_reason})" if fatal_reason else "",
     )
+    if fatal_reason:
+        # 已生成的 draft 照常保留;错误原因冒泡给 job 层展示
+        suffix = f",中止前已生成 {len(created)} 题" if created else ""
+        raise PracticeGenerateError(f"{fatal_reason}{suffix}")
     return created, skipped

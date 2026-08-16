@@ -15,7 +15,10 @@ from sqlalchemy.orm import Session
 from app.models.practice import PracticeSettings, Question
 from app.models.task import Result, Task
 from app.services.practice import jobs as gen_jobs
-from app.services.practice.generator import generate_questions_for_task
+from app.services.practice.generator import (
+    PracticeGenerateError,
+    generate_questions_for_task,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +97,11 @@ def auto_generate_practice_for_task(task: Task, db: Session) -> int:
                 job_id, etype, data,
             ),
         )
+    except PracticeGenerateError as e:
+        # 致命错误(额度/认证等):友好原因置 job error 供侧栏展示,无需堆栈
+        logger.warning("[task=%s] 自动出题中止 job=%s: %s", task.id, job_id, e)
+        gen_jobs.update_job(job_id, status="error", error=str(e)[:500])
+        raise  # 保持原有语义:由调用方 try/except 兜底,不影响任务完成
     except Exception as e:
         logger.exception("[task=%s] 自动生成练习题失败 job=%s", task.id, job_id)
         gen_jobs.update_job(job_id, status="error", error=str(e)[:500])

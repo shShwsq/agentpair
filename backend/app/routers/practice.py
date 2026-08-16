@@ -63,7 +63,10 @@ from app.services.practice.difficulty import (
     adjust_question_difficulty,
     estimate_ability,
 )
-from app.services.practice.generator import generate_questions_for_task
+from app.services.practice.generator import (
+    PracticeGenerateError,
+    generate_questions_for_task,
+)
 from app.services.practice.selector import CandidateInfo, select_questions
 from app.services.practice.sm2 import (
     SM2State,
@@ -198,6 +201,10 @@ def _run_generate_job(job_id: str, task_id: UUID, user_id: UUID, max_findings: i
             "[practice] 手动出题完成 job=%s task=%s: %d 题(%d 条 finding 未出题)",
             job_id, task_id, len(items), skipped,
         )
+    except PracticeGenerateError as e:
+        # 致命错误(额度/认证等):友好原因直接展示,无需堆栈
+        logger.warning("[practice] 出题中止 job=%s: %s", job_id, e)
+        gen_jobs.update_job(job_id, status="error", error=str(e)[:500])
     except Exception as e:
         logger.exception("[practice] 异步出题失败 job=%s", job_id)
         gen_jobs.update_job(job_id, status="error", error=str(e)[:500])
