@@ -45,6 +45,28 @@ let es: EventSource | null = null
 const diagCounters = { tokenRendered: 0, tokenSkipped: 0, findingRendered: 0, findingSkipped: 0 }
 let diagLogTimer: ReturnType<typeof setInterval> | null = null
 
+// ============================================================
+// 实时展示状态(由 SSE 事件驱动)
+// 硬约束:这些 ref 必须声明在下方 immediate watch 之前——
+// watch 在挂载时同步触发,经 pickDefaultJob → subscribeToJob →
+// resetStreamState 访问它们;声明在 watch 之后会报 TDZ 错误,
+// 导致 setup 中断、侧栏渲染失败并拖垮整页交互(历史教训)
+// ============================================================
+const status = ref<GenerateJobSummary['status']>('pending')
+const done = ref(0)
+const total = ref(0)
+const currentFinding = ref('')
+const errorMsg = ref('')
+const doneInfo = ref<GenerateDoneData | null>(null)
+/** 流式输出文本(含 finding 分隔与工具调用标记) */
+const streamText = ref('')
+/** snapshot 即终态时不再消费重放事件,只展示 recent_text 尾部 */
+const snapshotTerminal = ref(false)
+
+/** 输出区自动跟随(用户手动上滚时暂停) */
+const followBottom = ref(true)
+const outputEl = ref<HTMLElement | null>(null)
+
 const selectedJob = computed<GenerateJobSummary | null>(
   () => props.jobs.find((j) => j.job_id === selectedJobId.value) ?? null,
 )
@@ -90,23 +112,8 @@ function handlePickJob(job: GenerateJobSummary): void {
 }
 
 // ============================================================
-// 实时展示状态(由 SSE 事件驱动)
+// 输出区滚动与流状态维护(函数声明会提升,不受声明顺序影响)
 // ============================================================
-const status = ref<GenerateJobSummary['status']>('pending')
-const done = ref(0)
-const total = ref(0)
-const currentFinding = ref('')
-const errorMsg = ref('')
-const doneInfo = ref<GenerateDoneData | null>(null)
-/** 流式输出文本(含 finding 分隔与工具调用标记) */
-const streamText = ref('')
-/** snapshot 即终态时不再消费重放事件,只展示 recent_text 尾部 */
-const snapshotTerminal = ref(false)
-
-/** 输出区自动跟随(用户手动上滚时暂停) */
-const followBottom = ref(true)
-const outputEl = ref<HTMLElement | null>(null)
-
 function scheduleScroll(): void {
   if (!followBottom.value) return
   nextTick(() => {
