@@ -26,6 +26,8 @@ export interface UserPreferenceOut {
   learning_topic: LearningTopic
   /** 出题前沙箱已清理时是否重新 clone 恢复工作区(默认关) */
   restore_workspace_for_practice: boolean
+  /** 用户级默认出题模型(UserLLMConfig 配置 id;null=未设置,回退任务级/env 默认) */
+  default_llm_config_id: string | null
   /** 最后更新时间(ISO 字符串,未配置时为 null) */
   updated_at: string | null
 }
@@ -40,13 +42,15 @@ export interface SaveUserPreferenceRequest {
 
 /** 保存练习设置请求(PUT /memory/preferences/practice body)
  *
- * learning_topic / restore_workspace_for_practice 可选,
- * 不传表示本次不修改(后端 None 语义)。
+ * learning_topic / restore_workspace_for_practice / default_llm_config_id 可选,
+ * 不传表示本次不修改(后端 None 语义);
+ * default_llm_config_id 传空串表示清空(回退任务级/env 默认)。
  */
 export interface SavePracticeSettingsRequest {
   auto_generate_practice: boolean
   learning_topic?: LearningTopic
   restore_workspace_for_practice?: boolean
+  default_llm_config_id?: string | null
 }
 
 /**

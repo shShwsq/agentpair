@@ -38,6 +38,8 @@ class UserPreferenceOut(BaseModel):
     learning_topic: str = "security"
     # 出题前沙箱已清理时是否重新 clone 恢复工作区(默认关)
     restore_workspace_for_practice: bool = False
+    # 用户级默认出题模型(UserLLMConfig 配置 id;None=未设置,回退任务级/env 默认)
+    default_llm_config_id: str | None = None
     # 最后更新时间(可空 — 未配置时为 None;FastAPI 序列化为 ISO 字符串)
     updated_at: datetime | None = None
 
@@ -59,6 +61,8 @@ class SavePracticeSettingsRequest(BaseModel):
       出题提示词按此切换;None 表示本次不修改
     - restore_workspace_for_practice:出题前沙箱已清理时是否重新 clone
       恢复工作区;None 表示本次不修改
+    - default_llm_config_id:用户级默认出题模型(UserLLMConfig 配置 id);
+      None 表示本次不修改,空串表示清空(回退任务级/env 默认)
     """
 
     auto_generate_practice: bool = True
@@ -68,6 +72,7 @@ class SavePracticeSettingsRequest(BaseModel):
         LEARNING_TOPIC_CODING,
     ] | None = None
     restore_workspace_for_practice: bool | None = None
+    default_llm_config_id: str | None = Field(default=None, max_length=36)
 
 
 class SaveAgentPolicyRequest(BaseModel):

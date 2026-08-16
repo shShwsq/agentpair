@@ -380,3 +380,76 @@ def test_ensure_workspace_no_repo_url(monkeypatch):
     pref.restore_workspace_for_practice = True
     assert _ensure_workspace(MagicMock(), task, pref) is None
     assert not clone_calls
+
+
+# ============================================================
+# resolve_llm_client 三级解析(task 级 > 用户级默认 > env 默认)
+# ============================================================
+
+
+def _resolve_db(pref_default=None, configs=None):
+    """构造 mock db:按查询的模型返回不同行"""
+    db = MagicMock()
+
+    def _query(model):
+        q = MagicMock()
+        if model is gen.PracticeSettings:
+            if pref_default:
+                pref = MagicMock()
+                pref.default_llm_config_id = pref_default
+                q.filter.return_value.first.return_value = pref
+            else:
+                q.filter.return_value.first.return_value = None
+        else:  # UserLLMConfig
+            q.filter.return_value.first.return_value = SimpleNamespace(
+                llm_configs=configs or [],
+            )
+        return q
+
+    db.query.side_effect = _query
+    return db
+
+
+def test_resolve_task_level_wins(monkeypatch):
+    """task 级与用户级默认都命中时,优先用 task 级"""
+    llm_cls = MagicMock()
+    monkeypatch.setattr(gen, "LLMClient", llm_cls)
+    cfg_task = {"id": "cfg-task", "provider": "dashscope", "model": "qwen-max"}
+    cfg_user = {"id": "cfg-user", "provider": "dashscope", "model": "qwen-flash"}
+    db = _resolve_db(pref_default="cfg-user", configs=[cfg_task, cfg_user])
+    task = SimpleNamespace(llm_config_id="cfg-task", user_id="u1")
+    gen.resolve_llm_client(db, task)
+    llm_cls.from_config_dict.assert_called_once_with(cfg_task)
+
+
+def test_resolve_task_missing_falls_back_to_user_default(monkeypatch):
+    """task 级配置失效(已被删)时回退用户级默认"""
+    llm_cls = MagicMock()
+    monkeypatch.setattr(gen, "LLMClient", llm_cls)
+    cfg_user = {"id": "cfg-user", "provider": "dashscope", "model": "qwen-flash"}
+    db = _resolve_db(pref_default="cfg-user", configs=[cfg_user])
+    task = SimpleNamespace(llm_config_id="cfg-gone", user_id="u1")
+    gen.resolve_llm_client(db, task)
+    llm_cls.from_config_dict.assert_called_once_with(cfg_user)
+
+
+def test_resolve_user_default_only(monkeypatch):
+    """task 未指定模型时用用户级默认出题模型"""
+    llm_cls = MagicMock()
+    monkeypatch.setattr(gen, "LLMClient", llm_cls)
+    cfg_user = {"id": "cfg-user", "provider": "dashscope", "model": "qwen-flash"}
+    db = _resolve_db(pref_default="cfg-user", configs=[cfg_user])
+    task = SimpleNamespace(llm_config_id=None, user_id="u1")
+    gen.resolve_llm_client(db, task)
+    llm_cls.from_config_dict.assert_called_once_with(cfg_user)
+
+
+def test_resolve_all_missing_uses_env_default(monkeypatch):
+    """task 级与用户级都未命中时回退 env 默认(无参构造)"""
+    llm_cls = MagicMock()
+    monkeypatch.setattr(gen, "LLMClient", llm_cls)
+    db = _resolve_db(pref_default=None, configs=[])
+    task = SimpleNamespace(llm_config_id="cfg-gone", user_id="u1")
+    gen.resolve_llm_client(db, task)
+    llm_cls.from_config_dict.assert_not_called()
+    llm_cls.assert_called_once_with()

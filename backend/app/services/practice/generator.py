@@ -11,7 +11,8 @@
 4. 知识点 get_or_create(优先 CWE 编号)+ 同用户 sha256 去重
 5. 落库为 draft(记录出题时主题),前端预览确认后转 active
 
-出题模型解析:优先 task.llm_config_id(UserLLMConfig),失败回退 env 默认。
+出题模型解析:task.llm_config_id > 用户级默认出题模型
+(practice_settings.default_llm_config_id) > env 默认,逐级回退。
 """
 import hashlib
 import json
@@ -378,18 +379,35 @@ def _ensure_workspace(
 
 
 def resolve_llm_client(db: Session, task: Task) -> LLMClient:
-    """按 task.llm_config_id 解析出题模型,失败回退 env 默认"""
+    """解析出题模型:task.llm_config_id > 用户级默认出题模型 > env 默认
+
+    任务级与用户级配置都存于 UserLLMConfig.llm_configs(一次查询,
+    按优先级逐个匹配);任一级配置缺失/失效均回退下一级,全部失败回退 env 默认。
+    手动出题与任务完成自动出题共用本解析。
+    """
+    config_ids: list[str] = []
     if task.llm_config_id:
+        config_ids.append(task.llm_config_id)
+    if task.user_id is not None:
+        pref = db.query(PracticeSettings).filter(
+            PracticeSettings.user_id == task.user_id
+        ).first()
+        if pref is not None and pref.default_llm_config_id:
+            config_ids.append(pref.default_llm_config_id)
+    if config_ids:
         try:
             cfg_row = db.query(UserLLMConfig).filter(
                 UserLLMConfig.user_id == task.user_id
             ).first()
-            if cfg_row:
-                for cfg in cfg_row.llm_configs or []:
-                    if cfg.get("id") == task.llm_config_id:
-                        return LLMClient.from_config_dict(cfg)
+            configs = {
+                c.get("id"): c for c in (cfg_row.llm_configs or [])
+            } if cfg_row else {}
+            for cid in config_ids:
+                cfg = configs.get(cid)
+                if cfg:
+                    return LLMClient.from_config_dict(cfg)
             logger.warning(
-                "[practice] 未找到 llm_config_id=%s,回退 env 默认", task.llm_config_id
+                "[practice] 未找到出题模型配置 ids=%s,回退 env 默认", config_ids
             )
         except Exception as e:
             logger.warning("[practice] 加载出题模型配置失败,回退 env 默认: %s", e)

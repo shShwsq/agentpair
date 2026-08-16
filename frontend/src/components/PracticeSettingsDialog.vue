@@ -3,13 +3,15 @@
  * 练习设置弹窗
  *
  * 复用 PasswordDialog 的视觉语言(mask + card + header/body/footer)。
- * 三项设置(均为全局生效,切换/选中即保存):
+ * 四项设置(均为全局生效,切换/选中即保存):
  * - 自动生成练习题开关(产出的候选题仍需在任务详情页预览确认才入库)
  * - 学习主题:出题提示词按主题切换出题视角(网络安全/架构设计/通用代码能力)
  * - 出题前恢复工作区:沙箱已清理时重新 clone 仓库,供出题时查阅源码
+ * - 默认出题模型:用户级默认(任务级配置优先,未设置则回退 env 默认)
  *
  * emit 由父组件调 API 持久化并 toast,父组件更新 props 后弹窗内状态同步。
  */
+import type { LLMConfigItemOut } from '@/types/model_configs'
 import type { LearningTopic } from '@/types/memory'
 
 defineProps<{
@@ -21,6 +23,10 @@ defineProps<{
   learningTopic: LearningTopic
   /** 出题前恢复工作区开关状态 */
   restoreWorkspace: boolean
+  /** 默认出题模型配置 id(空串=跟随系统默认) */
+  defaultModelId: string
+  /** 用户已保存的 LLM 配置列表(下拉选项来源) */
+  llmConfigs: LLMConfigItemOut[]
   /** 保存中状态(禁用交互与关闭) */
   loading: boolean
   /** 错误信息(父组件 API 失败时传入) */
@@ -31,6 +37,7 @@ const emit = defineEmits<{
   (e: 'toggle'): void
   (e: 'topic', topic: LearningTopic): void
   (e: 'toggle-restore'): void
+  (e: 'model', configId: string): void
   (e: 'cancel'): void
 }>()
 
@@ -54,6 +61,16 @@ function handleTopic(loading: boolean, topic: LearningTopic, current: LearningTo
 function handleToggleRestore(loading: boolean): void {
   if (loading) return
   emit('toggle-restore')
+}
+
+function handleModelChange(
+  loading: boolean,
+  event: Event,
+  current: string,
+): void {
+  const value = (event.target as HTMLSelectElement).value
+  if (loading || value === current) return
+  emit('model', value)
 }
 
 function handleCancel(loading: boolean): void {
@@ -141,6 +158,30 @@ function handleCancel(loading: boolean): void {
               >
                 <span class="switch-thumb" />
               </button>
+            </div>
+
+            <!-- 默认出题模型:用户级默认,任务级配置优先,选中即保存 -->
+            <div class="setting-block">
+              <span class="setting-title">默认出题模型</span>
+              <span class="setting-desc">
+                生成练习题时默认使用的模型(手动出题与自动出题均生效);
+                任务自带模型配置时优先用任务配置,选「跟随系统默认」则用环境配置
+              </span>
+              <select
+                class="model-select"
+                aria-label="默认出题模型"
+                :value="defaultModelId"
+                :disabled="loading"
+                @change="handleModelChange(loading, $event, defaultModelId)"
+              >
+                <option value="">跟随系统默认</option>
+                <option v-for="cfg in llmConfigs" :key="cfg.id" :value="cfg.id">
+                  {{ cfg.name }}({{ cfg.provider }} / {{ cfg.model }})
+                </option>
+              </select>
+              <span v-if="!llmConfigs.length" class="model-hint">
+                暂无已保存的模型配置,可先到「模型设置」中添加
+              </span>
             </div>
 
             <p v-if="loading" class="saving-hint">
@@ -353,6 +394,39 @@ function handleCancel(loading: boolean): void {
 .topic-desc {
   font-size: var(--fs-xs);
   color: var(--color-text-secondary);
+}
+
+/* ---- 默认出题模型 ---- */
+.model-select {
+  width: 100%;
+  height: 36px;
+  padding: 0 var(--space-3);
+  font-size: var(--fs-sm);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: border-color var(--transition-fast);
+}
+
+.model-select:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+}
+
+.model-select:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+
+.model-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.model-hint {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
 }
 
 /* ---- 开关 ---- */

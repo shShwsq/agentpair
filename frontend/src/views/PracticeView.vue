@@ -19,6 +19,7 @@ import PracticeSettingsDialog from '@/components/PracticeSettingsDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import { getPreferences, savePracticeSettings } from '@/api/memory'
+import { getMyModels } from '@/api/model_configs'
 import {
   activateQuestions,
   archiveQuestion,
@@ -32,6 +33,7 @@ import {
   submitAnswer,
 } from '@/api/practice'
 import { extractErrorMessage } from '@/utils/error'
+import type { LLMConfigItemOut } from '@/types/model_configs'
 import type {
   GenerateJobSummary,
   PracticeStats,
@@ -101,12 +103,16 @@ function showToast(msg: string, type: 'success' | 'error'): void {
 }
 
 // ============================================================
-// 练习设置弹窗(自动生成开关 / 学习主题 / 出题前恢复工作区,切换即保存)
+// 练习设置弹窗(自动生成开关 / 学习主题 / 出题前恢复工作区 / 默认出题模型,切换即保存)
 // ============================================================
 const settingsOpen = ref(false)
 const autoGenPractice = ref(true)
 const learningTopic = ref<'security' | 'architecture' | 'coding'>('security')
 const restoreWorkspace = ref(false)
+/** 默认出题模型配置 id(空串=跟随系统默认) */
+const defaultModelId = ref('')
+/** 用户已保存的 LLM 配置列表(默认出题模型下拉选项来源) */
+const llmConfigs = ref<LLMConfigItemOut[]>([])
 const autoGenLoading = ref(false)
 const settingsError = ref('')
 
@@ -116,8 +122,15 @@ async function loadPracticeSettings(): Promise<void> {
     autoGenPractice.value = pref.auto_generate_practice
     learningTopic.value = pref.learning_topic
     restoreWorkspace.value = pref.restore_workspace_for_practice
+    defaultModelId.value = pref.default_llm_config_id ?? ''
   } catch {
     // 静默失败,保持默认值
+  }
+  try {
+    const models = await getMyModels()
+    llmConfigs.value = models.llm_configs
+  } catch {
+    // 静默失败,下拉只展示「跟随系统默认」
   }
 }
 
@@ -172,6 +185,28 @@ async function toggleRestoreWorkspace(): Promise<void> {
     restoreWorkspace.value = latest.restore_workspace_for_practice
     showToast(
       next ? '已开启出题前恢复工作区' : '已关闭出题前恢复工作区',
+      'success',
+    )
+  } catch (err) {
+    settingsError.value = extractErrorMessage(err)
+  } finally {
+    autoGenLoading.value = false
+  }
+}
+
+/** 切换默认出题模型(空串=清空,回退任务级/env 默认) */
+async function selectModel(configId: string): Promise<void> {
+  if (autoGenLoading.value || configId === defaultModelId.value) return
+  autoGenLoading.value = true
+  settingsError.value = ''
+  try {
+    const latest = await savePracticeSettings({
+      auto_generate_practice: autoGenPractice.value,
+      default_llm_config_id: configId,
+    })
+    defaultModelId.value = latest.default_llm_config_id ?? ''
+    showToast(
+      configId ? '默认出题模型已更新' : '默认出题模型已重置为跟随系统默认',
       'success',
     )
   } catch (err) {
@@ -1008,11 +1043,14 @@ onBeforeUnmount(() => {
       :auto-generate="autoGenPractice"
       :learning-topic="learningTopic"
       :restore-workspace="restoreWorkspace"
+      :default-model-id="defaultModelId"
+      :llm-configs="llmConfigs"
       :loading="autoGenLoading"
       :error="settingsError"
       @toggle="togglePracticeAuto"
       @topic="selectTopic"
       @toggle-restore="toggleRestoreWorkspace"
+      @model="selectModel"
       @cancel="settingsOpen = false"
     />
 

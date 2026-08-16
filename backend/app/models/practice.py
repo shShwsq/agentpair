@@ -252,10 +252,12 @@ class PracticeSettings(Base):
     - learning_topic:当前希望学习的主题(出题提示词按此切换)
     - restore_workspace_for_practice:出题前沙箱已清理时,
       是否重新 clone 仓库恢复工作区(供出题工具循环读源码)
+    - default_llm_config_id:用户级默认出题模型(UserLLMConfig 中某条配置的 id),
+      None=跟随任务级配置/env 默认
 
     迁移:老数据存于 user_preferences.auto_generate_practice 布尔列,
     migrate_practice_settings_table() 启动时把数据拷入本表后删除旧列(幂等);
-    learning_topic / restore_workspace_for_practice 为后加列,
+    learning_topic / restore_workspace_for_practice / default_llm_config_id 为后加列,
     由 migrate_practice_learning_columns() 幂等补齐。
     """
 
@@ -282,6 +284,11 @@ class PracticeSettings(Base):
     # 出题前沙箱已清理时是否重新 clone 恢复工作区(默认关,避免意外大仓库克隆)
     restore_workspace_for_practice: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false", default=False
+    )
+    # 用户级默认出题模型(UserLLMConfig.llm_configs 中某条配置的 id;None=不指定)
+    # 解析优先级:task.llm_config_id > 本字段 > env 默认
+    default_llm_config_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, default=None
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -355,7 +362,8 @@ def migrate_practice_learning_columns() -> None:
     """幂等给 practice_settings / practice_questions 补新列
 
     背景:项目用 Base.metadata.create_all(无 Alembic),已存在的表不会自动加新列。
-    - practice_settings 加 learning_topic / restore_workspace_for_practice
+    - practice_settings 加 learning_topic / restore_workspace_for_practice /
+      default_llm_config_id
     - practice_questions 加 learning_topic(可空,老题不补)
     全新库(create_all 已建好新列)或已迁过 → 直接返回。
     """
@@ -383,6 +391,12 @@ def migrate_practice_learning_columns() -> None:
                     "restore_workspace_for_practice BOOLEAN NOT NULL DEFAULT false"
                 ))
                 log.info("practice_settings.restore_workspace_for_practice 列迁移完成")
+            if "default_llm_config_id" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE practice_settings ADD COLUMN "
+                    "default_llm_config_id VARCHAR(36)"
+                ))
+                log.info("practice_settings.default_llm_config_id 列迁移完成")
         if insp.has_table("practice_questions"):
             cols = {c["name"] for c in insp.get_columns("practice_questions")}
             if "learning_topic" not in cols:
