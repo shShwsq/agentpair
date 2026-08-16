@@ -91,7 +91,14 @@ watch(
       draft.max_output_tokens = (ini as LLMConfigItem).max_output_tokens ?? null
       draft.has_api_key = ini.has_api_key
     } else {
-      draft.id = crypto.randomUUID()
+      // crypto.randomUUID() 仅在 Secure Context(HTTPS 或 localhost)可用。
+      // Docker 部署默认走 http://服务器IP,是非 Secure Context,需降级生成 UUID,
+      // 否则 draft.id 保持空串,落库后 JSONB 元素 id 为空,导致编辑/删除错乱。
+      draft.id = crypto?.randomUUID?.()
+        ?? 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+          const r = (Math.random() * 16) | 0
+          return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16)
+        })
       draft.name = ''
       draft.provider = ''
       draft.api_key = ''
