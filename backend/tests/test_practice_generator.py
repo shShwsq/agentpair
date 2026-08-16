@@ -10,6 +10,8 @@
 - dedup_hash 稳定性
 - 主题提示词切换(build_system_prompt)与工具说明段注入
 - 提示词强制读码要求(禁止常识题 / 必须给源码定位)
+- 泛化出题与改编题(origin/languages)指引及字段解析
+- 知识点语言标签并集累积
 - 质量关卡过滤(工作区可用时无 code_snippet 的题被丢弃 + 反馈重试)
 - 迷你工具循环(_call_llm / _execute_practice_tool)
 - 出题前工作区保障(_ensure_workspace 重新 clone 恢复)
@@ -192,6 +194,87 @@ def test_source_fields_truncated():
 
 
 # ============================================================
+# origin(真实代码题/改编题)与 languages(语言标签)解析
+# ============================================================
+
+
+def test_origin_parsed_and_fallback():
+    assert _normalize_raw_question(_raw(origin="synthetic"), {})["origin"] == "synthetic"
+    assert _normalize_raw_question(_raw(origin="repo"), {})["origin"] == "repo"
+    # 非法/缺失回退 repo
+    assert _normalize_raw_question(_raw(origin="weird"), {})["origin"] == "repo"
+    assert _normalize_raw_question(_raw(), {})["origin"] == "repo"
+
+
+def test_languages_normalized():
+    q = _normalize_raw_question(
+        _raw(languages=[" Python ", "SQL", "python", ""]), {},
+    )
+    assert q["languages"] == ["python", "sql"]
+    # 最多 5 个,单项截断 24 字符
+    q = _normalize_raw_question(_raw(languages=[f"lang{i}" for i in range(8)]), {})
+    assert len(q["languages"]) == 5
+    q = _normalize_raw_question(_raw(languages=["x" * 40]), {})
+    assert q["languages"] == ["x" * 24]
+
+
+def test_languages_inferred_from_source_file_ext():
+    # LLM 未给时从 source_file 扩展名推断
+    q = _normalize_raw_question(_raw(source_file="src/db.py"), {})
+    assert q["languages"] == ["python"]
+    # LLM 已给时不覆盖
+    q = _normalize_raw_question(_raw(source_file="src/db.py", languages=["java"]), {})
+    assert q["languages"] == ["java"]
+    # 无扩展名/未知扩展名 → 空列表
+    assert _normalize_raw_question(_raw(source_file="README"), {})["languages"] == []
+    assert _normalize_raw_question(_raw(source_file="a.unknownext"), {})["languages"] == []
+
+
+# ============================================================
+# 知识点语言标签并集累积
+# ============================================================
+
+
+def test_kp_languages_union_merge_on_existing():
+    existing = SimpleNamespace(languages=["python"])
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = existing
+    kp = gen._get_or_create_knowledge_point(
+        db, "u1", "CWE-89", "SQL 注入", languages=["python", "sql"],
+    )
+    assert kp is existing
+    assert kp.languages == ["python", "sql"]
+    # 无新语言时不重复追加
+    gen._get_or_create_knowledge_point(
+        db, "u1", "CWE-89", "SQL 注入", languages=["python"],
+    )
+    assert existing.languages == ["python", "sql"]
+
+
+def test_origin_and_kp_languages_persisted_in_pipeline(monkeypatch):
+    """完整管线:改编题 origin 与知识点语言标签落库"""
+    import json
+
+    monkeypatch.setattr(gen.sandbox_tools, "get_workspace_info", lambda tid: None)
+    synthetic = _raw(stem="改编题", origin="synthetic", languages=["java"])
+    monkeypatch.setattr(
+        gen, "_call_llm",
+        lambda *a, **k: json.dumps([synthetic], ensure_ascii=False),
+    )
+    db = _gen_db()
+    created, skipped = gen.generate_questions_for_task(
+        db, _gen_task(), "u1", client=MagicMock(),
+    )
+    assert len(created) == 1 and skipped == 0
+    assert created[0].origin == "synthetic"
+    kps_added = [
+        c.args[0] for c in db.add.call_args_list
+        if isinstance(c.args[0], gen.KnowledgePoint)
+    ]
+    assert kps_added and kps_added[0].languages == ["java"]
+
+
+# ============================================================
 # 质量关卡:工作区可用时无 code_snippet 的题被过滤,
 # 全部不合格时带质量反馈重试一次
 # ============================================================
@@ -335,11 +418,21 @@ def test_build_system_prompt_common_rules_always_present():
 
 
 def test_build_system_prompt_requires_code_reading_questions():
-    """通用规则强制题目必须阅读真实代码才能作答(禁常识题)"""
+    """通用规则强制题目必须阅读代码才能作答(禁常识题)"""
     for topic in ("security", "architecture", "coding"):
         prompt = build_system_prompt(topic, False)
-        assert "必须阅读真实代码才能作答" in prompt
+        assert "必须阅读代码才能作答" in prompt
         assert "常识题" in prompt
+
+
+def test_build_system_prompt_generalization_and_synthetic():
+    """通用规则含泛化要求与改编题指引,输出结构含 origin/languages"""
+    for topic in ("security", "architecture", "coding"):
+        prompt = build_system_prompt(topic, True)
+        assert "自包含" in prompt            # code_snippet 泛化要求
+        assert "改编题" in prompt            # synthetic 出题形式
+        assert '"origin": "repo|synthetic"' in prompt
+        assert '"languages"' in prompt
 
 
 def test_build_system_prompt_workspace_requires_source_location():
@@ -511,6 +604,60 @@ def test_ensure_workspace_clone_failure_degrades(monkeypatch):
     pref.restore_workspace_for_practice = True
     # 失败静默降级返回 None(出题走无工具路径),不抛异常
     assert _ensure_workspace(MagicMock(), _task_with_repo(), pref) is None
+
+
+def test_ensure_workspace_emits_restore_events(monkeypatch):
+    """恢复成功:依次推 start → progress(克隆进度回调透传)→ done 事件"""
+    state = {"info": None}
+    monkeypatch.setattr(
+        gen.sandbox_tools, "get_workspace_info", lambda tid: state["info"],
+    )
+
+    def fake_clone(repo_url, branch=None, task_id="", git_tokens=None, **kw):
+        # 模拟克隆过程中回调进度(与真实节流点位一致)
+        cb = kw.get("progress_callback")
+        assert cb is not None, "应透传 progress_callback"
+        cb(30, "Receiving objects: 30%")
+        cb(80, "Receiving objects: 80%")
+        state["info"] = {"repo_path": "/repo-restored"}
+
+    monkeypatch.setattr(gen.sandbox_tools, "clone_repo_with_fallback", fake_clone)
+    monkeypatch.setattr(gen.sandbox_tools, "mark_task_completed", lambda tid: None)
+    monkeypatch.setattr(gen, "_load_git_tokens", lambda db, uid: {})
+    events = []
+    pref = MagicMock()
+    pref.restore_workspace_for_practice = True
+    info = _ensure_workspace(
+        MagicMock(), _task_with_repo(), pref,
+        event_callback=lambda etype, data: events.append((etype, data)),
+    )
+    assert info == {"repo_path": "/repo-restored"}
+    assert [e[0] for e in events] == ["restore"] * 4
+    phases = [e[1]["phase"] for e in events]
+    assert phases == ["start", "progress", "progress", "done"]
+    assert events[1][1]["percent"] == 30
+    assert events[2][1]["message"] == "Receiving objects: 80%"
+
+
+def test_ensure_workspace_failure_emits_failed_event(monkeypatch):
+    """恢复失败:推 start → failed(带截断原因),且不抛异常"""
+
+    def _raise(*a, **k):
+        raise RuntimeError("network error")
+
+    monkeypatch.setattr(gen.sandbox_tools, "get_workspace_info", lambda tid: None)
+    monkeypatch.setattr(gen.sandbox_tools, "clone_repo_with_fallback", _raise)
+    monkeypatch.setattr(gen, "_load_git_tokens", lambda db, uid: {})
+    events = []
+    pref = MagicMock()
+    pref.restore_workspace_for_practice = True
+    info = _ensure_workspace(
+        MagicMock(), _task_with_repo(), pref,
+        event_callback=lambda etype, data: events.append((etype, data)),
+    )
+    assert info is None
+    assert [e[1]["phase"] for e in events] == ["start", "failed"]
+    assert "network error" in events[1][1]["message"]
 
 
 def test_ensure_workspace_no_repo_url(monkeypatch):

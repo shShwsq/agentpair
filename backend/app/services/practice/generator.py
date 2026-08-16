@@ -361,6 +361,7 @@ def _load_git_tokens(db: Session, user_id) -> dict[str, str]:
 
 def _ensure_workspace(
     db: Session, task: Task, settings_row: PracticeSettings | None,
+    event_callback: Callable[[str, dict], None] | None = None,
 ) -> dict | None:
     """保障出题用的工作区,返回 workspace info(含 repo_path;不可用为 None)
 
@@ -368,7 +369,19 @@ def _ensure_workspace(
     - 已清理 + 用户开启 restore_workspace_for_practice + 任务有 repo_url
       → 重新 clone 恢复(成功后标记 completed 纳入 1 小时 TTL 清理序列)
     - 恢复失败/条件不满足 → 静默降级(出题走无工具路径)
+
+    event_callback 非空时推 restore 事件(start/progress/done/failed),
+    供出题进度侧栏展示克隆进度;回调异常不影响恢复主流程。
     """
+
+    def _emit(phase: str, **extra) -> None:
+        if event_callback is None:
+            return
+        try:
+            event_callback("restore", {"phase": phase, **extra})
+        except Exception:
+            logger.warning("[practice] restore 事件回调异常(忽略)", exc_info=True)
+
     task_id_str = str(task.id)
     info = sandbox_tools.get_workspace_info(task_id_str)
     if info and info.get("repo_path"):
@@ -378,18 +391,24 @@ def _ensure_workspace(
     if not repo_url or settings_row is None or not settings_row.restore_workspace_for_practice:
         return info
     logger.info("[task=%s] 出题前沙箱已清理,重新 clone 恢复工作区", task.id)
+    _emit("start")
     try:
         sandbox_tools.clone_repo_with_fallback(
             repo_url,
             branch=params.get("branch"),
             task_id=task_id_str,
             git_tokens=_load_git_tokens(db, task.user_id),
+            progress_callback=lambda percent, message: _emit(
+                "progress", percent=percent, message=message,
+            ),
         )
         # 恢复的 session 属于已完成任务:纳入 TTL 清理序列,避免常驻泄漏
         sandbox_tools.mark_task_completed(task_id_str)
+        _emit("done")
         return sandbox_tools.get_workspace_info(task_id_str)
     except Exception as e:
         logger.warning("[task=%s] 出题前恢复工作区失败(降级为无工具出题): %s", task.id, e)
+        _emit("failed", message=str(e)[:200])
         return sandbox_tools.get_workspace_info(task_id_str)
 
 
@@ -640,7 +659,8 @@ def generate_questions_for_task(
     )
 
     # 工作区:存活 → 挂工具循环;已清理 → 按设置尝试重新 clone
-    ws_info = _ensure_workspace(db, task, settings_row)
+    # (restore 事件经 event_callback 推出题进度侧栏展示克隆进度)
+    ws_info = _ensure_workspace(db, task, settings_row, event_callback=event_callback)
     repo_path = (ws_info or {}).get("repo_path") or ""
     system_prompt = build_system_prompt(topic, workspace_available=bool(repo_path))
     task_id_str = str(task.id)

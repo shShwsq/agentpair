@@ -7,7 +7,7 @@ POST /practice/generate 立即返回 job_id,后台线程执行生成,
 设计:
 - 进程内 dict + 全局锁/条件变量(单实例部署够用;多实例部署时各实例轮询自己的
   job,前端命中非执行实例会 404,属已知边界,后续可换 Redis)
-- 每个 job 维护带序号的事件日志(finding/token/tool/progress/done/error),
+- 每个 job 维护带序号的事件日志(finding/token/tool/restore/progress/done/error),
   SSE 端点按 after_seq 增量重放;token 文本超上限时裁剪最旧的 token 事件,
   中途接入的客户端靠 snapshot(含 recent_text 尾部文本)兜底
 - job 完成/失败后保留 TTL 秒供轮询取结果,过期或超量时清理
@@ -70,6 +70,8 @@ def create_job(
             "current_finding": "",
             # 当前 finding 已累计的 LLM 输出尾部文本(中途接入 snapshot 用)
             "recent_text": "",
+            # 工作区恢复最新状态(start/progress/done/failed,中途接入 snapshot 用)
+            "restore": None,
             # 事件日志:[{"seq": int, "type": str, "data": dict}]
             "events": [],
             "event_seq": 0,
@@ -121,13 +123,15 @@ def set_total(job_id: str, total: int) -> None:
 
 
 def append_event(job_id: str, etype: str, data: dict) -> None:
-    """追加流式事件(finding/token/tool),并维护 snapshot 辅助字段
+    """追加流式事件(finding/token/tool/restore),并维护 snapshot 辅助字段
 
     - finding:切换当前 finding,recent_text 清零
     - token:追加 LLM 输出增量,recent_text 只保留尾部
     - tool:工具调用记录(仅入事件流)
+    - restore:出题前工作区恢复(start/progress/done/failed),同步记入
+      job["restore"] 供中途接入的 snapshot 兜底
     """
-    if etype not in ("finding", "token", "tool"):
+    if etype not in ("finding", "token", "tool", "restore"):
         return
     # [诊断] 测量获取全局锁的等待耗时(不含锁内处理),超阈值告警
     _t = time.perf_counter()
@@ -142,6 +146,8 @@ def append_event(job_id: str, etype: str, data: dict) -> None:
         elif etype == "token":
             delta = str(data.get("delta") or "")
             job["recent_text"] = (job["recent_text"] + delta)[-(_RECENT_TEXT_CHARS):]
+        elif etype == "restore":
+            job["restore"] = dict(data)
         _append_locked(job, etype, data)
         _COND.notify_all()
     if _w > _LOCK_WAIT_THRESHOLD:
@@ -215,6 +221,7 @@ def _summary_locked(job: dict) -> dict:
         "task_title": job["task_title"],
         "current_finding": job["current_finding"],
         "recent_text": job["recent_text"],
+        "restore": job["restore"],
         "skipped_findings": job["skipped_findings"],
         "created_count": job["created_count"] or len(job["questions"]),
         "started_at": job["started_at"].isoformat(),

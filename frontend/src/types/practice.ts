@@ -64,6 +64,8 @@ export interface GenerateJobSummary {
   current_finding: string
   /** 当前 finding 已累计的 LLM 输出尾部文本(中途接入兜底) */
   recent_text: string
+  /** 出题前工作区恢复的最新状态(中途接入兜底;未触发恢复为 null) */
+  restore: GenerateRestoreData | null
   skipped_findings: number
   created_count: number
   started_at: string | null
@@ -88,6 +90,16 @@ export interface GenerateFindingData {
 /** LLM 输出增量(打字机效果) */
 export interface GenerateTokenData {
   delta: string
+}
+
+/** 出题前工作区恢复状态(沙箱已清理时重新 clone) */
+export interface GenerateRestoreData {
+  /** start=开始恢复 / progress=克隆中 / done=恢复成功 / failed=恢复失败降级 */
+  phase: 'start' | 'progress' | 'done' | 'failed'
+  /** 克隆进度百分比 0-100(progress 阶段才有) */
+  percent?: number
+  /** git 进度行文本或失败原因(截断 200 字符) */
+  message?: string
 }
 
 /** 出题工具循环的工具调用记录 */

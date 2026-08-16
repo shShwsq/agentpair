@@ -351,6 +351,32 @@ def test_drafts_filtered_by_task_and_activate(ctx, ctx_b):
     assert r.status_code == 404
 
 
+def test_responses_carry_origin_and_languages(ctx):
+    """job/draft/组卷/题库响应携带 origin 与 languages 字段"""
+    ctx.login()
+    questions = _generate_and_confirm(ctx)
+    for q in questions:
+        assert q["origin"] == "repo"
+        assert q["languages"] == []
+
+    # 组卷响应同样携带两字段
+    r = ctx.client.post("/practice/sessions", json={"count": 3})
+    assert r.status_code == 200
+    for q in r.json()["questions"]:
+        assert q["origin"] == "repo"
+        assert q["languages"] == []
+
+    # 知识点回写语言后,题库列表透传语言标签
+    db = ctx.session_factory()
+    kp = db.query(KnowledgePoint).first()
+    kp.languages = ["python"]
+    db.commit()
+    db.close()
+    items = ctx.client.get("/practice/questions").json()
+    assert items and any(i["languages"] == ["python"] for i in items)
+    assert all(i["origin"] in ("repo", None) for i in items)
+
+
 def test_other_user_session_detail_404(ctx, ctx_b):
     ctx.login()
     _generate_and_confirm(ctx)
