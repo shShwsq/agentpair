@@ -170,6 +170,12 @@ bash scripts/build-sandbox-image.sh --no-qoder-cli --no-qoder-cli-cn --no-kimi-c
 # 服务器在国内时加 --cn-mirror 一键国内加速(避免 docker.io 拉取 ubuntu 超时)
 bash scripts/build-sandbox-image.sh --cn-mirror
 
+# Hermes install.sh 的 GitHub clone 走 SSH(需宿主机有 SSH key 且公钥已加到 GitHub):
+#   --ssh        启用 BuildKit SSH 转发(docker build --ssh default)
+#   --ssh-key    可选,指定 key 文件(如 ~/.ssh/id_ed25519);不指定则走 SSH agent
+# 注意:国内服务器直连 GitHub 22 端口可能被墙,此时 SSH 会 fallback 到 HTTPS(功能不受影响)
+bash scripts/build-sandbox-image.sh --ssh --ssh-key ~/.ssh/id_ed25519
+
 # 或仅换 Docker 基础镜像源(apt/npm 仍用官方源)
 bash scripts/build-sandbox-image.sh --registry docker.m.daocloud.io
 ```
