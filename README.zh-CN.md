@@ -9,10 +9,12 @@ AgentPair 的核心创新是 **user_agent 模拟用户追问** 的交互模式 �
 ## 核心特性
 
 - **双智能体协作**:`user_agent`(意图对齐 + 结果审视)+ `react_agent`(执行)多轮迭代,自动补齐覆盖盲区
+- **检查点评估**:react_agent 执行过程中,user_agent 在迭代边界做轻量方向纠偏,发现跑偏时软中断拉回
 - **执行器抽象层**:内置 react_agent / Qoder CLI / Kimi Code CLI / Hermes CLI / Codex CLI 等可插拔执行器,通过 ACP 协议统一通信
 - **场景模板化**:安全审计、代码审查等场景作为快捷模板(预设提示词 + 推荐 skill),checklist 由 LLM 动态生成 + 用户编辑确认
 - **沙箱隔离**:基于 [OpenSandbox](https://github.com/opensandbox/opensandbox) 的容器化执行,工具调用在隔离环境完成
-- **多 Git 平台**:统一抽象层支持 GitHub / Gitee,OAuth 登录 + 私有仓库绑定 + 自动克隆
+- **多 Git 平台**:统一抽象层支持 GitHub / Gitee,OAuth 登录 + 私有仓库绑定 + 自动克隆(Gitee 令牌经 refresh_token 自动续期)
+- **练习题生成与自适应练习**:把任务真实发现经 LLM 改编为客观题(网络安全 / 架构设计 / 通用代码能力三主题),SM-2 遗忘曲线排期,结合薄弱点强化与难度匹配即时组卷
 - **流式输出**:思考过程、工具调用、计划清单实时推送到前端
 - **用户澄清循环**:任务启动前 `user_agent` 可向用户提问,意图对齐后再执行
 - **技能系统**:可加载专家 SKILL.md 指令,按任务选择性启用
@@ -33,15 +35,17 @@ AgentPair 的核心创新是 **user_agent 模拟用户追问** 的交互模式 �
 AgentPair/
 ├── backend/                  # FastAPI 后端
 │   ├── app/
-│   │   ├── agents/           # 智能体(user_agent / react_agent / orchestrator)
+│   │   ├── agents/           # 智能体(user_agent / react_agent / orchestrator / verifier / CLI wrapper)
 │   │   ├── llm/              # LLM 客户端封装
-│   │   ├── models/           # SQLAlchemy 数据模型
-│   │   ├── routers/          # API 路由(auth / tasks / git_provider / ...)
+│   │   ├── models/           # SQLAlchemy 数据模型(含 practice / agent_policy / task_artifact)
+│   │   ├── routers/          # API 路由(auth / tasks / git_provider / practice / ...)
 │   │   ├── sandbox/          # OpenSandbox 客户端封装
-│   │   ├── scenarios/        # 场景模板(安全审计 / 代码审查)
+│   │   ├── scenarios/        # 场景模板(安全审计 / 代码审查 / 通用)
 │   │   ├── schemas/          # Pydantic 请求/响应模型
+│   │   ├── services/         # 练习引擎(SM-2 / selector / generator)+ 记忆 / 工作区 diff
 │   │   ├── skills/           # 技能加载器 + skill 注册表
-│   │   ├── tools/            # ReAct 工具(clone_repo / search_code / ...)
+│   │   ├── tools/            # ReAct 工具(clone_repo / search_code / run_lint / ...)
+│   │   ├── agent_checkpoint.py # 检查点评估(迭代边界方向纠偏)
 │   │   ├── config.py         # 环境变量配置(pydantic-settings)
 │   │   ├── git_provider.py   # Git 平台抽象层(GitHub / Gitee)
 │   │   └── main.py           # FastAPI 入口
@@ -50,10 +54,11 @@ AgentPair/
 │   └── .env.example
 ├── frontend/                 # Vue 3 前端
 │   ├── src/
-│   │   ├── api/              # API 客户端
+│   │   ├── api/              # API 客户端(含 practice / practiceStream)
 │   │   ├── components/       # 可复用组件
+│   │   ├── composables/      # Composables(主题 / 引导 / 功能开关)
 │   │   ├── stores/           # Pinia 状态管理
-│   │   ├── views/            # 页面视图
+│   │   ├── views/            # 页面视图(含 PracticeView)
 │   │   └── types/            # TypeScript 类型定义
 │   ├── package.json
 │   └── .env.example
@@ -148,6 +153,7 @@ npm run dev
 | `APP_PORT` | 监听端口 | `8000` |
 | `LOG_LEVEL` | 日志级别(留空则按 `APP_DEBUG` 决定) | 空 |
 | `APP_BASE_URL` | 应用基础 URL(用于邮件验证/重置链接) | `http://localhost:5173` |
+| `PRACTICE_ENABLED` | 出题 & 练习功能总开关(`false` = `/practice/*` 路由不注册、任务完成不自动出题;已建表与题库数据保留) | `true` |
 
 #### 认证与加密
 
@@ -196,6 +202,7 @@ GitHub 和 Gitee 二者均支持,按需配置。留空的平台对应路由会�
 | `LLM_API_KEY` | LLM API Key(从厂商控制台获取) | **必填** |
 | `LLM_MODEL` | 模型 id | `qwen3.6-flash` |
 | `LLM_ENABLE_THINKING` | 是否启用思考(混合思考模型可开关) | `true` |
+| `LLM_RATE_LIMIT_MAX_RETRIES` | 429 限流退避重试次数(指数退避 + 抖动,0=不重试) | `3` |
 
 > 生产环境/多用户场景下,LLM 配置由用户在「模型配置」页面自行管理,这几个环境变量仅作开发期兜底。
 
@@ -204,6 +211,8 @@ GitHub 和 Gitee 二者均支持,按需配置。留空的平台对应路由会�
 | 变量 | 说明 | 默认值 |
 |---|---|---|
 | `REPO_CLONE_DIR` | 本地 clone 临时目录(`SANDBOX_MODE=local` 时使用) | `./_repos` |
+| `REPO_CLONE_DEPTH` | 克隆深度:`0`=完整克隆(默认,保留 git 历史供 log/blame 追溯);`>0`=浅克隆 `--depth N`(超大仓库可加速) | `0` |
+| `REPO_CLONE_TIMEOUT` | 克隆超时(秒),完整克隆比浅克隆慢,超大仓库可调大 | `600` |
 
 #### 沙箱(OpenSandbox)
 
@@ -214,6 +223,7 @@ GitHub 和 Gitee 二者均支持,按需配置。留空的平台对应路由会�
 | `SANDBOX_API_KEY` | Server 鉴权 API Key(对应 server `[server].api_key`,留空不鉴权) | 空 |
 | `SANDBOX_IMAGE` | 沙箱镜像(必须预装 git / ripgrep / python3 / awk / coreutils) | `ubuntu` |
 | `SANDBOX_TIMEOUT_MINUTES` | 沙箱超时(分钟) | `30` |
+| `SANDBOX_RENEW_INTERVAL_MINUTES` | 会话续期间隔(分钟):访问时距上次续期超过此值就 renew TTL,防长任务被 Server 回收 | `5` |
 | `SANDBOX_USE_SERVER_PROXY` | 是否走 Server 代理(跨机部署必须 `true`) | `true` |
 | `SANDBOX_SSH_KEY_HOST_PATH` | Server 宿主机 SSH key 目录(只读挂载到沙箱供 SSH clone 用,绝对路径) | 空 |
 | `SANDBOX_CPU` | 沙箱 CPU 限制(如 `2`) | 空 |
@@ -224,6 +234,13 @@ GitHub 和 Gitee 二者均支持,按需配置。留空的平台对应路由会�
 #### CLI 执行器(可选,按 `task.executor` 生效)
 
 每个 CLI 执行器有两类配置:二进制名/路径 + 安装命令(沙箱内未检测到时自动安装)。
+
+**CLI 挂死兜底**(对所有 CLI 执行器生效):
+
+| 变量 | 说明 | 默认值 |
+|---|---|---|
+| `ACP_IDLE_TIMEOUT_OUTPUT_SECONDS` | 无活动工具(等模型输出)时的 idle 超时,超时则 cancel + 用已累积输出收尾本轮(`0`=关闭) | `300` |
+| `ACP_IDLE_TIMEOUT_TOOL_SECONDS` | 有工具在跑(克隆/构建等长命令本就无输出)时的最后防线超时,防 CLI 中途崩溃没发 completed(`0`=关闭) | `1800` |
 
 **Qoder CLI(国际版)** —— `task.executor=qoder_cli`
 
@@ -314,6 +331,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - [规格说明](docs/spec.md) —— 完整产品规格与架构设计
 - [开发路线图](docs/Roadmap.md) —— 阶段规划与进度
 - [沙箱部署指南](docs/opensandbox-deploy.md) —— OpenSandbox Server 部署与镜像构建
+- [智能体架构](docs/agent-architecture.md) —— user_agent / react_agent / CLI 智能体内幕、上下文传递与检查点评估
+- [任务详情页结构](docs/task-detail-view-structure.md) —— TaskDetailView 布局与渲染管线
 
 ## 开发说明
 
@@ -322,6 +341,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - **新增技能**:在 `backend/skills/<category>/<name>/` 下放 `SKILL.md`,启动时自动扫描加载。
 - **新增 Git 平台**:在 `git_provider.py` 的 `PROVIDERS` 注册表添加实现类即可,前后端路由/UI 已参数化。
 - **新增 CLI 执行器**:在 `backend/app/agents/` 的 registry 注册 agent_type,实现 ACP 协议通信。
+- **练习功能**:`PRACTICE_ENABLED=false` 会关闭 `/practice/*` 路由与自动出题;出题日志落在 `backend/logs/practice_generate.log`。
 
 ## License
 
