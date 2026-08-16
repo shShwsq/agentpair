@@ -14,6 +14,8 @@
  */
 import type { RouteLocationRaw } from 'vue-router'
 
+import { practiceEnabled } from '@/composables/useFeatures'
+
 /** 气泡相对目标元素的位置 */
 export type OnboardingPlacement = 'top' | 'bottom' | 'left' | 'right'
 
@@ -31,14 +33,20 @@ export interface OnboardingStep {
   content: string
   /** 气泡相对目标元素的位置;默认 'bottom' */
   placement?: OnboardingPlacement
+  /** 仅练习功能启用(PRACTICE_ENABLED=true)时包含此步骤 */
+  requiresPractice?: boolean
+  /** 练习功能启用时覆盖 content(同一锚点在两种部署下的不同文案) */
+  contentWhenPractice?: string
 }
 
 /**
  * 引导版本号。步骤结构或文案有大改时递增,使老用户重新看到引导。
  * - v1: 首版,覆盖 HomeView / TaskCreateView / TaskDetailView / AppHeader。
  * - v2: 主导航文案对齐实际 7 项(补「技能管理」),并补充主题切换入口说明。
+ * - v3: 感知练习功能开关(PRACTICE_ENABLED):启用部署新增「自适应练习」介绍步骤,
+ *       home-nav 文案补全该导航项;关闭部署步骤与文案保持 v2 不变。
  */
-export const ONBOARDING_VERSION = 2
+export const ONBOARDING_VERSION = 3
 
 /**
  * 全部引导步骤(按路由分组,组内按顺序播放)。
@@ -88,6 +96,18 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
     title: '主导航',
     content:
       '顶栏可切换:模型设置(配置 LLM)、CLI 设置(外部 CLI 凭据)、协作策略(评估频率 / 验证权限 / CLI 命令确认)、技能管理(上传自定义技能)、记忆管理(用户偏好 / 全局 / 项目记忆)。',
+    contentWhenPractice:
+      '顶栏可切换:模型设置(配置 LLM)、CLI 设置(外部 CLI 凭据)、协作策略(评估频率 / 验证权限 / CLI 命令确认)、技能管理(上传自定义技能)、自适应练习(按掌握度出题复习)、记忆管理(用户偏好 / 全局 / 项目记忆)。',
+  },
+  {
+    id: 'home-practice',
+    target: 'app-header-nav-practice',
+    route: 'home',
+    placement: 'bottom',
+    title: '自适应练习',
+    content:
+      '根据你的掌握度自动生成练习题,任务完成后可进入练习巩固知识。导航项右上角的红色数字表示到期待复习的题目数。',
+    requiresPractice: true,
   },
   {
     id: 'home-settings',
@@ -185,7 +205,17 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
  * 引导组件在进入某路由时调用,若返回非空数组且该路由未标记完成,则启动播放。
  */
 export function getStepsForRoute(routeName: string): OnboardingStep[] {
-  return ONBOARDING_STEPS.filter((s) => s.route === routeName)
+  return (
+    ONBOARDING_STEPS
+      // 练习开关感知:requiresPractice 步骤仅在练习启用部署中播放
+      .filter((s) => s.route === routeName && (!s.requiresPractice || practiceEnabled.value))
+      // 文案覆盖:练习启用时用 contentWhenPractice 替换 content(浅拷贝,不改原定义)
+      .map((s) =>
+        practiceEnabled.value && s.contentWhenPractice
+          ? { ...s, content: s.contentWhenPractice }
+          : s,
+      )
+  )
 }
 
 /**

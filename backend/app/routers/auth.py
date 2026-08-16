@@ -11,9 +11,10 @@
 - POST   /auth/password/reset        重置密码
 - POST   /auth/password/change       修改密码(需登录)
 - POST   /auth/oauth/{provider}     Git 平台 OAuth 登录(github / gitee)
-- DELETE /auth/account               删除账号(硬删除,连带 task+配置+token+绑定)
+- DELETE /auth/account               删除账号(硬删除,连带 task+配置+token+绑定+磁盘 skill)
 """
 import logging
+import shutil
 import uuid
 from datetime import datetime, timezone
 
@@ -58,6 +59,11 @@ from app.security import (
     extract_user_id_from_token,
     hash_password,
     verify_password,
+)
+from app.skills.loader import (
+    DEFAULT_SKILLS_ROOT,
+    get_user_skills_root,
+    reload_registry,
 )
 
 logger = logging.getLogger(__name__)
@@ -318,6 +324,24 @@ def change_password(
 # ============================================================
 
 
+def _cleanup_user_skills(user_id: uuid.UUID) -> None:
+    """删除账户时清理磁盘上该用户上传的 skill
+
+    skill 走文件系统存储(USER_SKILLS_DIR),无数据库外键,需手动清理:
+    - 当前落地位置:<USER_SKILLS_DIR>/user_<uid>/(DirectorySkillStorage)
+    - 旧版本遗留位置:backend/skills/user_<uid>/(与 skills.delete 同源清理,幂等)
+    清理后刷新进程级注册表,避免残留条目。失败仅记日志,不阻断账号删除。
+    """
+    try:
+        scenario_id = f"user_{user_id}"
+        shutil.rmtree(get_user_skills_root() / scenario_id, ignore_errors=True)
+        shutil.rmtree(DEFAULT_SKILLS_ROOT / scenario_id, ignore_errors=True)
+        reload_registry()
+        logger.info("用户 %s 的 skill 磁盘目录已清理", user_id)
+    except Exception:
+        logger.exception("清理用户 %s 的 skill 磁盘目录失败", user_id)
+
+
 @router.delete("/account", response_model=MessageResponse)
 def delete_account(
     req: DeleteAccountRequest,
@@ -328,7 +352,9 @@ def delete_account(
 
     要求用户输入完整邮箱作为二次确认,后端校验匹配后执行硬删除:
     - 连带删除该用户的 task、user_llm_config、user_git_bindings(email_token 已 CASCADE)
+    - 练习数据 / 项目记忆 / 偏好设置等均随外键 CASCADE 删除
     - 解除 Git 平台关联(provider_user_id 随绑定行释放,可被其他账号绑定)
+    - 清理磁盘上该用户上传的 skill 目录
 
     安全考虑:
     - 邮箱不匹配 → 400,不执行删除
@@ -345,6 +371,9 @@ def delete_account(
     # user → tasks → conversations/results, user → user_llm_config, user → email_token
     db.delete(user)
     db.commit()
+
+    # skill 走文件系统存储,无数据库外键,需手动清理磁盘目录
+    _cleanup_user_skills(user.id)
 
     logger.info("用户 %s (%s) 已删除账号", user.id, user.email)
 
