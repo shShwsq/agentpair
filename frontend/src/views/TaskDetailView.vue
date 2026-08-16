@@ -57,6 +57,7 @@ import {
   updateTaskVerifierConfig,
 } from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
+import { listDrafts } from '@/api/practice'
 import { listArtifacts } from '@/api/taskArtifacts'
 import { clientLog } from '@/utils/clientLog'
 import { extractErrorMessage } from '@/utils/error'
@@ -2550,6 +2551,27 @@ const expandedResults = reactive<Set<string>>(new Set())
 
 // ---- 生成练习题(把结果清单的真实发现转为自适应练习题,见 PracticeGenerateDialog) ----
 const practiceDialogOpen = ref(false)
+/** 该任务待确认 draft 数(>0 时按钮提示「确认练习题(N)」,含任务完成后自动生成的) */
+const pendingDraftCount = ref(0)
+
+async function refreshPracticeDraftCount(): Promise<void> {
+  if (!task.value || task.value.status !== 'completed') {
+    pendingDraftCount.value = 0
+    return
+  }
+  try {
+    pendingDraftCount.value = (await listDrafts(String(task.value.id))).length
+  } catch {
+    pendingDraftCount.value = 0  // 匿名/失败不提示
+  }
+}
+
+watch(
+  () => task.value?.status,
+  (status) => {
+    if (status === 'completed') refreshPracticeDraftCount()
+  },
+)
 
 function openPracticeGenerate(): void {
   practiceDialogOpen.value = true
@@ -3151,9 +3173,9 @@ function toggleResult(id: string): void {
             <button
               v-if="task.status === 'completed'"
               class="practice-generate-btn"
-              title="把审计发现改编为自适应练习题"
+              :title="pendingDraftCount > 0 ? '存在待确认的候选题,点击预览入库' : '把审计发现改编为自适应练习题'"
               @click="openPracticeGenerate"
-            >生成练习题</button>
+            >{{ pendingDraftCount > 0 ? `确认练习题(${pendingDraftCount})` : '生成练习题' }}</button>
           </h2>
           <template v-for="group in resultGroups" :key="group.key">
             <h3 v-if="resultGrouping" class="sidebar-result-group">
@@ -3329,8 +3351,8 @@ function toggleResult(id: string): void {
       v-if="task"
       :open="practiceDialogOpen"
       :task-id="String(task.id)"
-      @close="practiceDialogOpen = false"
-      @confirmed="practiceDialogOpen = false"
+      @close="practiceDialogOpen = false; refreshPracticeDraftCount()"
+      @confirmed="practiceDialogOpen = false; refreshPracticeDraftCount()"
     />
 
     <!-- 危险命令确认弹窗(local 模式,危险命令需用户确认) -->
