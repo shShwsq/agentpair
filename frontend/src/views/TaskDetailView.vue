@@ -27,6 +27,7 @@ import { jsonrepair } from 'jsonrepair'
 import AppHeader from '@/components/AppHeader.vue'
 import ChecklistReviewDialog from '@/components/ChecklistReviewDialog.vue'
 import ConversationMessage from '@/components/ConversationMessage.vue'
+import PracticeGenerateDialog from '@/components/PracticeGenerateDialog.vue'
 import QuestionDialog from '@/components/QuestionDialog.vue'
 import UserMessageInput from '@/components/UserMessageInput.vue'
 import TaskRuntimeSettings from '@/components/TaskRuntimeSettings.vue'
@@ -56,6 +57,8 @@ import {
   updateTaskVerifierConfig,
 } from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
+import { listDrafts } from '@/api/practice'
+import { ensureFeaturesLoaded, practiceEnabled } from '@/composables/useFeatures'
 import { listArtifacts } from '@/api/taskArtifacts'
 import { clientLog } from '@/utils/clientLog'
 import { extractErrorMessage } from '@/utils/error'
@@ -2547,6 +2550,40 @@ async function locateCheckpoint(id: string): Promise<void> {
 // ---- 右侧栏结果清单展开状态(默认折叠,点击卡片展开正文) ----
 const expandedResults = reactive<Set<string>>(new Set())
 
+// ---- 生成练习题(把结果清单的真实发现转为自适应练习题,见 PracticeGenerateDialog) ----
+// 后端 PRACTICE_ENABLED=false 时隐藏入口并跳过 draft 拉取
+ensureFeaturesLoaded()
+const practiceDialogOpen = ref(false)
+/** 该任务待确认 draft 数(>0 时按钮提示「确认练习题(N)」,含任务完成后自动生成的) */
+const pendingDraftCount = ref(0)
+
+async function refreshPracticeDraftCount(): Promise<void> {
+  if (!practiceEnabled.value) {
+    pendingDraftCount.value = 0
+    return
+  }
+  if (!task.value || task.value.status !== 'completed') {
+    pendingDraftCount.value = 0
+    return
+  }
+  try {
+    pendingDraftCount.value = (await listDrafts(String(task.value.id))).length
+  } catch {
+    pendingDraftCount.value = 0  // 匿名/失败不提示
+  }
+}
+
+watch(
+  () => task.value?.status,
+  (status) => {
+    if (status === 'completed') refreshPracticeDraftCount()
+  },
+)
+
+function openPracticeGenerate(): void {
+  practiceDialogOpen.value = true
+}
+
 function toggleResult(id: string): void {
   if (expandedResults.has(id)) {
     expandedResults.delete(id)
@@ -3138,7 +3175,15 @@ function toggleResult(id: string): void {
           class="sidebar-results"
           data-onboarding="detail-results"
         >
-          <h2>结果清单 <span class="count">({{ task.results.length }})</span></h2>
+          <h2>
+            结果清单 <span class="count">({{ task.results.length }})</span>
+            <button
+              v-if="task.status === 'completed' && practiceEnabled"
+              class="practice-generate-btn"
+              :title="pendingDraftCount > 0 ? '存在待确认的候选题,点击预览入库' : '把审计发现改编为自适应练习题'"
+              @click="openPracticeGenerate"
+            >{{ pendingDraftCount > 0 ? `确认练习题(${pendingDraftCount})` : '生成练习题' }}</button>
+          </h2>
           <template v-for="group in resultGroups" :key="group.key">
             <h3 v-if="resultGrouping" class="sidebar-result-group">
               <span :class="['severity-tag', `sev-${group.color}`]">{{ group.label }}</span>
@@ -3306,6 +3351,15 @@ function toggleResult(id: string): void {
       :submitting="submittingVerifyAction"
       @approve="handleApproveVerifyAction"
       @reject="handleRejectVerifyAction"
+    />
+
+    <!-- 练习题生成预览对话框(结果清单发现 → LLM 出题 → 预览确认入库) -->
+    <PracticeGenerateDialog
+      v-if="task"
+      :open="practiceDialogOpen"
+      :task-id="String(task.id)"
+      @close="practiceDialogOpen = false; refreshPracticeDraftCount()"
+      @confirmed="practiceDialogOpen = false; refreshPracticeDraftCount()"
     />
 
     <!-- 危险命令确认弹窗(local 模式,危险命令需用户确认) -->
@@ -3665,6 +3719,25 @@ function toggleResult(id: string): void {
   margin-bottom: var(--space-3);
   font-size: var(--fs-base);
   font-weight: var(--fw-semibold);
+}
+
+/* 结果清单标题旁的「生成练习题」入口(仅任务完成后可用) */
+.practice-generate-btn {
+  margin-left: auto;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--color-primary);
+  background: var(--color-primary-light);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.practice-generate-btn:hover {
+  color: var(--color-text-inverse);
+  background: var(--color-primary);
 }
 
 /* 结果分组头(仅有分组声明时显示) */

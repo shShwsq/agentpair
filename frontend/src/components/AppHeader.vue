@@ -14,17 +14,47 @@
  * 主题按钮:弹出浅色/深色/跟随系统三选项,选择持久化到 localStorage(useTheme)。
  */
 import { onBeforeUnmount, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
+import { getPracticeSummary } from '@/api/practice'
 import BrandLogo from '@/components/BrandLogo.vue'
 import HelpDialog from '@/components/HelpDialog.vue'
 import { useTheme } from '@/composables/useTheme'
 import type { ThemeMode } from '@/composables/useTheme'
+import { ensureFeaturesLoaded, practiceEnabled } from '@/composables/useFeatures'
 import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
+const route = useRoute()
 const authStore = useAuthStore()
 const { mode, resolved, setMode } = useTheme()
+
+/** 到期复习题数(「自适应练习」导航项红色徽标;0 时隐藏) */
+const practiceDueCount = ref(0)
+
+/** 静默拉取练习概览刷新徽标(未登录/网络异常不提示;练习功能关闭时跳过) */
+async function refreshPracticeBadge(): Promise<void> {
+  if (!practiceEnabled.value) {
+    practiceDueCount.value = 0
+    return
+  }
+  try {
+    const summary = await getPracticeSummary()
+    practiceDueCount.value = summary.due_count
+  } catch {
+    // 静默失败,徽标保持现状
+  }
+}
+
+// 先拿功能开关再刷徽标(后端关闭练习功能时不拉概览、隐藏导航项)
+ensureFeaturesLoaded().then(refreshPracticeBadge)
+// 路由切换时刷新(任务完成后题库/到期数会变化)
+watch(
+  () => route.path,
+  () => {
+    refreshPracticeBadge()
+  },
+)
 
 /** 帮助文档弹窗是否显示 */
 const helpOpen = ref(false)
@@ -95,6 +125,12 @@ function handleCloseHelp(): void {
             <RouterLink to="/cli">CLI 设置</RouterLink>
             <RouterLink to="/agent-policy">协作策略</RouterLink>
             <RouterLink to="/skills">技能管理</RouterLink>
+            <RouterLink v-if="practiceEnabled" to="/practice">
+              自适应练习
+              <span v-if="practiceDueCount > 0" class="practice-badge">{{
+                practiceDueCount > 99 ? '99+' : practiceDueCount
+              }}</span>
+            </RouterLink>
             <RouterLink to="/memory">记忆管理</RouterLink>
           </slot>
         </nav>
@@ -402,5 +438,22 @@ function handleCloseHelp(): void {
   height: 2px;
   background: var(--color-primary);
   border-radius: var(--radius-full);
+}
+
+/* 到期复习徽标:红色小圆角数字,钉在「自适应练习」导航项右上角 */
+:deep(.practice-badge) {
+  position: absolute;
+  top: 1px;
+  right: 0;
+  min-width: 16px;
+  padding: 0 4px;
+  font-size: 10px;
+  font-weight: var(--fw-semibold);
+  line-height: 16px;
+  text-align: center;
+  color: #fff;
+  background: var(--color-danger);
+  border-radius: var(--radius-full);
+  pointer-events: none;
 }
 </style>

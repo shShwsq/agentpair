@@ -19,6 +19,7 @@ import type {
   ProjectListResponse,
   ProjectOut,
   SaveAgentPolicyRequest,
+  SavePracticeSettingsRequest,
   SaveProjectRequest,
   SaveUserMemoryRequest,
   SaveUserPreferenceRequest,
@@ -38,6 +39,13 @@ export function getPreferences(): Promise<UserPreferenceOut> {
 /** 保存/更新 User Profile (get_or_create) */
 export function savePreferences(body: SaveUserPreferenceRequest): Promise<UserPreferenceOut> {
   return client.put('/memory/preferences', body).then((r) => r.data)
+}
+
+/** 保存/更新练习设置(任务完成后自动生成练习题开关) */
+export function savePracticeSettings(
+  body: SavePracticeSettingsRequest,
+): Promise<UserPreferenceOut> {
+  return client.put('/memory/preferences/practice', body).then((r) => r.data)
 }
 
 /** 保存/更新 agent 策略配置(检查点评估频率、打断权限等) */

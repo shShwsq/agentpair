@@ -118,3 +118,23 @@ def get_optional_user_sse(
         except (TokenExpiredError, TokenInvalidError):
             pass
     return None
+
+
+def get_current_user_sse(
+    authorization: str | None = Header(default=None),
+    token: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> User:
+    """SSE 专用必须登录(匿名 → 401)
+
+    用于数据 per-user 隔离的 SSE 端点(如出题进度流);
+    鉴权解析与 get_optional_user_sse 一致,仅匿名时行为不同。
+    """
+    user = get_optional_user_sse(authorization=authorization, token=token, db=db)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="未登录或登录已过期",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user

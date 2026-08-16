@@ -20,13 +20,33 @@ export interface UserPreferenceOut {
   user_profile: string
   /** agent 策略配置(检查点评估频率、打断权限等),null=未配置(用系统默认) */
   agent_policy: SaveAgentPolicyRequest | null
+  /** 任务完成后是否自动生成练习题 draft(默认开;产出仍需预览确认) */
+  auto_generate_practice: boolean
+  /** 当前学习主题(出题提示词按此切换) */
+  learning_topic: LearningTopic
+  /** 出题前沙箱已清理时是否重新 clone 恢复工作区(默认关) */
+  restore_workspace_for_practice: boolean
   /** 最后更新时间(ISO 字符串,未配置时为 null) */
   updated_at: string | null
 }
 
+/** 学习主题(出题视角切换) */
+export type LearningTopic = 'security' | 'architecture' | 'coding'
+
 /** 保存 User Profile 请求(PUT /memory/preferences body) */
 export interface SaveUserPreferenceRequest {
   user_profile: string
+}
+
+/** 保存练习设置请求(PUT /memory/preferences/practice body)
+ *
+ * learning_topic / restore_workspace_for_practice 可选,
+ * 不传表示本次不修改(后端 None 语义)。
+ */
+export interface SavePracticeSettingsRequest {
+  auto_generate_practice: boolean
+  learning_topic?: LearningTopic
+  restore_workspace_for_practice?: boolean
 }
 
 /**

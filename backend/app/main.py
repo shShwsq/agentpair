@@ -41,11 +41,13 @@ async def lifespan(app: FastAPI):
     生产环境应切换到 Alembic 迁移管理 schema 变更。
     """
     from app.models import email_token, task, user  # noqa: F401
+    from app.models import agent_policy  # noqa: F401  # 用户级协作策略独立表
     from app.models import task_artifact  # noqa: F401
     from app.models import user_agent_config  # noqa: F401
     from app.models import user_git_binding  # noqa: F401
     from app.models import user_llm_config  # noqa: F401
     from app.models import project  # noqa: F401
+    from app.models import practice  # noqa: F401  # 练习模块全新表,随 create_all 建表
 
     if settings.DB_REBUILD_ON_START:
         Base.metadata.drop_all(bind=engine)
@@ -70,6 +72,21 @@ async def lifespan(app: FastAPI):
     from app.models.user_preference import migrate_user_preference_columns
 
     migrate_user_preference_columns()
+    # 迁移练习设置:user_preferences.auto_generate_practice → practice_settings 独立表
+    # (拷数据后删旧列;新表已由 create_all 建好)
+    from app.models.practice import migrate_practice_settings_table
+
+    migrate_practice_settings_table()
+    # 补练习域新列:practice_settings.learning_topic / restore_workspace_for_practice
+    # + practice_questions.learning_topic(幂等,全新库直接返回)
+    from app.models.practice import migrate_practice_learning_columns
+
+    migrate_practice_learning_columns()
+    # 迁移用户级 agent_policy:user_preferences.agent_policy JSONB → agent_policies 独立表
+    # (拷数据后删旧列;必须晚于 migrate_user_preference_columns,新表已由 create_all 建好)
+    from app.models.agent_policy import migrate_agent_policy_table
+
+    migrate_agent_policy_table()
     # 加 conversations.tool_call_id 列(tool_result 关联对应 tool_call,并行调用时前端精确配对)
     from app.models.task import migrate_conversation_tool_call_id
 
@@ -93,6 +110,11 @@ app.include_router(git_provider_router.router)
 app.include_router(workspace_router.router)
 app.include_router(agent_configs.router)
 app.include_router(memory_router.router)
+# 出题 & 练习功能总开关:关闭时 /practice/* 全部 404(路由不注册)
+if settings.PRACTICE_ENABLED:
+    from app.routers import practice as practice_router
+
+    app.include_router(practice_router.router)
 
 
 @app.get("/")

@@ -56,23 +56,23 @@ def resolve_agent_policy(task: Task, db: Session) -> dict[str, Any]:
     """合并用户级默认 + 任务级覆盖,返回最终生效的策略
 
     优先级:任务级覆盖(task.params["_agent_policy"]) > 用户级默认
-    (UserPreference.agent_policy) > DEFAULT_AGENT_POLICY
+    (agent_policies 表) > DEFAULT_AGENT_POLICY
 
     任务的 user_id 可能为 None(匿名任务),此时只用默认值 + 任务级覆盖。
     """
     defaults = dict(DEFAULT_AGENT_POLICY)
 
-    # 加载用户级默认(若用户已登录且配置了 agent_policy)
+    # 加载用户级默认(若用户已登录且保存过协作策略)
     if task.user_id is not None:
         try:
-            from app.models.user_preference import UserPreference
-            user_pref = (
-                db.query(UserPreference)
-                .filter(UserPreference.user_id == task.user_id)
+            from app.models.agent_policy import AgentPolicy
+            policy_row = (
+                db.query(AgentPolicy)
+                .filter(AgentPolicy.user_id == task.user_id)
                 .first()
             )
-            if user_pref and user_pref.agent_policy:
-                defaults.update(user_pref.agent_policy)
+            if policy_row is not None:
+                defaults.update(policy_row.to_dict())
         except Exception as e:
             logger.warning(
                 f"[task={task.id}] 加载用户级 agent_policy 失败(用默认): {e}"

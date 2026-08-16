@@ -35,6 +35,7 @@ from app.agents.user_agent import (
     run_user_agent,
 )
 from app.clone_skip import clear_skip_state
+from app.config import settings
 from app.event_bus import finish_task, publish
 from app.llm.client import LLMClient
 from app.models.task import Conversation, Result, Task, TaskStatus
@@ -71,7 +72,7 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
     # 先解析 agent 策略(检查点评估频率、打断权限等):
     # 启动阶段文案必须在推送前由 user_agent 启停决定,
     # 否则单 agent 模式会先闪现"双智能体协作启动"误导前端
-    # 合并用户级默认(UserPreference.agent_policy)+ 任务级覆盖(task.params["_agent_policy"])
+    # 合并用户级默认(agent_policies 表)+ 任务级覆盖(task.params["_agent_policy"])
     agent_policy = resolve_agent_policy(task, db)
     logger.info(
         f"[task={task.id}] agent_policy: K={agent_policy.get('checkpoint_interval')}, "
@@ -229,6 +230,14 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
                 summarize_and_save_memory(task, db, llm_client)
             except Exception as mem_err:
                 logger.warning(f"[task={task.id}] 归纳写入记忆失败(忽略): {mem_err}")
+
+            # 自动生成练习题 draft(失败兜底,不影响任务完成;产出仍需用户确认)
+            if settings.PRACTICE_ENABLED:
+                try:
+                    from app.services.practice.auto_generate import auto_generate_practice_for_task
+                    auto_generate_practice_for_task(task, db)
+                except Exception as practice_err:
+                    logger.warning(f"[task={task.id}] 自动生成练习题失败(忽略): {practice_err}")
 
             # 捕获工作区 diff(失败兜底,不影响任务完成)
             try:
@@ -484,6 +493,14 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             summarize_and_save_memory(task, db, llm_client)
         except Exception as mem_err:
             logger.warning(f"[task={task.id}] 归纳写入记忆失败(忽略): {mem_err}")
+
+        # 自动生成练习题 draft(失败兜底,不影响任务完成;产出仍需用户确认)
+        if settings.PRACTICE_ENABLED:
+            try:
+                from app.services.practice.auto_generate import auto_generate_practice_for_task
+                auto_generate_practice_for_task(task, db)
+            except Exception as practice_err:
+                logger.warning(f"[task={task.id}] 自动生成练习题失败(忽略): {practice_err}")
 
         # 捕获工作区 diff(失败兜底,不影响任务完成;容器仍存活)
         try:
@@ -1247,7 +1264,7 @@ def resume_audit_with_message(
     executor = get_executor(task)
 
     # 加载 agent 策略(检查点评估频率、打断权限等)
-    # 合并用户级默认(UserPreference.agent_policy)+ 任务级覆盖(task.params["_agent_policy"])
+    # 合并用户级默认(agent_policies 表)+ 任务级覆盖(task.params["_agent_policy"])
     agent_policy = resolve_agent_policy(task, db)
     logger.info(
         f"[task={task.id}] resume agent_policy: K={agent_policy.get('checkpoint_interval')}, "
