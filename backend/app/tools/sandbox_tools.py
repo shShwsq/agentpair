@@ -1874,14 +1874,22 @@ def run_python_code(
 _GIT_CMD_TIMEOUT = 60
 
 
-def _run_git(repo_path: str, args: list[str], task_id: str = "") -> dict:
+def _run_git(
+    repo_path: str,
+    args: list[str],
+    task_id: str = "",
+    output_limit: int = _RUN_CODE_OUTPUT_LIMIT,
+) -> dict:
     """在仓库目录里运行 git 只读子命令(local 本地 subprocess / sandbox session.run_command)
 
-    供 git_log / git_blame 共用。所有参数以列表形式传递,repo_path 用 -C 指定,
+    供 git_log / git_blame / git_diff 共用。所有参数以列表形式传递,repo_path 用 -C 指定,
     文件路径参数由调用方以 "--" 元素分隔(防选项注入),sandbox 模式再逐个 shlex.quote。
 
+    output_limit: 输出截断上限。默认复用 run_python_code 的上限;
+    git_diff 等输出天然较大的工具可传更大值。
+
     返回:{
-        "output": str,      # git 输出(stdout + 必要时 stderr,截断到 _RUN_CODE_OUTPUT_LIMIT)
+        "output": str,      # git 输出(stdout + 必要时 stderr,截断到 output_limit)
         "exit_code": int,   # 0 表示成功
         "truncated": bool,  # 输出是否被截断
     }
@@ -1936,9 +1944,9 @@ def _run_git(repo_path: str, args: list[str], task_id: str = "") -> dict:
             output = f"[沙箱执行 git 失败: {e}]"
             exit_code = -1
 
-    # 输出截断(复用 run_python_code 的上限,保留尾部——错误信息常在尾部)
-    if len(output) > _RUN_CODE_OUTPUT_LIMIT:
-        output = "[...输出过长,已截断头部...]\n" + output[-_RUN_CODE_OUTPUT_LIMIT:]
+    # 输出截断(保留尾部——错误信息常在尾部;git_diff 等传更大 output_limit)
+    if len(output) > output_limit:
+        output = "[...输出过长,已截断头部...]\n" + output[-output_limit:]
         truncated = True
 
     return {"output": output, "exit_code": exit_code, "truncated": truncated}
@@ -2004,6 +2012,164 @@ def git_blame(
     # "--" 分隔,防止 file_path 被解析为选项
     args += ["--", file_path]
     return _run_git(repo_path, args, task_id)
+
+
+# git_diff 输出预算:diff 天然比 log/blame 大,拉高截断上限后再按文件结构化截断
+_GIT_DIFF_OUTPUT_LIMIT = 40000
+# 单文件 patch 截断上限 / 最多返回文件数(控 token,防大区间 diff 冲爆上下文)
+_GIT_DIFF_PATCH_LIMIT = 2000
+_GIT_DIFF_MAX_FILES = 30
+
+
+def _validate_git_ref(ref: str, name: str) -> str:
+    """校验 git ref(分支/提交/标签),拒绝选项注入与空白字符
+
+    ref 会作为 git diff 的位置参数,若以 - 开头可能被 git 解析为选项;
+    空白字符在 sandbox 拼接命令时也会造成歧义,一并拒绝。
+    """
+    ref = (ref or "").strip()
+    if not ref:
+        raise ValueError(f"{name} 不能为空")
+    if ref.startswith("-"):
+        raise ValueError(f"{name} 不能以 - 开头(防选项注入): {ref}")
+    if any(c.isspace() for c in ref):
+        raise ValueError(f"{name} 不能含空白字符: {ref}")
+    return ref
+
+
+def _parse_numstat(output: str) -> list[dict]:
+    """解析 git diff --numstat 输出为每文件增删行数清单
+
+    行格式:added\tdeleted\tpath(二进制文件 added/deleted 为 -)
+    """
+    files = []
+    for line in output.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        added_s, deleted_s, path = parts
+        files.append({
+            "path": path,
+            "additions": int(added_s) if added_s.lstrip("-").isdigit() else 0,
+            "deletions": int(deleted_s) if deleted_s.lstrip("-").isdigit() else 0,
+        })
+    return files
+
+
+def _parse_diff_patches(output: str) -> dict[str, str]:
+    """把 git diff 全量输出按文件切块,返回 {path: patch}
+
+    以 "diff --git " 行分块;路径从 "+++ b/<path>" 提取,
+    新增文件取 "--- a/<path>"(此时 +++ 是 /dev/null)。重命名块用头行 b/ 路径兜底。
+    """
+    patches: dict[str, str] = {}
+    lines = output.splitlines(keepends=True)
+    starts = [i for i, ln in enumerate(lines) if ln.startswith("diff --git ")]
+    for idx, s in enumerate(starts):
+        e = starts[idx + 1] if idx + 1 < len(starts) else len(lines)
+        chunk_lines = lines[s:e]
+        path = ""
+        minus_path = ""
+        for ln in chunk_lines[1:]:
+            if ln.startswith("--- "):
+                minus_path = ln[4:].strip()
+            elif ln.startswith("+++ "):
+                target = ln[4:].strip()
+                if target == "/dev/null":
+                    # 删除文件:从 --- a/<path> 取
+                    path = minus_path[2:] if minus_path.startswith("a/") else minus_path
+                else:
+                    path = target[2:] if target.startswith("b/") else target
+                break
+        if not path:
+            # 兜底:从 "diff --git a/x b/x" 头行取 b/ 路径
+            header = chunk_lines[0][len("diff --git "):].strip()
+            if " b/" in header:
+                path = header.rsplit(" b/", 1)[1]
+        if path:
+            patches[path] = "".join(chunk_lines)
+    return patches
+
+
+def git_diff(
+    repo_path: str,
+    base: str = "HEAD~1",
+    head: str = "HEAD",
+    file_path: str | None = None,
+    stat_only: bool = False,
+    task_id: str = "",
+) -> dict:
+    """查看两个 ref(提交/分支/标签)之间的结构化 diff(增量审查/演化分析用)
+
+    参数:
+        repo_path: clone_repo 返回的 path
+        base: 起始 ref,默认 HEAD~1(即默认看最近一次提交的变更)
+        head: 结束 ref,默认 HEAD。也可传分支名比较分支差异(如 base="main" head="feature")
+        file_path: 可选,只看某文件的 diff(仓库内相对路径)
+        stat_only: True=只返回每文件增删行数(不看 patch,大区间先用它总览)
+
+    返回:{
+        "base": str, "head": str,
+        "files": [{"path", "additions", "deletions", "patch"}],  # stat_only 时无 patch
+        "total_files": int,      # 变更文件总数(可能大于 files 长度——超上限截断)
+        "truncated": bool,       # 文件数或单文件 patch 被截断
+        "exit_code": int,        # 0=成功;非 0 时附 error(ref 不存在等)
+    }
+    """
+    base = _validate_git_ref(base, "base")
+    head = _validate_git_ref(head, "head")
+
+    range_args: list[str] = ["diff"]
+    if file_path:
+        # numstat + 路径过滤:"--" 分隔防选项注入
+        range_args += ["--numstat", base, head, "--", file_path]
+    else:
+        range_args += ["--numstat", base, head]
+    stat_result = _run_git(repo_path, range_args, task_id, output_limit=_GIT_DIFF_OUTPUT_LIMIT)
+    if stat_result["exit_code"] != 0:
+        return {
+            "base": base, "head": head, "files": [], "total_files": 0,
+            "truncated": False, "exit_code": stat_result["exit_code"],
+            "error": stat_result["output"][:500] or "git diff --numstat 执行失败",
+        }
+
+    stats = _parse_numstat(stat_result["output"])
+    total_files = len(stats)
+    truncated = stat_result["truncated"]
+
+    if stat_only:
+        files = stats[:_GIT_DIFF_MAX_FILES]
+        return {
+            "base": base, "head": head,
+            "files": files,
+            "total_files": total_files,
+            "truncated": truncated or total_files > len(files),
+            "exit_code": 0,
+        }
+
+    # 全量 patch(同区间再跑一次,拿到后按文件切块)
+    patch_args: list[str] = ["diff", base, head]
+    if file_path:
+        patch_args += ["--", file_path]
+    patch_result = _run_git(repo_path, patch_args, task_id, output_limit=_GIT_DIFF_OUTPUT_LIMIT)
+    patches = _parse_diff_patches(patch_result["output"]) if patch_result["exit_code"] == 0 else {}
+    truncated = truncated or patch_result["truncated"]
+
+    files = []
+    for st in stats[:_GIT_DIFF_MAX_FILES]:
+        patch = patches.get(st["path"], "")
+        if len(patch) > _GIT_DIFF_PATCH_LIMIT:
+            patch = patch[:_GIT_DIFF_PATCH_LIMIT] + "\n[...单文件 diff 过长,已截断...]"
+            truncated = True
+        files.append({**st, "patch": patch})
+
+    return {
+        "base": base, "head": head,
+        "files": files,
+        "total_files": total_files,
+        "truncated": truncated or total_files > len(files),
+        "exit_code": 0,
+    }
 
 
 # ============================================================

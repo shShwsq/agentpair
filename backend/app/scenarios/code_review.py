@@ -24,7 +24,12 @@ class CodeReviewTemplate:
 
     @property
     def recommended_skills(self) -> list[str]:
-        return []  # 代码审查无特别推荐的 skill
+        # 对应 skills/code_review/ 目录下实际存在的 skill name(来自 SKILL.md frontmatter)
+        return [
+            "review_error_handling",
+            "review_concurrency",
+            "review_test_quality",
+        ]
 
 
 register_scenario(CodeReviewTemplate())
