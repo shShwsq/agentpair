@@ -28,6 +28,13 @@ export interface WorkspaceInfo {
   mode: string
 }
 
+/** 工作区恢复(POST /tasks/{id}/workspace/restore)的响应 */
+export interface WorkspaceRestoreResponse {
+  available: boolean
+  repo_path: string
+  mode: string
+}
+
 /** 整树快照条目(相对仓库根的路径) */
 export interface WorkspaceTreeEntry {
   path: string

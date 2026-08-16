@@ -5,12 +5,14 @@
  * - GET /tasks/{id}/workspace          工作区信息
  * - GET /tasks/{id}/workspace/files    列出目录
  * - GET /tasks/{id}/workspace/file     读取文件
+ * - POST /tasks/{id}/workspace/restore 过期工作区重新 clone
  */
 import client from './client'
 import type {
   WorkspaceFileResponse,
   WorkspaceFilesResponse,
   WorkspaceInfo,
+  WorkspaceRestoreResponse,
   WorkspaceTreeResponse,
 } from '@/types/workspace'
 
@@ -51,4 +53,12 @@ export function readWorkspaceFile(
       params: { path, offset, max_lines: maxLines },
     })
     .then((r) => r.data)
+}
+
+/** 恢复已过期清理的工作区:重新 clone 任务仓库(用户显式操作,同步等待)
+ *
+ * 做题页右侧代码栏在工作区不可用时展示「重新拉取代码」按钮调用。
+ */
+export function restoreWorkspace(taskId: string): Promise<WorkspaceRestoreResponse> {
+  return client.post(`/tasks/${taskId}/workspace/restore`).then((r) => r.data)
 }

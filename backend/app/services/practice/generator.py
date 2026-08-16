@@ -4,14 +4,21 @@
 1. 取任务 Results(上限 max_findings 条,防 LLM 成本失控)
 2. 逐条 finding 调 LLM 生成 1~3 题:
    - system prompt 按用户学习主题切换(security/architecture/coding)
-   - 工作区可用时挂只读迷你工具循环(read_file / search_code / find_files),
-     LLM 自主补全源码上下文提高出题质量;沙箱已清理且用户开启
-     「出题前恢复工作区」时先重新 clone 恢复
-3. json_repair 容错解析 + 字段校验,失败重试 1 次,仍失败丢弃该 finding
-4. 知识点 get_or_create(优先 CWE 编号)+ 同用户 sha256 去重
-5. 落库为 draft(记录出题时主题),前端预览确认后转 active
+   - 提示词强制题目必须阅读真实代码才能作答(禁止常识题);
+     工作区可用时挂只读迷你工具循环(read_file / search_code / find_files),
+     要求出题前先读源码并记录 source_file/source_lines;
+     沙箱已清理且用户开启「出题前恢复工作区」时先重新 clone 恢复
+3. json_repair 容错解析 + 字段校验,失败重试 1 次,仍失败丢弃该 finding;
+   工作区可用时无 code_snippet 的题判为不合格,带质量反馈重试 1 次后丢弃
+4. 致命错误快速失败:模型 401/403(额度耗尽/Key 失效)等不可重试错误
+   立即中止剩余 finding,抛 PracticeGenerateError 由 job 层展示原因
+5. 知识点 get_or_create(优先 CWE 编号)+ 同用户 sha256 去重
+6. 落库为 draft(记录出题时主题与源码定位),前端预览确认后转 active
 
-出题模型解析:优先 task.llm_config_id(UserLLMConfig),失败回退 env 默认。
+出题模型解析:task.llm_config_id > 用户级默认出题模型
+(practice_settings.default_llm_config_id) > env 默认,逐级回退;
+用户开启「始终用默认出题模型」(force_default_llm)时跳过任务级配置,
+直接按 用户级默认 > env 默认 解析。
 """
 import hashlib
 import json
@@ -22,12 +29,15 @@ from typing import Any
 from json_repair import repair_json
 from sqlalchemy.orm import Session
 
+import openai
 from app.llm.client import LLMClient
 from app.models.practice import (
     DEFAULT_LEARNING_TOPIC,
     LEARNING_TOPIC_ARCHITECTURE,
     LEARNING_TOPIC_CODING,
     LEARNING_TOPIC_SECURITY,
+    THINKING_MODE_OFF,
+    THINKING_MODE_ON,
     KnowledgePoint,
     PracticeSettings,
     Question,
@@ -46,9 +56,34 @@ MAX_QUESTIONS_PER_FINDING = 3
 # 解析失败重试次数
 PARSE_RETRY = 1
 # 出题工具循环最大轮次(每轮可含多次并行工具调用;超限后强制无工具出题)
-MAX_TOOL_ROUNDS = 4
+MAX_TOOL_ROUNDS = 6
 # 单次工具结果回传 LLM 的截断阈值(防上下文爆炸)
 _MAX_TOOL_RESULT_CHARS = 3000
+
+
+class PracticeGenerateError(Exception):
+    """出题过程遇到不可重试的致命错误(已生成的题目照常落库)
+
+    异常消息为面向用户的友好原因,由 job 层捕获后置 error 终态,
+    前端出题进度侧栏直接展示。
+    """
+
+
+def _fatal_llm_reason(e: Exception) -> str | None:
+    """识别出题模型的不可重试致命错误(认证/额度),返回面向用户的原因
+
+    额度耗尽/Key 失效类错误后续所有 finding 必然同样失败,
+    应立即中止(快速失败)而非逐条重试空转;其他错误(超时/
+    5xx/429 等)返回 None,走原有重试与丢弃路径。
+    """
+    if isinstance(e, openai.AuthenticationError):
+        return "API Key 无效或已失效(401),请检查出题模型配置"
+    if isinstance(e, openai.PermissionDeniedError):
+        text = str(e).lower()
+        if "quota" in text or "free tier" in text:
+            return "免费额度已用尽(403),请充值或更换出题模型"
+        return "无权访问该模型(403),请检查出题模型配置"
+    return None
 
 # ============================================================
 # 提示词:按学习主题切换出题视角(通用规则段共享)
@@ -86,31 +121,49 @@ _TOPIC_PROMPT_HEADS = {
 }
 
 # 工作区可用时注入的工具说明段(工具实际可用与否与 sandbox 存活状态一致)
-_TOOL_SECTION = """## 源码查阅工具(仓库已 clone,可调用)
-发现描述里代码不完整时,你可以先调工具查阅真实源码再出题:
+_TOOL_SECTION = """## 源码查阅工具(仓库已 clone,必须使用)
+出题前必须先调工具查阅真实源码,禁止跳过直接出题:
 - read_file(file_path, max_lines?, offset?):读仓库文件(带行号,分页)
 - search_code(pattern, file_glob?, output_mode?):正则搜索代码;
   output_mode="files_with_matches" 可快速定位含关键词的文件
 - find_files(pattern):按 glob 递归查文件路径(如 **/*.py)
-工具轮数有限,查不到就基于现有信息出题。凡提供或读到源码的,
-题干与 code_snippet 必须引用真实源码,不得虚构。"""
+要求:
+1. 每道题出题前至少 read_file 一次相关源文件,确认代码真实存在
+2. 真实代码题(origin=repo):题干与 code_snippet 必须引用读到的真实源码,
+   不得虚构,并给出 source_file(仓库内相对路径)与
+   source_lines(行区间如 "120-150" 或单行号 "42",取自 read_file 结果)
+3. 改编题(origin=synthetic):先读原代码确认问题形态,再原创虚构代码,
+   不给 source_file/source_lines
+确实在仓库中找不到相关代码时,才退回基于发现描述出题(此时不给 source_file)。"""
 
 # 三主题共享的输出规则段
 _COMMON_RULES = """## 通用要求
 1. 出 1~3 道题,题型限定:
    - single_choice(单选):如「该代码片段存在哪种问题」「正确的改进方式是」
    - true_false(判断):选项固定为 ["正确", "错误"],题干为一个可判定真伪的陈述
-2. 题干必须引用发现中的真实代码/场景,不要泛泛而谈;代码片段单独放 code_snippet
-3. 干扰项要有迷惑性但明确错误,正确答案唯一
-4. explanation 讲清原理与改进要点,100 字以内
-5. difficulty 评估难度(1-5 整数):1=概念识别,3=需理解代码逻辑,5=需深入细节
-6. knowledge_name:知识点中文展示名(如 "SQL 注入")
-7. 元信息中若标注 verified: false 或判定为误报的发现,不要出题,直接返回空数组 []
+2. 题目必须阅读代码才能作答:题干要落到具体代码细节(函数名、调用关系、
+   变量/字面量、分支逻辑等),禁止不看代码也能答对的通用概念题、常识题
+3. 代码片段单独放 code_snippet,必须自包含:含必要的函数签名、导入与上下文,
+   脱离原仓库也能读懂;题干不得依赖仓库特有路径、内部业务命名才可作答
+4. 出题形式由你自主决定,鼓励真实代码题与改编题混合:
+   - origin="repo"(真实代码题):基于发现中的真实代码/场景出题
+   - origin="synthetic"(改编题):原创一段含同类漏洞/问题的完整虚构代码,
+     业务场景与命名与原仓库完全不同,题干不得提及原仓库;考察用户把知识
+     泛化应用到新代码的能力
+5. 干扰项要有迷惑性但明确错误,正确答案唯一
+6. explanation 讲清原理与改进要点,100 字以内
+7. difficulty 评估难度(1-5 整数):1=概念识别,3=需理解代码逻辑,5=需深入细节
+8. knowledge_name:知识点中文展示名(如 "SQL 注入")
+9. languages:该题涉及的全部编程语言,小写短名数组(如 ["python", "sql"])
+10. 元信息中若标注 verified: false 或判定为误报的发现,不要出题,直接返回空数组 []
 
 只输出 JSON 数组,不要任何其他文字。每个元素结构:
-{"qtype": "single_choice|true_false", "stem": "...", "code_snippet": "..."或null,
+{"qtype": "single_choice|true_false", "origin": "repo|synthetic",
+ "stem": "...", "code_snippet": "...",
+ "source_file": "仓库内相对路径"或null, "source_lines": "120-150"或null,
  "options": ["...", "..."], "answer_idx": 0, "explanation": "...",
- "difficulty": 3, "knowledge_key": "...", "knowledge_name": "..."}"""
+ "difficulty": 3, "knowledge_key": "...", "knowledge_name": "...",
+ "languages": ["python", "sql"]}"""
 
 
 def build_system_prompt(topic: str, workspace_available: bool) -> str:
@@ -340,6 +393,7 @@ def _load_git_tokens(db: Session, user_id) -> dict[str, str]:
 
 def _ensure_workspace(
     db: Session, task: Task, settings_row: PracticeSettings | None,
+    event_callback: Callable[[str, dict], None] | None = None,
 ) -> dict | None:
     """保障出题用的工作区,返回 workspace info(含 repo_path;不可用为 None)
 
@@ -347,7 +401,19 @@ def _ensure_workspace(
     - 已清理 + 用户开启 restore_workspace_for_practice + 任务有 repo_url
       → 重新 clone 恢复(成功后标记 completed 纳入 1 小时 TTL 清理序列)
     - 恢复失败/条件不满足 → 静默降级(出题走无工具路径)
+
+    event_callback 非空时推 restore 事件(start/progress/done/failed),
+    供出题进度侧栏展示克隆进度;回调异常不影响恢复主流程。
     """
+
+    def _emit(phase: str, **extra) -> None:
+        if event_callback is None:
+            return
+        try:
+            event_callback("restore", {"phase": phase, **extra})
+        except Exception:
+            logger.warning("[practice] restore 事件回调异常(忽略)", exc_info=True)
+
     task_id_str = str(task.id)
     info = sandbox_tools.get_workspace_info(task_id_str)
     if info and info.get("repo_path"):
@@ -357,18 +423,24 @@ def _ensure_workspace(
     if not repo_url or settings_row is None or not settings_row.restore_workspace_for_practice:
         return info
     logger.info("[task=%s] 出题前沙箱已清理,重新 clone 恢复工作区", task.id)
+    _emit("start")
     try:
         sandbox_tools.clone_repo_with_fallback(
             repo_url,
             branch=params.get("branch"),
             task_id=task_id_str,
             git_tokens=_load_git_tokens(db, task.user_id),
+            progress_callback=lambda percent, message: _emit(
+                "progress", percent=percent, message=message,
+            ),
         )
         # 恢复的 session 属于已完成任务:纳入 TTL 清理序列,避免常驻泄漏
         sandbox_tools.mark_task_completed(task_id_str)
+        _emit("done")
         return sandbox_tools.get_workspace_info(task_id_str)
     except Exception as e:
         logger.warning("[task=%s] 出题前恢复工作区失败(降级为无工具出题): %s", task.id, e)
+        _emit("failed", message=str(e)[:200])
         return sandbox_tools.get_workspace_info(task_id_str)
 
 
@@ -378,22 +450,91 @@ def _ensure_workspace(
 
 
 def resolve_llm_client(db: Session, task: Task) -> LLMClient:
-    """按 task.llm_config_id 解析出题模型,失败回退 env 默认"""
-    if task.llm_config_id:
+    """解析出题模型:task.llm_config_id > 用户级默认出题模型 > env 默认
+
+    任务级与用户级配置都存于 UserLLMConfig.llm_configs(一次查询,
+    按优先级逐个匹配);任一级配置缺失/失效均回退下一级,全部失败回退 env 默认。
+    用户开启「始终用默认出题模型」(practice_settings.force_default_llm)时
+    跳过任务级配置,直接按 用户级默认 > env 默认 解析。
+    手动出题与任务完成自动出题共用本解析。
+    """
+    config_ids: list[str] = []
+    pref = None
+    if task.user_id is not None:
+        pref = db.query(PracticeSettings).filter(
+            PracticeSettings.user_id == task.user_id
+        ).first()
+    # 「始终用默认出题模型」开启时忽略任务自带配置(用户级默认 > env 默认)
+    force_default = pref is not None and pref.force_default_llm is True
+    if not force_default and task.llm_config_id:
+        config_ids.append(task.llm_config_id)
+    if pref is not None and pref.default_llm_config_id:
+        config_ids.append(pref.default_llm_config_id)
+    if config_ids:
         try:
             cfg_row = db.query(UserLLMConfig).filter(
                 UserLLMConfig.user_id == task.user_id
             ).first()
-            if cfg_row:
-                for cfg in cfg_row.llm_configs or []:
-                    if cfg.get("id") == task.llm_config_id:
-                        return LLMClient.from_config_dict(cfg)
+            configs = {
+                c.get("id"): c for c in (cfg_row.llm_configs or [])
+            } if cfg_row else {}
+            for cid in config_ids:
+                cfg = configs.get(cid)
+                if cfg:
+                    return LLMClient.from_config_dict(cfg)
             logger.warning(
-                "[practice] 未找到 llm_config_id=%s,回退 env 默认", task.llm_config_id
+                "[practice] 未找到出题模型配置 ids=%s,回退 env 默认", config_ids
             )
         except Exception as e:
             logger.warning("[practice] 加载出题模型配置失败,回退 env 默认: %s", e)
     return LLMClient()
+
+
+def resolve_generate_model_info(db: Session, task: Task) -> dict[str, str]:
+    """解析本次出题将使用的模型与来源(任务详情页展示用)
+
+    与 resolve_llm_client 同一优先级(含「始终用默认出题模型」开关),
+    返回 {model: 模型名, source: task=任务配置 / default=练习默认 / env=环境默认}。
+    """
+    client = resolve_llm_client(db, task)
+    model = getattr(client, "model", None) or "?"
+    source = "env"
+    if task.user_id is not None:
+        pref = db.query(PracticeSettings).filter(
+            PracticeSettings.user_id == task.user_id
+        ).first()
+        if pref is not None and pref.force_default_llm is True:
+            if pref.default_llm_config_id:
+                source = "default"
+        elif task.llm_config_id:
+            source = "task"
+        elif pref is not None and pref.default_llm_config_id:
+            source = "default"
+    elif task.llm_config_id:
+        source = "task"
+    return {"model": model, "source": source}
+
+
+def _apply_thinking_mode(client: LLMClient, settings_row: PracticeSettings | None) -> None:
+    """应用用户级出题思考模式覆盖(手动/自动出题共用)
+
+    follow(默认)保持出题模型配置自身的思考开关不动;on/off 强制开/关:
+    - 思考模式出题更慢但可能质量更高;部分模型思考模式下工具调用
+      会写成文本而非结构化通道,导致出题工具循环失效,此时可强制关
+    - 仅支持思考模式的模型(catalog thinking=only)强制关无效:
+      build_thinking_extras 对该类模型始终强附思考参数,这里记日志后跳过
+    """
+    mode = getattr(settings_row, "thinking_mode_for_practice", None)
+    if mode not in (THINKING_MODE_OFF, THINKING_MODE_ON):
+        return  # follow / 未知值(如测试 mock)→ 保持模型配置原样
+    meta = getattr(client, "model_meta", None) or {}
+    if mode == THINKING_MODE_OFF and meta.get("thinking") == "only":
+        logger.info(
+            "[practice] 模型 %s 仅支持思考模式,忽略强制关闭设置",
+            getattr(client, "model", "?"),
+        )
+        return
+    client.enable_thinking = (mode == THINKING_MODE_ON)
 
 
 def compute_dedup_hash(stem: str, code_snippet: str | None) -> str:
@@ -402,8 +543,38 @@ def compute_dedup_hash(stem: str, code_snippet: str | None) -> str:
     ).hexdigest()
 
 
+# 文件扩展名 → 语言短名(LLM 未给 languages 时从 source_file 推断用)
+_EXT_LANGUAGES: dict[str, str] = {
+    ".py": "python", ".js": "javascript", ".jsx": "javascript",
+    ".ts": "typescript", ".tsx": "typescript", ".java": "java",
+    ".go": "go", ".rs": "rust", ".c": "c", ".h": "c", ".cpp": "cpp",
+    ".cc": "cpp", ".cs": "csharp", ".php": "php", ".rb": "ruby",
+    ".sql": "sql", ".sh": "shell", ".html": "html", ".vue": "vue",
+}
+
+# 语言标签规范化上限(防 LLM 乱输出)
+_MAX_LANGUAGES = 5
+_MAX_LANGUAGE_LEN = 24
+
+
+def _normalize_languages(raw: Any, source_file: str | None) -> list[str]:
+    """规范化 LLM 输出的语言标签:小写/去重/截断;未给时从 source_file 扩展名推断"""
+    langs: list[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            s = str(item or "").strip().lower()
+            if s and s not in langs:
+                langs.append(s[:_MAX_LANGUAGE_LEN])
+    if not langs and source_file:
+        ext = source_file[source_file.rfind("."):].lower() if "." in source_file else ""
+        lang = _EXT_LANGUAGES.get(ext)
+        if lang:
+            langs.append(lang)
+    return langs[:_MAX_LANGUAGES]
+
+
 def _get_or_create_knowledge_point(
-    db: Session, user_id, key: str, name: str
+    db: Session, user_id, key: str, name: str, languages: list[str] | None = None,
 ) -> KnowledgePoint:
     key = (key or "").strip() or "general"
     kp = db.query(KnowledgePoint).filter(
@@ -411,12 +582,18 @@ def _get_or_create_knowledge_point(
         KnowledgePoint.key == key,
     ).first()
     if kp:
+        # 已有知识点:语言标签并集累积(保持原顺序追加新语言)
+        merged = list(kp.languages or [])
+        added = [l for l in (languages or []) if l not in merged]
+        if added:
+            kp.languages = merged + added
         return kp
     kp = KnowledgePoint(
         user_id=user_id,
         key=key,
         name=(name or "").strip() or key,
         category="cwe" if key.upper().startswith("CWE-") else "general",
+        languages=list(languages or []),
     )
     db.add(kp)
     db.flush()
@@ -472,6 +649,15 @@ def _normalize_raw_question(raw: Any, finding_meta: dict) -> dict | None:
     code_snippet = raw.get("code_snippet")
     code_snippet = str(code_snippet).strip() if code_snippet else None
 
+    # 源码定位(工作区可用时 LLM 应给出;老输出无此字段时为 None)
+    source_file = str(raw.get("source_file") or "").strip()[:512] or None
+    source_lines = str(raw.get("source_lines") or "").strip()[:32] or None
+
+    # 出题形式:repo=真实代码题,synthetic=改编题;白名单外回退 repo
+    origin = str(raw.get("origin") or "").strip()
+    if origin not in ("repo", "synthetic"):
+        origin = "repo"
+
     return {
         "qtype": qtype,
         "stem": stem,
@@ -482,27 +668,62 @@ def _normalize_raw_question(raw: Any, finding_meta: dict) -> dict | None:
         "difficulty": difficulty,
         "knowledge_key": knowledge_key,
         "knowledge_name": str(raw.get("knowledge_name") or "").strip(),
+        "source_file": source_file,
+        "source_lines": source_lines,
+        "origin": origin,
+        "languages": _normalize_languages(raw.get("languages"), source_file),
     }
 
 
-def _parse_llm_questions(content: str, finding_meta: dict) -> list[dict]:
-    """json_repair 容错解析 LLM 输出 → 规范题目列表"""
+def _parse_llm_questions(content: str, finding_meta: dict, finding_id=None) -> list[dict]:
+    """json_repair 容错解析 LLM 输出 → 规范题目列表
+
+    解析/校验的每个丢弃分支都落日志(出题专用日志文件),
+    便于排查“一道题也没生成”是模型输出问题还是校验过严。
+    """
     text = (content or "").strip()
     if not text:
+        logger.warning("[practice] finding=%s LLM 输出为空,无法出题", finding_id)
         return []
     try:
         result = repair_json(text, return_objects=True)
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            "[practice] finding=%s json_repair 解析失败: %s; 输出样例: %r",
+            finding_id, e, text[:300],
+        )
         return []
     if isinstance(result, dict):
         result = [result]
     if not isinstance(result, list):
+        logger.warning(
+            "[practice] finding=%s LLM 输出解析结果非数组(%s),样例: %r",
+            finding_id, type(result).__name__, text[:300],
+        )
         return []
     questions = []
+    invalid: list[Any] = []
     for raw in result:
         q = _normalize_raw_question(raw, finding_meta)
         if q:
             questions.append(q)
+        else:
+            invalid.append(raw)
+    if invalid:
+        try:
+            sample = json.dumps(invalid[0], ensure_ascii=False, default=str)[:300]
+        except Exception:
+            sample = str(invalid[0])[:300]
+        logger.warning(
+            "[practice] finding=%s 结构校验丢弃 %d/%d 题,首个无效元素样例: %s",
+            finding_id, len(invalid), len(result), sample,
+        )
+    if not questions and not invalid:
+        # 模型主动返回空数组(提示词约定:判定误报/不适合出题时返回 [])
+        logger.info(
+            "[practice] finding=%s LLM 返回空数组(可能判定为误报或不适合出题)",
+            finding_id,
+        )
     return questions[:MAX_QUESTIONS_PER_FINDING]
 
 
@@ -516,6 +737,13 @@ _FINDING_TEMPLATE = """以下是代码审计任务的一条真实发现:
 【元信息】{metadata}
 
 请基于这条发现出题(1~3 道)。"""
+
+# 工作区可用但生成的题目全部缺代码上下文时,追加到 user prompt 重试的质量反馈
+_NO_CODE_FEEDBACK = (
+    "\n\n【质量反馈】上一轮生成的题目缺少真实代码上下文,不看代码也能作答,不合格。"
+    "请先用源码查阅工具(read_file 等)读取相关源文件,再基于实际源码重新出题:"
+    "题干必须落到具体代码细节,每题必须带 code_snippet,并给出 source_file 与 source_lines。"
+)
 
 
 def generate_questions_for_task(
@@ -537,16 +765,19 @@ def generate_questions_for_task(
     if client is None:
         client = resolve_llm_client(db, task)
 
-    # 用户练习设置:学习主题决定提示词;是否允许出题前恢复工作区
+    # 用户练习设置:学习主题决定提示词;是否允许出题前恢复工作区;
+    # 思考模式覆盖出题模型的思考开关
     settings_row = db.query(PracticeSettings).filter(
         PracticeSettings.user_id == user_id
     ).first()
+    _apply_thinking_mode(client, settings_row)
     topic = (
         settings_row.learning_topic if settings_row else DEFAULT_LEARNING_TOPIC
     )
 
     # 工作区:存活 → 挂工具循环;已清理 → 按设置尝试重新 clone
-    ws_info = _ensure_workspace(db, task, settings_row)
+    # (restore 事件经 event_callback 推出题进度侧栏展示克隆进度)
+    ws_info = _ensure_workspace(db, task, settings_row, event_callback=event_callback)
     repo_path = (ws_info or {}).get("repo_path") or ""
     system_prompt = build_system_prompt(topic, workspace_available=bool(repo_path))
     task_id_str = str(task.id)
@@ -555,6 +786,13 @@ def generate_questions_for_task(
         db.query(Result).filter(Result.task_id == task.id).order_by(Result.created_at).all()
     )[:max_findings]
     total_findings = len(findings)
+
+    # 出题起始快照:模型/主题/工作区/发现数(排查无题产出时的第一手上下文)
+    logger.info(
+        "[practice] 开始出题 task=%s user=%s model=%s topic=%s workspace=%s findings=%d",
+        task.id, user_id, getattr(client, "model", "?"), topic,
+        bool(repo_path), total_findings,
+    )
 
     # 已有 dedup_hash(同用户),避免重复入库
     existing_hashes = {
@@ -565,6 +803,7 @@ def generate_questions_for_task(
 
     created: list[Question] = []
     skipped = 0
+    fatal_reason = ""  # 非空表示遇到不可重试致命错误,需中止并冒泡原因
     for idx, finding in enumerate(findings):
         meta = finding.metadata_ or {}
         if event_callback:
@@ -583,36 +822,78 @@ def generate_questions_for_task(
         )
 
         questions: list[dict] = []
+        user_prompt = prompt
+        content = ""
         for attempt in range(PARSE_RETRY + 1):
             try:
                 content = _call_llm(
-                    client, system_prompt, prompt, task_id_str, repo_path,
+                    client, system_prompt, user_prompt, task_id_str, repo_path,
                     on_event=event_callback,
                 )
             except Exception as e:
+                fatal = _fatal_llm_reason(e)
+                if fatal is not None:
+                    # 额度/认证类错误:后续 finding 必然同样失败,立即中止
+                    # 避免空转(原因经 PracticeGenerateError 推给前端展示)
+                    logger.error(
+                        "[practice] 出题模型致命错误,中止剩余 finding: %s", e,
+                    )
+                    fatal_reason = (
+                        f"出题模型 {getattr(client, 'model', '?')} {fatal}"
+                    )
+                    break
                 logger.warning(
                     "[practice] finding=%s LLM 调用失败(第 %d 次): %s",
                     finding.id, attempt + 1, e,
                 )
                 content = ""
-            questions = _parse_llm_questions(content, meta)
+            questions = _parse_llm_questions(content, meta, finding_id=finding.id)
+            # 质量关卡:工作区可用时无 code_snippet 的题不合格(常识题拦截)
+            if repo_path and questions:
+                qualified = [q for q in questions if q["code_snippet"]]
+                dropped = len(questions) - len(qualified)
+                if dropped:
+                    logger.info(
+                        "[practice] finding=%s 质量关卡: %d/%d 题缺 code_snippet 被丢弃",
+                        finding.id, dropped, len(questions),
+                    )
+                if not qualified and attempt < PARSE_RETRY:
+                    # 全部缺代码上下文:带质量反馈重试一次
+                    logger.info(
+                        "[practice] finding=%s 全部题目缺代码上下文,带质量反馈重试",
+                        finding.id,
+                    )
+                    user_prompt = prompt + _NO_CODE_FEEDBACK
+                    continue
+                questions = qualified
             if questions:
                 break
 
+        if fatal_reason:
+            break
+
         if not questions:
             skipped += 1
+            logger.warning(
+                "[practice] finding=%s 未能产出任何题目(共 %d 次尝试);"
+                "最后一次 LLM 输出样例: %r",
+                finding.id, PARSE_RETRY + 1, (content or "")[:300],
+            )
             if progress_callback:
                 progress_callback(idx + 1, total_findings)
             continue
 
+        dup_skipped = 0
         for q in questions:
             dedup_hash = compute_dedup_hash(q["stem"], q["code_snippet"])
             if dedup_hash in existing_hashes:
+                dup_skipped += 1
                 continue
             existing_hashes.add(dedup_hash)
 
             kp = _get_or_create_knowledge_point(
-                db, user_id, q["knowledge_key"], q["knowledge_name"]
+                db, user_id, q["knowledge_key"], q["knowledge_name"],
+                languages=q["languages"],
             )
             question = Question(
                 user_id=user_id,
@@ -629,9 +910,18 @@ def generate_questions_for_task(
                 status=QuestionStatus.DRAFT,
                 dedup_hash=dedup_hash,
                 learning_topic=topic,
+                origin=q["origin"],
+                source_file=q["source_file"],
+                source_lines=q["source_lines"],
             )
             db.add(question)
             created.append(question)
+
+        if dup_skipped:
+            logger.info(
+                "[practice] finding=%s 去重跳过 %d 题(同用户已有相同题目)",
+                finding.id, dup_skipped,
+            )
 
         if progress_callback:
             progress_callback(idx + 1, total_findings)
@@ -639,4 +929,13 @@ def generate_questions_for_task(
     db.commit()
     for q in created:
         db.refresh(q)
+    logger.info(
+        "[practice] 出题结束 task=%s: 生成 %d 题, %d/%d 条 finding 未出题%s",
+        task.id, len(created), skipped, total_findings,
+        f"(致命错误中止: {fatal_reason})" if fatal_reason else "",
+    )
+    if fatal_reason:
+        # 已生成的 draft 照常保留;错误原因冒泡给 job 层展示
+        suffix = f",中止前已生成 {len(created)} 题" if created else ""
+        raise PracticeGenerateError(f"{fatal_reason}{suffix}")
     return created, skipped

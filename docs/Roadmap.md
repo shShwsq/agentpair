@@ -18,6 +18,8 @@
 | 7 | 网站前端 | ✅ 已完成 |
 | 8 | 微信小程序 | ⬜ 未开始 |
 | 9 | 生产化与上线 | 🔨 部分完成 |
+| 10 | 练习题与自适应练习 | ✅ 已完成 |
+| 11 | 检查点评估与工作区变更 | ✅ 已完成 |
 
 ### 超出原规划已实现的功能
 
@@ -50,6 +52,28 @@
 
 - **记忆管理**:三类长期记忆统一管理(用户偏好 User Profile / 全局记忆 UserMemory / 项目记忆 Project)。user_agent 在 system prompt 注入精简版,react_agent 与 CLI agent 在沙箱写入完整项目记忆供 `read_file` 查阅。前端记忆管理页支持查看 / 编辑 / 删除。
 - **用户技能上传**:用户可上传自定义 skill(SKILL.md 文件),隔离存储(per-user 目录),仅本人任务可用。系统内置 skill 全局共享。任务创建时可选允许调用的 skill 集合(`allowed_skills`)。
+
+#### 练习题与自适应练习
+
+- **题目生成(generator.py)**:任务 Results 一键生成客观题(单选/判断),LLM 逐条 finding 生成 1~3 题(漏洞识别 / 成因判断 / 修复选择),严格 JSON + 重试 + 字段校验 + sha256 去重,草稿确认制(draft → active)。
+- **SM-2 遗忘曲线(sm2.py)**:答对 quality=4 / 答错 quality=1,EF 与间隔序列(1 → 6 → 前值×EF)标准实现,`due_at` 驱动到期复习。
+- **综合选题(selector.py)**:到期复习优先 > 薄弱点强化 > 难度匹配 > 新知识引入的加权打分,含同知识点 ≤60%、复习题占比 ≥50%、冷启动取难度 ≤2 新题等约束。
+- **三主题出题**:网络安全 / 架构设计 / 通用代码能力三套提示词;沙箱未销毁时注入源码 + 迷你工具循环(read_file/search_code/find_files)增强质量;沙箱过期可重新拉取工作区(默认关)。
+- **出题模型三级解析**:task 级 > 用户级默认(`practice_settings.default_llm_config_id`)> env 默认;思考模式三态覆盖(follow/on/off)。
+- **异步 job + SSE**:出题后台线程执行,`/practice/generate/{job_id}/stream` 推送进度;出题日志落盘 `logs/practice_generate.log`。
+- **前端**:PracticeView(练习首页 / 会话答题 / 统计趋势 / 题库管理)、出题进度侧栏、生成确认弹窗、练习设置弹窗;`PRACTICE_ENABLED` 功能开关前后端联动。
+
+#### 检查点评估与工作区变更
+
+- **检查点评估(agent_checkpoint)**:react_agent 执行中每 K 个迭代边界由 user_agent 做轻量方向评估,明显跑偏时生成追问指令;`agent_interrupt` 软中断队列在下一迭代边界注入 react_agent(优先级低于真实用户消息)。
+- **协作策略独立表(agent_policies)**:用户级默认从 `user_preferences` JSONB 迁移为独立 1:1 表(评估频率 / 打断权限 / 验证权限),任务级经 `task.params._agent_policy` 覆盖。
+- **工作区变更捕获(workspace_diff)**:任务完成时捕获已跟踪 + 未跟踪文件合成 git patch,存 `task_artifacts`(kind=git_diff,上限 100 万字符);仓库树快照(kind=repo_tree)兜底;前端任务详情页展示变更区(按行着色、可折叠)。
+
+#### 代码审查能力增强
+
+- **质量工具**:`run_lint`(Python ruff / JS eslint)/ `run_coverage`(pytest-cov / vitest),local/sandbox 双模式(缺工具返回指引 / 自动安装)。
+- **依赖清单工具**:`list_dependencies` 扫描清单文件返回结构化依赖,串联 `query_cve` 批量查已知漏洞。
+- **code_review 场景 skill**:review_concurrency(并发安全)/ review_error_handling(错误处理)/ review_test_quality(测试质量)。
 
 #### 安全与隔离
 
@@ -363,10 +387,53 @@ uvicorn app.main:app --reload
 - ✅ 任务异步执行(后台线程 threading,暂未用 Celery/RQ)
 - ✅ 沙箱部署脚本(scripts/build-sandbox-image.sh)
 - ✅ 资源限制(沙箱 CPU/内存/执行时间限制;react_agent MAX_ITERATIONS + 循环检测)
+- ✅ 沙箱 TTL 自动续期(SANDBOX_RENEW_INTERVAL_MINUTES)+ 克隆深度/超时可配(REPO_CLONE_DEPTH / REPO_CLONE_TIMEOUT)
+- ✅ LLM 429 限流退避重试(LLM_RATE_LIMIT_MAX_RETRIES)+ CLI 挂死兜底(ACP_IDLE_TIMEOUT_*)
 - ⬜ 任务队列(Celery/RQ):当前用 threading,生产环境需切换
 - ⬜ 监控与日志系统
 - ⬜ 微信内容安全检测
 - ⬜ 域名 + HTTPS + 备案
+
+---
+
+## 阶段 10:练习题与自适应练习 ✅
+
+**目标**:把「审计任务产出」与「学习练习」打通——任务真实发现一键转题库,按遗忘曲线 + 薄弱点自适应组卷,把分析平台变成学习平台。
+
+**做什么**:
+- 题目生成(generator.py):任务 Results 逐条调 LLM 生成客观题(单选/判断),严格 JSON + 重试 + 字段校验 + 去重,草稿确认制
+- SM-2 遗忘曲线(sm2.py)+ 难度评估与能力估计(difficulty.py)
+- 综合选题(selector.py):到期复习优先 > 薄弱点强化 > 难度匹配 > 新知识引入
+- 三主题提示词(网络安全 / 架构设计 / 通用代码能力)+ 源码注入 + 迷你工具循环 + 工作区恢复
+- 出题模型三级解析(task > 用户级默认 > env)+ 思考模式三态覆盖
+- 异步出题 job + SSE 进度 + 出题日志落盘;任务完成自动出题(auto_generate)
+- 前端 PracticeView(练习 / 统计 / 题库管理)+ 出题进度侧栏 + 设置弹窗;`PRACTICE_ENABLED` 开关
+
+**验证方式**:
+- 跑一个任务 → 生成练习题 → 预览确认 → 练习会话作答 → 看对错解析与知识点掌握度变化
+- 连续作答观察 SM-2 间隔与选题权重变化
+- 开关 PRACTICE_ENABLED 验证前后端入口隐藏
+
+**完成标志**:任务 → 题库 → 自适应练习的完整闭环可用。
+
+---
+
+## 阶段 11:检查点评估与工作区变更 ✅
+
+**目标**:让 user_agent 在 react_agent 执行过程中就能实时纠偏(不用等一轮跑完),并把任务的工作区产物留存下来。
+
+**做什么**:
+- 检查点评估(agent_checkpoint):每 K 个迭代边界轻量方向评估,跑偏时软中断拉回(agent_interrupt 队列)
+- AgentPolicy 独立表:用户级默认从 user_preferences JSONB 迁移,任务级可覆盖
+- 工作区变更捕获(workspace_diff):任务完成时合成 git patch 存 task_artifacts,前端只读展示
+- 代码审查能力增强:run_lint / run_coverage / list_dependencies 工具 + 3 个 code_review skill
+
+**验证方式**:
+- 跑一个任务,观察右侧栏「检查点评估聚合」出现记录,点击能定位对话流
+- 故意让 react_agent 跑偏,看是否被软中断拉回
+- 任务完成后查看工作区变更区 diff 展示
+
+**完成标志**:迭代边界实时纠偏 + 工作区产物留存闭环可用。
 
 ---
 

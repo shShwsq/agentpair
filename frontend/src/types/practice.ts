@@ -21,6 +21,13 @@ export interface DraftQuestion {
   difficulty: number
   knowledge_key: string | null
   knowledge_name: string | null
+  /** 出题形式:repo=基于真实源码,synthetic=改编题(虚构代码) */
+  origin: 'repo' | 'synthetic'
+  /** 知识点编程语言标签(如 ["python", "sql"]) */
+  languages: string[]
+  /** 题目引用的源码定位(工作区可用时出题产生;老题为 null) */
+  source_file: string | null
+  source_lines: string | null
 }
 
 export interface GenerateResponse {
@@ -31,6 +38,18 @@ export interface GenerateResponse {
 /** 异步出题句柄(POST /practice/generate 立即返回) */
 export interface GenerateJobResponse {
   job_id: string
+}
+
+/** 任务出题模型解析结果(GET /practice/tasks/{task_id}/generate-model)
+ *
+ * 与真实出题同一解析优先级(任务配置 > 练习默认 > 环境默认,
+ * 「始终用默认出题模型」开启时跳过任务级),供任务详情页出题入口展示。
+ */
+export interface GenerateModelInfo {
+  /** 本次出题将使用的模型名 */
+  model: string
+  /** 来源:task=任务自带配置 / default=练习默认出题模型 / env=环境默认 */
+  source: 'task' | 'default' | 'env'
 }
 
 /** 出题进度与结果(GET /practice/generate/{job_id}) */
@@ -57,6 +76,8 @@ export interface GenerateJobSummary {
   current_finding: string
   /** 当前 finding 已累计的 LLM 输出尾部文本(中途接入兜底) */
   recent_text: string
+  /** 出题前工作区恢复的最新状态(中途接入兜底;未触发恢复为 null) */
+  restore: GenerateRestoreData | null
   skipped_findings: number
   created_count: number
   started_at: string | null
@@ -81,6 +102,16 @@ export interface GenerateFindingData {
 /** LLM 输出增量(打字机效果) */
 export interface GenerateTokenData {
   delta: string
+}
+
+/** 出题前工作区恢复状态(沙箱已清理时重新 clone) */
+export interface GenerateRestoreData {
+  /** start=开始恢复 / progress=克隆中 / done=恢复成功 / failed=恢复失败降级 */
+  phase: 'start' | 'progress' | 'done' | 'failed'
+  /** 克隆进度百分比 0-100(progress 阶段才有) */
+  percent?: number
+  /** git 进度行文本或失败原因(截断 200 字符) */
+  message?: string
 }
 
 /** 出题工具循环的工具调用记录 */
@@ -143,6 +174,16 @@ export interface SessionQuestion {
   options: string[]
   difficulty: number
   knowledge_name: string | null
+  /** 知识点编程语言标签 */
+  languages: string[]
+  /** 出题形式:repo=真实代码题,synthetic=改编题 */
+  origin: 'repo' | 'synthetic'
+  /** 题目来源任务(右侧代码栏据此打开对应工作区;老题为 null) */
+  source_task_id: string | null
+  /** 题目引用的源码文件(仓库内相对路径;无则不自动定位) */
+  source_file: string | null
+  /** 题目引用的行区间(如 "120-150" 或 "42") */
+  source_lines: string | null
 }
 
 export interface StartSessionResponse {
@@ -160,6 +201,8 @@ export interface SubmitAnswerRequest {
 export interface KnowledgeState {
   knowledge_key: string
   knowledge_name: string
+  /** 知识点编程语言标签 */
+  languages: string[]
   ease_factor: number
   interval_days: number
   repetitions: number
@@ -183,6 +226,8 @@ export interface SubmitAnswerResponse {
 export interface WeakPointItem {
   knowledge_key: string
   knowledge_name: string
+  /** 知识点编程语言标签 */
+  languages: string[]
   attempts: number
   correct_count: number
   /** 错误率 0-1 */
@@ -209,6 +254,10 @@ export interface QuestionListItem {
   difficulty: number
   status: 'draft' | 'active' | 'archived'
   knowledge_name: string | null
+  /** 知识点编程语言标签 */
+  languages: string[]
+  /** 出题形式:repo=真实代码题,synthetic=改编题(老题为 null) */
+  origin: 'repo' | 'synthetic' | null
   attempts: number
   accuracy: number | null
   created_at: string
@@ -260,4 +309,11 @@ export interface TrendPoint {
 
 export interface TrendResponse {
   weeks: TrendPoint[]
+}
+
+/** 清空练习记录的删除计数(DELETE /practice/records) */
+export interface ClearRecordsResponse {
+  deleted_sessions: number
+  deleted_attempts: number
+  deleted_questions: number
 }

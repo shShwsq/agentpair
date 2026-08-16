@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app.clone_skip import consume_skip_clone
 from app.config import settings
@@ -434,12 +434,17 @@ def _pause_checkpoint(task_id: str, deadline: float) -> float:
 def _clone_repo_local(
     ctx: dict, clone_url: str, repo_name: str, branch: str | None,
     task_id: str = "", cancellable: bool = False,
+    progress_callback: Callable[[int, str], None] | None = None,
 ) -> dict:
     """local 模式:本地 git clone(Popen 流式读进度 + 推 SSE)
 
     用 subprocess.Popen 逐行读 git 的 stderr 进度输出(需 --progress 强制非 tty
     也输出),解析 "Receiving objects: X%" 等行后通过 event_bus 推 clone_progress
     事件给前端。节流:百分比变化 >=5 或距上次推送 >=2s 才推一次。
+
+    progress_callback(percent, message):可选的直连进度回调(与 event_bus 推送
+    同点位同节流)。任务结束后的调用方(如出题工作区恢复)总线已 finish,
+    clone_progress 会被丢弃,只能走这个回调拿进度;回调异常不影响克隆。
 
     超时用 deadline + poll 机制(而非 subprocess.run 的 timeout),超时主动 kill
     进程并 join 读线程,避免大仓库卡死时无反馈。
@@ -489,6 +494,11 @@ def _clone_repo_local(
                     "percent": percent,
                     "message": line.strip()[:200],
                 })
+                if progress_callback:
+                    try:
+                        progress_callback(percent, line.strip()[:200])
+                    except Exception:
+                        logger.warning("[local] clone 进度回调异常(忽略)", exc_info=True)
                 last_percent = percent
                 last_push_ts = now
 
@@ -547,6 +557,7 @@ def _parse_git_progress(line: str) -> int | None:
 def _clone_repo_sandbox(
     ctx: dict, clone_url: str, repo_name: str, branch: str | None,
     task_id: str = "", cancellable: bool = False,
+    progress_callback: Callable[[int, str], None] | None = None,
 ) -> dict:
     """sandbox 模式:在沙箱里 git clone(后台命令 + 进度文件轮询流式推进度)
 
@@ -555,7 +566,8 @@ def _clone_repo_sandbox(
     execd 日志采集按 \n 分行缓存,\r 进度块拿不到(实测 cursor 长期不动)。
     改为把 stderr 重定向到沙箱内进度文件(文件写入无行缓冲,\r 实时落盘),
     轮询 read_file 解析最新进度行推 clone_progress 事件
-    (节流:百分比变化 >=5 或距上次推送 >=2s)。
+    (节流:百分比变化 >=5 或距上次推送 >=2s)。progress_callback 与
+    event_bus 推送同点位同节流(任务结束后总线已 finish 的调用方走它拿进度)。
 
     完成判定:轮询 get_command_status(命令未退出时恒为 200,避免每轮
     read_file 退出码标记文件触发 404 + SDK ERROR traceback 污染日志);
@@ -626,6 +638,11 @@ def _clone_repo_sandbox(
                             "percent": percent,
                             "message": line.strip()[:200],
                         })
+                        if progress_callback:
+                            try:
+                                progress_callback(percent, line.strip()[:200])
+                            except Exception:
+                                logger.warning("[sandbox] clone 进度回调异常(忽略)", exc_info=True)
                         last_percent = percent
                         last_push_ts = now
                     break
@@ -2501,6 +2518,7 @@ def str_replace_editor(
 def clone_repo_with_fallback(
     repo_url: str, branch: str | None = None, task_id: str = "",
     git_tokens: dict | None = None, cancellable: bool = False,
+    progress_callback: Callable[[int, str], None] | None = None,
 ) -> dict:
     """克隆仓库(协议回退:HTTPS+token → SSH → HTTPS 匿名)
 
@@ -2528,6 +2546,10 @@ def clone_repo_with_fallback(
 
     复用同一套 session 管理(_get_or_create_session + _set_repo_path),
     所以 clone 完成后 react_agent / workspace 路由可直接通过 task_id 复用会话。
+
+    progress_callback(percent, message):可选直连进度回调,透传给
+    _clone_repo_local/_clone_repo_sandbox(任务结束后的调用方 event_bus
+    已 finish,clone_progress 事件会被丢弃,只能走此回调拿实时进度)。
     """
     git_tokens = git_tokens or {}
     provider = get_provider_for_url(repo_url)
@@ -2584,12 +2606,12 @@ def clone_repo_with_fallback(
                 if mode == "local":
                     result = _clone_repo_local(
                         ctx, url, repo_name, attempt_branch, task_id=task_id,
-                        cancellable=cancellable,
+                        cancellable=cancellable, progress_callback=progress_callback,
                     )
                 else:
                     result = _clone_repo_sandbox(
                         ctx, url, repo_name, attempt_branch, task_id=task_id,
-                        cancellable=cancellable,
+                        cancellable=cancellable, progress_callback=progress_callback,
                     )
                 _set_repo_path(task_id, result["path"])
                 logger.info(f"[clone_fallback] task={task_id} 克隆成功(协议 {safe_url})")

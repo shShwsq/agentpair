@@ -63,6 +63,9 @@ class KnowledgePoint(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     # 粗分类(前端分组展示用,如 injection / auth / crypto)
     category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 编程语言标签(多值,如 ["python", "sql"]);出题时由 LLM 给出,
+    # 同知识点多次出题做并集累积;老数据为空列表
+    languages: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -113,6 +116,15 @@ class Question(Base):
     difficulty: Mapped[float] = mapped_column(Float, nullable=False, default=3.0)
     # 出题时使用的学习主题(security/architecture/coding;老数据为 NULL)
     learning_topic: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 题目来源形式:repo=基于真实源码出题,synthetic=改编题
+    # (LLM 原创含同类问题的虚构代码,脱离原仓库);老题为 NULL 视为 repo
+    origin: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, default="repo", server_default="repo"
+    )
+    # 题目引用的源码定位(仓库内相对路径 + 行区间,如 "120-150";老题为 NULL),
+    # 做题页右侧代码栏据此自动打开并滚动定位
+    source_file: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    source_lines: Mapped[str | None] = mapped_column(String(32), nullable=True)
     status: Mapped[QuestionStatus] = mapped_column(
         Enum(QuestionStatus), default=QuestionStatus.DRAFT, nullable=False, index=True
     )
@@ -243,6 +255,17 @@ LEARNING_TOPICS = (
 )
 DEFAULT_LEARNING_TOPIC = LEARNING_TOPIC_SECURITY
 
+# ============================================================
+# 出题思考模式(用户级覆盖出题模型的思考开关)
+# follow=跟随模型配置自身开关(默认);on/off=强制开/关。
+# 仅支持思考模式的模型(catalog thinking=only)强制关会被忽略。
+# ============================================================
+THINKING_MODE_FOLLOW = "follow"
+THINKING_MODE_ON = "on"
+THINKING_MODE_OFF = "off"
+THINKING_MODES = (THINKING_MODE_FOLLOW, THINKING_MODE_ON, THINKING_MODE_OFF)
+DEFAULT_THINKING_MODE = THINKING_MODE_FOLLOW
+
 
 class PracticeSettings(Base):
     """用户级练习设置 (per-user, 1:1)
@@ -252,11 +275,16 @@ class PracticeSettings(Base):
     - learning_topic:当前希望学习的主题(出题提示词按此切换)
     - restore_workspace_for_practice:出题前沙箱已清理时,
       是否重新 clone 仓库恢复工作区(供出题工具循环读源码)
+    - default_llm_config_id:用户级默认出题模型(UserLLMConfig 中某条配置的 id),
+      None=跟随任务级配置/env 默认
+    - thinking_mode_for_practice:出题思考模式覆盖(follow/on/off),
+      follow=跟随出题模型配置自身的思考开关
 
     迁移:老数据存于 user_preferences.auto_generate_practice 布尔列,
     migrate_practice_settings_table() 启动时把数据拷入本表后删除旧列(幂等);
-    learning_topic / restore_workspace_for_practice 为后加列,
-    由 migrate_practice_learning_columns() 幂等补齐。
+    learning_topic / restore_workspace_for_practice / default_llm_config_id /
+    thinking_mode_for_practice / force_default_llm 为后加列,由
+    migrate_practice_learning_columns() 幂等补齐。
     """
 
     __tablename__ = "practice_settings"
@@ -282,6 +310,21 @@ class PracticeSettings(Base):
     # 出题前沙箱已清理时是否重新 clone 恢复工作区(默认关,避免意外大仓库克隆)
     restore_workspace_for_practice: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false", default=False
+    )
+    # 用户级默认出题模型(UserLLMConfig.llm_configs 中某条配置的 id;None=不指定)
+    # 解析优先级:task.llm_config_id > 本字段 > env 默认
+    default_llm_config_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, default=None
+    )
+    # 始终用默认出题模型(忽略任务自带模型配置;默认关)
+    force_default_llm: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
+    )
+    # 出题思考模式覆盖:follow=跟随模型配置,on/off=强制开/关
+    # (思考模式出题可能更慢但质量更高;部分模型思考模式下工具调用不稳定)
+    thinking_mode_for_practice: Mapped[str] = mapped_column(
+        String(16), nullable=False,
+        server_default=DEFAULT_THINKING_MODE, default=DEFAULT_THINKING_MODE,
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -355,8 +398,10 @@ def migrate_practice_learning_columns() -> None:
     """幂等给 practice_settings / practice_questions 补新列
 
     背景:项目用 Base.metadata.create_all(无 Alembic),已存在的表不会自动加新列。
-    - practice_settings 加 learning_topic / restore_workspace_for_practice
-    - practice_questions 加 learning_topic(可空,老题不补)
+    - practice_settings 加 learning_topic / restore_workspace_for_practice /
+      default_llm_config_id / thinking_mode_for_practice / force_default_llm
+    - practice_questions 加 learning_topic(可空,老题不补)与
+      source_file / source_lines(源码定位,可空)
     全新库(create_all 已建好新列)或已迁过 → 直接返回。
     """
     import logging
@@ -383,6 +428,32 @@ def migrate_practice_learning_columns() -> None:
                     "restore_workspace_for_practice BOOLEAN NOT NULL DEFAULT false"
                 ))
                 log.info("practice_settings.restore_workspace_for_practice 列迁移完成")
+            if "default_llm_config_id" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE practice_settings ADD COLUMN "
+                    "default_llm_config_id VARCHAR(36)"
+                ))
+                log.info("practice_settings.default_llm_config_id 列迁移完成")
+            if "thinking_mode_for_practice" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE practice_settings ADD COLUMN "
+                    "thinking_mode_for_practice VARCHAR(16) NOT NULL DEFAULT 'follow'"
+                ))
+                log.info("practice_settings.thinking_mode_for_practice 列迁移完成")
+            if "force_default_llm" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE practice_settings ADD COLUMN "
+                    "force_default_llm BOOLEAN NOT NULL DEFAULT false"
+                ))
+                log.info("practice_settings.force_default_llm 列迁移完成")
+        if insp.has_table("knowledge_points"):
+            cols = {c["name"] for c in insp.get_columns("knowledge_points")}
+            if "languages" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE knowledge_points ADD COLUMN languages "
+                    "JSONB NOT NULL DEFAULT '[]'"
+                ))
+                log.info("knowledge_points.languages 列迁移完成")
         if insp.has_table("practice_questions"):
             cols = {c["name"] for c in insp.get_columns("practice_questions")}
             if "learning_topic" not in cols:
@@ -391,4 +462,22 @@ def migrate_practice_learning_columns() -> None:
                     "learning_topic VARCHAR(32)"
                 ))
                 log.info("practice_questions.learning_topic 列迁移完成")
+            if "source_file" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE practice_questions ADD COLUMN "
+                    "source_file VARCHAR(512)"
+                ))
+                log.info("practice_questions.source_file 列迁移完成")
+            if "source_lines" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE practice_questions ADD COLUMN "
+                    "source_lines VARCHAR(32)"
+                ))
+                log.info("practice_questions.source_lines 列迁移完成")
+            if "origin" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE practice_questions ADD COLUMN origin "
+                    "VARCHAR(16) DEFAULT 'repo'"
+                ))
+                log.info("practice_questions.origin 列迁移完成")
         conn.commit()

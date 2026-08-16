@@ -7,6 +7,7 @@
 - GET /tasks/{task_id}/workspace/files    列出目录(懒加载树,单层)
 - GET /tasks/{task_id}/workspace/tree     整树快照(首屏一次拉取,带短 TTL 缓存)
 - GET /tasks/{task_id}/workspace/file     读取文件内容(原始文本 + 分页,前端自行渲染行号)
+- POST /tasks/{task_id}/workspace/restore 过期工作区重新 clone(做题页代码栏一键恢复)
 
 session 生命周期:
 - 任务运行中:clone 完成后即可浏览
@@ -176,3 +177,59 @@ def read_workspace_file(
     except Exception as e:
         logger.exception(f"[task={task_id}] 读取工作区文件失败: path={path}")
         raise HTTPException(status_code=500, detail=f"读取文件失败: {e}")
+
+
+@router.post("/tasks/{task_id}/workspace/restore")
+def restore_workspace(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+) -> dict:
+    """恢复已过期清理的工作区:重新 clone 任务仓库(用户显式操作)
+
+    做题页右侧代码栏在沙箱 session 过期后展示「重新拉取代码」按钮调用。
+    与出题时的自动恢复不同,此处为用户主动触发,不受
+    restore_workspace_for_practice 开关限制。恢复的 session 属于已完成任务,
+    标记 completed 纳入 TTL 清理序列避免常驻泄漏。
+
+    - session 仍存活 → 直接返回当前工作区信息(幂等)
+    - 任务无 repo_url → 400
+    - clone 失败 → 500(前端提示并保持不可用态)
+    """
+    task = _check_task_access(task_id, db, current_user)
+
+    info = sandbox_tools.get_workspace_info(str(task_id))
+    if info and info.get("repo_path"):
+        return {
+            "available": True,
+            "repo_path": info["repo_path"],
+            "mode": info.get("mode", ""),
+        }
+
+    params = task.params or {}
+    repo_url = params.get("repo_url")
+    if not repo_url:
+        raise HTTPException(status_code=400, detail="任务无仓库地址,无法恢复工作区")
+
+    # 复用出题模块的 git token 解密逻辑(懒加载避免模块级循环引用)
+    from app.services.practice.generator import _load_git_tokens
+
+    logger.info("[task=%s] 用户请求恢复工作区,重新 clone", task_id)
+    try:
+        sandbox_tools.clone_repo_with_fallback(
+            repo_url,
+            branch=params.get("branch"),
+            task_id=str(task_id),
+            git_tokens=_load_git_tokens(db, task.user_id),
+        )
+    except Exception as e:
+        logger.warning("[task=%s] 恢复工作区失败: %s", task_id, e)
+        raise HTTPException(status_code=500, detail=f"恢复工作区失败: {e}")
+
+    sandbox_tools.mark_task_completed(str(task_id))
+    info = sandbox_tools.get_workspace_info(str(task_id)) or {}
+    return {
+        "available": bool(info.get("repo_path")),
+        "repo_path": info.get("repo_path", ""),
+        "mode": info.get("mode", ""),
+    }

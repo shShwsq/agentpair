@@ -1,6 +1,6 @@
 # 双智能体架构与上下文传递逻辑
 
-本文档整理 `backend/app/agents/` 目录下 `user_agent`、内置 `react_agent`、外部 CLI agent（Qoder / Kimi / Hermes / Codex）的代码逻辑、协作流程与上下文传递机制。
+本文档整理 `backend/app/agents/` 目录下 `user_agent`、内置 `react_agent`、外部 CLI agent（Qoder / Kimi / Hermes / Codex）的代码逻辑、协作流程与上下文传递机制，并覆盖检查点评估（`agent_checkpoint.py` / `agent_interrupt.py`）与工作区变更捕获（`workspace_diff.py`）。
 
 > 阅读前置：`docs/spec.md`（产品定义）、`backend/app/agents/orchestrator.py`（协作编排）。
 
@@ -52,10 +52,10 @@
 
 | 角色 | 职责 | 是否调工具 | 模型来源 |
 |------|------|-----------|---------|
-| **user_agent** | 评估覆盖度、生成 checklist、追问、整理结构化结果 | 否，只输出 JSON 评估 | `task.llm_config_id` |
-| **内置 react_agent** | ReAct 循环执行代码分析（clone / search / read / semgrep 等） | 是，调用沙箱工具 | `task.react_llm_config_id`（空时回退 `llm_config_id`） |
-| **ExternalCLIAgent** | 沙箱内启动外部 CLI，通过 ACP 协议通信 | 是，由 CLI 自主调工具 | CLI 自管（凭证经环境变量注入） |
-| **verifier_agent**（实验性） | 在沙箱里跑 PoC / HTTP 请求动态验证 react_agent 的发现 | 是，独立工具集（`http_request` + `run_python_code`） | `task.llm_config_id`（复用 user_agent 的 LLMClient） |
+| **user_agent** | 评估覆盖度、生成 checklist、追问、整理结构化结果;**检查点评估**(迭代边界轻量方向纠偏) | 否,只输出 JSON 评估 | `task.llm_config_id` |
+| **内置 react_agent** | ReAct 循环执行代码分析(clone / search / read / semgrep 等) | 是,调用沙箱工具 | `task.react_llm_config_id`(空时回退 `llm_config_id`) |
+| **ExternalCLIAgent** | 沙箱内启动外部 CLI,通过 ACP 协议通信 | 是,由 CLI 自主调工具 | CLI 自管(凭证经环境变量注入) |
+| **verifier_agent**(实验性) | 在沙箱里跑 PoC / HTTP 请求动态验证 react_agent 的发现 | 是,独立工具集(`http_request` + `run_python_code`) | `task.llm_config_id`(复用 user_agent 的 LLMClient) |
 
 ### 1.2 协作轮次
 
@@ -67,7 +67,17 @@
   - react_agent 执行一轮 → 返回 `summary`
   - user_agent 对照 `task.checklist` 评估 → 输出 `covered/missing/followup_query/done`
   - `done=true` 时输出 `results + grouping`，orchestrator 落库
-- **resume（完成后重启）**：用户追加消息触发，最多 `MAX_RESUME_ROUNDS=3` 轮
+- **resume(完成后重启)**:用户追加消息触发,最多 `MAX_RESUME_ROUNDS=3` 轮
+
+### 1.3 检查点评估(迭代边界方向纠偏)
+
+在 react_agent 执行过程中,user_agent 除 round 边界的完整评估外,还会在**迭代边界**做轻量方向评估(默认每 K=10 个迭代一次,builtin/CLI 可分别配置 `checkpoint_interval_builtin` / `checkpoint_interval_cli`,null=用统一值):
+
+- **触发**:orchestrator 通过 `resolve_agent_policy` 解析用户级默认(`AgentPolicy` 表)+ 任务级覆盖(`task.params._agent_policy`)得到生效的 K 值,在 react_agent 每轮执行中每 K 个迭代边界调用 `agent_checkpoint.py` 的评估函数
+- **评估内容**:只判断方向是否明显跑偏(不做 covered/missing),避免频繁打断影响 react_agent 工作;评估结果落库 `Conversation(role=user_agent, type=evaluation)`,content 带 `[检查点评估` 前缀
+- **软中断**:若判定跑偏,生成追问指令写入 `agent_interrupt.py` 的 per-task 内存队列;react_agent 下一迭代边界先 `drain_user_messages`(真实用户消息,优先级高)再 `drain_interrupts`(检查点追问,优先级低),作为 user 消息注入 LLM 上下文
+- **展示**:前端任务详情页右侧栏「检查点评估聚合」列出各条记录(第 N 轮 · 迭代 M + 继续/已打断徽标 + 理由),点击定位对话流对应迭代边界(横线闪烁)
+- **策略来源**:`AgentPolicy` 独立表(1:1),字段语义见 `agent_checkpoint.DEFAULT_AGENT_POLICY`;老数据从 `user_preferences` JSONB 一次性迁移(`migrate_agent_policy_table`),任务级覆盖走 `task.params._agent_policy`
 
 ---
 
@@ -707,8 +717,10 @@ orchestrator / user_agent / react_agent / CLI agent / verifier_agent 都通过 `
 | `plan` | react_agent / CLI agent | plan 状态更新（round_idx + steps） |
 | `question` | orchestrator | 用户澄清提问（ask_round + questions + reasoning） |
 | `checklist_review` | orchestrator | checklist 确认请求（checklist + reasoning） |
-| `verify_action` | verifier_agent | 验证动作授权请求（`per_action` 模式，前端 VerifyActionDialog） |
-| `command_confirm` | sandbox_tools (local 模式) | 危险命令确认（前端 CommandConfirmDialog） |
+| `verify_action` | verifier_agent | 验证动作授权请求(`per_action` 模式,前端 VerifyActionDialog) |
+| `command_confirm` | sandbox_tools (local 模式) | 危险命令确认(前端 CommandConfirmDialog) |
+| `checkpoint` | agent_checkpoint | 检查点评估结果(迭代边界方向评估,前端右侧栏「检查点评估聚合」+ 对话流横线定位) |
+| `interrupt` | agent_interrupt | 检查点跑偏打断指令(入队后由 react_agent 下一迭代边界注入) |
 | `done` / `error` | orchestrator | 任务终止事件 |
 
 ---
@@ -739,10 +751,17 @@ orchestrator / user_agent / react_agent / CLI agent / verifier_agent 都通过 `
 
 ### 8.4 暂停检查点
 
-- **粗粒度**：每轮开始前 + react_agent 跑完后、user_agent 评估前
-- **细粒度**：react_agent 每个迭代边界 + 工具调用前
+- **粗粒度**:每轮开始前 + react_agent 跑完后、user_agent 评估前
+- **细粒度**:react_agent 每个迭代边界 + 工具调用前
 
-### 8.5 资源清理（finally 块）
+### 8.5 检查点评估(迭代边界方向纠偏)
+
+- 与 round 边界完整评估互补:完整评估决定 covered/missing 与是否继续,检查点评估只判断方向是否跑偏
+- 默认 K=10 迭代一次,builtin/CLI 可分别配置(`checkpoint_interval_builtin` / `checkpoint_interval_cli`);用户级默认存 `AgentPolicy` 表,任务级 `task.params._agent_policy` 覆盖
+- 打断指令走 `agent_interrupt` 软中断队列,优先级低于真实用户消息(`user_messages`)
+- 避免过度打断:仅在明显跑偏时生成追问,评估记录带条数/字符预算防刷屏
+
+### 8.6 资源清理（finally 块）
 
 `run_dual_agent_audit` 和 `resume_audit_with_message` 的 finally 块清理：
 - `clear_pending_question` / `clear_pending_checklist` / `clear_pause_state` / `clear_user_messages` / `clear_pending_verify_authorization` / `clear_pending_command_confirm`
@@ -776,4 +795,11 @@ orchestrator / user_agent / react_agent / CLI agent / verifier_agent 都通过 `
 | [user_interaction.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/user_interaction.py) | 用户交互状态管理（pending question / checklist / verify_authorization / command_confirm 阻塞等待） |
 | [user_messages.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/user_messages.py) | 用户补充消息队列（运行中/暂停中追加） |
 | [pause_controller.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/pause_controller.py) | 暂停/恢复控制器 |
-| [event_bus.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/event_bus.py) | 事件总线（publish / SSE 订阅） |
+| [event_bus.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/event_bus.py) | 事件总线(publish / SSE 订阅) |
+| [agent_checkpoint.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agent_checkpoint.py) | 检查点评估(迭代边界轻量方向评估 + K 值解析 + 策略合并) |
+| [agent_interrupt.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agent_interrupt.py) | 检查点打断队列(per-task 内存队列,软中断注入) |
+| [services/workspace_diff.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/services/workspace_diff.py) | 任务完成时工作区 diff/patch 捕获 + 仓库树快照(存 task_artifacts) |
+| [models/task_artifact.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/models/task_artifact.py) | 任务工作区产物模型(kind=git_diff / repo_tree) |
+| [tools/quality_tools.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/tools/quality_tools.py) | 代码质量工具(run_lint / run_coverage,local/sandbox 双模式) |
+| [tools/dependency_tools.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/tools/dependency_tools.py) | 依赖清单解析工具(list_dependencies,串联 query_cve) |
+| [models/agent_policy.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/models/agent_policy.py) | 用户级协作策略表(检查点评估频率 / 打断 / 验证权限) |

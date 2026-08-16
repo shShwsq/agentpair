@@ -32,6 +32,7 @@ from app.models.user import User
 from app.schemas.practice import (
     ActivateQuestionsRequest,
     ActivateQuestionsResponse,
+    ClearRecordsResponse,
     ConfirmQuestionsRequest,
     ConfirmQuestionsResponse,
     DraftQuestionResponse,
@@ -39,6 +40,7 @@ from app.schemas.practice import (
     GenerateJobsResponse,
     GenerateJobStatusResponse,
     GenerateJobSummary,
+    GenerateModelResponse,
     GenerateRequest,
     KnowledgeStateResponse,
     PracticeSummaryResponse,
@@ -62,7 +64,11 @@ from app.services.practice.difficulty import (
     adjust_question_difficulty,
     estimate_ability,
 )
-from app.services.practice.generator import generate_questions_for_task
+from app.services.practice.generator import (
+    PracticeGenerateError,
+    generate_questions_for_task,
+    resolve_generate_model_info,
+)
 from app.services.practice.selector import CandidateInfo, select_questions
 from app.services.practice.sm2 import (
     SM2State,
@@ -101,6 +107,23 @@ def _estimate_user_ability(db: Session, user_id: UUID) -> float:
 # ============================================================
 # 题目生成 / 确认
 # ============================================================
+
+
+@router.get("/tasks/{task_id}/generate-model", response_model=GenerateModelResponse)
+def get_task_generate_model(
+    task_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> GenerateModelResponse:
+    """任务详情页展示「本次出题将使用」的模型(与真实出题同一解析逻辑)
+
+    解析优先级与 POST /practice/generate 完全一致:任务自带配置 >
+    练习设置默认出题模型 > env 默认;「始终用默认出题模型」开启时跳过任务级。
+    前端在出题入口附近展示,避免用户困惑为什么没用默认模型。
+    """
+    task = _get_task_owned(db, task_id, current_user.id)
+    info = resolve_generate_model_info(db, task)
+    return GenerateModelResponse(**info)
 
 
 @router.post("/generate", response_model=GenerateJobResponse)
@@ -149,7 +172,12 @@ def _run_generate_job(job_id: str, task_id: UUID, user_id: UUID, max_findings: i
         ).first()
         if not task:
             gen_jobs.update_job(job_id, status="error", error="任务不存在或无权访问")
+            logger.warning("[practice] 手动出题 job=%s 任务不存在或无权访问 task=%s", job_id, task_id)
             return
+        logger.info(
+            "[practice] 手动出题开始 job=%s task=%s user=%s max_findings=%d",
+            job_id, task_id, user_id, max_findings,
+        )
         created, skipped = generate_questions_for_task(
             db, task, user_id, max_findings=max_findings,
             progress_callback=lambda done, total: gen_jobs.update_job(
@@ -179,11 +207,23 @@ def _run_generate_job(job_id: str, task_id: UUID, user_id: UUID, max_findings: i
                 difficulty=q.difficulty,
                 knowledge_key=kp.key if kp else None,
                 knowledge_name=kp.name if kp else None,
+                origin=q.origin or "repo",
+                languages=(kp.languages if kp else None) or [],
+                source_file=q.source_file,
+                source_lines=q.source_lines,
             ))
         # done/total 由进度回调维护,此处不覆盖
         gen_jobs.update_job(
             job_id, status="done", questions=items, skipped_findings=skipped
         )
+        logger.info(
+            "[practice] 手动出题完成 job=%s task=%s: %d 题(%d 条 finding 未出题)",
+            job_id, task_id, len(items), skipped,
+        )
+    except PracticeGenerateError as e:
+        # 致命错误(额度/认证等):友好原因直接展示,无需堆栈
+        logger.warning("[practice] 出题中止 job=%s: %s", job_id, e)
+        gen_jobs.update_job(job_id, status="error", error=str(e)[:500])
     except Exception as e:
         logger.exception("[practice] 异步出题失败 job=%s", job_id)
         gen_jobs.update_job(job_id, status="error", error=str(e)[:500])
@@ -350,6 +390,10 @@ def list_drafts(
             difficulty=q.difficulty,
             knowledge_key=kp.key if kp else None,
             knowledge_name=kp.name if kp else None,
+            origin=q.origin or "repo",
+            languages=(kp.languages if kp else None) or [],
+            source_file=q.source_file,
+            source_lines=q.source_lines,
         ))
     return items
 
@@ -510,6 +554,11 @@ def start_session(
                 options=c.question.options,
                 difficulty=c.question.difficulty,
                 knowledge_name=kps[c.kp_id].name if c.kp_id in kps else None,
+                languages=(kps[c.kp_id].languages if c.kp_id in kps else None) or [],
+                origin=c.question.origin or "repo",
+                source_task_id=c.question.source_task_id,
+                source_file=c.question.source_file,
+                source_lines=c.question.source_lines,
             )
             for c in picked
         ],
@@ -546,6 +595,14 @@ def _start_session_from_pool(
                 difficulty=q.difficulty,
                 knowledge_name=kps[q.knowledge_point_id].name
                 if q.knowledge_point_id in kps else None,
+                languages=(
+                    kps[q.knowledge_point_id].languages
+                    if q.knowledge_point_id in kps else None
+                ) or [],
+                origin=q.origin or "repo",
+                source_task_id=q.source_task_id,
+                source_file=q.source_file,
+                source_lines=q.source_lines,
             )
             for q in picked
         ],
@@ -671,6 +728,7 @@ def submit_answer(
         state=KnowledgeStateResponse(
             knowledge_key=kp.key if kp else "general",
             knowledge_name=kp.name if kp else "未分类",
+            languages=(kp.languages if kp else None) or [],
             ease_factor=new_state.ease_factor,
             interval_days=new_state.interval_days,
             repetitions=new_state.repetitions,
@@ -877,6 +935,7 @@ def get_stats(
         weak_points.append(WeakPointItem(
             knowledge_key=kp.key if kp else "general",
             knowledge_name=kp.name if kp else "未分类",
+            languages=(kp.languages if kp else None) or [],
             attempts=s.attempts,
             correct_count=s.correct_count,
             accuracy=round(1.0 - s.correct_count / s.attempts, 4),
@@ -986,6 +1045,8 @@ def list_questions(
             difficulty=q.difficulty,
             status=q.status.value,
             knowledge_name=kp.name if kp else None,
+            languages=(kp.languages if kp else None) or [],
+            origin=q.origin,
             attempts=attempts or 0,
             accuracy=(correct / attempts) if attempts else None,
             created_at=q.created_at,
@@ -1009,3 +1070,57 @@ def archive_question(
     question.status = QuestionStatus.ARCHIVED
     db.commit()
     return {"archived": True}
+
+
+# ============================================================
+# 清空练习记录(进度归零;可选连题库一并删除)
+# ============================================================
+
+
+@router.delete("/records", response_model=ClearRecordsResponse)
+def clear_records(
+    include_questions: bool = Query(default=False),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ClearRecordsResponse:
+    """清空当前用户的练习记录
+
+    基础档:删除答题流水 / 会话 / SM-2 记忆状态,题库保留但难度重置回初值;
+    include_questions=true 时连题目与知识点词典一并删除,回到完全空白。
+    practice_settings 不受影响。
+    """
+    deleted_attempts = (
+        db.query(Attempt).filter(Attempt.user_id == current_user.id).delete()
+    )
+    deleted_sessions = (
+        db.query(PracticeSession)
+        .filter(PracticeSession.user_id == current_user.id)
+        .delete()
+    )
+    db.query(UserKnowledgeState).filter(
+        UserKnowledgeState.user_id == current_user.id
+    ).delete()
+
+    deleted_questions = 0
+    if include_questions:
+        deleted_questions = (
+            db.query(Question).filter(Question.user_id == current_user.id).delete()
+        )
+        db.query(KnowledgePoint).filter(
+            KnowledgePoint.user_id == current_user.id
+        ).delete()
+    else:
+        # 难度由作答动态调整过,进度归零时重置回默认初值
+        db.query(Question).filter(Question.user_id == current_user.id).update(
+            {"difficulty": 3.0}
+        )
+    db.commit()
+    logger.info(
+        "练习记录已清空: user=%s sessions=%s attempts=%s questions=%s",
+        current_user.id, deleted_sessions, deleted_attempts, deleted_questions,
+    )
+    return ClearRecordsResponse(
+        deleted_sessions=deleted_sessions,
+        deleted_attempts=deleted_attempts,
+        deleted_questions=deleted_questions,
+    )

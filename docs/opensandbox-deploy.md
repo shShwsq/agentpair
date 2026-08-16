@@ -624,6 +624,11 @@ SANDBOX_IMAGE=agentpair-sandbox:latest
 # 沙箱超时(分钟)
 SANDBOX_TIMEOUT_MINUTES=30
 
+# 可选:会话 TTL 续期间隔(分钟,默认 5)
+# 会话被访问时距上次续期超过此值就自动 renew TTL,
+# 防长任务(多轮协作/用户等待/CLI 长执行)拖过 TTL 被 Server 回收(回收后命令 404)
+SANDBOX_RENEW_INTERVAL_MINUTES=5
+
 # 可选:挂载宿主机 SSH key(第三节)
 SANDBOX_SSH_KEY_HOST_PATH=~/.ssh
 

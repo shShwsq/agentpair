@@ -21,6 +21,9 @@ from app.models.practice import (
     LEARNING_TOPIC_ARCHITECTURE,
     LEARNING_TOPIC_CODING,
     LEARNING_TOPIC_SECURITY,
+    THINKING_MODE_FOLLOW,
+    THINKING_MODE_OFF,
+    THINKING_MODE_ON,
 )
 
 
@@ -38,6 +41,12 @@ class UserPreferenceOut(BaseModel):
     learning_topic: str = "security"
     # 出题前沙箱已清理时是否重新 clone 恢复工作区(默认关)
     restore_workspace_for_practice: bool = False
+    # 用户级默认出题模型(UserLLMConfig 配置 id;None=未设置,回退任务级/env 默认)
+    default_llm_config_id: str | None = None
+    # 始终用默认出题模型(忽略任务自带模型配置;默认关)
+    force_default_llm: bool = False
+    # 出题思考模式覆盖(follow=跟随模型配置/on=强制开/off=强制关,默认 follow)
+    thinking_mode_for_practice: str = THINKING_MODE_FOLLOW
     # 最后更新时间(可空 — 未配置时为 None;FastAPI 序列化为 ISO 字符串)
     updated_at: datetime | None = None
 
@@ -59,6 +68,12 @@ class SavePracticeSettingsRequest(BaseModel):
       出题提示词按此切换;None 表示本次不修改
     - restore_workspace_for_practice:出题前沙箱已清理时是否重新 clone
       恢复工作区;None 表示本次不修改
+    - default_llm_config_id:用户级默认出题模型(UserLLMConfig 配置 id);
+      None 表示本次不修改,空串表示清空(回退任务级/env 默认)
+    - force_default_llm:始终用默认出题模型(忽略任务自带模型配置);
+      None 表示本次不修改
+    - thinking_mode_for_practice:出题思考模式覆盖(follow/on/off);
+      None 表示本次不修改
     """
 
     auto_generate_practice: bool = True
@@ -68,6 +83,13 @@ class SavePracticeSettingsRequest(BaseModel):
         LEARNING_TOPIC_CODING,
     ] | None = None
     restore_workspace_for_practice: bool | None = None
+    default_llm_config_id: str | None = Field(default=None, max_length=36)
+    force_default_llm: bool | None = None
+    thinking_mode_for_practice: Literal[
+        THINKING_MODE_FOLLOW,
+        THINKING_MODE_ON,
+        THINKING_MODE_OFF,
+    ] | None = None
 
 
 class SaveAgentPolicyRequest(BaseModel):

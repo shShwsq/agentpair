@@ -14,14 +14,18 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import AppHeader from '@/components/AppHeader.vue'
+import PracticeCodeSidebar from '@/components/PracticeCodeSidebar.vue'
+import PracticeGenerateDialog from '@/components/PracticeGenerateDialog.vue'
 import PracticeGenerateSidebar from '@/components/PracticeGenerateSidebar.vue'
 import PracticeSettingsDialog from '@/components/PracticeSettingsDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import { getPreferences, savePracticeSettings } from '@/api/memory'
+import { getMyModels } from '@/api/model_configs'
 import {
   activateQuestions,
   archiveQuestion,
+  clearPracticeRecords,
   getSessionDetail,
   getPracticeStats,
   getPracticeTrend,
@@ -32,6 +36,8 @@ import {
   submitAnswer,
 } from '@/api/practice'
 import { extractErrorMessage } from '@/utils/error'
+import type { LLMConfigItemOut } from '@/types/model_configs'
+import type { PracticeThinkingMode } from '@/types/memory'
 import type {
   GenerateJobSummary,
   PracticeStats,
@@ -89,6 +95,71 @@ function toggleGenSidebar(): void {
   genSidebarOpen.value = !genSidebarOpen.value
 }
 
+// ---- 题目入库弹窗(复用任务详情页的 PracticeGenerateDialog)----
+// 出题进度侧栏完成的 job 点「确认入库」→ 携带来源任务 id 打开预览勾选
+const practiceDialogOpen = ref(false)
+const practiceDialogTaskId = ref('')
+
+function handleConfirmPreview(taskId: string): void {
+  practiceDialogTaskId.value = taskId
+  practiceDialogOpen.value = true
+}
+
+/** 弹窗关闭(无论是否确认):刷新题库与统计,让新入库的题即时可见 */
+function handlePracticeDialogClose(): void {
+  practiceDialogOpen.value = false
+  loadQuestionBank()
+  loadStats()
+}
+
+// ============================================================
+// 源码查阅侧栏(右侧,仅答题会话):按当前题的 source_task_id 浏览工作区
+// ============================================================
+const codeSidebarOpen = ref(false)
+/** 用户手动切换过的来源任务(切题时重置,默认跟随当前题) */
+const codeTaskOverride = ref<string | null>(null)
+
+/** 本局涉及的来源任务清单(去重,供侧栏下拉切换) */
+const sessionTaskOptions = computed(() => {
+  const seen = new Map<string, string>()
+  for (const q of sessionQuestions.value) {
+    if (q.source_task_id && !seen.has(q.source_task_id)) {
+      seen.set(q.source_task_id, `任务 ${q.source_task_id.slice(0, 8)}`)
+    }
+  }
+  return [...seen.entries()].map(([id, label]) => ({ id, label }))
+})
+
+/** 侧栏当前浏览的任务(手动切换优先,否则跟随当前题) */
+const codeTaskId = computed<string | null>(
+  () => codeTaskOverride.value ?? currentQuestion.value?.source_task_id ?? null,
+)
+
+/** 当前题的源码定位行号(取 source_lines 起始行) */
+const locateLine = computed<number | null>(() => {
+  const raw = currentQuestion.value?.source_lines
+  if (!raw) return null
+  const m = raw.match(/\d+/)
+  return m ? Number(m[0]) : null
+})
+
+function toggleCodeSidebar(): void {
+  codeSidebarOpen.value = !codeSidebarOpen.value
+  // 同侧互斥:打开代码栏时收起出题进度栏
+  if (codeSidebarOpen.value) genSidebarOpen.value = false
+}
+
+/** 点题目上的源码标签:打开侧栏并跟随当前题定位 */
+function openCodeAtSource(): void {
+  codeTaskOverride.value = null
+  codeSidebarOpen.value = true
+  genSidebarOpen.value = false
+}
+
+function handleSwitchCodeTask(taskId: string): void {
+  codeTaskOverride.value = taskId
+}
+
 // ============================================================
 // Toast(与其他视图一致的本地实现)
 // ============================================================
@@ -101,12 +172,20 @@ function showToast(msg: string, type: 'success' | 'error'): void {
 }
 
 // ============================================================
-// 练习设置弹窗(自动生成开关 / 学习主题 / 出题前恢复工作区,切换即保存)
+// 练习设置弹窗(自动生成开关 / 学习主题 / 出题前恢复工作区 / 思考模式 / 默认出题模型,切换即保存)
 // ============================================================
 const settingsOpen = ref(false)
 const autoGenPractice = ref(true)
 const learningTopic = ref<'security' | 'architecture' | 'coding'>('security')
 const restoreWorkspace = ref(false)
+/** 出题思考模式(follow=跟随模型配置/on=强制开/off=强制关) */
+const thinkingMode = ref<PracticeThinkingMode>('follow')
+/** 默认出题模型配置 id(空串=跟随系统默认) */
+const defaultModelId = ref('')
+/** 始终用默认出题模型(忽略任务自带模型配置) */
+const forceDefaultLlm = ref(false)
+/** 用户已保存的 LLM 配置列表(默认出题模型下拉选项来源) */
+const llmConfigs = ref<LLMConfigItemOut[]>([])
 const autoGenLoading = ref(false)
 const settingsError = ref('')
 
@@ -116,8 +195,17 @@ async function loadPracticeSettings(): Promise<void> {
     autoGenPractice.value = pref.auto_generate_practice
     learningTopic.value = pref.learning_topic
     restoreWorkspace.value = pref.restore_workspace_for_practice
+    thinkingMode.value = pref.thinking_mode_for_practice
+    defaultModelId.value = pref.default_llm_config_id ?? ''
+    forceDefaultLlm.value = pref.force_default_llm
   } catch {
     // 静默失败,保持默认值
+  }
+  try {
+    const models = await getMyModels()
+    llmConfigs.value = models.llm_configs
+  } catch {
+    // 静默失败,下拉只展示「跟随系统默认」
   }
 }
 
@@ -178,6 +266,115 @@ async function toggleRestoreWorkspace(): Promise<void> {
     settingsError.value = extractErrorMessage(err)
   } finally {
     autoGenLoading.value = false
+  }
+}
+
+/** 切换出题思考模式(follow=跟随模型配置/on=强制开/off=强制关) */
+async function selectThinkingMode(mode: PracticeThinkingMode): Promise<void> {
+  if (autoGenLoading.value || mode === thinkingMode.value) return
+  autoGenLoading.value = true
+  settingsError.value = ''
+  try {
+    const latest = await savePracticeSettings({
+      auto_generate_practice: autoGenPractice.value,
+      thinking_mode_for_practice: mode,
+    })
+    thinkingMode.value = latest.thinking_mode_for_practice
+    const label = mode === 'follow' ? '跟随模型配置'
+      : mode === 'on' ? '强制开启' : '强制关闭'
+    showToast(`出题思考模式已切换为「${label}」`, 'success')
+  } catch (err) {
+    settingsError.value = extractErrorMessage(err)
+  } finally {
+    autoGenLoading.value = false
+  }
+}
+
+/** 切换「始终用默认出题模型」(忽略任务自带配置,全局统一用默认模型) */
+async function toggleForceDefaultLlm(): Promise<void> {
+  if (autoGenLoading.value) return
+  autoGenLoading.value = true
+  settingsError.value = ''
+  const next = !forceDefaultLlm.value
+  try {
+    const latest = await savePracticeSettings({
+      auto_generate_practice: autoGenPractice.value,
+      force_default_llm: next,
+    })
+    forceDefaultLlm.value = latest.force_default_llm
+    showToast(
+      next ? '已开启「始终用默认出题模型」' : '已关闭「始终用默认出题模型」',
+      'success',
+    )
+  } catch (err) {
+    settingsError.value = extractErrorMessage(err)
+  } finally {
+    autoGenLoading.value = false
+  }
+}
+
+/** 切换默认出题模型(空串=清空,回退任务级/env 默认) */
+async function selectModel(configId: string): Promise<void> {
+  if (autoGenLoading.value || configId === defaultModelId.value) return
+  autoGenLoading.value = true
+  settingsError.value = ''
+  try {
+    const latest = await savePracticeSettings({
+      auto_generate_practice: autoGenPractice.value,
+      default_llm_config_id: configId,
+    })
+    defaultModelId.value = latest.default_llm_config_id ?? ''
+    showToast(
+      configId ? '默认出题模型已更新' : '默认出题模型已重置为跟随系统默认',
+      'success',
+    )
+  } catch (err) {
+    settingsError.value = extractErrorMessage(err)
+  } finally {
+    autoGenLoading.value = false
+  }
+}
+
+// ---- 危险操作:清空练习数据(不可逆,弹窗内已二次确认) ----
+/** 清空中(禁用弹窗交互) */
+const clearing = ref(false)
+
+/**
+ * 清空练习数据
+ *
+ * includeQuestions=false:进度归零,保留题库;
+ * includeQuestions=true:连题库一并删除。
+ * 正在作答的会话已被清除,直接退回首页;成功后重拉全部联动数据。
+ */
+async function handleClearPractice(includeQuestions: boolean): Promise<void> {
+  if (clearing.value || autoGenLoading.value) return
+  clearing.value = true
+  settingsError.value = ''
+  try {
+    await clearPracticeRecords(includeQuestions)
+    // 进行中的会话与明细缓存均已失效,退回首页
+    mode.value = 'home'
+    sessionId.value = ''
+    sessionQuestions.value = []
+    sessionResults.value = []
+    feedback.value = null
+    codeSidebarOpen.value = false
+    codeTaskOverride.value = null
+    sessionDetails.value = {}
+    settingsOpen.value = false
+    showToast(
+      includeQuestions ? '已清空全部练习数据' : '已清空练习记录',
+      'success',
+    )
+    loadStats()
+    loadQuestionBank()
+    loadMistakes()
+    loadSessions()
+    loadTrend()
+  } catch (err) {
+    settingsError.value = extractErrorMessage(err)
+  } finally {
+    clearing.value = false
   }
 }
 
@@ -245,6 +442,7 @@ async function handleStartPractice(
     chosenIdx.value = null
     feedback.value = null
     submitting.value = false
+    codeTaskOverride.value = null
     mode.value = 'session'
   } catch (err) {
     startError.value = extractErrorMessage(err)
@@ -292,6 +490,8 @@ function handleNext(): void {
   currentIndex.value += 1
   chosenIdx.value = null
   feedback.value = null
+  // 切题后侧栏重新跟随当前题的来源任务
+  codeTaskOverride.value = null
 }
 
 /** 提前结束本局(未完成全部题目) */
@@ -310,6 +510,8 @@ function backToHome(): void {
   sessionQuestions.value = []
   sessionResults.value = []
   feedback.value = null
+  codeSidebarOpen.value = false
+  codeTaskOverride.value = null
   loadStats()
   loadQuestionBank()
   loadMistakes()
@@ -583,6 +785,20 @@ onBeforeUnmount(() => {
       <template v-if="mode === 'session' && currentQuestion">
         <div class="session-bar">
           <button class="btn-ghost" @click="handleQuitSession">退出练习</button>
+          <button
+            :class="['btn-ghost', 'code-toggle-btn', { 'code-toggle-active': codeSidebarOpen }]"
+            :disabled="sessionTaskOptions.length === 0"
+            :title="sessionTaskOptions.length === 0
+              ? '本局题目无来源任务,无法浏览代码'
+              : (codeSidebarOpen ? '收起源码查阅' : '打开源码查阅,边看代码边答题')"
+            @click="toggleCodeSidebar"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="16 18 22 12 16 6" />
+              <polyline points="8 6 2 12 8 18" />
+            </svg>
+            源码查阅
+          </button>
           <div class="session-progress">
             <span class="session-progress-text">
               第 {{ currentIndex + 1 }} / {{ sessionQuestions.length }} 题
@@ -601,8 +817,23 @@ onBeforeUnmount(() => {
             <span v-if="currentQuestion.knowledge_name" class="tag tag-kp">
               {{ currentQuestion.knowledge_name }}
             </span>
+            <span
+              v-for="lang in (currentQuestion.languages ?? [])"
+              :key="lang"
+              class="tag tag-lang"
+            >{{ lang }}</span>
+            <span v-if="currentQuestion.origin === 'synthetic'" class="tag tag-synthetic" title="智能体原创的虚构代码,脱离原仓库">改编</span>
             <span class="tag">{{ currentQuestion.qtype === 'true_false' ? '判断题' : '单选题' }}</span>
             <span class="tag">难度 {{ formatDifficulty(currentQuestion.difficulty) }}</span>
+            <button
+              v-if="currentQuestion.source_file"
+              type="button"
+              class="tag tag-source"
+              :title="`打开右侧源码查阅并定位到 ${currentQuestion.source_file}`"
+              @click="openCodeAtSource"
+            >
+              {{ currentQuestion.source_file }}<template v-if="currentQuestion.source_lines">:{{ currentQuestion.source_lines }}</template>
+            </button>
           </div>
 
           <h2 class="question-stem">{{ currentQuestion.stem }}</h2>
@@ -810,6 +1041,11 @@ onBeforeUnmount(() => {
                 <div class="weak-info">
                   <span class="weak-name">{{ w.knowledge_name }}</span>
                   <span class="weak-key">{{ w.knowledge_key }}</span>
+                  <span
+                    v-for="lang in (w.languages ?? [])"
+                    :key="lang"
+                    class="tag tag-lang"
+                  >{{ lang }}</span>
                   <span v-if="isDue(w.due_at)" class="tag tag-due">待复习</span>
                 </div>
                 <div class="weak-bar-wrap" :title="`错误率 ${formatPercent(w.accuracy)}`">
@@ -850,6 +1086,12 @@ onBeforeUnmount(() => {
                   <span class="bank-stem">{{ q.stem }}</span>
                   <span class="bank-meta">
                     <span v-if="q.knowledge_name" class="tag tag-kp">{{ q.knowledge_name }}</span>
+                    <span
+                      v-for="lang in (q.languages ?? [])"
+                      :key="lang"
+                      class="tag tag-lang"
+                    >{{ lang }}</span>
+                    <span v-if="q.origin === 'synthetic'" class="tag tag-synthetic" title="智能体原创的虚构代码,脱离原仓库">改编</span>
                     <span>{{ q.qtype === 'true_false' ? '判断' : '单选' }}</span>
                     <span>作答 {{ q.attempts }} 次 · 正确率 {{ formatPercent(q.accuracy) }}</span>
                   </span>
@@ -967,6 +1209,12 @@ onBeforeUnmount(() => {
                   <span class="bank-stem">{{ q.stem }}</span>
                   <span class="bank-meta">
                     <span v-if="q.knowledge_name" class="tag tag-kp">{{ q.knowledge_name }}</span>
+                    <span
+                      v-for="lang in (q.languages ?? [])"
+                      :key="lang"
+                      class="tag tag-lang"
+                    >{{ lang }}</span>
+                    <span v-if="q.origin === 'synthetic'" class="tag tag-synthetic" title="智能体原创的虚构代码,脱离原仓库">改编</span>
                     <span>{{ q.qtype === 'true_false' ? '判断' : '单选' }}</span>
                     <span>难度 {{ formatDifficulty(q.difficulty) }}</span>
                     <template v-if="q.attempts > 0">
@@ -995,10 +1243,21 @@ onBeforeUnmount(() => {
       </template>
       </main>
 
+      <PracticeCodeSidebar
+        v-if="mode === 'session' && codeSidebarOpen"
+        :task-id="codeTaskId"
+        :task-options="sessionTaskOptions"
+        :locate-file="currentQuestion?.source_file ?? null"
+        :locate-line="locateLine"
+        @close="codeSidebarOpen = false"
+        @switch-task="handleSwitchCodeTask"
+      />
+
       <PracticeGenerateSidebar
-        v-if="genSidebarOpen"
+        v-if="genSidebarOpen && !(mode === 'session' && codeSidebarOpen)"
         :jobs="generateJobs"
         @close="genSidebarOpen = false"
+        @confirm-preview="handleConfirmPreview"
       />
     </div>
 
@@ -1008,12 +1267,31 @@ onBeforeUnmount(() => {
       :auto-generate="autoGenPractice"
       :learning-topic="learningTopic"
       :restore-workspace="restoreWorkspace"
+      :thinking-mode="thinkingMode"
+      :default-model-id="defaultModelId"
+      :force-default-llm="forceDefaultLlm"
+      :llm-configs="llmConfigs"
       :loading="autoGenLoading"
+      :clearing="clearing"
       :error="settingsError"
       @toggle="togglePracticeAuto"
       @topic="selectTopic"
       @toggle-restore="toggleRestoreWorkspace"
+      @thinking="selectThinkingMode"
+      @model="selectModel"
+      @toggle-force-default="toggleForceDefaultLlm"
+      @clear-records="handleClearPractice(false)"
+      @clear-all="handleClearPractice(true)"
       @cancel="settingsOpen = false"
+    />
+
+    <!-- ============ 题目入库弹窗(出题进度侧栏入口,与任务详情页同款) ============ -->
+    <PracticeGenerateDialog
+      v-if="practiceDialogTaskId"
+      :open="practiceDialogOpen"
+      :task-id="practiceDialogTaskId"
+      @close="handlePracticeDialogClose"
+      @confirmed="handlePracticeDialogClose"
     />
 
     <!-- ============ 浮动提示 ============ -->
@@ -1613,6 +1891,40 @@ onBeforeUnmount(() => {
   gap: var(--space-3);
 }
 
+/* 会话顶栏「源码查阅」切换按钮(打开时高亮;无来源任务时置灰) */
+.code-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--fs-xs);
+}
+
+.code-toggle-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.code-toggle-active {
+  color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+/* 题目上的源码定位标签(可点击,打开代码栏并定位) */
+.tag-source {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  color: var(--color-primary);
+  background: var(--color-primary-light);
+  border: none;
+  cursor: pointer;
+}
+
+.tag-source:hover {
+  text-decoration: underline;
+}
+
 .session-progress-text {
   font-size: var(--fs-sm);
   color: var(--color-text-secondary);
@@ -1662,6 +1974,18 @@ onBeforeUnmount(() => {
 .tag-kp {
   color: var(--color-primary);
   background: var(--color-primary-light);
+}
+
+/* 编程语言标签:低权重中性样式 */
+.tag-lang {
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+
+/* 改编题标签:区分虚构代码来源 */
+.tag-synthetic {
+  color: var(--color-warning, #b45309);
+  background: color-mix(in srgb, var(--color-warning, #b45309) 10%, transparent);
 }
 
 .tag-due {

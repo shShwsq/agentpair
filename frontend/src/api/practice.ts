@@ -8,12 +8,14 @@ import client from './client'
 import type {
   ActivateQuestionsRequest,
   ActivateQuestionsResponse,
+  ClearRecordsResponse,
   ConfirmQuestionsRequest,
   ConfirmQuestionsResponse,
   DraftQuestion,
   GenerateJobResponse,
   GenerateJobsResponse,
   GenerateJobStatus,
+  GenerateModelInfo,
   GenerateRequest,
   PracticeStats,
   PracticeSummary,
@@ -34,6 +36,11 @@ import type {
  */
 export function generateQuestions(req: GenerateRequest): Promise<GenerateJobResponse> {
   return client.post('/practice/generate', req).then((r) => r.data)
+}
+
+/** 本次出题将使用的模型(任务详情页出题入口附近展示用,与真实出题同一解析) */
+export function getTaskGenerateModel(taskId: string): Promise<GenerateModelInfo> {
+  return client.get(`/practice/tasks/${taskId}/generate-model`).then((r) => r.data)
 }
 
 /** 轮询出题进度与结果 */
@@ -122,4 +129,16 @@ export function getSessionDetail(sessionId: string): Promise<SessionDetail> {
 /** 归档题目(不再参与组卷) */
 export function archiveQuestion(questionId: string): Promise<{ archived: boolean }> {
   return client.post(`/practice/questions/${questionId}/archive`).then((r) => r.data)
+}
+
+/**
+ * 清空练习记录(不可恢复)
+ *
+ * includeQuestions=false:进度归零(流水/会话/记忆状态),题库保留但难度重置;
+ * includeQuestions=true:连题目与知识点词典一并删除。
+ */
+export function clearPracticeRecords(includeQuestions = false): Promise<ClearRecordsResponse> {
+  return client
+    .delete('/practice/records', { params: { include_questions: includeQuestions } })
+    .then((r) => r.data)
 }

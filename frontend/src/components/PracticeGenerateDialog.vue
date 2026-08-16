@@ -252,6 +252,12 @@ function formatDifficulty(d: number): string {
                     />
                     <span class="draft-no">题 {{ idx + 1 }}</span>
                     <span v-if="q.knowledge_name" class="tag tag-kp">{{ q.knowledge_name }}</span>
+                    <span
+                      v-for="lang in (q.languages ?? [])"
+                      :key="lang"
+                      class="tag tag-lang"
+                    >{{ lang }}</span>
+                    <span v-if="q.origin === 'synthetic'" class="tag tag-synthetic" title="智能体原创的虚构代码,脱离原仓库">改编</span>
                     <span class="tag">{{ q.qtype === 'true_false' ? '判断' : '单选' }}</span>
                     <span class="tag">难度 {{ formatDifficulty(q.difficulty) }}</span>
                   </div>
@@ -471,6 +477,19 @@ function formatDifficulty(d: number): string {
 .tag-kp {
   color: var(--color-primary);
   background: var(--color-primary-light);
+}
+
+/* 编程语言标签:低权重中性样式 */
+.tag-lang {
+  color: var(--color-text-secondary);
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+}
+
+/* 改编题标签:区分虚构代码来源 */
+.tag-synthetic {
+  color: var(--color-warning, #b45309);
+  background: color-mix(in srgb, var(--color-warning, #b45309) 10%, transparent);
 }
 
 .draft-stem {

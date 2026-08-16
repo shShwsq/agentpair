@@ -254,6 +254,32 @@ def test_append_event_seq_and_snapshot_fields():
             gen_jobs._JOBS.pop(job_id, None)
 
 
+def test_append_event_restore_updates_snapshot():
+    """restore 事件入事件流,并维护 snapshot 字段供中途接入兜底"""
+    user_id = uuid.uuid4()
+    job_id = gen_jobs.create_job(user_id)
+    try:
+        assert gen_jobs.snapshot(job_id, user_id)["restore"] is None
+        gen_jobs.append_event(job_id, "restore", {"phase": "start"})
+        gen_jobs.append_event(
+            job_id, "restore", {"phase": "progress", "percent": 42, "message": "Receiving objects: 42%"},
+        )
+        snap = gen_jobs.snapshot(job_id, user_id)
+        # snapshot 只保留最新一条 restore 状态
+        assert snap["restore"] == {
+            "phase": "progress", "percent": 42, "message": "Receiving objects: 42%",
+        }
+        # 事件流保留全部 restore 事件(供 SSE 重放)
+        job = gen_jobs.get_job(job_id, user_id)
+        assert [e["type"] for e in job["events"]] == ["restore", "restore"]
+        # list_jobs 摘要同样携带 restore 字段(job 列表状态展示用)
+        listed = [j for j in gen_jobs.list_jobs(user_id) if j["job_id"] == job_id]
+        assert listed[0]["restore"]["phase"] == "progress"
+    finally:
+        with gen_jobs._LOCK:
+            gen_jobs._JOBS.pop(job_id, None)
+
+
 def test_recent_text_keeps_tail():
     user_id = uuid.uuid4()
     job_id = gen_jobs.create_job(user_id)

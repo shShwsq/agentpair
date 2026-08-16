@@ -15,7 +15,10 @@ from sqlalchemy.orm import Session
 from app.models.practice import PracticeSettings, Question
 from app.models.task import Result, Task
 from app.services.practice import jobs as gen_jobs
-from app.services.practice.generator import generate_questions_for_task
+from app.services.practice.generator import (
+    PracticeGenerateError,
+    generate_questions_for_task,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,7 @@ def auto_generate_practice_for_task(task: Task, db: Session) -> int:
     """
     # 1) 匿名任务不支持(练习题 per-user 隔离)
     if task.user_id is None:
+        logger.info("[task=%s] 匿名任务不支持自动生成练习题,跳过", task.id)
         return 0
 
     # 2) 用户开关(practice_settings 独立表,1:1)
@@ -59,6 +63,7 @@ def auto_generate_practice_for_task(task: Task, db: Session) -> int:
         Question.source_task_id == task.id
     ).first()
     if exists:
+        logger.info("[task=%s] 该任务已有练习题,跳过自动生成", task.id)
         return 0
 
     # 4) 只对有结构化发现的任务出题(单 agent 纯摘要无元信息,质量差)
@@ -92,7 +97,13 @@ def auto_generate_practice_for_task(task: Task, db: Session) -> int:
                 job_id, etype, data,
             ),
         )
+    except PracticeGenerateError as e:
+        # 致命错误(额度/认证等):友好原因置 job error 供侧栏展示,无需堆栈
+        logger.warning("[task=%s] 自动出题中止 job=%s: %s", task.id, job_id, e)
+        gen_jobs.update_job(job_id, status="error", error=str(e)[:500])
+        raise  # 保持原有语义:由调用方 try/except 兜底,不影响任务完成
     except Exception as e:
+        logger.exception("[task=%s] 自动生成练习题失败 job=%s", task.id, job_id)
         gen_jobs.update_job(job_id, status="error", error=str(e)[:500])
         raise  # 保持原有语义:由调用方 try/except 兜底,不影响任务完成
     gen_jobs.update_job(

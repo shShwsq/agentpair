@@ -1,6 +1,7 @@
 """练习模块的 Pydantic 模型(请求与响应)"""
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -25,6 +26,19 @@ class GenerateJobResponse(BaseModel):
     """异步生成任务句柄(POST /practice/generate 立即返回)"""
 
     job_id: str
+
+
+class GenerateModelResponse(BaseModel):
+    """任务出题模型解析结果(GET /practice/tasks/{task_id}/generate-model)
+
+    与真实出题的 resolve_llm_client 同一优先级解析,供任务详情页在
+    出题入口附近展示「本次出题将使用:xxx」,避免用户困惑为什么
+    没用练习设置里的默认模型。
+    source: task=任务自带配置 / default=练习默认出题模型 / env=环境默认
+    """
+
+    model: str
+    source: Literal["task", "default", "env"]
 
 
 class GenerateJobStatusResponse(BaseModel):
@@ -87,6 +101,13 @@ class DraftQuestionResponse(BaseModel):
     difficulty: float
     knowledge_key: str | None = None
     knowledge_name: str | None = None
+    # 出题形式:repo=基于真实源码,synthetic=改编题(虚构代码)
+    origin: str = "repo"
+    # 知识点编程语言标签(如 ["python", "sql"];来自知识点累积)
+    languages: list[str] = []
+    # 题目引用的源码定位(预览时校对出处用;老题为 None)
+    source_file: str | None = None
+    source_lines: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -143,7 +164,11 @@ class StartSessionRequest(BaseModel):
 
 
 class SessionQuestionResponse(BaseModel):
-    """组卷下发的题面(不含 answer_idx / explanation,防作弊)"""
+    """组卷下发的题面(不含 answer_idx / explanation,防作弊)
+
+    source_task_id/source_file/source_lines 供做题页右侧代码栏
+    打开题目来源工作区并自动定位(不含答案,无作弊风险)。
+    """
 
     id: uuid.UUID
     qtype: str
@@ -152,6 +177,13 @@ class SessionQuestionResponse(BaseModel):
     options: list[str]
     difficulty: float
     knowledge_name: str | None = None
+    # 知识点编程语言标签(做题页标签展示用)
+    languages: list[str] = []
+    # 出题形式:repo=真实代码题,synthetic=改编题
+    origin: str = "repo"
+    source_task_id: uuid.UUID | None = None
+    source_file: str | None = None
+    source_lines: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -175,6 +207,8 @@ class KnowledgeStateResponse(BaseModel):
 
     knowledge_key: str
     knowledge_name: str
+    # 知识点编程语言标签
+    languages: list[str] = []
     ease_factor: float
     interval_days: float
     repetitions: int
@@ -207,6 +241,8 @@ class WeakPointItem(BaseModel):
 
     knowledge_key: str
     knowledge_name: str
+    # 知识点编程语言标签
+    languages: list[str] = []
     attempts: int
     correct_count: int
     accuracy: float
@@ -239,6 +275,10 @@ class QuestionListItem(BaseModel):
     difficulty: float
     status: str
     knowledge_name: str | None = None
+    # 知识点编程语言标签
+    languages: list[str] = []
+    # 出题形式:repo=真实代码题,synthetic=改编题(老题为 None)
+    origin: str | None = None
     attempts: int = 0
     accuracy: float | None = None
     created_at: datetime
@@ -305,3 +345,11 @@ class TrendResponse(BaseModel):
     """最近 N 周作答趋势(旧到新)"""
 
     weeks: list[TrendPoint] = []
+
+
+class ClearRecordsResponse(BaseModel):
+    """清空练习记录的删除计数(DELETE /practice/records)"""
+
+    deleted_sessions: int = 0
+    deleted_attempts: int = 0
+    deleted_questions: int = 0

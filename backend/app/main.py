@@ -1,6 +1,8 @@
 """FastAPI 应用入口"""
 import logging
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from fastapi import FastAPI
 
@@ -21,6 +23,31 @@ logging.basicConfig(
     level=_log_level,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+
+# 出题链路专用滚动日志:logs/practice_generate.log(与 perf.log 同目录约定)
+# 排查“一道题也没生成”需要持久化记录:模型解析/工作区状态/每条 finding 的
+# 解析与丢弃原因/汇总结果;控制台输出保留(propagate 不关)
+_PRACTICE_LOG_FILE = Path(__file__).resolve().parent.parent / "logs" / "practice_generate.log"
+try:
+    _PRACTICE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _practice_handler = RotatingFileHandler(
+        _PRACTICE_LOG_FILE,
+        maxBytes=10 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    _practice_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    ))
+    # 挂到出题相关 logger:services.practice(generator/auto_generate/jobs)
+    # 与 routers.practice(job 线程);文件 handler 随 INFO 级别全量落盘
+    _practice_handler.setLevel(logging.INFO)
+    for _name in ("app.services.practice", "app.routers.practice"):
+        logging.getLogger(_name).addHandler(_practice_handler)
+except Exception:  # 日志落盘失败不影响应用启动
+    logging.getLogger(__name__).warning(
+        "出题日志文件初始化失败: %s", _PRACTICE_LOG_FILE, exc_info=True
+    )
 
 # 导入场景模块,触发注册(general 放首位 → 前端新建任务默认选中"通用")
 from app.scenarios import general  # noqa: F401

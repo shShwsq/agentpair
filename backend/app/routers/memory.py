@@ -27,9 +27,14 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.deps import get_current_user
 from app.models.agent_policy import AgentPolicy
-from app.models.practice import DEFAULT_LEARNING_TOPIC, PracticeSettings
+from app.models.practice import (
+    DEFAULT_LEARNING_TOPIC,
+    DEFAULT_THINKING_MODE,
+    PracticeSettings,
+)
 from app.models.project import Project
 from app.models.user import User
+from app.models.user_llm_config import UserLLMConfig
 from app.models.user_memory import UserMemory
 from app.models.user_preference import UserPreference
 from app.schemas.memory import (
@@ -96,11 +101,26 @@ def save_practice_settings(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> UserPreferenceOut:
-    """保存/更新练习设置(自动生成开关 / 学习主题 / 出题前恢复工作区)
+    """保存/更新练习设置(自动生成开关 / 学习主题 / 出题前恢复工作区 / 默认出题模型 / 思考模式)
 
     存于 practice_settings 独立表(1:1),get_or_create:无行时自动创建。
-    learning_topic / restore_workspace_for_practice 可选:传 None 表示不修改。
+    learning_topic / restore_workspace_for_practice / default_llm_config_id /
+    force_default_llm / thinking_mode_for_practice 可选:传 None 表示不修改;
+    default_llm_config_id 传空串表示清空。
     """
+    # 默认出题模型归属校验:必须是当前用户已保存的 LLM 配置
+    if req.default_llm_config_id:
+        cfg_row = (
+            db.query(UserLLMConfig)
+            .filter(UserLLMConfig.user_id == current_user.id)
+            .first()
+        )
+        ids = {c.get("id") for c in (cfg_row.llm_configs or [])} if cfg_row else set()
+        if req.default_llm_config_id not in ids:
+            raise HTTPException(
+                status_code=400,
+                detail="出题模型配置不存在或不属于当前用户",
+            )
     row = (
         db.query(PracticeSettings)
         .filter(PracticeSettings.user_id == current_user.id)
@@ -118,12 +138,21 @@ def save_practice_settings(
         row.learning_topic = req.learning_topic
     if req.restore_workspace_for_practice is not None:
         row.restore_workspace_for_practice = req.restore_workspace_for_practice
+    if req.default_llm_config_id is not None:
+        row.default_llm_config_id = req.default_llm_config_id or None
+    if req.force_default_llm is not None:
+        row.force_default_llm = req.force_default_llm
+    if req.thinking_mode_for_practice is not None:
+        row.thinking_mode_for_practice = req.thinking_mode_for_practice
     db.commit()
     db.refresh(row)
     logger.info(
-        "用户 %s 更新练习设置: auto_generate_practice=%s learning_topic=%s restore_workspace=%s",
+        "用户 %s 更新练习设置: auto_generate_practice=%s learning_topic=%s "
+        "restore_workspace=%s default_llm_config_id=%s force_default_llm=%s thinking_mode=%s",
         current_user.id, req.auto_generate_practice,
         req.learning_topic, req.restore_workspace_for_practice,
+        row.default_llm_config_id, row.force_default_llm,
+        row.thinking_mode_for_practice,
     )
     return _build_preference_out(db, current_user.id, settings_row=row)
 
@@ -313,7 +342,8 @@ def _build_preference_out(
 
     - user_profile 来自 user_preferences(可能无行)
     - agent_policy 来自 agent_policies 独立表(可能无行 → None,前端用系统默认)
-    - auto_generate_practice / learning_topic / restore_workspace_for_practice
+    - auto_generate_practice / learning_topic / restore_workspace_for_practice /
+      default_llm_config_id / force_default_llm / thinking_mode_for_practice
       来自 practice_settings 独立表(可能无行 → 用默认值)
     - updated_at 取各行中较新的(哪边最后保存,就算最后更新)
     """
@@ -348,6 +378,16 @@ def _build_preference_out(
         learning_topic=settings_row.learning_topic if settings_row else DEFAULT_LEARNING_TOPIC,
         restore_workspace_for_practice=(
             settings_row.restore_workspace_for_practice if settings_row else False
+        ),
+        default_llm_config_id=(
+            settings_row.default_llm_config_id if settings_row else None
+        ),
+        force_default_llm=(
+            settings_row.force_default_llm if settings_row else False
+        ),
+        thinking_mode_for_practice=(
+            settings_row.thinking_mode_for_practice
+            if settings_row else DEFAULT_THINKING_MODE
         ),
         updated_at=updated_at,
     )

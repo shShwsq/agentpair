@@ -57,7 +57,7 @@ import {
   updateTaskVerifierConfig,
 } from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
-import { listDrafts } from '@/api/practice'
+import { listDrafts, listGenerateJobs, getTaskGenerateModel } from '@/api/practice'
 import { ensureFeaturesLoaded, practiceEnabled } from '@/composables/useFeatures'
 import { listArtifacts } from '@/api/taskArtifacts'
 import { clientLog } from '@/utils/clientLog'
@@ -85,6 +85,7 @@ import type {
   CommandConfirmEventData,
 } from '@/types/task'
 import type { TaskArtifact } from '@/types/taskArtifact'
+import type { GenerateJobSummary, GenerateModelInfo } from '@/types/practice'
 
 const route = useRoute()
 const router = useRouter()
@@ -2577,14 +2578,87 @@ async function refreshPracticeDraftCount(): Promise<void> {
   }
 }
 
+/** 本次出题将使用的模型(与后端出题同一解析逻辑;任务完成 + 功能开启时展示) */
+const generateModelInfo = ref<GenerateModelInfo | null>(null)
+
+async function refreshGenerateModel(): Promise<void> {
+  if (!practiceEnabled.value || !task.value || task.value.status !== 'completed') {
+    generateModelInfo.value = null
+    return
+  }
+  try {
+    generateModelInfo.value = await getTaskGenerateModel(String(task.value.id))
+  } catch {
+    generateModelInfo.value = null  // 匿名/失败不展示
+  }
+}
+
+/** 模型来源的中文说明(任务详情页「本次出题将使用」后缀) */
+const generateModelSourceLabel = computed(() => {
+  const source = generateModelInfo.value?.source
+  if (source === 'task') return '任务配置'
+  if (source === 'default') return '练习默认设置'
+  return '环境默认'
+})
+
 watch(
   () => task.value?.status,
   (status) => {
-    if (status === 'completed') refreshPracticeDraftCount()
+    if (status === 'completed') {
+      refreshPracticeDraftCount()
+      refreshGenerateModel()
+      // 自动出题在任务完成时触发:开始轮询本任务关联的运行中 job,展示跳转入口
+      startGenJobPoll()
+    } else {
+      stopGenJobPoll()
+    }
   },
 )
 
+// ---- 出题进度跳转入口:轮询本任务关联的出题 job(手动/自动),运行中时展示 ----
+const runningGenJob = ref<GenerateJobSummary | null>(null)
+let genJobPollTimer: ReturnType<typeof setInterval> | null = null
+
+async function pollRunningGenJob(): Promise<void> {
+  if (!practiceEnabled.value || !task.value || task.value.status !== 'completed') {
+    runningGenJob.value = null
+    return
+  }
+  try {
+    const res = await listGenerateJobs()
+    const taskId = String(task.value.id)
+    runningGenJob.value = res.jobs.find(
+      (j) => j.task_id === taskId && (j.status === 'pending' || j.status === 'running'),
+    ) ?? null
+  } catch {
+    runningGenJob.value = null  // 匿名/失败不提示
+  }
+}
+
+function startGenJobPoll(): void {
+  if (genJobPollTimer) return
+  void pollRunningGenJob()
+  genJobPollTimer = setInterval(pollRunningGenJob, 5000)
+}
+
+function stopGenJobPoll(): void {
+  if (genJobPollTimer) {
+    clearInterval(genJobPollTimer)
+    genJobPollTimer = null
+  }
+  runningGenJob.value = null
+}
+
+onUnmounted(stopGenJobPoll)
+
+/** 跳转自适应练习页查看出题进度(练习页会自动展开出题进度侧栏) */
+function goToPracticeProgress(): void {
+  router.push({ name: 'practice' })
+}
+
 function openPracticeGenerate(): void {
+  // 打开出题对话框前刷新一次模型展示(设置里可能刚换过默认模型)
+  void refreshGenerateModel()
   practiceDialogOpen.value = true
 }
 
@@ -3181,13 +3255,29 @@ function toggleResult(id: string): void {
         >
           <h2>
             结果清单 <span class="count">({{ task.results.length }})</span>
+            <!-- 本任务的出题 job 运行中时,隐藏「生成练习题」入口,改为展示跳转练习页看实时进度 -->
             <button
-              v-if="task.status === 'completed' && practiceEnabled"
+              v-if="runningGenJob"
+              class="gen-progress-entry"
+              title="跳转到自适应练习查看出题进度"
+              @click="goToPracticeProgress"
+            >
+              <span class="gen-pulse-dot" aria-hidden="true" />
+              正在出题<template v-if="runningGenJob.total">({{ runningGenJob.done }}/{{ runningGenJob.total }})</template>
+              · 查看进度
+            </button>
+            <button
+              v-else-if="task.status === 'completed' && practiceEnabled"
               class="practice-generate-btn"
               :title="pendingDraftCount > 0 ? '存在待确认的候选题,点击预览入库' : '把审计发现改编为自适应练习题'"
               @click="openPracticeGenerate"
             >{{ pendingDraftCount > 0 ? `确认练习题(${pendingDraftCount})` : '生成练习题' }}</button>
           </h2>
+          <!-- 出题入口旁:展示本次出题将使用的模型,避免用户困惑为什么没用默认模型 -->
+          <p v-if="generateModelInfo && task.status === 'completed' && practiceEnabled" class="generate-model-hint">
+            本次出题将使用：<strong class="generate-model-name">{{ generateModelInfo.model }}</strong>
+            <span class="generate-model-source">（{{ generateModelSourceLabel }}）</span>
+          </p>
           <template v-for="group in resultGroups" :key="group.key">
             <h3 v-if="resultGrouping" class="sidebar-result-group">
               <span :class="['severity-tag', `sev-${group.color}`]">{{ group.label }}</span>
@@ -3550,6 +3640,46 @@ function toggleResult(id: string): void {
   padding: var(--space-2) 0;
 }
 
+/* 出题进度跳转入口(位于结果清单标题行,与「生成练习题」按钮互斥;呼吸红点提示运行中) */
+.gen-progress-entry {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-left: auto;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.gen-progress-entry:hover {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+.gen-progress-entry .gen-pulse-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  animation: gen-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes gen-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.7); }
+}
+
 .overview-actions {
   display: flex;
   gap: var(--space-2);
@@ -3742,6 +3872,25 @@ function toggleResult(id: string): void {
 .practice-generate-btn:hover {
   color: var(--color-text-inverse);
   background: var(--color-primary);
+}
+
+/* 出题入口旁的「本次出题将使用」提示(位于结果清单标题行下方) */
+.generate-model-hint {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 var(--space-3);
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+}
+
+.generate-model-name {
+  font-weight: var(--fw-semibold);
+  color: var(--color-text);
+}
+
+.generate-model-source {
+  color: var(--color-text-muted);
 }
 
 /* 结果分组头(仅有分组声明时显示) */

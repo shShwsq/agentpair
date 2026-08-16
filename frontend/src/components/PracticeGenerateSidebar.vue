@@ -17,6 +17,7 @@ import type {
   GenerateFindingData,
   GenerateJobSummary,
   GenerateProgressData,
+  GenerateRestoreData,
   GenerateSnapshotData,
   GenerateTokenData,
   GenerateToolData,
@@ -29,6 +30,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: []
+  /** 请求打开题目入库弹窗(携带 job 的来源任务 id,由父组件展示 PracticeGenerateDialog) */
+  'confirm-preview': [taskId: string]
 }>()
 
 // ============================================================
@@ -62,6 +65,8 @@ const doneInfo = ref<GenerateDoneData | null>(null)
 const streamText = ref('')
 /** snapshot 即终态时不再消费重放事件,只展示 recent_text 尾部 */
 const snapshotTerminal = ref(false)
+/** 出题前工作区恢复状态(沙箱已清理时重新 clone,首条 finding 到达后清除) */
+const restore = ref<GenerateRestoreData | null>(null)
 
 /** 输出区自动跟随(用户手动上滚时暂停) */
 const followBottom = ref(true)
@@ -162,6 +167,7 @@ function resetStreamState(): void {
   doneInfo.value = null
   streamText.value = ''
   snapshotTerminal.value = false
+  restore.value = null
   followBottom.value = true
 }
 
@@ -194,6 +200,7 @@ function subscribeToJob(job: GenerateJobSummary): void {
     onFinding: handleFinding,
     onToken: handleToken,
     onTool: handleTool,
+    onRestore: handleRestore,
     onProgress: handleProgress,
     onDone: handleDone,
     onError: handleError,
@@ -215,6 +222,8 @@ function handleSnapshot(data: GenerateSnapshotData): void {
   total.value = data.total
   currentFinding.value = data.current_finding
   errorMsg.value = data.error
+  // 中途接入时正在恢复工作区:用 snapshot 的 restore 字段兜底展示
+  if (data.restore) restore.value = data.restore
   // 已终态的 job:只展示输出尾部文本,跳过事件重放(历史 job 一眼带过)
   if (data.status === 'done' || data.status === 'error') {
     snapshotTerminal.value = true
@@ -233,6 +242,7 @@ function handleFinding(data: GenerateFindingData): void {
   }
   diagCounters.findingRendered++
   currentFinding.value = data.title
+  restore.value = null // 开始出题说明工作区阶段已结束,收起恢复横幅
   appendOutput(`\n\n━━ 发现 ${data.index}/${data.total}:${data.title} ━━\n`)
 }
 
@@ -248,6 +258,11 @@ function handleToken(data: GenerateTokenData): void {
 function handleTool(data: GenerateToolData): void {
   if (snapshotTerminal.value) return
   appendOutput(`\n[工具] ${data.summary}\n`)
+}
+
+function handleRestore(data: GenerateRestoreData): void {
+  if (snapshotTerminal.value) return
+  restore.value = data
 }
 
 function handleProgress(data: GenerateProgressData): void {
@@ -287,10 +302,21 @@ const progressPercent = computed(() => {
 })
 
 function statusLabel(job: GenerateJobSummary): string {
-  if (job.status === 'pending') return '排队中'
+  if (job.status === 'pending') {
+    // 恢复工作区阶段(克隆可能耗时数十秒),给出明确状态避免误以为卡死
+    const phase = job.restore?.phase
+    if (phase === 'start' || phase === 'progress') return '恢复工作区中'
+    return '排队中'
+  }
   if (job.status === 'running') return `出题中 ${job.done}/${job.total || '?'}`
   if (job.status === 'done') return `已完成 · ${job.created_count} 题`
   return '失败'
+}
+
+/** 打开题目入库弹窗(仅 job 关联了来源任务时可用) */
+function handleConfirmPreview(): void {
+  const taskId = selectedJob.value?.task_id
+  if (taskId) emit('confirm-preview', taskId)
 }
 </script>
 
@@ -347,6 +373,27 @@ function statusLabel(job: GenerateJobSummary): string {
           正在出题:{{ currentFinding }}
         </p>
 
+        <!-- 工作区恢复横幅(沙箱已清理时重新 clone,含克隆进度) -->
+        <div v-if="restore" :class="['gen-restore', `gen-restore-${restore.phase}`]">
+          <template v-if="restore.phase === 'failed'">
+            <p class="gen-restore-text">工作区恢复失败,已降级为无代码上下文出题</p>
+            <p v-if="restore.message" class="gen-restore-msg">{{ restore.message }}</p>
+          </template>
+          <template v-else-if="restore.phase === 'done'">
+            <p class="gen-restore-text">工作区已恢复,即将基于源码出题</p>
+          </template>
+          <template v-else>
+            <p class="gen-restore-text">
+              <span class="gen-restore-spinner" aria-hidden="true" />
+              正在恢复工作区(重新克隆仓库)<template v-if="restore.percent != null"> {{ restore.percent }}%</template>
+            </p>
+            <div v-if="restore.percent != null" class="gen-restore-track">
+              <div class="gen-restore-fill" :style="{ width: `${restore.percent}%` }" />
+            </div>
+            <p v-if="restore.message" class="gen-restore-msg">{{ restore.message }}</p>
+          </template>
+        </div>
+
         <!-- LLM 流式输出区 -->
         <div ref="outputEl" class="gen-output" @scroll="handleOutputScroll">
           <pre class="gen-output-text">{{ streamText || (status === 'running' ? '等待模型输出...' : '') }}</pre>
@@ -354,8 +401,15 @@ function statusLabel(job: GenerateJobSummary): string {
 
         <!-- 终止态提示 -->
         <div v-if="status === 'done'" class="gen-footer gen-footer-done">
-          已生成 {{ doneInfo?.created ?? 0 }} 道题<template v-if="(doneInfo?.skipped ?? 0) > 0">(另有 {{ doneInfo?.skipped }} 条发现未能出题)</template>。
-          草稿需前往任务详情页或题库管理确认后入库。
+          <p class="gen-done-text">
+            已生成 {{ doneInfo?.created ?? 0 }} 道题<template v-if="(doneInfo?.skipped ?? 0) > 0">(另有 {{ doneInfo?.skipped }} 条发现未能出题)</template>
+          </p>
+          <button
+            v-if="selectedJob?.task_id"
+            class="btn-primary btn-small gen-confirm-btn"
+            title="预览候选题并勾选入库"
+            @click="handleConfirmPreview"
+          >确认入库</button>
         </div>
         <div v-else-if="status === 'error'" class="gen-footer gen-footer-error">
           生成失败:{{ errorMsg || '未知错误' }}
@@ -546,6 +600,66 @@ function statusLabel(job: GenerateJobSummary): string {
   color: var(--color-text);
 }
 
+/* ---- 工作区恢复横幅 ---- */
+.gen-restore {
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-secondary);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
+.gen-restore-text {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text);
+}
+
+.gen-restore-done { color: var(--color-success, #16a34a); }
+.gen-restore-failed { color: var(--color-danger); }
+
+.gen-restore-spinner {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: gen-restore-spin 0.8s linear infinite;
+}
+
+@keyframes gen-restore-spin {
+  to { transform: rotate(360deg); }
+}
+
+.gen-restore-track {
+  margin-top: var(--space-1);
+  height: 4px;
+  background: var(--color-border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.gen-restore-fill {
+  height: 100%;
+  background: var(--color-primary);
+  border-radius: 2px;
+  transition: width var(--transition-normal, 0.3s ease);
+}
+
+.gen-restore-msg {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---- 流式输出区 ---- */
 .gen-output {
   flex: 1;
@@ -579,6 +693,14 @@ function statusLabel(job: GenerateJobSummary): string {
 .gen-footer-done {
   color: var(--color-success, #16a34a);
   background: var(--color-bg-secondary);
+}
+
+.gen-done-text {
+  margin: 0 0 var(--space-2);
+}
+
+.gen-confirm-btn {
+  width: 100%;
 }
 
 .gen-footer-error {

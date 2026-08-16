@@ -65,6 +65,7 @@
 
 **场景二:代码审查**(`code_review`)
 - 预设提示词:关注代码质量、可读性、正确性、性能等
+- 推荐 skill:review_concurrency(并发安全)/ review_error_handling(错误处理)/ review_test_quality(测试质量)
 
 **场景三:通用**(`general`)
 - 无预设提示词,用户自行描述任务
@@ -286,6 +287,11 @@ Result(任务结果项,通用)
 - Task 新增 `paused` 状态
 - Conversation 新增 `round_idx`(协作轮次)、`reasoning`(思考链)、`message`(用户补充消息)、`history_compress`(LLM 压缩缓存)等类型
 
+**后续新增表**(详见 §9.15-9.19):
+- `AgentPolicy`(agent_policies):用户级协作策略独立表(1:1,检查点评估频率 / 打断权限 / 验证权限),从 `user_preferences` JSONB 迁移而来,任务级经 `task.params._agent_policy` 覆盖
+- `TaskArtifact`(task_artifacts):任务工作区产物,1:N 挂在 Task 上(`kind=git_diff` 存工作区变更 patch,`kind=repo_tree` 存仓库树快照)
+- 练习模块表族(knowledge_points / questions / user_knowledge_states / practice_sessions / attempts / practice_settings):知识点、题库、SM-2 记忆状态、会话、答题流水与用户练习设置
+
 ---
 
 ## 6. 报告输出
@@ -403,6 +409,12 @@ Result(任务结果项,通用)
 | query_cve | 解析依赖文件 + 查 CVE 数据库(OSV API,按依赖逐个查) | ✓ |
 | write_file | 在工作区写文件(PoC 脚本、补丁、报告等) | ✓ |
 | run_python_code | 在沙箱执行 Python 代码(验证 PoC / 跑分析脚本 / 执行测试) | ✓ |
+| run_command | 在工作区执行 shell 命令(构建 / 测试 / 运行服务),local/sandbox 双模式,危险命令按策略拦截 | ✓ |
+| str_replace_editor | 精确编辑文件(create / str_replace / insert,支持行号插入与全部替换) | ✓ |
+| git_log / git_blame / git_diff | Git 追溯:提交历史 / 责任溯源 / 变更 diff(含 stat 模式) | ✓ |
+| list_dependencies | 扫描清单文件(requirements.txt / package.json / go.mod 等)返回结构化依赖列表,串联 query_cve 批量查漏洞 | ✓ |
+| run_lint | 运行静态检查(Python 用 ruff,JS/TS 检测 eslint);local 缺工具返回指引,sandbox 自动安装 | ✓ |
+| run_coverage | 跑测试并解析覆盖率(Python 用 pytest-cov,JS 检测 vitest) | ✓ |
 | list_skills / skill | 查看并加载专家技能(获取 SKILL.md 指令后按其指引执行) | ✓ |
 
 **场景降级后**:工具全部开放,不再按场景过滤。用户创建任务时可通过 `allowed_skills` 选择允许调用的 skill。
@@ -651,6 +663,7 @@ react_agent 维护跨轮 plan 状态:
 | `/models` | ModelSettingsView | LLM 模型配置(多厂商列表式管理) |
 | `/cli` | CliSettingsView | 外部 CLI 凭据配置(Qoder / Kimi / Hermes / Codex) |
 | `/agent-policy` | AgentPolicyView | 协作策略(user_agent 启用 / 轮次 / 评估频率 / 验证授权模式 / CLI 命令确认模式) |
+| `/practice` | PracticeView | 自适应练习(出题生成 / 练习会话 / 题库管理 / 统计趋势) |
 | `/skills` | SkillManagerView | 技能管理(上传 zip / 列表 / 在线编辑 SKILL.md / 删除) |
 | `/memory` | MemoryView | 记忆管理(用户偏好 / 全局记忆 / 项目记忆) |
 | `/settings` | SettingsView | 用户设置(改密码/Git 平台绑定 GitHub+Gitee/删除账号) |
@@ -709,5 +722,77 @@ user_agent 调用独立 ReAct 智能体在已部署测试环境动态验证发�
 - 完成标记按"用户 email + 路由名 + 版本号"持久化到 localStorage
 - 版本号 `ONBOARDING_VERSION` 递增时,老用户的完成标记作废,下次登录重新看到引导
 - 支持 ESC 跳过、方向键导航、resize / scroll 重定位
+
+### 9.15 检查点评估(agent_checkpoint,迭代边界方向纠偏)
+
+在 react_agent(内置或外部 CLI)执行过程中,每 K 个迭代边界由 user_agent 做一次**轻量方向评估**,与 round 边界的完整评估互补:
+- **触发**:`agent_checkpoint.py` 按 `resolve_agent_policy` 解析的用户级默认 + 任务级覆盖(`task.params._agent_policy`)计算实际生效的 K 值(`checkpoint_interval_builtin` / `checkpoint_interval_cli`,可空=用统一间隔)
+- **评估内容**:只判断方向是否明显跑偏(不做 covered/missing),仅在明显跑偏时生成追问指令,避免频繁打断影响 react_agent 工作
+- **软中断**:`agent_interrupt.py` 维护 per-task 内存队列,跑偏指令入队后由 react_agent 下一迭代边界 drain 出来,作为 user 消息注入 LLM 上下文(优先级低于真实用户消息 `user_messages`)
+- **落库与展示**:检查点评估结果落库为 `Conversation(type=evaluation, checkpoint=true)`,前端任务详情页右侧栏「检查点评估聚合」展示,点击可定位到对话流对应迭代边界(横线闪烁)
+- **策略表**:用户级默认存 `AgentPolicy` 独立表(1:1),保存接口 `PUT /memory/preferences/agent_policy`;老数据从 `user_preferences` JSONB 一次性迁移
+- **开关**:协作策略页可关闭检查点评估(`checkpoint_enabled`),默认开启
+
+### 9.16 练习题生成与自适应练习(Practice)
+
+**定位**:把「审计任务产出」与「学习练习」打通——任务完成后用户可把 Results(真实发现,带 CWE/severity/代码上下文)一键转化为题库;练习时按 **到期复习优先 > 薄弱点强化 > 难度匹配 > 新知识引入** 的加权策略即时组卷。全部为客观题(单选/判断),LLM 生成、后端程序判分。
+
+**功能开关**:`PRACTICE_ENABLED`(默认 true),`false` 时 `/practice/*` 路由不注册、任务完成不自动出题;已建表与题库数据保留。前端通过 `GET /health` 的 `features.practice_enabled` 隐藏练习入口(`useFeatures` composable)。
+
+**核心模块**(`backend/app/services/practice/`):
+
+| 模块 | 职责 |
+|------|------|
+| `generator.py` | 题目生成:逐条 finding 调 LLM 生成 1~3 题(漏洞识别 / 成因判断 / 修复选择),输出严格 JSON,解析失败重试 1 次 + 字段校验,失败丢弃;按 `stem+code_snippet` sha256 去重;生成为 `status=draft` 待用户确认转 `active` |
+| `sm2.py` | SM-2 遗忘曲线:答对 quality=4、答错 quality=1;EF 更新与间隔序列(1 → 6 → 前值×EF,下限 1.3),首次作答创建状态记录 |
+| `difficulty.py` | 难度评估(LLM 初评 1-5 + 作答后微调)与用户能力估计(冷启动 2.5,后为最近 10 次答对题难度的加权均值) |
+| `selector.py` | 综合选题:score = 3.0×到期紧迫度 + 2.0×薄弱度 + 1.5×难度匹配 + 0.5×新颖度 + 随机抖动;约束:同知识点 ≤60%、复习题占比 ≥50%、冷启动取难度 ≤2 新题 |
+| `auto_generate.py` | 任务完成自动出题(受用户级偏好 `auto_generate_practice` 控制) |
+| `jobs.py` | 出题异步 job(后台线程,进度经 SSE 推送) |
+
+**三主题提示词**:网络安全 / 架构设计 / 通用代码能力(`practice_settings.topic`),不同主题仅影响 system prompt,生成流程不变。
+
+**出题上下文增强**:
+- **源码注入**:沙箱未销毁时(默认保留 1 小时),出题过程可注入相关源码文件内容
+- **迷你工具循环**:generator 内置轻量循环(read_file / search_code / find_files,`MAX_TOOL_ROUNDS=6`,结果截断 3000 字符)增强出题质量,不复用重型 react_agent
+- **工作区恢复**:沙箱过期后支持重新 clone 仓库(默认关闭,避免意外拉取大仓库)
+
+**出题模型三级解析**(`generator.resolve_llm_client`):`task.llm_config_id`(任务级)> `practice_settings.default_llm_config_id`(用户级默认)> env 默认(`LLM_PROVIDER` / `LLM_MODEL`),任一级缺失或失效逐级回退。
+
+**思考模式覆盖**:`practice_settings.thinking_mode_for_practice` 三态(follow=跟随模型配置 / on=强制开 / off=强制关),出题前应用到 `client.enable_thinking`;catalog 中 thinking=only 的模型强制关被忽略并记日志。
+
+**API 一览**(`backend/app/routers/practice.py`,全部 `Depends(get_current_user)`):
+- `POST /practice/generate` + `GET /practice/generate/jobs` + `GET /practice/generate/{job_id}` + `GET /practice/generate/{job_id}/stream`(异步出题 job + SSE 进度)
+- `GET /practice/drafts`(候选题预览)+ `POST /practice/questions/confirm`(确认入库)+ `POST /practice/questions/activate`(直接激活)
+- `POST /practice/sessions` + `POST /practice/sessions/{id}/answers`(组卷与判分,答案不下发)
+- `GET /practice/summary` / `GET /practice/trend` / `GET /practice/stats`(统计与趋势)
+- `GET /practice/questions` + `POST /practice/questions/{id}/archive`(题库管理)+ `DELETE /practice/records`(清空记录)
+
+**前端**:`PracticeView.vue`(练习首页 / 会话答题 / 统计)、`PracticeGenerateSidebar`(出题进度侧栏,与答题代码栏互斥,360px)、`PracticeGenerateDialog`(生成确认)、`PracticeSettingsDialog`(主题 / 恢复开关 / 默认出题模型 / 思考模式)、`PracticeCodeSidebar`(答题时源码查阅);任务详情页结果区有「生成练习题」入口。
+
+**出题日志**:`backend/logs/practice_generate.log`(滚动 10MB×3),记录模型解析 / 工作区状态 / 每条 finding 的解析与丢弃原因,便于排查"一道题也没生成"。
+
+### 9.17 工作区变更捕获(diff / patch)
+
+任务完成时在容器内捕获工作区变更,持久化到 `task_artifacts` 表:
+- `kind=git_diff`:已跟踪文件(暂存 + 未暂存,`git diff HEAD`)+ 未跟踪文件(`git ls-files --others` 逐个读内容拼 new file patch)合成完整 patch,可用 `git apply` 重建工作区(单条上限 100 万字符,截断后仅供查阅)
+- `kind=repo_tree`:仓库树快照(上限 5000 条目),工作区不可用时兜底展示文件清单
+- 捕获失败不阻塞任务完成状态;前端任务详情页主区「工作区变更」区只读展示(按行着色,头部显示变更文件数 / 字符数 / 截断提示,支持折叠)
+
+### 9.18 代码审查能力增强
+
+在安全审计工具之外,为代码审查场景补齐质量与依赖分析能力:
+- **`run_lint` / `run_coverage`**(`quality_tools.py`):local 模式 `shutil.which` 检测宿主机工具,缺失返回指引不静默失败;sandbox 模式缺失自动 `pip install`。run_lint:Python 用 ruff、JS/TS 仅在存在 eslint 配置时尝试;run_coverage:Python 用 pytest-cov、JS 检测 vitest
+- **`list_dependencies`**(`dependency_tools.py`):扫描常见清单文件(requirements.txt / package.json / go.mod / Cargo.toml 等)返回结构化依赖(精确版本 vs 范围约束区分),串联 query_cve 批量查已知漏洞,省去逐个 read_file 解析的迭代成本
+- **新增 code_review 场景 skill**(`backend/skills/code_review/`):`review_concurrency`(并发安全)/ `review_error_handling`(错误处理)/ `review_test_quality`(测试质量),与既有 `code_security_audit` 三个 skill 并列
+
+### 9.19 Git 平台与克隆增强
+
+- **Gitee refresh token 机制**:Gitee 的 access_token 带有效期,`GitProvider.refresh_access_token(refresh_token)` 在 token 过期时用 refresh_token 换新(返回新的 OAuthTokenSet,refresh_token 可能被轮转);GitHub 不支持刷新(refresh_token=None)。绑定数据存 `user_git_bindings` 时加密保存 refresh_token,克隆前自动判断并刷新
+- **克隆深度与超时**:`REPO_CLONE_DEPTH`(0=完整克隆默认,保留 git 历史供 log/blame 追溯;>0=浅克隆 `--depth N`)+ `REPO_CLONE_TIMEOUT`(默认 600s)
+- **克隆跳过**(`clone_skip.py`):用户可在克隆阶段点击跳过预克隆,一次性标志让 orchestrator 终止当前 clone 并降级为 react_agent 自主克隆
+- **沙箱续期**:`SANDBOX_RENEW_INTERVAL_MINUTES`(默认 5),会话被访问时距上次续期超过此值就 renew TTL,防长任务拖过 TTL 被 Server 回收
+- **CLI 挂死兜底**:`ACP_IDLE_TIMEOUT_OUTPUT_SECONDS`(默认 300,无活动工具时)/ `ACP_IDLE_TIMEOUT_TOOL_SECONDS`(默认 1800,有工具在跑时),超时 cancel + 用已累积输出收尾,防 CLI 静默挂死
+- **LLM 限流退避**:`LLM_RATE_LIMIT_MAX_RETRIES`(默认 3),429 时指数退避 + 抖动重试,厂商返回 Retry-After 时优先采用
 
 
