@@ -98,10 +98,13 @@ function handleCancel(): void {
                 将永久删除你的账号及以下数据:
               </p>
               <ul class="banner-list">
-                <li>所有历史任务及其结果</li>
-                <li>模型配置(API Key 等)</li>
-                <li>GitHub 账号关联</li>
+                <li>所有历史任务、对话与审计结果</li>
+                <li>练习题库、答题记录与学习进度</li>
+                <li>模型配置(API Key 等)与智能体设置</li>
+                <li>项目记忆、长期记忆与偏好设置</li>
+                <li>Git 平台账号关联(GitHub / Gitee)</li>
                 <li>邮箱验证记录</li>
+                <li>上传的自定义 Skill</li>
               </ul>
             </div>
 
