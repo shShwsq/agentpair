@@ -225,6 +225,35 @@ def test_unauthenticated_returns_401(ctx):
 
 
 # ============================================================
+# 出题模型解析(任务详情页「本次出题将使用」展示)
+# ============================================================
+
+
+def test_generate_model_info_env_default(ctx):
+    """任务无自带配置、无练习设置时,返回 env 默认模型(source=env)"""
+    ctx.login()
+    r = ctx.client.get(f"/practice/tasks/{ctx.task.id}/generate-model")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["source"] == "env"
+    assert body["model"] == settings.LLM_MODEL
+
+
+def test_generate_model_info_requires_login_and_ownership(ctx, ctx_b):
+    """未登录 401;他人任务 404(与出题接口同一归属校验)"""
+    ctx.logout()
+    assert (
+        ctx.client.get(f"/practice/tasks/{ctx.task.id}/generate-model").status_code
+        == 401
+    )
+    ctx.login()
+    assert (
+        ctx.client.get(f"/practice/tasks/{ctx_b.task.id}/generate-model").status_code
+        == 404
+    )
+
+
+# ============================================================
 # 生成 → 确认 → 组卷 → 答题 → 统计 完整链路
 # ============================================================
 

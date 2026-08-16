@@ -1,6 +1,7 @@
 """练习模块的 Pydantic 模型(请求与响应)"""
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -25,6 +26,19 @@ class GenerateJobResponse(BaseModel):
     """异步生成任务句柄(POST /practice/generate 立即返回)"""
 
     job_id: str
+
+
+class GenerateModelResponse(BaseModel):
+    """任务出题模型解析结果(GET /practice/tasks/{task_id}/generate-model)
+
+    与真实出题的 resolve_llm_client 同一优先级解析,供任务详情页在
+    出题入口附近展示「本次出题将使用:xxx」,避免用户困惑为什么
+    没用练习设置里的默认模型。
+    source: task=任务自带配置 / default=练习默认出题模型 / env=环境默认
+    """
+
+    model: str
+    source: Literal["task", "default", "env"]
 
 
 class GenerateJobStatusResponse(BaseModel):

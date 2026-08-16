@@ -15,6 +15,7 @@ import type {
   GenerateJobResponse,
   GenerateJobsResponse,
   GenerateJobStatus,
+  GenerateModelInfo,
   GenerateRequest,
   PracticeStats,
   PracticeSummary,
@@ -35,6 +36,11 @@ import type {
  */
 export function generateQuestions(req: GenerateRequest): Promise<GenerateJobResponse> {
   return client.post('/practice/generate', req).then((r) => r.data)
+}
+
+/** 本次出题将使用的模型(任务详情页出题入口附近展示用,与真实出题同一解析) */
+export function getTaskGenerateModel(taskId: string): Promise<GenerateModelInfo> {
+  return client.get(`/practice/tasks/${taskId}/generate-model`).then((r) => r.data)
 }
 
 /** 轮询出题进度与结果 */

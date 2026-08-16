@@ -182,6 +182,8 @@ const restoreWorkspace = ref(false)
 const thinkingMode = ref<PracticeThinkingMode>('follow')
 /** 默认出题模型配置 id(空串=跟随系统默认) */
 const defaultModelId = ref('')
+/** 始终用默认出题模型(忽略任务自带模型配置) */
+const forceDefaultLlm = ref(false)
 /** 用户已保存的 LLM 配置列表(默认出题模型下拉选项来源) */
 const llmConfigs = ref<LLMConfigItemOut[]>([])
 const autoGenLoading = ref(false)
@@ -195,6 +197,7 @@ async function loadPracticeSettings(): Promise<void> {
     restoreWorkspace.value = pref.restore_workspace_for_practice
     thinkingMode.value = pref.thinking_mode_for_practice
     defaultModelId.value = pref.default_llm_config_id ?? ''
+    forceDefaultLlm.value = pref.force_default_llm
   } catch {
     // 静默失败,保持默认值
   }
@@ -280,6 +283,29 @@ async function selectThinkingMode(mode: PracticeThinkingMode): Promise<void> {
     const label = mode === 'follow' ? '跟随模型配置'
       : mode === 'on' ? '强制开启' : '强制关闭'
     showToast(`出题思考模式已切换为「${label}」`, 'success')
+  } catch (err) {
+    settingsError.value = extractErrorMessage(err)
+  } finally {
+    autoGenLoading.value = false
+  }
+}
+
+/** 切换「始终用默认出题模型」(忽略任务自带配置,全局统一用默认模型) */
+async function toggleForceDefaultLlm(): Promise<void> {
+  if (autoGenLoading.value) return
+  autoGenLoading.value = true
+  settingsError.value = ''
+  const next = !forceDefaultLlm.value
+  try {
+    const latest = await savePracticeSettings({
+      auto_generate_practice: autoGenPractice.value,
+      force_default_llm: next,
+    })
+    forceDefaultLlm.value = latest.force_default_llm
+    showToast(
+      next ? '已开启「始终用默认出题模型」' : '已关闭「始终用默认出题模型」',
+      'success',
+    )
   } catch (err) {
     settingsError.value = extractErrorMessage(err)
   } finally {
@@ -1243,6 +1269,7 @@ onBeforeUnmount(() => {
       :restore-workspace="restoreWorkspace"
       :thinking-mode="thinkingMode"
       :default-model-id="defaultModelId"
+      :force-default-llm="forceDefaultLlm"
       :llm-configs="llmConfigs"
       :loading="autoGenLoading"
       :clearing="clearing"
@@ -1252,6 +1279,7 @@ onBeforeUnmount(() => {
       @toggle-restore="toggleRestoreWorkspace"
       @thinking="selectThinkingMode"
       @model="selectModel"
+      @toggle-force-default="toggleForceDefaultLlm"
       @clear-records="handleClearPractice(false)"
       @clear-all="handleClearPractice(true)"
       @cancel="settingsOpen = false"

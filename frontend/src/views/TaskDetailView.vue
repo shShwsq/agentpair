@@ -57,7 +57,7 @@ import {
   updateTaskVerifierConfig,
 } from '@/api/task'
 import { subscribeTaskStream } from '@/api/stream'
-import { listDrafts, listGenerateJobs } from '@/api/practice'
+import { listDrafts, listGenerateJobs, getTaskGenerateModel } from '@/api/practice'
 import { ensureFeaturesLoaded, practiceEnabled } from '@/composables/useFeatures'
 import { listArtifacts } from '@/api/taskArtifacts'
 import { clientLog } from '@/utils/clientLog'
@@ -85,7 +85,7 @@ import type {
   CommandConfirmEventData,
 } from '@/types/task'
 import type { TaskArtifact } from '@/types/taskArtifact'
-import type { GenerateJobSummary } from '@/types/practice'
+import type { GenerateJobSummary, GenerateModelInfo } from '@/types/practice'
 
 const route = useRoute()
 const router = useRouter()
@@ -2578,11 +2578,35 @@ async function refreshPracticeDraftCount(): Promise<void> {
   }
 }
 
+/** 本次出题将使用的模型(与后端出题同一解析逻辑;任务完成 + 功能开启时展示) */
+const generateModelInfo = ref<GenerateModelInfo | null>(null)
+
+async function refreshGenerateModel(): Promise<void> {
+  if (!practiceEnabled.value || !task.value || task.value.status !== 'completed') {
+    generateModelInfo.value = null
+    return
+  }
+  try {
+    generateModelInfo.value = await getTaskGenerateModel(String(task.value.id))
+  } catch {
+    generateModelInfo.value = null  // 匿名/失败不展示
+  }
+}
+
+/** 模型来源的中文说明(任务详情页「本次出题将使用」后缀) */
+const generateModelSourceLabel = computed(() => {
+  const source = generateModelInfo.value?.source
+  if (source === 'task') return '任务配置'
+  if (source === 'default') return '练习默认设置'
+  return '环境默认'
+})
+
 watch(
   () => task.value?.status,
   (status) => {
     if (status === 'completed') {
       refreshPracticeDraftCount()
+      refreshGenerateModel()
       // 自动出题在任务完成时触发:开始轮询本任务关联的运行中 job,展示跳转入口
       startGenJobPoll()
     } else {
@@ -2633,6 +2657,8 @@ function goToPracticeProgress(): void {
 }
 
 function openPracticeGenerate(): void {
+  // 打开出题对话框前刷新一次模型展示(设置里可能刚换过默认模型)
+  void refreshGenerateModel()
   practiceDialogOpen.value = true
 }
 
@@ -3247,6 +3273,11 @@ function toggleResult(id: string): void {
               @click="openPracticeGenerate"
             >{{ pendingDraftCount > 0 ? `确认练习题(${pendingDraftCount})` : '生成练习题' }}</button>
           </h2>
+          <!-- 出题入口旁:展示本次出题将使用的模型,避免用户困惑为什么没用默认模型 -->
+          <p v-if="generateModelInfo && task.status === 'completed' && practiceEnabled" class="generate-model-hint">
+            本次出题将使用：<strong class="generate-model-name">{{ generateModelInfo.model }}</strong>
+            <span class="generate-model-source">（{{ generateModelSourceLabel }}）</span>
+          </p>
           <template v-for="group in resultGroups" :key="group.key">
             <h3 v-if="resultGrouping" class="sidebar-result-group">
               <span :class="['severity-tag', `sev-${group.color}`]">{{ group.label }}</span>
@@ -3841,6 +3872,25 @@ function toggleResult(id: string): void {
 .practice-generate-btn:hover {
   color: var(--color-text-inverse);
   background: var(--color-primary);
+}
+
+/* 出题入口旁的「本次出题将使用」提示(位于结果清单标题行下方) */
+.generate-model-hint {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 var(--space-3);
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
+}
+
+.generate-model-name {
+  font-weight: var(--fw-semibold);
+  color: var(--color-text);
+}
+
+.generate-model-source {
+  color: var(--color-text-muted);
 }
 
 /* 结果分组头(仅有分组声明时显示) */

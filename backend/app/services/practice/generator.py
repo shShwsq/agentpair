@@ -16,7 +16,9 @@
 6. 落库为 draft(记录出题时主题与源码定位),前端预览确认后转 active
 
 出题模型解析:task.llm_config_id > 用户级默认出题模型
-(practice_settings.default_llm_config_id) > env 默认,逐级回退。
+(practice_settings.default_llm_config_id) > env 默认,逐级回退;
+用户开启「始终用默认出题模型」(force_default_llm)时跳过任务级配置,
+直接按 用户级默认 > env 默认 解析。
 """
 import hashlib
 import json
@@ -452,17 +454,22 @@ def resolve_llm_client(db: Session, task: Task) -> LLMClient:
 
     任务级与用户级配置都存于 UserLLMConfig.llm_configs(一次查询,
     按优先级逐个匹配);任一级配置缺失/失效均回退下一级,全部失败回退 env 默认。
+    用户开启「始终用默认出题模型」(practice_settings.force_default_llm)时
+    跳过任务级配置,直接按 用户级默认 > env 默认 解析。
     手动出题与任务完成自动出题共用本解析。
     """
     config_ids: list[str] = []
-    if task.llm_config_id:
-        config_ids.append(task.llm_config_id)
+    pref = None
     if task.user_id is not None:
         pref = db.query(PracticeSettings).filter(
             PracticeSettings.user_id == task.user_id
         ).first()
-        if pref is not None and pref.default_llm_config_id:
-            config_ids.append(pref.default_llm_config_id)
+    # 「始终用默认出题模型」开启时忽略任务自带配置(用户级默认 > env 默认)
+    force_default = pref is not None and pref.force_default_llm is True
+    if not force_default and task.llm_config_id:
+        config_ids.append(task.llm_config_id)
+    if pref is not None and pref.default_llm_config_id:
+        config_ids.append(pref.default_llm_config_id)
     if config_ids:
         try:
             cfg_row = db.query(UserLLMConfig).filter(
@@ -481,6 +488,31 @@ def resolve_llm_client(db: Session, task: Task) -> LLMClient:
         except Exception as e:
             logger.warning("[practice] 加载出题模型配置失败,回退 env 默认: %s", e)
     return LLMClient()
+
+
+def resolve_generate_model_info(db: Session, task: Task) -> dict[str, str]:
+    """解析本次出题将使用的模型与来源(任务详情页展示用)
+
+    与 resolve_llm_client 同一优先级(含「始终用默认出题模型」开关),
+    返回 {model: 模型名, source: task=任务配置 / default=练习默认 / env=环境默认}。
+    """
+    client = resolve_llm_client(db, task)
+    model = getattr(client, "model", None) or "?"
+    source = "env"
+    if task.user_id is not None:
+        pref = db.query(PracticeSettings).filter(
+            PracticeSettings.user_id == task.user_id
+        ).first()
+        if pref is not None and pref.force_default_llm is True:
+            if pref.default_llm_config_id:
+                source = "default"
+        elif task.llm_config_id:
+            source = "task"
+        elif pref is not None and pref.default_llm_config_id:
+            source = "default"
+    elif task.llm_config_id:
+        source = "task"
+    return {"model": model, "source": source}
 
 
 def _apply_thinking_mode(client: LLMClient, settings_row: PracticeSettings | None) -> None:

@@ -8,7 +8,8 @@
  * - 学习主题:出题提示词按主题切换出题视角(网络安全/架构设计/通用代码能力)
  * - 出题前恢复工作区:沙箱已清理时重新 clone 仓库,供出题时查阅源码
  * - 出题思考模式:覆盖出题模型的思考开关(跟随配置/强制开/强制关)
- * - 默认出题模型:用户级默认(任务级配置优先,未设置则回退 env 默认)
+ * - 默认出题模型:用户级默认(任务级配置优先,未设置则回退 env 默认);
+ *   可开「始终用默认出题模型」忽略任务级配置
  *
  * emit 由父组件调 API 持久化并 toast,父组件更新 props 后弹窗内状态同步。
  */
@@ -30,6 +31,8 @@ const props = defineProps<{
   thinkingMode: PracticeThinkingMode
   /** 默认出题模型配置 id(空串=跟随系统默认) */
   defaultModelId: string
+  /** 始终用默认出题模型(忽略任务自带模型配置) */
+  forceDefaultLlm: boolean
   /** 用户已保存的 LLM 配置列表(下拉选项来源) */
   llmConfigs: LLMConfigItemOut[]
   /** 保存中状态(禁用交互与关闭) */
@@ -46,6 +49,7 @@ const emit = defineEmits<{
   (e: 'toggle-restore'): void
   (e: 'thinking', mode: PracticeThinkingMode): void
   (e: 'model', configId: string): void
+  (e: 'toggle-force-default'): void
   (e: 'clear-records'): void
   (e: 'clear-all'): void
   (e: 'cancel'): void
@@ -123,6 +127,11 @@ function handleModelChange(
   const value = (event.target as HTMLSelectElement).value
   if (loading || value === current) return
   emit('model', value)
+}
+
+function handleToggleForceDefault(loading: boolean): void {
+  if (loading) return
+  emit('toggle-force-default')
 }
 
 function handleCancel(loading: boolean): void {
@@ -263,6 +272,26 @@ function handleCancel(loading: boolean): void {
               <span v-if="!llmConfigs.length" class="model-hint">
                 暂无已保存的模型配置,可先到「模型设置」中添加
               </span>
+
+              <!-- 始终用默认出题模型:忽略任务自带模型配置,全局统一用上面的默认模型 -->
+              <div class="force-default-row" @click="handleToggleForceDefault(busy)">
+                <div class="setting-info">
+                  <span class="setting-title force-title">始终用默认出题模型</span>
+                  <span class="setting-desc">
+                    忽略任务自带的模型配置,所有任务出题统一用上面的默认模型
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  :aria-checked="forceDefaultLlm"
+                  :class="['switch', { 'switch-on': forceDefaultLlm }]"
+                  :disabled="busy"
+                  @click.stop="handleToggleForceDefault(busy)"
+                >
+                  <span class="switch-thumb" />
+                </button>
+              </div>
             </div>
 
             <!-- 危险操作:数据清空不可逆,均需二次确认 -->
@@ -586,6 +615,21 @@ function handleCancel(loading: boolean): void {
 .model-hint {
   font-size: var(--fs-xs);
   color: var(--color-text-muted);
+}
+
+/* 始终用默认出题模型开关行(位于默认出题模型下拉下方) */
+.force-default-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+  cursor: pointer;
+}
+
+.force-title {
+  font-size: var(--fs-sm);
 }
 
 /* ---- 开关 ---- */

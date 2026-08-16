@@ -40,6 +40,18 @@ export interface GenerateJobResponse {
   job_id: string
 }
 
+/** 任务出题模型解析结果(GET /practice/tasks/{task_id}/generate-model)
+ *
+ * 与真实出题同一解析优先级(任务配置 > 练习默认 > 环境默认,
+ * 「始终用默认出题模型」开启时跳过任务级),供任务详情页出题入口展示。
+ */
+export interface GenerateModelInfo {
+  /** 本次出题将使用的模型名 */
+  model: string
+  /** 来源:task=任务自带配置 / default=练习默认出题模型 / env=环境默认 */
+  source: 'task' | 'default' | 'env'
+}
+
 /** 出题进度与结果(GET /practice/generate/{job_id}) */
 export interface GenerateJobStatus {
   status: 'pending' | 'running' | 'done' | 'error'

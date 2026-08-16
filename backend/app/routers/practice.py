@@ -40,6 +40,7 @@ from app.schemas.practice import (
     GenerateJobsResponse,
     GenerateJobStatusResponse,
     GenerateJobSummary,
+    GenerateModelResponse,
     GenerateRequest,
     KnowledgeStateResponse,
     PracticeSummaryResponse,
@@ -66,6 +67,7 @@ from app.services.practice.difficulty import (
 from app.services.practice.generator import (
     PracticeGenerateError,
     generate_questions_for_task,
+    resolve_generate_model_info,
 )
 from app.services.practice.selector import CandidateInfo, select_questions
 from app.services.practice.sm2 import (
@@ -105,6 +107,23 @@ def _estimate_user_ability(db: Session, user_id: UUID) -> float:
 # ============================================================
 # 题目生成 / 确认
 # ============================================================
+
+
+@router.get("/tasks/{task_id}/generate-model", response_model=GenerateModelResponse)
+def get_task_generate_model(
+    task_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> GenerateModelResponse:
+    """任务详情页展示「本次出题将使用」的模型(与真实出题同一解析逻辑)
+
+    解析优先级与 POST /practice/generate 完全一致:任务自带配置 >
+    练习设置默认出题模型 > env 默认;「始终用默认出题模型」开启时跳过任务级。
+    前端在出题入口附近展示,避免用户困惑为什么没用默认模型。
+    """
+    task = _get_task_owned(db, task_id, current_user.id)
+    info = resolve_generate_model_info(db, task)
+    return GenerateModelResponse(**info)
 
 
 @router.post("/generate", response_model=GenerateJobResponse)

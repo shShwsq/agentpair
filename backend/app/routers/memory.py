@@ -105,7 +105,7 @@ def save_practice_settings(
 
     存于 practice_settings 独立表(1:1),get_or_create:无行时自动创建。
     learning_topic / restore_workspace_for_practice / default_llm_config_id /
-    thinking_mode_for_practice 可选:传 None 表示不修改;
+    force_default_llm / thinking_mode_for_practice 可选:传 None 表示不修改;
     default_llm_config_id 传空串表示清空。
     """
     # 默认出题模型归属校验:必须是当前用户已保存的 LLM 配置
@@ -140,16 +140,19 @@ def save_practice_settings(
         row.restore_workspace_for_practice = req.restore_workspace_for_practice
     if req.default_llm_config_id is not None:
         row.default_llm_config_id = req.default_llm_config_id or None
+    if req.force_default_llm is not None:
+        row.force_default_llm = req.force_default_llm
     if req.thinking_mode_for_practice is not None:
         row.thinking_mode_for_practice = req.thinking_mode_for_practice
     db.commit()
     db.refresh(row)
     logger.info(
         "用户 %s 更新练习设置: auto_generate_practice=%s learning_topic=%s "
-        "restore_workspace=%s default_llm_config_id=%s thinking_mode=%s",
+        "restore_workspace=%s default_llm_config_id=%s force_default_llm=%s thinking_mode=%s",
         current_user.id, req.auto_generate_practice,
         req.learning_topic, req.restore_workspace_for_practice,
-        row.default_llm_config_id, row.thinking_mode_for_practice,
+        row.default_llm_config_id, row.force_default_llm,
+        row.thinking_mode_for_practice,
     )
     return _build_preference_out(db, current_user.id, settings_row=row)
 
@@ -340,7 +343,8 @@ def _build_preference_out(
     - user_profile 来自 user_preferences(可能无行)
     - agent_policy 来自 agent_policies 独立表(可能无行 → None,前端用系统默认)
     - auto_generate_practice / learning_topic / restore_workspace_for_practice /
-      thinking_mode_for_practice 来自 practice_settings 独立表(可能无行 → 用默认值)
+      default_llm_config_id / force_default_llm / thinking_mode_for_practice
+      来自 practice_settings 独立表(可能无行 → 用默认值)
     - updated_at 取各行中较新的(哪边最后保存,就算最后更新)
     """
     if pref_row is None:
@@ -377,6 +381,9 @@ def _build_preference_out(
         ),
         default_llm_config_id=(
             settings_row.default_llm_config_id if settings_row else None
+        ),
+        force_default_llm=(
+            settings_row.force_default_llm if settings_row else False
         ),
         thinking_mode_for_practice=(
             settings_row.thinking_mode_for_practice

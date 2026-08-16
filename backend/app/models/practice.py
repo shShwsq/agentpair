@@ -283,8 +283,8 @@ class PracticeSettings(Base):
     迁移:老数据存于 user_preferences.auto_generate_practice 布尔列,
     migrate_practice_settings_table() 启动时把数据拷入本表后删除旧列(幂等);
     learning_topic / restore_workspace_for_practice / default_llm_config_id /
-    thinking_mode_for_practice 为后加列,由 migrate_practice_learning_columns()
-    幂等补齐。
+    thinking_mode_for_practice / force_default_llm 为后加列,由
+    migrate_practice_learning_columns() 幂等补齐。
     """
 
     __tablename__ = "practice_settings"
@@ -315,6 +315,10 @@ class PracticeSettings(Base):
     # 解析优先级:task.llm_config_id > 本字段 > env 默认
     default_llm_config_id: Mapped[str | None] = mapped_column(
         String(36), nullable=True, default=None
+    )
+    # 始终用默认出题模型(忽略任务自带模型配置;默认关)
+    force_default_llm: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
     )
     # 出题思考模式覆盖:follow=跟随模型配置,on/off=强制开/关
     # (思考模式出题可能更慢但质量更高;部分模型思考模式下工具调用不稳定)
@@ -395,7 +399,7 @@ def migrate_practice_learning_columns() -> None:
 
     背景:项目用 Base.metadata.create_all(无 Alembic),已存在的表不会自动加新列。
     - practice_settings 加 learning_topic / restore_workspace_for_practice /
-      default_llm_config_id / thinking_mode_for_practice
+      default_llm_config_id / thinking_mode_for_practice / force_default_llm
     - practice_questions 加 learning_topic(可空,老题不补)与
       source_file / source_lines(源码定位,可空)
     全新库(create_all 已建好新列)或已迁过 → 直接返回。
@@ -436,6 +440,12 @@ def migrate_practice_learning_columns() -> None:
                     "thinking_mode_for_practice VARCHAR(16) NOT NULL DEFAULT 'follow'"
                 ))
                 log.info("practice_settings.thinking_mode_for_practice 列迁移完成")
+            if "force_default_llm" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE practice_settings ADD COLUMN "
+                    "force_default_llm BOOLEAN NOT NULL DEFAULT false"
+                ))
+                log.info("practice_settings.force_default_llm 列迁移完成")
         if insp.has_table("knowledge_points"):
             cols = {c["name"] for c in insp.get_columns("knowledge_points")}
             if "languages" not in cols:

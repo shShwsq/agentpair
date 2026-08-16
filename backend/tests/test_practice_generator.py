@@ -745,16 +745,21 @@ def test_ensure_workspace_no_repo_url(monkeypatch):
 # ============================================================
 
 
-def _resolve_db(pref_default=None, configs=None):
-    """构造 mock db:按查询的模型返回不同行"""
+def _resolve_db(pref_default=None, configs=None, force_default=False):
+    """构造 mock db:按查询的模型返回不同行
+
+    force_default=True 且 pref_default=None 时仍返回 settings 行
+    (代表用户开了开关但没设默认模型,应回退 env 默认)
+    """
     db = MagicMock()
 
     def _query(model):
         q = MagicMock()
         if model is gen.PracticeSettings:
-            if pref_default:
+            if pref_default is not None or force_default:
                 pref = MagicMock()
                 pref.default_llm_config_id = pref_default
+                pref.force_default_llm = force_default
                 q.filter.return_value.first.return_value = pref
             else:
                 q.filter.return_value.first.return_value = None
@@ -811,6 +816,58 @@ def test_resolve_all_missing_uses_env_default(monkeypatch):
     gen.resolve_llm_client(db, task)
     llm_cls.from_config_dict.assert_not_called()
     llm_cls.assert_called_once_with()
+
+
+def test_resolve_force_default_skips_task_level(monkeypatch):
+    """「始终用默认出题模型」开启时忽略任务级配置,直接用用户默认"""
+    llm_cls = MagicMock()
+    monkeypatch.setattr(gen, "LLMClient", llm_cls)
+    cfg_task = {"id": "cfg-task", "provider": "dashscope", "model": "qwen-max"}
+    cfg_user = {"id": "cfg-user", "provider": "dashscope", "model": "qwen-flash"}
+    db = _resolve_db(
+        pref_default="cfg-user", configs=[cfg_task, cfg_user], force_default=True
+    )
+    task = SimpleNamespace(llm_config_id="cfg-task", user_id="u1")
+    gen.resolve_llm_client(db, task)
+    llm_cls.from_config_dict.assert_called_once_with(cfg_user)
+
+
+def test_resolve_force_default_without_default_falls_back_env(monkeypatch):
+    """开关开启但未设默认模型时回退 env 默认(不误用任务级)"""
+    llm_cls = MagicMock()
+    monkeypatch.setattr(gen, "LLMClient", llm_cls)
+    db = _resolve_db(pref_default=None, configs=[], force_default=True)
+    task = SimpleNamespace(llm_config_id="cfg-task", user_id="u1")
+    gen.resolve_llm_client(db, task)
+    llm_cls.from_config_dict.assert_not_called()
+    llm_cls.assert_called_once_with()
+
+
+def test_resolve_generate_model_info_sources(monkeypatch):
+    """模型信息来源判定:task=任务配置 / default=练习默认 / env=环境默认"""
+    llm_cls = MagicMock()
+    llm_cls.from_config_dict.return_value.model = "qwen-max"  # 配置命中路径
+    llm_cls.return_value.model = "qwen-max"  # env 默认回退路径
+    monkeypatch.setattr(gen, "LLMClient", llm_cls)
+    # 任务级命中
+    db = _resolve_db(pref_default="cfg-user", configs=[{"id": "cfg-task"}])
+    task = SimpleNamespace(llm_config_id="cfg-task", user_id="u1")
+    assert gen.resolve_generate_model_info(db, task) == {"model": "qwen-max", "source": "task"}
+    # 默认设置命中(任务未指定)
+    db = _resolve_db(pref_default="cfg-user", configs=[{"id": "cfg-user"}])
+    task = SimpleNamespace(llm_config_id=None, user_id="u1")
+    assert gen.resolve_generate_model_info(db, task) == {"model": "qwen-max", "source": "default"}
+    # 开关开启时任务级让位给默认
+    db = _resolve_db(
+        pref_default="cfg-user", configs=[{"id": "cfg-task"}, {"id": "cfg-user"}],
+        force_default=True,
+    )
+    task = SimpleNamespace(llm_config_id="cfg-task", user_id="u1")
+    assert gen.resolve_generate_model_info(db, task) == {"model": "qwen-max", "source": "default"}
+    # 全部未命中 → env
+    db = _resolve_db(pref_default=None, configs=[])
+    task = SimpleNamespace(llm_config_id=None, user_id="u1")
+    assert gen.resolve_generate_model_info(db, task) == {"model": "qwen-max", "source": "env"}
 
 
 # ============================================================
