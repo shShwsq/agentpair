@@ -125,7 +125,7 @@ function handleCloseHelp(): void {
             <RouterLink to="/cli">CLI 设置</RouterLink>
             <RouterLink to="/agent-policy">协作策略</RouterLink>
             <RouterLink to="/skills">技能管理</RouterLink>
-            <RouterLink v-if="practiceEnabled" to="/practice">
+            <RouterLink v-if="practiceEnabled" to="/practice" data-onboarding="app-header-nav-practice">
               自适应练习
               <span v-if="practiceDueCount > 0" class="practice-badge">{{
                 practiceDueCount > 99 ? '99+' : practiceDueCount

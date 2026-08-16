@@ -15,6 +15,7 @@ import { useRoute } from 'vue-router'
 
 import OnboardingTour from '@/components/OnboardingTour.vue'
 import UnsavedGuardDialog from '@/components/UnsavedGuardDialog.vue'
+import { ensureFeaturesLoaded } from '@/composables/useFeatures'
 import { useOnboarding } from '@/composables/useOnboarding'
 import { useAuthStore } from '@/stores/auth'
 
@@ -32,7 +33,9 @@ watch(
     // 仅在从未登录(prevEmail 为 null/undefined)到登录(email 非空)的转变时,
     // 额外触发一次引导检查(此时 route.name 未变化,上面的路由 watcher 不会重新触发)
     if (email && !prevEmail && route.name) {
-      requestAnimationFrame(() => {
+      requestAnimationFrame(async () => {
+        // 引导步骤/文案按练习功能开关区分,先确保开关已拉取再启动
+        await ensureFeaturesLoaded()
         maybeStartForRoute(String(route.name))
       })
     }
@@ -47,7 +50,9 @@ watch(
   (name) => {
     if (!name) return
     // 等下一帧,避免目标元素尚未挂载
-    requestAnimationFrame(() => {
+    requestAnimationFrame(async () => {
+      // 引导步骤/文案按练习功能开关区分,先确保开关已拉取再启动
+      await ensureFeaturesLoaded()
       maybeStartForRoute(String(name))
     })
   },
