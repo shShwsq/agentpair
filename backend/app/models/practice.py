@@ -255,6 +255,17 @@ LEARNING_TOPICS = (
 )
 DEFAULT_LEARNING_TOPIC = LEARNING_TOPIC_SECURITY
 
+# ============================================================
+# 出题思考模式(用户级覆盖出题模型的思考开关)
+# follow=跟随模型配置自身开关(默认);on/off=强制开/关。
+# 仅支持思考模式的模型(catalog thinking=only)强制关会被忽略。
+# ============================================================
+THINKING_MODE_FOLLOW = "follow"
+THINKING_MODE_ON = "on"
+THINKING_MODE_OFF = "off"
+THINKING_MODES = (THINKING_MODE_FOLLOW, THINKING_MODE_ON, THINKING_MODE_OFF)
+DEFAULT_THINKING_MODE = THINKING_MODE_FOLLOW
+
 
 class PracticeSettings(Base):
     """用户级练习设置 (per-user, 1:1)
@@ -266,11 +277,14 @@ class PracticeSettings(Base):
       是否重新 clone 仓库恢复工作区(供出题工具循环读源码)
     - default_llm_config_id:用户级默认出题模型(UserLLMConfig 中某条配置的 id),
       None=跟随任务级配置/env 默认
+    - thinking_mode_for_practice:出题思考模式覆盖(follow/on/off),
+      follow=跟随出题模型配置自身的思考开关
 
     迁移:老数据存于 user_preferences.auto_generate_practice 布尔列,
     migrate_practice_settings_table() 启动时把数据拷入本表后删除旧列(幂等);
-    learning_topic / restore_workspace_for_practice / default_llm_config_id 为后加列,
-    由 migrate_practice_learning_columns() 幂等补齐。
+    learning_topic / restore_workspace_for_practice / default_llm_config_id /
+    thinking_mode_for_practice 为后加列,由 migrate_practice_learning_columns()
+    幂等补齐。
     """
 
     __tablename__ = "practice_settings"
@@ -301,6 +315,12 @@ class PracticeSettings(Base):
     # 解析优先级:task.llm_config_id > 本字段 > env 默认
     default_llm_config_id: Mapped[str | None] = mapped_column(
         String(36), nullable=True, default=None
+    )
+    # 出题思考模式覆盖:follow=跟随模型配置,on/off=强制开/关
+    # (思考模式出题可能更慢但质量更高;部分模型思考模式下工具调用不稳定)
+    thinking_mode_for_practice: Mapped[str] = mapped_column(
+        String(16), nullable=False,
+        server_default=DEFAULT_THINKING_MODE, default=DEFAULT_THINKING_MODE,
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -375,7 +395,7 @@ def migrate_practice_learning_columns() -> None:
 
     背景:项目用 Base.metadata.create_all(无 Alembic),已存在的表不会自动加新列。
     - practice_settings 加 learning_topic / restore_workspace_for_practice /
-      default_llm_config_id
+      default_llm_config_id / thinking_mode_for_practice
     - practice_questions 加 learning_topic(可空,老题不补)与
       source_file / source_lines(源码定位,可空)
     全新库(create_all 已建好新列)或已迁过 → 直接返回。
@@ -410,6 +430,12 @@ def migrate_practice_learning_columns() -> None:
                     "default_llm_config_id VARCHAR(36)"
                 ))
                 log.info("practice_settings.default_llm_config_id 列迁移完成")
+            if "thinking_mode_for_practice" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE practice_settings ADD COLUMN "
+                    "thinking_mode_for_practice VARCHAR(16) NOT NULL DEFAULT 'follow'"
+                ))
+                log.info("practice_settings.thinking_mode_for_practice 列迁移完成")
         if insp.has_table("knowledge_points"):
             cols = {c["name"] for c in insp.get_columns("knowledge_points")}
             if "languages" not in cols:

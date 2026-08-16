@@ -37,6 +37,7 @@ import {
 } from '@/api/practice'
 import { extractErrorMessage } from '@/utils/error'
 import type { LLMConfigItemOut } from '@/types/model_configs'
+import type { PracticeThinkingMode } from '@/types/memory'
 import type {
   GenerateJobSummary,
   PracticeStats,
@@ -171,12 +172,14 @@ function showToast(msg: string, type: 'success' | 'error'): void {
 }
 
 // ============================================================
-// 练习设置弹窗(自动生成开关 / 学习主题 / 出题前恢复工作区 / 默认出题模型,切换即保存)
+// 练习设置弹窗(自动生成开关 / 学习主题 / 出题前恢复工作区 / 思考模式 / 默认出题模型,切换即保存)
 // ============================================================
 const settingsOpen = ref(false)
 const autoGenPractice = ref(true)
 const learningTopic = ref<'security' | 'architecture' | 'coding'>('security')
 const restoreWorkspace = ref(false)
+/** 出题思考模式(follow=跟随模型配置/on=强制开/off=强制关) */
+const thinkingMode = ref<PracticeThinkingMode>('follow')
 /** 默认出题模型配置 id(空串=跟随系统默认) */
 const defaultModelId = ref('')
 /** 用户已保存的 LLM 配置列表(默认出题模型下拉选项来源) */
@@ -190,6 +193,7 @@ async function loadPracticeSettings(): Promise<void> {
     autoGenPractice.value = pref.auto_generate_practice
     learningTopic.value = pref.learning_topic
     restoreWorkspace.value = pref.restore_workspace_for_practice
+    thinkingMode.value = pref.thinking_mode_for_practice
     defaultModelId.value = pref.default_llm_config_id ?? ''
   } catch {
     // 静默失败,保持默认值
@@ -255,6 +259,27 @@ async function toggleRestoreWorkspace(): Promise<void> {
       next ? '已开启出题前恢复工作区' : '已关闭出题前恢复工作区',
       'success',
     )
+  } catch (err) {
+    settingsError.value = extractErrorMessage(err)
+  } finally {
+    autoGenLoading.value = false
+  }
+}
+
+/** 切换出题思考模式(follow=跟随模型配置/on=强制开/off=强制关) */
+async function selectThinkingMode(mode: PracticeThinkingMode): Promise<void> {
+  if (autoGenLoading.value || mode === thinkingMode.value) return
+  autoGenLoading.value = true
+  settingsError.value = ''
+  try {
+    const latest = await savePracticeSettings({
+      auto_generate_practice: autoGenPractice.value,
+      thinking_mode_for_practice: mode,
+    })
+    thinkingMode.value = latest.thinking_mode_for_practice
+    const label = mode === 'follow' ? '跟随模型配置'
+      : mode === 'on' ? '强制开启' : '强制关闭'
+    showToast(`出题思考模式已切换为「${label}」`, 'success')
   } catch (err) {
     settingsError.value = extractErrorMessage(err)
   } finally {
@@ -1216,6 +1241,7 @@ onBeforeUnmount(() => {
       :auto-generate="autoGenPractice"
       :learning-topic="learningTopic"
       :restore-workspace="restoreWorkspace"
+      :thinking-mode="thinkingMode"
       :default-model-id="defaultModelId"
       :llm-configs="llmConfigs"
       :loading="autoGenLoading"
@@ -1224,6 +1250,7 @@ onBeforeUnmount(() => {
       @toggle="togglePracticeAuto"
       @topic="selectTopic"
       @toggle-restore="toggleRestoreWorkspace"
+      @thinking="selectThinkingMode"
       @model="selectModel"
       @clear-records="handleClearPractice(false)"
       @clear-all="handleClearPractice(true)"

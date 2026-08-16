@@ -31,6 +31,8 @@ from app.models.practice import (
     LEARNING_TOPIC_ARCHITECTURE,
     LEARNING_TOPIC_CODING,
     LEARNING_TOPIC_SECURITY,
+    THINKING_MODE_OFF,
+    THINKING_MODE_ON,
     KnowledgePoint,
     PracticeSettings,
     Question,
@@ -453,6 +455,28 @@ def resolve_llm_client(db: Session, task: Task) -> LLMClient:
     return LLMClient()
 
 
+def _apply_thinking_mode(client: LLMClient, settings_row: PracticeSettings | None) -> None:
+    """应用用户级出题思考模式覆盖(手动/自动出题共用)
+
+    follow(默认)保持出题模型配置自身的思考开关不动;on/off 强制开/关:
+    - 思考模式出题更慢但可能质量更高;部分模型思考模式下工具调用
+      会写成文本而非结构化通道,导致出题工具循环失效,此时可强制关
+    - 仅支持思考模式的模型(catalog thinking=only)强制关无效:
+      build_thinking_extras 对该类模型始终强附思考参数,这里记日志后跳过
+    """
+    mode = getattr(settings_row, "thinking_mode_for_practice", None)
+    if mode not in (THINKING_MODE_OFF, THINKING_MODE_ON):
+        return  # follow / 未知值(如测试 mock)→ 保持模型配置原样
+    meta = getattr(client, "model_meta", None) or {}
+    if mode == THINKING_MODE_OFF and meta.get("thinking") == "only":
+        logger.info(
+            "[practice] 模型 %s 仅支持思考模式,忽略强制关闭设置",
+            getattr(client, "model", "?"),
+        )
+        return
+    client.enable_thinking = (mode == THINKING_MODE_ON)
+
+
 def compute_dedup_hash(stem: str, code_snippet: str | None) -> str:
     return hashlib.sha256(
         f"{stem.strip()}\n{(code_snippet or '').strip()}".encode("utf-8")
@@ -650,10 +674,12 @@ def generate_questions_for_task(
     if client is None:
         client = resolve_llm_client(db, task)
 
-    # 用户练习设置:学习主题决定提示词;是否允许出题前恢复工作区
+    # 用户练习设置:学习主题决定提示词;是否允许出题前恢复工作区;
+    # 思考模式覆盖出题模型的思考开关
     settings_row = db.query(PracticeSettings).filter(
         PracticeSettings.user_id == user_id
     ).first()
+    _apply_thinking_mode(client, settings_row)
     topic = (
         settings_row.learning_topic if settings_row else DEFAULT_LEARNING_TOPIC
     )

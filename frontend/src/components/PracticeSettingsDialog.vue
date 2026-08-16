@@ -3,10 +3,11 @@
  * 练习设置弹窗
  *
  * 复用 PasswordDialog 的视觉语言(mask + card + header/body/footer)。
- * 四项设置(均为全局生效,切换/选中即保存):
+ * 五项设置(均为全局生效,切换/选中即保存):
  * - 自动生成练习题开关(产出的候选题仍需在任务详情页预览确认才入库)
  * - 学习主题:出题提示词按主题切换出题视角(网络安全/架构设计/通用代码能力)
  * - 出题前恢复工作区:沙箱已清理时重新 clone 仓库,供出题时查阅源码
+ * - 出题思考模式:覆盖出题模型的思考开关(跟随配置/强制开/强制关)
  * - 默认出题模型:用户级默认(任务级配置优先,未设置则回退 env 默认)
  *
  * emit 由父组件调 API 持久化并 toast,父组件更新 props 后弹窗内状态同步。
@@ -14,7 +15,7 @@
 import { computed, ref, watch } from 'vue'
 
 import type { LLMConfigItemOut } from '@/types/model_configs'
-import type { LearningTopic } from '@/types/memory'
+import type { LearningTopic, PracticeThinkingMode } from '@/types/memory'
 
 const props = defineProps<{
   /** 是否显示 */
@@ -25,6 +26,8 @@ const props = defineProps<{
   learningTopic: LearningTopic
   /** 出题前恢复工作区开关状态 */
   restoreWorkspace: boolean
+  /** 出题思考模式(follow=跟随模型配置/on=强制开/off=强制关) */
+  thinkingMode: PracticeThinkingMode
   /** 默认出题模型配置 id(空串=跟随系统默认) */
   defaultModelId: string
   /** 用户已保存的 LLM 配置列表(下拉选项来源) */
@@ -41,6 +44,7 @@ const emit = defineEmits<{
   (e: 'toggle'): void
   (e: 'topic', topic: LearningTopic): void
   (e: 'toggle-restore'): void
+  (e: 'thinking', mode: PracticeThinkingMode): void
   (e: 'model', configId: string): void
   (e: 'clear-records'): void
   (e: 'clear-all'): void
@@ -80,6 +84,13 @@ const TOPIC_OPTIONS: Array<{ value: LearningTopic; label: string; desc: string }
   { value: 'coding', label: '通用代码能力', desc: 'bug 识别、代码坏味道、最佳实践' },
 ]
 
+/** 思考模式选项(与后端 THINKING_MODES 对齐) */
+const THINKING_OPTIONS: Array<{ value: PracticeThinkingMode; label: string; desc: string }> = [
+  { value: 'follow', label: '跟随模型配置', desc: '使用出题模型配置自身的思考开关(默认)' },
+  { value: 'on', label: '强制开启', desc: '出题更慢,题目质量可能更高' },
+  { value: 'off', label: '强制关闭', desc: '出题更快;模型思考模式下工具调用异常导致出不出题时可尝试' },
+]
+
 function handleToggle(loading: boolean): void {
   if (loading) return
   emit('toggle')
@@ -93,6 +104,15 @@ function handleTopic(loading: boolean, topic: LearningTopic, current: LearningTo
 function handleToggleRestore(loading: boolean): void {
   if (loading) return
   emit('toggle-restore')
+}
+
+function handleThinking(
+  loading: boolean,
+  mode: PracticeThinkingMode,
+  current: PracticeThinkingMode,
+): void {
+  if (loading || mode === current) return
+  emit('thinking', mode)
 }
 
 function handleModelChange(
@@ -190,6 +210,35 @@ function handleCancel(loading: boolean): void {
               >
                 <span class="switch-thumb" />
               </button>
+            </div>
+
+            <!-- 出题思考模式:覆盖出题模型的思考开关,选中即保存 -->
+            <div class="setting-block">
+              <span class="setting-title">出题思考模式</span>
+              <span class="setting-desc">
+                是否让出题模型开启思考(慢想)模式;开启后出题更慢但题目质量可能更高,
+                关闭则生成更快——若某模型思考模式下反复读代码却出不出题,可强制关闭
+              </span>
+              <div class="topic-list" role="radiogroup" aria-label="出题思考模式">
+                <button
+                  v-for="opt in THINKING_OPTIONS"
+                  :key="opt.value"
+                  type="button"
+                  role="radio"
+                  :aria-checked="thinkingMode === opt.value"
+                  :class="['topic-option', { 'topic-active': thinkingMode === opt.value }]"
+                  :disabled="busy"
+                  @click="handleThinking(busy, opt.value, thinkingMode)"
+                >
+                  <span class="topic-radio">
+                    <span v-if="thinkingMode === opt.value" class="topic-radio-dot" />
+                  </span>
+                  <span class="topic-text">
+                    <span class="topic-label">{{ opt.label }}</span>
+                    <span class="topic-desc">{{ opt.desc }}</span>
+                  </span>
+                </button>
+              </div>
             </div>
 
             <!-- 默认出题模型:用户级默认,任务级配置优先,选中即保存 -->

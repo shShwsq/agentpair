@@ -94,7 +94,7 @@ def test_fallback_mid_chain_skip_stops_remaining_protocols(monkeypatch, tmp_path
     calls: list[str] = []
     monkeypatch.setattr(st, "_get_or_create_session", lambda _tid: _fake_local_ctx(tmp_path))
 
-    def _fake_clone(ctx, url, repo_name, branch, task_id="", cancellable=False):
+    def _fake_clone(ctx, url, repo_name, branch, task_id="", cancellable=False, progress_callback=None):
         calls.append(url)
         if len(calls) == 1:
             # 第一次失败,并模拟用户此时点了"跳过预克隆"

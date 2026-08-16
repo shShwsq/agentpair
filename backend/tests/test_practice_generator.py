@@ -23,6 +23,7 @@ import app.models.task_artifact  # noqa: F401  让 Task mapper 能解析 TaskArt
 import app.services.practice.generator as gen
 from app.services.practice.generator import (
     _MAX_TOOL_RESULT_CHARS,
+    _apply_thinking_mode,
     _call_llm,
     _ensure_workspace,
     _execute_practice_tool,
@@ -747,3 +748,63 @@ def test_resolve_all_missing_uses_env_default(monkeypatch):
     gen.resolve_llm_client(db, task)
     llm_cls.from_config_dict.assert_not_called()
     llm_cls.assert_called_once_with()
+
+
+# ============================================================
+# 出题思考模式覆盖(_apply_thinking_mode)
+# ============================================================
+
+
+def _thinking_client(meta=None, enable_thinking=True):
+    """伪造 LLMClient(只含 _apply_thinking_mode 用到的属性)"""
+    return SimpleNamespace(
+        enable_thinking=enable_thinking,
+        model_meta=meta,
+        model="kimi-k2.5",
+    )
+
+
+def _pref_mode(mode):
+    return SimpleNamespace(thinking_mode_for_practice=mode)
+
+
+def test_thinking_mode_follow_keeps_config():
+    """follow(默认):不动模型配置自身的思考开关"""
+    client = _thinking_client(meta={"thinking": "hybrid"}, enable_thinking=True)
+    _apply_thinking_mode(client, _pref_mode("follow"))
+    assert client.enable_thinking is True
+    client2 = _thinking_client(meta={"thinking": "hybrid"}, enable_thinking=False)
+    _apply_thinking_mode(client2, _pref_mode("follow"))
+    assert client2.enable_thinking is False
+
+
+def test_thinking_mode_on_forces_enable():
+    client = _thinking_client(meta={"thinking": "hybrid"}, enable_thinking=False)
+    _apply_thinking_mode(client, _pref_mode("on"))
+    assert client.enable_thinking is True
+
+
+def test_thinking_mode_off_forces_disable():
+    client = _thinking_client(meta={"thinking": "hybrid"}, enable_thinking=True)
+    _apply_thinking_mode(client, _pref_mode("off"))
+    assert client.enable_thinking is False
+
+
+def test_thinking_mode_off_ignored_for_thinking_only_model():
+    """仅支持思考模式的模型(thinking=only):强制关无效,保持原样"""
+    client = _thinking_client(meta={"thinking": "only"}, enable_thinking=True)
+    _apply_thinking_mode(client, _pref_mode("off"))
+    assert client.enable_thinking is True
+
+
+def test_thinking_mode_no_settings_or_unknown_value():
+    """无设置行 / 未知值(如 MagicMock 属性)→ 保持模型配置原样"""
+    client = _thinking_client(meta={"thinking": "hybrid"}, enable_thinking=True)
+    _apply_thinking_mode(client, None)
+    assert client.enable_thinking is True
+    _apply_thinking_mode(client, MagicMock())
+    assert client.enable_thinking is True
+    # model_meta 缺失(自定义模型)时强制开/关仍生效
+    client2 = _thinking_client(meta=None, enable_thinking=True)
+    _apply_thinking_mode(client2, _pref_mode("off"))
+    assert client2.enable_thinking is False

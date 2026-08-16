@@ -28,12 +28,17 @@ export interface UserPreferenceOut {
   restore_workspace_for_practice: boolean
   /** 用户级默认出题模型(UserLLMConfig 配置 id;null=未设置,回退任务级/env 默认) */
   default_llm_config_id: string | null
+  /** 出题思考模式覆盖(follow=跟随模型配置/on=强制开/off=强制关,默认 follow) */
+  thinking_mode_for_practice: PracticeThinkingMode
   /** 最后更新时间(ISO 字符串,未配置时为 null) */
   updated_at: string | null
 }
 
 /** 学习主题(出题视角切换) */
 export type LearningTopic = 'security' | 'architecture' | 'coding'
+
+/** 出题思考模式(覆盖出题模型配置的思考开关) */
+export type PracticeThinkingMode = 'follow' | 'on' | 'off'
 
 /** 保存 User Profile 请求(PUT /memory/preferences body) */
 export interface SaveUserPreferenceRequest {
@@ -42,8 +47,8 @@ export interface SaveUserPreferenceRequest {
 
 /** 保存练习设置请求(PUT /memory/preferences/practice body)
  *
- * learning_topic / restore_workspace_for_practice / default_llm_config_id 可选,
- * 不传表示本次不修改(后端 None 语义);
+ * learning_topic / restore_workspace_for_practice / default_llm_config_id /
+ * thinking_mode_for_practice 可选,不传表示本次不修改(后端 None 语义);
  * default_llm_config_id 传空串表示清空(回退任务级/env 默认)。
  */
 export interface SavePracticeSettingsRequest {
@@ -51,6 +56,7 @@ export interface SavePracticeSettingsRequest {
   learning_topic?: LearningTopic
   restore_workspace_for_practice?: boolean
   default_llm_config_id?: string | null
+  thinking_mode_for_practice?: PracticeThinkingMode
 }
 
 /**
