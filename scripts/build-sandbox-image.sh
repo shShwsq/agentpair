@@ -608,6 +608,11 @@ EOF
 # install.sh 默认不装 [anthropic] extra;anthropic_messages 模式的 provider
 # (anthropic/minimax)需要 anthropic Python 包,这里补装(版本与 pyproject.toml 对齐)。
 # uv venv 默认不含 pip,先 ensurepip 引导。本 RUN 内不写 # 注释行(续行合并后 # 会吞后续命令)。
+#
+# sed 容忍 npm 失败:install.sh 的 install_node_deps 给 hermes-agent monorepo 跑 npm install
+# (含 electron/agent-browser 等浏览器工具依赖,二进制从 github releases 下载,国内必挂),
+# 且新版 install.sh 中 npm 失败会直接退出(--skip-browser 只管 Playwright 不管 npm install)。
+# AgentPair 用 hermes acp(纯 Python ACP)不需要浏览器工具,改成 || true 容忍失败继续安装。
 EOF
         if [ "$WITH_SSH" -eq 1 ]; then
             cat >> "$DOCKERFILE" <<'EOF'
@@ -627,7 +632,8 @@ EOF
         fi
         cat >> "$DOCKERFILE" <<'EOF'
     curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh \
-    && bash /tmp/hermes-install.sh --skip-setup --skip-browser --non-interactive \
+    && sed -i 's/install_node_deps || return/install_node_deps || true/g' /tmp/hermes-install.sh \
+    && bash /tmp/hermes-install.sh --skip-setup --skip-browser --skip-computer-use --non-interactive \
     && rm -f /tmp/hermes-install.sh \
     && hermes --version \
     && /usr/local/lib/hermes-agent/venv/bin/python -m ensurepip \
