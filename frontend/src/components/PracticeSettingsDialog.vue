@@ -3,18 +3,25 @@
  * 练习设置弹窗
  *
  * 复用 PasswordDialog 的视觉语言(mask + card + header/body/footer)。
- * 目前只有一项:任务完成后自动生成练习题开关(全局生效,
- * 产出的候选题仍需在任务详情页预览确认才入库)。
+ * 三项设置(均为全局生效,切换/选中即保存):
+ * - 自动生成练习题开关(产出的候选题仍需在任务详情页预览确认才入库)
+ * - 学习主题:出题提示词按主题切换出题视角(网络安全/架构设计/通用代码能力)
+ * - 出题前恢复工作区:沙箱已清理时重新 clone 仓库,供出题时查阅源码
  *
- * 开关切换即保存:emit toggle 由父组件调 API 持久化并 toast,
- * 父组件更新 autoGenerate 后弹窗内状态同步。
+ * emit 由父组件调 API 持久化并 toast,父组件更新 props 后弹窗内状态同步。
  */
+import type { LearningTopic } from '@/types/memory'
+
 defineProps<{
   /** 是否显示 */
   open: boolean
   /** 自动生成练习题当前开关状态 */
   autoGenerate: boolean
-  /** 保存中状态(禁用开关与关闭) */
+  /** 当前学习主题 */
+  learningTopic: LearningTopic
+  /** 出题前恢复工作区开关状态 */
+  restoreWorkspace: boolean
+  /** 保存中状态(禁用交互与关闭) */
   loading: boolean
   /** 错误信息(父组件 API 失败时传入) */
   error?: string
@@ -22,12 +29,31 @@ defineProps<{
 
 const emit = defineEmits<{
   (e: 'toggle'): void
+  (e: 'topic', topic: LearningTopic): void
+  (e: 'toggle-restore'): void
   (e: 'cancel'): void
 }>()
+
+/** 主题选项(与后端 LEARNING_TOPICS 对齐) */
+const TOPIC_OPTIONS: Array<{ value: LearningTopic; label: string; desc: string }> = [
+  { value: 'security', label: '网络安全', desc: '漏洞识别、成因判断、修复方式' },
+  { value: 'architecture', label: '架构设计', desc: '模块边界、设计模式、选型权衡' },
+  { value: 'coding', label: '通用代码能力', desc: 'bug 识别、代码坏味道、最佳实践' },
+]
 
 function handleToggle(loading: boolean): void {
   if (loading) return
   emit('toggle')
+}
+
+function handleTopic(loading: boolean, topic: LearningTopic, current: LearningTopic): void {
+  if (loading || topic === current) return
+  emit('topic', topic)
+}
+
+function handleToggleRestore(loading: boolean): void {
+  if (loading) return
+  emit('toggle-restore')
 }
 
 function handleCancel(loading: boolean): void {
@@ -70,6 +96,53 @@ function handleCancel(loading: boolean): void {
                 <span class="switch-thumb" />
               </button>
             </div>
+
+            <!-- 学习主题:出题提示词按主题切换出题视角,选中即保存 -->
+            <div class="setting-block">
+              <span class="setting-title">学习主题</span>
+              <span class="setting-desc">出题时按主题切换出题视角,生成贴合当前学习目标的题目</span>
+              <div class="topic-list" role="radiogroup" aria-label="学习主题">
+                <button
+                  v-for="opt in TOPIC_OPTIONS"
+                  :key="opt.value"
+                  type="button"
+                  role="radio"
+                  :aria-checked="learningTopic === opt.value"
+                  :class="['topic-option', { 'topic-active': learningTopic === opt.value }]"
+                  :disabled="loading"
+                  @click="handleTopic(loading, opt.value, learningTopic)"
+                >
+                  <span class="topic-radio">
+                    <span v-if="learningTopic === opt.value" class="topic-radio-dot" />
+                  </span>
+                  <span class="topic-text">
+                    <span class="topic-label">{{ opt.label }}</span>
+                    <span class="topic-desc">{{ opt.desc }}</span>
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            <div class="setting-row" @click="handleToggleRestore(loading)">
+              <div class="setting-info">
+                <span class="setting-title">出题前恢复工作区</span>
+                <span class="setting-desc">
+                  出题时沙箱已清理(任务完成超过 1 小时)则重新克隆仓库,
+                  让出题过程能查阅真实源码提高题目质量(会消耗克隆时间)
+                </span>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                :aria-checked="restoreWorkspace"
+                :class="['switch', { 'switch-on': restoreWorkspace }]"
+                :disabled="loading"
+                @click.stop="handleToggleRestore(loading)"
+              >
+                <span class="switch-thumb" />
+              </button>
+            </div>
+
             <p v-if="loading" class="saving-hint">
               <span class="btn-spinner" /> 保存中...
             </p>
@@ -157,6 +230,9 @@ function handleCancel(loading: boolean): void {
   flex: 1;
   overflow-y: auto;
   padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
 }
 
 /* ---- 设置项 ---- */
@@ -193,6 +269,90 @@ function handleCancel(loading: boolean): void {
   font-size: var(--fs-xs);
   color: var(--color-text-secondary);
   line-height: var(--lh-relaxed);
+}
+
+/* ---- 学习主题 ---- */
+.setting-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.topic-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.topic-option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.topic-option:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+}
+
+.topic-option:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.topic-active {
+  border-color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 6%, transparent);
+}
+
+.topic-radio {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  border: 2px solid var(--color-border-strong);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.topic-active .topic-radio {
+  border-color: var(--color-primary);
+}
+
+.topic-radio-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-primary);
+}
+
+.topic-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.topic-label {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--color-text);
+}
+
+.topic-desc {
+  font-size: var(--fs-xs);
+  color: var(--color-text-secondary);
 }
 
 /* ---- 开关 ---- */
@@ -238,7 +398,7 @@ function handleCancel(loading: boolean): void {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  margin: var(--space-3) 0 0;
+  margin: 0;
   font-size: var(--fs-xs);
   color: var(--color-text-muted);
 }

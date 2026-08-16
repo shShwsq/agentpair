@@ -5,7 +5,8 @@
 - 匿名任务(user_id 为空)跳过
 - 用户开关关闭跳过(开关开启/未配置不拦)
 - 同一任务已有题目(任意状态)跳过
-- 无结构化 finding(无 cwe/severity 元信息)跳过
+- 无结构化 finding(metadata 为空/全空白值)跳过
+- metadata 含任意非空值(含非安全场景的通用键)即可出题
 - 命中守卫后调 generator,返回生成数
 """
 from unittest.mock import MagicMock, patch
@@ -63,12 +64,24 @@ def test_skip_when_questions_already_exist():
 
 
 def test_skip_without_structured_findings():
-    # 纯摘要 Result:metadata 为空/无 cwe/severity/空串
-    for metas in ([], [None], [{}], [{"title": "x"}], [{"severity": "   "}]):
+    # 纯摘要 Result:metadata 为空/None/空 dict/全空白值
+    for metas in ([], [None], [{}], [{"severity": "   "}]):
         db = _mock_db(pref_row=None, result_metas=metas)
         with patch("app.services.practice.auto_generate.generate_questions_for_task") as gen:
             assert auto_generate_practice_for_task(_task(), db) == 0
         gen.assert_not_called()
+
+
+def test_generate_with_generic_meta():
+    # 放宽后非安全场景的通用 metadata 键也视为结构化 finding
+    for metas in ([{"title": "x"}], [{"category": "readability"}]):
+        db = _mock_db(pref_row=None, result_metas=metas)
+        with patch(
+            "app.services.practice.auto_generate.generate_questions_for_task",
+            return_value=([MagicMock()], 0),
+        ) as gen:
+            assert auto_generate_practice_for_task(_task(), db) == 1
+        gen.assert_called_once()
 
 
 def test_generate_with_cwe_meta():

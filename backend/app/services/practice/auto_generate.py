@@ -2,7 +2,7 @@
 
 挂在 orchestrator 任务完成收尾处(与 memory_summarize 同模式):
 - 只生成 draft,仍需用户在任务详情页预览确认后转 active
-- 守卫条件:登录用户、开关开启、存在结构化 finding(带 cwe/severity 元信息);
+- 守卫条件:登录用户、开关开启、存在结构化 finding(metadata 非空);
   单 agent 模式的纯摘要 Result 无元信息,自动跳过避免低质量题
 - 同一任务已生成过(任何状态的题目)则跳过,避免追问/重试后重复出题
 """
@@ -16,17 +16,19 @@ from app.services.practice.generator import generate_questions_for_task
 
 logger = logging.getLogger(__name__)
 
-# 视为"结构化 finding"的元信息键(至少命中一个才出题)
-_FINDING_META_KEYS = ("cwe", "severity")
-
 
 def _has_structured_findings(db: Session, task_id) -> bool:
-    """任务的 Results 中是否存在带 cwe/severity 元信息的结构化发现"""
+    """任务的 Results 中是否存在带元信息的结构化发现
+
+    判定标准:metadata 为非空 dict(安全场景含 cwe/severity,
+    代码审查等场景含 category/file_path 等;出题提示词按用户
+    学习主题适配,不再限定只认 cwe/severity)。
+    """
     results = db.query(Result.metadata_).filter(Result.task_id == task_id).all()
     for (meta,) in results:
-        if not meta:
-            continue
-        if any(str(meta.get(k) or "").strip() for k in _FINDING_META_KEYS):
+        if meta and isinstance(meta, dict) and any(
+            str(v or "").strip() for v in meta.values()
+        ):
             return True
     return False
 
@@ -58,7 +60,7 @@ def auto_generate_practice_for_task(task: Task, db: Session) -> int:
 
     # 4) 只对有结构化发现的任务出题(单 agent 纯摘要无元信息,质量差)
     if not _has_structured_findings(db, task.id):
-        logger.info("[task=%s] 无结构化审计发现(cwe/severity),跳过自动生成", task.id)
+        logger.info("[task=%s] 无结构化审计发现(元信息为空),跳过自动生成", task.id)
         return 0
 
     created, skipped = generate_questions_for_task(db, task, task.user_id)

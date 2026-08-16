@@ -13,9 +13,15 @@
 后续还有合并时截断(项目 8000 / 全局 10000)与注入时截断(2000)两道防线。
 """
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from app.models.practice import (
+    LEARNING_TOPIC_ARCHITECTURE,
+    LEARNING_TOPIC_CODING,
+    LEARNING_TOPIC_SECURITY,
+)
 
 
 class UserPreferenceOut(BaseModel):
@@ -28,6 +34,10 @@ class UserPreferenceOut(BaseModel):
     agent_policy: dict[str, Any] | None = None
     # 任务完成后是否自动生成练习题 draft(默认开)
     auto_generate_practice: bool = True
+    # 当前学习主题(出题提示词按此切换,默认 security)
+    learning_topic: str = "security"
+    # 出题前沙箱已清理时是否重新 clone 恢复工作区(默认关)
+    restore_workspace_for_practice: bool = False
     # 最后更新时间(可空 — 未配置时为 None;FastAPI 序列化为 ISO 字符串)
     updated_at: datetime | None = None
 
@@ -43,10 +53,21 @@ class SaveUserPreferenceRequest(BaseModel):
 class SavePracticeSettingsRequest(BaseModel):
     """保存练习设置请求(PUT /memory/preferences/practice)
 
-    任务完成后是否自动生成练习题 draft(产出仍需用户在预览对话框确认才转 active)。
+    - auto_generate_practice:任务完成后是否自动生成练习题 draft
+      (产出仍需用户在预览对话框确认才转 active)
+    - learning_topic:当前学习主题(security/architecture/coding),
+      出题提示词按此切换;None 表示本次不修改
+    - restore_workspace_for_practice:出题前沙箱已清理时是否重新 clone
+      恢复工作区;None 表示本次不修改
     """
 
     auto_generate_practice: bool = True
+    learning_topic: Literal[
+        LEARNING_TOPIC_SECURITY,
+        LEARNING_TOPIC_ARCHITECTURE,
+        LEARNING_TOPIC_CODING,
+    ] | None = None
+    restore_workspace_for_practice: bool | None = None
 
 
 class SaveAgentPolicyRequest(BaseModel):

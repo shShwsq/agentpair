@@ -7,10 +7,22 @@
 - CWE 元信息优先于 LLM 输出的 knowledge_key(含纯数字补前缀)
 - 单条 finding 最多 3 题截断
 - dedup_hash 稳定性
+- 主题提示词切换(build_system_prompt)与工具说明段注入
+- 迷你工具循环(_call_llm / _execute_practice_tool)
+- 出题前工作区保障(_ensure_workspace 重新 clone 恢复)
 """
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import app.services.practice.generator as gen
 from app.services.practice.generator import (
+    _MAX_TOOL_RESULT_CHARS,
+    _call_llm,
+    _ensure_workspace,
+    _execute_practice_tool,
     _normalize_raw_question,
     _parse_llm_questions,
+    build_system_prompt,
     compute_dedup_hash,
 )
 
@@ -162,3 +174,209 @@ def test_dedup_hash_stable_and_trim_insensitive():
 
 def test_dedup_hash_none_snippet():
     assert len(compute_dedup_hash("题干", None)) == 64
+
+
+# ============================================================
+# 主题提示词
+# ============================================================
+
+
+def test_build_system_prompt_topic_switch():
+    assert "网络安全培训出题专家" in build_system_prompt("security", False)
+    assert "架构培训出题专家" in build_system_prompt("architecture", False)
+    assert "通用编码能力培训出题专家" in build_system_prompt("coding", False)
+
+
+def test_build_system_prompt_unknown_topic_falls_back_security():
+    assert "网络安全培训出题专家" in build_system_prompt("not_a_topic", False)
+
+
+def test_build_system_prompt_tool_section_only_with_workspace():
+    assert "源码查阅工具" in build_system_prompt("security", True)
+    assert "源码查阅工具" not in build_system_prompt("security", False)
+
+
+def test_build_system_prompt_common_rules_always_present():
+    for topic in ("security", "architecture", "coding"):
+        prompt = build_system_prompt(topic, True)
+        assert "只输出 JSON 数组" in prompt
+        assert "verified: false" in prompt  # 误报发现不出题提示
+
+
+# ============================================================
+# 迷你工具循环
+# ============================================================
+
+
+def _chunk(content=None, tool_deltas=None):
+    """伪造 StreamChunk(只含 _stream_one_round 用到的字段)"""
+    return SimpleNamespace(
+        content_delta=content,
+        tool_call_deltas=tool_deltas or [],
+        finish_reason="stop",
+    )
+
+
+def _delta(index=0, id=None, name=None, args=""):
+    return SimpleNamespace(
+        index=index, id=id, name=name, arguments_fragment=args,
+    )
+
+
+class _FakeClient:
+    """按轮次依次返回预设 chunk 序列,并记录每次调用"""
+
+    def __init__(self, rounds):
+        self.rounds = list(rounds)
+        self.calls = []
+
+    def chat_stream(self, messages, **kw):
+        self.calls.append({"messages": messages, "kw": kw})
+        return iter(self.rounds.pop(0))
+
+
+def test_call_llm_no_workspace_single_call_without_tools():
+    client = _FakeClient([[_chunk(content="[]")]])
+    out = _call_llm(client, "sys", "finding 文本", "t1", "")
+    assert out == "[]"
+    assert len(client.calls) == 1
+    assert client.calls[0]["kw"].get("tools") is None
+
+
+def test_call_llm_tool_loop_executes_tool_then_finalizes(monkeypatch):
+    """第一轮 LLM 要求 read_file,执行后第二轮直出题目"""
+    read_calls = []
+
+    def fake_read_file(repo_path, file_path, **kw):
+        read_calls.append((repo_path, file_path))
+        return {"path": file_path, "content": "def foo(): pass"}
+
+    monkeypatch.setattr(gen.sandbox_tools, "read_file", fake_read_file)
+    client = _FakeClient([
+        [_chunk(tool_deltas=[
+            _delta(id="call_1", name="read_file"),
+            _delta(args='{"file_path": "src/a.py"}'),
+        ])],
+        [_chunk(content="[{\"qtype\": \"single_choice\"}]")],
+    ])
+    out = _call_llm(client, "sys", "finding 文本", "t1", "/repo")
+    assert "single_choice" in out
+    assert read_calls == [("/repo", "src/a.py")]
+    # 第一轮带工具,第二轮收到 tool 结果消息
+    assert client.calls[0]["kw"].get("tools") is not None
+    msgs = client.calls[1]["messages"]
+    assert any(m["role"] == "tool" and "src/a.py" in m["content"] for m in msgs)
+
+
+def test_execute_practice_tool_unknown_and_truncate(monkeypatch):
+    assert "未知工具" in _execute_practice_tool("t1", "/repo", "hack", {})
+    monkeypatch.setattr(
+        gen.sandbox_tools, "read_file",
+        lambda *a, **k: {"content": "x" * 100000},
+    )
+    out = _execute_practice_tool("t1", "/repo", "read_file", {"file_path": "a.py"})
+    assert len(out) == _MAX_TOOL_RESULT_CHARS
+
+
+def test_execute_practice_tool_failure_returns_text(monkeypatch):
+    def _raise(*a, **k):
+        raise RuntimeError("session gone")
+
+    monkeypatch.setattr(gen.sandbox_tools, "search_code", _raise)
+    out = _execute_practice_tool("t1", "/repo", "search_code", {"pattern": "x"})
+    assert out.startswith("工具执行失败")
+
+
+# ============================================================
+# 出题前工作区保障(_ensure_workspace)
+# ============================================================
+
+
+def _task_with_repo():
+    task = MagicMock()
+    task.id = "t1"
+    task.params = {"repo_url": "https://example.com/r.git", "branch": "dev"}
+    return task
+
+
+def test_ensure_workspace_alive_reuses_no_clone(monkeypatch):
+    monkeypatch.setattr(
+        gen.sandbox_tools, "get_workspace_info",
+        lambda tid: {"repo_path": "/repo", "mode": "sandbox"},
+    )
+    clone_calls = []
+    monkeypatch.setattr(
+        gen.sandbox_tools, "clone_repo_with_fallback",
+        lambda *a, **k: clone_calls.append(1),
+    )
+    info = _ensure_workspace(MagicMock(), _task_with_repo(), None)
+    assert info["repo_path"] == "/repo"
+    assert not clone_calls
+
+
+def test_ensure_workspace_setting_off_no_clone(monkeypatch):
+    monkeypatch.setattr(gen.sandbox_tools, "get_workspace_info", lambda tid: None)
+    clone_calls = []
+    monkeypatch.setattr(
+        gen.sandbox_tools, "clone_repo_with_fallback",
+        lambda *a, **k: clone_calls.append(1),
+    )
+    pref = MagicMock()
+    pref.restore_workspace_for_practice = False
+    assert _ensure_workspace(MagicMock(), _task_with_repo(), pref) is None
+    assert not clone_calls
+
+
+def test_ensure_workspace_restores_when_enabled(monkeypatch):
+    """session 已清理 + 开关开启 → 重新 clone 并纳入 TTL 清理序列"""
+    state = {"info": None}
+    monkeypatch.setattr(
+        gen.sandbox_tools, "get_workspace_info", lambda tid: state["info"],
+    )
+    clone_calls = []
+
+    def fake_clone(repo_url, branch=None, task_id="", git_tokens=None, **kw):
+        clone_calls.append((repo_url, branch, task_id))
+        state["info"] = {"repo_path": "/repo-restored"}
+
+    monkeypatch.setattr(gen.sandbox_tools, "clone_repo_with_fallback", fake_clone)
+    marked = []
+    monkeypatch.setattr(
+        gen.sandbox_tools, "mark_task_completed", lambda tid: marked.append(tid),
+    )
+    monkeypatch.setattr(gen, "_load_git_tokens", lambda db, uid: {"github": "tk"})
+    pref = MagicMock()
+    pref.restore_workspace_for_practice = True
+    info = _ensure_workspace(MagicMock(), _task_with_repo(), pref)
+    assert info == {"repo_path": "/repo-restored"}
+    assert clone_calls == [("https://example.com/r.git", "dev", "t1")]
+    assert marked == ["t1"]
+
+
+def test_ensure_workspace_clone_failure_degrades(monkeypatch):
+    def _raise(*a, **k):
+        raise RuntimeError("network error")
+
+    monkeypatch.setattr(gen.sandbox_tools, "get_workspace_info", lambda tid: None)
+    monkeypatch.setattr(gen.sandbox_tools, "clone_repo_with_fallback", _raise)
+    monkeypatch.setattr(gen, "_load_git_tokens", lambda db, uid: {})
+    pref = MagicMock()
+    pref.restore_workspace_for_practice = True
+    # 失败静默降级返回 None(出题走无工具路径),不抛异常
+    assert _ensure_workspace(MagicMock(), _task_with_repo(), pref) is None
+
+
+def test_ensure_workspace_no_repo_url(monkeypatch):
+    monkeypatch.setattr(gen.sandbox_tools, "get_workspace_info", lambda tid: None)
+    clone_calls = []
+    monkeypatch.setattr(
+        gen.sandbox_tools, "clone_repo_with_fallback",
+        lambda *a, **k: clone_calls.append(1),
+    )
+    task = MagicMock()
+    task.id = "t1"
+    task.params = {}
+    pref = MagicMock()
+    pref.restore_workspace_for_practice = True
+    assert _ensure_workspace(MagicMock(), task, pref) is None
+    assert not clone_calls

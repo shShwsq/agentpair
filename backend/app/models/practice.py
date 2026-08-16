@@ -111,6 +111,8 @@ class Question(Base):
 
     # 难度 1-5(LLM 初评,作答后微调)
     difficulty: Mapped[float] = mapped_column(Float, nullable=False, default=3.0)
+    # 出题时使用的学习主题(security/architecture/coding;老数据为 NULL)
+    learning_topic: Mapped[str | None] = mapped_column(String(32), nullable=True)
     status: Mapped[QuestionStatus] = mapped_column(
         Enum(QuestionStatus), default=QuestionStatus.DRAFT, nullable=False, index=True
     )
@@ -227,15 +229,34 @@ class Attempt(Base):
     )
 
 
+# ============================================================
+# 学习主题(出题提示词按主题切换;用户级默认存 practice_settings,
+# 题目落库时记录出题当时的主题,便于后续按主题筛选/组卷)
+# ============================================================
+LEARNING_TOPIC_SECURITY = "security"          # 网络安全
+LEARNING_TOPIC_ARCHITECTURE = "architecture"  # 架构设计
+LEARNING_TOPIC_CODING = "coding"              # 通用代码能力
+LEARNING_TOPICS = (
+    LEARNING_TOPIC_SECURITY,
+    LEARNING_TOPIC_ARCHITECTURE,
+    LEARNING_TOPIC_CODING,
+)
+DEFAULT_LEARNING_TOPIC = LEARNING_TOPIC_SECURITY
+
+
 class PracticeSettings(Base):
     """用户级练习设置 (per-user, 1:1)
 
-    目前只有一项:任务完成后是否自动生成练习题 draft
-    (默认开启;产出仍需用户预览确认才转 active)。
-    后续练习域的用户级设置(如默认组卷题数)可加在本表。
+    - auto_generate_practice:任务完成后是否自动生成练习题 draft
+      (默认开启;产出仍需用户预览确认才转 active)
+    - learning_topic:当前希望学习的主题(出题提示词按此切换)
+    - restore_workspace_for_practice:出题前沙箱已清理时,
+      是否重新 clone 仓库恢复工作区(供出题工具循环读源码)
 
     迁移:老数据存于 user_preferences.auto_generate_practice 布尔列,
-    migrate_practice_settings_table() 启动时把数据拷入本表后删除旧列(幂等)。
+    migrate_practice_settings_table() 启动时把数据拷入本表后删除旧列(幂等);
+    learning_topic / restore_workspace_for_practice 为后加列,
+    由 migrate_practice_learning_columns() 幂等补齐。
     """
 
     __tablename__ = "practice_settings"
@@ -252,6 +273,15 @@ class PracticeSettings(Base):
     # 任务完成后是否自动生成练习题 draft(默认开启)
     auto_generate_practice: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="true", default=True
+    )
+    # 当前学习主题(security/architecture/coding,默认 security)
+    learning_topic: Mapped[str] = mapped_column(
+        String(32), nullable=False,
+        server_default=DEFAULT_LEARNING_TOPIC, default=DEFAULT_LEARNING_TOPIC,
+    )
+    # 出题前沙箱已清理时是否重新 clone 恢复工作区(默认关,避免意外大仓库克隆)
+    restore_workspace_for_practice: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -318,4 +348,47 @@ def migrate_practice_settings_table() -> None:
             "practice_settings 迁移: user_preferences.auto_generate_practice "
             "→ practice_settings(旧列已删)"
         )
+        conn.commit()
+
+
+def migrate_practice_learning_columns() -> None:
+    """幂等给 practice_settings / practice_questions 补新列
+
+    背景:项目用 Base.metadata.create_all(无 Alembic),已存在的表不会自动加新列。
+    - practice_settings 加 learning_topic / restore_workspace_for_practice
+    - practice_questions 加 learning_topic(可空,老题不补)
+    全新库(create_all 已建好新列)或已迁过 → 直接返回。
+    """
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    from app.database import engine
+
+    log = logging.getLogger(__name__)
+
+    with engine.connect() as conn:
+        insp = inspect(conn)
+        if insp.has_table("practice_settings"):
+            cols = {c["name"] for c in insp.get_columns("practice_settings")}
+            if "learning_topic" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE practice_settings ADD COLUMN learning_topic "
+                    "VARCHAR(32) NOT NULL DEFAULT 'security'"
+                ))
+                log.info("practice_settings.learning_topic 列迁移完成")
+            if "restore_workspace_for_practice" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE practice_settings ADD COLUMN "
+                    "restore_workspace_for_practice BOOLEAN NOT NULL DEFAULT false"
+                ))
+                log.info("practice_settings.restore_workspace_for_practice 列迁移完成")
+        if insp.has_table("practice_questions"):
+            cols = {c["name"] for c in insp.get_columns("practice_questions")}
+            if "learning_topic" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE practice_questions ADD COLUMN "
+                    "learning_topic VARCHAR(32)"
+                ))
+                log.info("practice_questions.learning_topic 列迁移完成")
         conn.commit()

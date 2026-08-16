@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.deps import get_current_user
 from app.models.agent_policy import AgentPolicy
-from app.models.practice import PracticeSettings
+from app.models.practice import DEFAULT_LEARNING_TOPIC, PracticeSettings
 from app.models.project import Project
 from app.models.user import User
 from app.models.user_memory import UserMemory
@@ -96,9 +96,10 @@ def save_practice_settings(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> UserPreferenceOut:
-    """保存/更新练习设置(任务完成后自动生成练习题开关)
+    """保存/更新练习设置(自动生成开关 / 学习主题 / 出题前恢复工作区)
 
     存于 practice_settings 独立表(1:1),get_or_create:无行时自动创建。
+    learning_topic / restore_workspace_for_practice 可选:传 None 表示不修改。
     """
     row = (
         db.query(PracticeSettings)
@@ -113,10 +114,17 @@ def save_practice_settings(
         db.add(row)
     else:
         row.auto_generate_practice = req.auto_generate_practice
+    if req.learning_topic is not None:
+        row.learning_topic = req.learning_topic
+    if req.restore_workspace_for_practice is not None:
+        row.restore_workspace_for_practice = req.restore_workspace_for_practice
     db.commit()
     db.refresh(row)
-    logger.info("用户 %s 更新练习设置: auto_generate_practice=%s",
-                current_user.id, req.auto_generate_practice)
+    logger.info(
+        "用户 %s 更新练习设置: auto_generate_practice=%s learning_topic=%s restore_workspace=%s",
+        current_user.id, req.auto_generate_practice,
+        req.learning_topic, req.restore_workspace_for_practice,
+    )
     return _build_preference_out(db, current_user.id, settings_row=row)
 
 
@@ -305,7 +313,8 @@ def _build_preference_out(
 
     - user_profile 来自 user_preferences(可能无行)
     - agent_policy 来自 agent_policies 独立表(可能无行 → None,前端用系统默认)
-    - auto_generate_practice 来自 practice_settings 独立表(可能无行 → 默认开)
+    - auto_generate_practice / learning_topic / restore_workspace_for_practice
+      来自 practice_settings 独立表(可能无行 → 用默认值)
     - updated_at 取各行中较新的(哪边最后保存,就算最后更新)
     """
     if pref_row is None:
@@ -336,6 +345,10 @@ def _build_preference_out(
         user_profile=pref_row.user_profile if pref_row else "",
         agent_policy=policy_row.to_dict() if policy_row else None,
         auto_generate_practice=settings_row.auto_generate_practice if settings_row else True,
+        learning_topic=settings_row.learning_topic if settings_row else DEFAULT_LEARNING_TOPIC,
+        restore_workspace_for_practice=(
+            settings_row.restore_workspace_for_practice if settings_row else False
+        ),
         updated_at=updated_at,
     )
 

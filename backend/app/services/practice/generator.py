@@ -2,14 +2,19 @@
 
 流程:
 1. 取任务 Results(上限 max_findings 条,防 LLM 成本失控)
-2. 逐条 finding 调 LLM 生成 1~3 题(漏洞识别 / 成因判断 / 修复选择)
+2. 逐条 finding 调 LLM 生成 1~3 题:
+   - system prompt 按用户学习主题切换(security/architecture/coding)
+   - 工作区可用时挂只读迷你工具循环(read_file / search_code / find_files),
+     LLM 自主补全源码上下文提高出题质量;沙箱已清理且用户开启
+     「出题前恢复工作区」时先重新 clone 恢复
 3. json_repair 容错解析 + 字段校验,失败重试 1 次,仍失败丢弃该 finding
 4. 知识点 get_or_create(优先 CWE 编号)+ 同用户 sha256 去重
-5. 落库为 draft,前端预览确认后转 active
+5. 落库为 draft(记录出题时主题),前端预览确认后转 active
 
 出题模型解析:优先 task.llm_config_id(UserLLMConfig),失败回退 env 默认。
 """
 import hashlib
+import json
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -18,10 +23,21 @@ from json_repair import repair_json
 from sqlalchemy.orm import Session
 
 from app.llm.client import LLMClient
-from app.models.practice import KnowledgePoint, Question, QuestionStatus, QuestionType
+from app.models.practice import (
+    DEFAULT_LEARNING_TOPIC,
+    LEARNING_TOPIC_ARCHITECTURE,
+    LEARNING_TOPIC_CODING,
+    LEARNING_TOPIC_SECURITY,
+    KnowledgePoint,
+    PracticeSettings,
+    Question,
+    QuestionStatus,
+    QuestionType,
+)
 from app.models.task import Result, Task
 from app.models.user_llm_config import UserLLMConfig
 from app.services.practice.difficulty import clamp_difficulty
+from app.tools import sandbox_tools
 
 logger = logging.getLogger(__name__)
 
@@ -29,36 +45,306 @@ logger = logging.getLogger(__name__)
 MAX_QUESTIONS_PER_FINDING = 3
 # 解析失败重试次数
 PARSE_RETRY = 1
+# 出题工具循环最大轮次(每轮可含多次并行工具调用;超限后强制无工具出题)
+MAX_TOOL_ROUNDS = 4
+# 单次工具结果回传 LLM 的截断阈值(防上下文爆炸)
+_MAX_TOOL_RESULT_CHARS = 3000
 
-GENERATE_SYSTEM_PROMPT = """你是一名网络安全培训出题专家。基于给定的真实代码审计发现,改编出用于安全培训的客观题。
+# ============================================================
+# 提示词:按学习主题切换出题视角(通用规则段共享)
+# ============================================================
 
-要求:
+_SECURITY_TOPIC_HEAD = """你是一名网络安全培训出题专家。基于给定的真实代码审计发现,改编出用于安全培训的客观题。
+
+## 出题视角
+- 漏洞识别:该代码片段存在哪种漏洞
+- 成因判断:漏洞根因与触发条件
+- 修复选择:正确的修复方式与安全编码实践
+- knowledge_key 优先用 CWE 编号(如 "CWE-89");无对应 CWE 时用英文短标识(如 "hardcoded_secrets")"""
+
+_ARCHITECTURE_TOPIC_HEAD = """你是一名软件架构培训出题专家。基于给定的真实代码分析发现,从架构设计视角改编出客观题。
+
+## 出题视角
+- 模块边界与职责划分、分层是否合理、依赖方向
+- 设计模式的应用与误用、技术选型权衡(一致性/性能/可维护性)
+- 耦合与内聚、扩展性、可测试性缺陷及其改进方案
+- 即使发现本身是安全/质量问题,也应从架构成因或设计改进角度出题
+- knowledge_key 用英文短标识(如 "layering"、"circular_dependency"、"observer_pattern")"""
+
+_CODING_TOPIC_HEAD = """你是一名通用编码能力培训出题专家。基于给定的真实代码分析发现,改编出考察通用编码能力的客观题。
+
+## 出题视角
+- bug 识别与边界条件、异常与错误处理
+- 代码坏味道与可读性、性能问题(如 N+1 查询、不必要的重复计算)
+- 语言特性正确用法与工程最佳实践(测试、命名、API 设计)
+- knowledge_key 用英文短标识(如 "null_safety"、"exception_handling"、"n_plus_one_query")"""
+
+_TOPIC_PROMPT_HEADS = {
+    LEARNING_TOPIC_SECURITY: _SECURITY_TOPIC_HEAD,
+    LEARNING_TOPIC_ARCHITECTURE: _ARCHITECTURE_TOPIC_HEAD,
+    LEARNING_TOPIC_CODING: _CODING_TOPIC_HEAD,
+}
+
+# 工作区可用时注入的工具说明段(工具实际可用与否与 sandbox 存活状态一致)
+_TOOL_SECTION = """## 源码查阅工具(仓库已 clone,可调用)
+发现描述里代码不完整时,你可以先调工具查阅真实源码再出题:
+- read_file(file_path, max_lines?, offset?):读仓库文件(带行号,分页)
+- search_code(pattern, file_glob?, output_mode?):正则搜索代码;
+  output_mode="files_with_matches" 可快速定位含关键词的文件
+- find_files(pattern):按 glob 递归查文件路径(如 **/*.py)
+工具轮数有限,查不到就基于现有信息出题。凡提供或读到源码的,
+题干与 code_snippet 必须引用真实源码,不得虚构。"""
+
+# 三主题共享的输出规则段
+_COMMON_RULES = """## 通用要求
 1. 出 1~3 道题,题型限定:
-   - single_choice(单选):如「该代码片段存在哪种漏洞」「正确的修复方式是」
+   - single_choice(单选):如「该代码片段存在哪种问题」「正确的改进方式是」
    - true_false(判断):选项固定为 ["正确", "错误"],题干为一个可判定真伪的陈述
 2. 题干必须引用发现中的真实代码/场景,不要泛泛而谈;代码片段单独放 code_snippet
 3. 干扰项要有迷惑性但明确错误,正确答案唯一
-4. explanation 讲清原理与修复要点,100 字以内
-5. difficulty 评估难度(1-5 整数):1=概念识别,3=需理解代码逻辑,5=需深入利用/修复细节
-6. knowledge_key:知识点唯一键,优先用 CWE 编号(如 "CWE-89");无对应 CWE 时用英文短标识(如 "hardcoded_secrets")
-7. knowledge_name:知识点中文展示名(如 "SQL 注入")
+4. explanation 讲清原理与改进要点,100 字以内
+5. difficulty 评估难度(1-5 整数):1=概念识别,3=需理解代码逻辑,5=需深入细节
+6. knowledge_name:知识点中文展示名(如 "SQL 注入")
+7. 元信息中若标注 verified: false 或判定为误报的发现,不要出题,直接返回空数组 []
 
 只输出 JSON 数组,不要任何其他文字。每个元素结构:
 {"qtype": "single_choice|true_false", "stem": "...", "code_snippet": "..."或null,
  "options": ["...", "..."], "answer_idx": 0, "explanation": "...",
- "difficulty": 3, "knowledge_key": "CWE-89", "knowledge_name": "SQL 注入"}
-"""
+ "difficulty": 3, "knowledge_key": "...", "knowledge_name": "..."}"""
 
-_FINDING_TEMPLATE = """以下是代码审计任务的一条真实发现:
 
-【标题】{title}
+def build_system_prompt(topic: str, workspace_available: bool) -> str:
+    """按学习主题拼出题 system prompt;工作区可用时附工具说明段"""
+    head = _TOPIC_PROMPT_HEADS.get(topic) or _TOPIC_PROMPT_HEADS[LEARNING_TOPIC_SECURITY]
+    sections = [head]
+    if workspace_available:
+        sections.append(_TOOL_SECTION)
+    sections.append(_COMMON_RULES)
+    return "\n\n".join(sections)
 
-【详细描述】
-{content}
 
-【元信息】{metadata}
+# ============================================================
+# 出题工具循环(只读三工具;repo_path/task_id 由宿主注入,LLM 不感知)
+# ============================================================
 
-请基于这条发现出题(1~3 道)。"""
+_PRACTICE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "读取仓库内文件内容(带行号,支持 offset 翻页)。发现描述缺少具体代码时,先读相关源文件",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "仓库内相对路径"},
+                    "max_lines": {"type": "integer", "description": "本次最多返回行数,默认 100"},
+                    "offset": {"type": "integer", "description": "从第几行开始读(1-based),默认 1"},
+                },
+                "required": ["file_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_code",
+            "description": "正则搜索仓库代码,定位相关函数、字符串或调用点",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "正则表达式"},
+                    "file_glob": {"type": "string", "description": "文件名过滤 glob(可选),如 *.py"},
+                    "output_mode": {
+                        "type": "string",
+                        "enum": ["content", "files_with_matches"],
+                        "description": "content=匹配行+行号;files_with_matches=仅文件路径(快速定位)",
+                    },
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_files",
+            "description": "按 glob 模式递归查找文件路径(不看内容),如 **/*.py",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "glob 模式"},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+]
+
+
+def _execute_practice_tool(task_id: str, repo_path: str, name: str, args: dict) -> str:
+    """执行出题工具循环的只读工具,返回截断后的 JSON 文本"""
+    try:
+        if name == "read_file":
+            result = sandbox_tools.read_file(
+                repo_path,
+                str(args.get("file_path") or ""),
+                max_lines=max(1, min(int(args.get("max_lines") or 100), 150)),
+                offset=max(1, int(args.get("offset") or 1)),
+                task_id=task_id,
+            )
+        elif name == "search_code":
+            result = sandbox_tools.search_code(
+                repo_path,
+                str(args.get("pattern") or ""),
+                file_glob=args.get("file_glob"),
+                max_matches=max(1, min(int(args.get("max_matches") or 30), 50)),
+                output_mode=str(args.get("output_mode") or "content"),
+                task_id=task_id,
+            )
+        elif name == "find_files":
+            result = sandbox_tools.find_files(
+                repo_path, str(args.get("pattern") or ""), task_id=task_id,
+            )
+        else:
+            return f"未知工具: {name}"
+        return json.dumps(result, ensure_ascii=False, default=str)[:_MAX_TOOL_RESULT_CHARS]
+    except Exception as e:
+        return f"工具执行失败: {e}"
+
+
+def _stream_one_round(
+    client: LLMClient, messages: list[dict], tools: list[dict] | None,
+) -> tuple[str, list[dict]]:
+    """一轮 chat_stream:累积正式回复与工具调用增量(参数跨 chunk 拼接)"""
+    content_parts: list[str] = []
+    tool_calls_acc: dict[int, dict] = {}
+    for chunk in client.chat_stream(messages, max_tokens=4096, tools=tools):
+        if chunk.content_delta:
+            content_parts.append(chunk.content_delta)
+        for d in chunk.tool_call_deltas or []:
+            slot = tool_calls_acc.setdefault(
+                d.index, {"id": "", "name": "", "arguments_str": ""},
+            )
+            if d.id and not slot["id"]:
+                slot["id"] = d.id
+            if d.name and not slot["name"]:
+                slot["name"] = d.name
+            if d.arguments_fragment:
+                slot["arguments_str"] += d.arguments_fragment
+    tool_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
+    return "".join(content_parts), tool_calls
+
+
+def _call_llm(
+    client: LLMClient, system_prompt: str, finding_text: str,
+    task_id: str, repo_path: str,
+) -> str:
+    """出题 LLM 调用:工作区可用 → 有界工具循环;否则单次直出"""
+    tools = _PRACTICE_TOOL_DEFINITIONS if repo_path else None
+    messages: list[dict] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": finding_text},
+    ]
+    for _ in range(MAX_TOOL_ROUNDS):
+        content, tool_calls = _stream_one_round(client, messages, tools)
+        if not tool_calls:
+            return content
+        assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
+        assistant_msg["tool_calls"] = [
+            {
+                "id": tc["id"] or f"call_{i}",
+                "type": "function",
+                "function": {"name": tc["name"], "arguments": tc["arguments_str"]},
+            }
+            for i, tc in enumerate(tool_calls)
+        ]
+        messages.append(assistant_msg)
+        for i, tc in enumerate(tool_calls):
+            try:
+                args = json.loads(tc["arguments_str"]) if tc["arguments_str"] else {}
+            except json.JSONDecodeError:
+                args = {}
+            result_str = _execute_practice_tool(task_id, repo_path, tc["name"], args)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"] or f"call_{i}",
+                "content": result_str,
+            })
+    # 超工具轮数:去掉工具强制收口出题
+    content, _ = _stream_one_round(client, messages, None)
+    return content
+
+
+# ============================================================
+# 工作区保障(沙箱已清理时按用户设置重新 clone)
+# ============================================================
+
+
+def _load_git_tokens(db: Session, user_id) -> dict[str, str]:
+    """加载用户 git provider 的 access_token(与 orchestrator._load_git_tokens 同逻辑)"""
+    if user_id is None:
+        return {}
+    try:
+        from app.models.user_git_binding import UserGitBinding
+        from app.security import decrypt_secret
+
+        bindings = (
+            db.query(UserGitBinding)
+            .filter(
+                UserGitBinding.user_id == user_id,
+                UserGitBinding.access_token != "",
+            )
+            .all()
+        )
+        tokens: dict[str, str] = {}
+        for b in bindings:
+            try:
+                tokens[b.provider] = decrypt_secret(b.access_token)
+            except Exception as e:
+                logger.warning("[practice] 解密 %s token 失败: %s", b.provider, e)
+        return tokens
+    except Exception as e:
+        logger.warning("[practice] 加载 git token 失败: %s", e)
+        return {}
+
+
+def _ensure_workspace(
+    db: Session, task: Task, settings_row: PracticeSettings | None,
+) -> dict | None:
+    """保障出题用的工作区,返回 workspace info(含 repo_path;不可用为 None)
+
+    - 沙箱 session 存活 → 直接复用
+    - 已清理 + 用户开启 restore_workspace_for_practice + 任务有 repo_url
+      → 重新 clone 恢复(成功后标记 completed 纳入 1 小时 TTL 清理序列)
+    - 恢复失败/条件不满足 → 静默降级(出题走无工具路径)
+    """
+    task_id_str = str(task.id)
+    info = sandbox_tools.get_workspace_info(task_id_str)
+    if info and info.get("repo_path"):
+        return info
+    params = task.params or {}
+    repo_url = params.get("repo_url")
+    if not repo_url or settings_row is None or not settings_row.restore_workspace_for_practice:
+        return info
+    logger.info("[task=%s] 出题前沙箱已清理,重新 clone 恢复工作区", task.id)
+    try:
+        sandbox_tools.clone_repo_with_fallback(
+            repo_url,
+            branch=params.get("branch"),
+            task_id=task_id_str,
+            git_tokens=_load_git_tokens(db, task.user_id),
+        )
+        # 恢复的 session 属于已完成任务:纳入 TTL 清理序列,避免常驻泄漏
+        sandbox_tools.mark_task_completed(task_id_str)
+        return sandbox_tools.get_workspace_info(task_id_str)
+    except Exception as e:
+        logger.warning("[task=%s] 出题前恢复工作区失败(降级为无工具出题): %s", task.id, e)
+        return sandbox_tools.get_workspace_info(task_id_str)
+
+
+# ============================================================
+# 原有管线:模型解析 / 校验 / 去重 / 落库
+# ============================================================
 
 
 def resolve_llm_client(db: Session, task: Task) -> LLMClient:
@@ -190,19 +476,16 @@ def _parse_llm_questions(content: str, finding_meta: dict) -> list[dict]:
     return questions[:MAX_QUESTIONS_PER_FINDING]
 
 
-def _call_llm(client: LLMClient, finding_text: str) -> str:
-    """同步累积 chat_stream 的 content"""
-    buf: list[str] = []
-    for chunk in client.chat_stream(
-        [
-            {"role": "system", "content": GENERATE_SYSTEM_PROMPT},
-            {"role": "user", "content": finding_text},
-        ],
-        max_tokens=4096,
-    ):
-        if chunk.content_delta:
-            buf.append(chunk.content_delta)
-    return "".join(buf)
+_FINDING_TEMPLATE = """以下是代码审计任务的一条真实发现:
+
+【标题】{title}
+
+【详细描述】
+{content}
+
+【元信息】{metadata}
+
+请基于这条发现出题(1~3 道)。"""
 
 
 def generate_questions_for_task(
@@ -220,6 +503,20 @@ def generate_questions_for_task(
     """
     if client is None:
         client = resolve_llm_client(db, task)
+
+    # 用户练习设置:学习主题决定提示词;是否允许出题前恢复工作区
+    settings_row = db.query(PracticeSettings).filter(
+        PracticeSettings.user_id == user_id
+    ).first()
+    topic = (
+        settings_row.learning_topic if settings_row else DEFAULT_LEARNING_TOPIC
+    )
+
+    # 工作区:存活 → 挂工具循环;已清理 → 按设置尝试重新 clone
+    ws_info = _ensure_workspace(db, task, settings_row)
+    repo_path = (ws_info or {}).get("repo_path") or ""
+    system_prompt = build_system_prompt(topic, workspace_available=bool(repo_path))
+    task_id_str = str(task.id)
 
     findings = (
         db.query(Result).filter(Result.task_id == task.id).order_by(Result.created_at).all()
@@ -246,7 +543,7 @@ def generate_questions_for_task(
         questions: list[dict] = []
         for attempt in range(PARSE_RETRY + 1):
             try:
-                content = _call_llm(client, prompt)
+                content = _call_llm(client, system_prompt, prompt, task_id_str, repo_path)
             except Exception as e:
                 logger.warning(
                     "[practice] finding=%s LLM 调用失败(第 %d 次): %s",
@@ -286,6 +583,7 @@ def generate_questions_for_task(
                 difficulty=q["difficulty"],
                 status=QuestionStatus.DRAFT,
                 dedup_hash=dedup_hash,
+                learning_topic=topic,
             )
             db.add(question)
             created.append(question)
