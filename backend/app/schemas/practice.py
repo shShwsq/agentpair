@@ -42,6 +42,35 @@ class GenerateJobStatusResponse(BaseModel):
     skipped_findings: int = 0
 
 
+class GenerateJobSummary(BaseModel):
+    """出题 job 摘要(GET /practice/generate/jobs)
+
+    练习页侧栏发现运行中 job 用;含 SSE snapshot 同构字段,
+    已完成 job 的 recent_text 保留最后一批输出尾部文本。
+    """
+
+    job_id: str
+    status: str
+    done: int = 0
+    total: int = 0
+    error: str = ""
+    # 出题来源:manual(任务详情页手动) / auto(任务完成自动生成)
+    source: str = "manual"
+    task_id: str | None = None
+    task_title: str = ""
+    current_finding: str = ""
+    recent_text: str = ""
+    skipped_findings: int = 0
+    created_count: int = 0
+    started_at: str | None = None
+
+
+class GenerateJobsResponse(BaseModel):
+    """当前用户的出题 job 列表(运行中优先,限最近 10 条)"""
+
+    jobs: list[GenerateJobSummary] = []
+
+
 class DraftQuestionResponse(BaseModel):
     """生成的候选题(draft 状态,待用户预览确认)
 

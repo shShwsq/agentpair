@@ -92,10 +92,13 @@ def _clean_tables(test_engine):
 
 # 确定性 fake 生成器:每条 Result 出 1 题(难度 1.5 保证冷启动可选题)
 def _fake_generate(db, task, user_id, max_findings=10, client=None,
-                   progress_callback=None):
+                   progress_callback=None, event_callback=None):
     findings = db.query(Result).filter(Result.task_id == task.id).all()[:max_findings]
     created = []
     for i, r in enumerate(findings):
+        if event_callback:
+            event_callback("finding", {"index": i + 1, "total": len(findings), "title": r.title})
+            event_callback("token", {"delta": f"fake-output-{i}"})
         kp = KnowledgePoint(
             user_id=user_id, key=f"CWE-{89 + i}", name=f"知识点{i}", category="cwe"
         )

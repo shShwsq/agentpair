@@ -43,6 +43,69 @@ export interface GenerateJobStatus {
   skipped_findings: number
 }
 
+/** 出题 job 摘要(GET /practice/generate/jobs,与 SSE snapshot 同构) */
+export interface GenerateJobSummary {
+  job_id: string
+  status: 'pending' | 'running' | 'done' | 'error'
+  done: number
+  total: number
+  error: string
+  /** 出题来源:manual(任务详情页手动) / auto(任务完成自动生成) */
+  source: 'manual' | 'auto'
+  task_id: string | null
+  task_title: string
+  current_finding: string
+  /** 当前 finding 已累计的 LLM 输出尾部文本(中途接入兜底) */
+  recent_text: string
+  skipped_findings: number
+  created_count: number
+  started_at: string | null
+}
+
+export interface GenerateJobsResponse {
+  jobs: GenerateJobSummary[]
+}
+
+// ---- 出题进度 SSE 事件(GET /practice/generate/{job_id}/stream) ----
+
+/** 初始快照(连接建立时推送,含 recent_text 供中途接入兜底) */
+export type GenerateSnapshotData = GenerateJobSummary
+
+/** 开始处理某条发现 */
+export interface GenerateFindingData {
+  index: number
+  total: number
+  title: string
+}
+
+/** LLM 输出增量(打字机效果) */
+export interface GenerateTokenData {
+  delta: string
+}
+
+/** 出题工具循环的工具调用记录 */
+export interface GenerateToolData {
+  name: string
+  summary: string
+}
+
+/** 进度计数更新(每处理完一条 finding) */
+export interface GenerateProgressData {
+  done: number
+  total: number
+}
+
+/** 终止事件:完成 */
+export interface GenerateDoneData {
+  created: number
+  skipped: number
+}
+
+/** 终止事件:失败 */
+export interface GenerateErrorData {
+  message: string
+}
+
 export interface ConfirmQuestionsRequest {
   task_id: string
   question_ids: string[]

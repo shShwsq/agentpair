@@ -7,17 +7,21 @@
 - 同一任务已有题目(任意状态)跳过
 - 无结构化 finding(metadata 为空/全空白值)跳过
 - metadata 含任意非空值(含非安全场景的通用键)即可出题
-- 命中守卫后调 generator,返回生成数
+- 命中守卫后调 generator(带进度/事件回调),返回生成数
+- 生成过程创建 source=auto 的 job 追踪(练习页侧栏可见)
 """
+import uuid
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
+from app.services.practice import jobs as gen_jobs
 from app.services.practice.auto_generate import auto_generate_practice_for_task
 
 
-def _mock_db(pref_row=None, existing_question=None, result_metas=None):
+def _mock_db(pref_row=None, existing_question=None, result_metas=None, result_count=2):
     """按 auto_generate 内的 query 顺序注入:
     1) PracticeSettings 2) Question.id 3) Result.metadata_
+    4) count(Result.id)(job 追踪的 set_total 用)
     """
     q_pref = MagicMock()
     q_pref.filter.return_value.first.return_value = pref_row
@@ -27,8 +31,10 @@ def _mock_db(pref_row=None, existing_question=None, result_metas=None):
     q_result.filter.return_value.all.return_value = [
         (m,) for m in (result_metas or [])
     ]
+    q_count = MagicMock()
+    q_count.filter.return_value.scalar.return_value = result_count
     db = MagicMock()
-    db.query.side_effect = [q_pref, q_question, q_result]
+    db.query.side_effect = [q_pref, q_question, q_result, q_count]
     return db
 
 
@@ -36,6 +42,7 @@ def _task(user_id=None):
     t = MagicMock()
     t.id = uuid4()
     t.user_id = user_id or uuid4()
+    t.title = "测试任务"
     return t
 
 
@@ -92,7 +99,42 @@ def test_generate_with_cwe_meta():
         return_value=([MagicMock()] * 3, 1),
     ) as gen:
         assert auto_generate_practice_for_task(task, db) == 3
-    gen.assert_called_once_with(db, task, task.user_id)
+    gen.assert_called_once()
+    # 传入位置参数不变,额外携带进度/事件回调(job 追踪用)
+    args, kwargs = gen.call_args
+    assert args == (db, task, task.user_id)
+    assert callable(kwargs["progress_callback"])
+    assert callable(kwargs["event_callback"])
+
+
+def test_generate_creates_auto_job():
+    """自动出题创建 source=auto 的 job,完成后状态 done 且计数正确"""
+    user_id = uuid.uuid4()
+    db = _mock_db(pref_row=None, result_metas=[{"cwe": "CWE-89"}], result_count=5)
+    task = _task(user_id=user_id)
+    with patch(
+        "app.services.practice.auto_generate.generate_questions_for_task",
+        return_value=([MagicMock()] * 3, 1),
+    ):
+        assert auto_generate_practice_for_task(task, db) == 3
+    jobs = gen_jobs.list_jobs(user_id)
+    try:
+        assert len(jobs) == 1
+        job = jobs[0]
+        assert job["source"] == "auto"
+        assert job["status"] == "done"
+        assert job["total"] == 5  # 发现数未超上限,不裁剪
+        assert job["created_count"] == 3
+        assert job["skipped_findings"] == 1
+        assert job["task_title"] == "测试任务"
+        # 终止事件已追加(含 done 事件,SSE 客户端据此收尾)
+        raw = gen_jobs.get_job(job["job_id"], user_id)
+        assert raw["events"][-1]["type"] == "done"
+        assert raw["events"][-1]["data"] == {"created": 3, "skipped": 1}
+    finally:
+        # 清理全局 job 表,避免污染其它用例
+        with gen_jobs._LOCK:
+            gen_jobs._JOBS.pop(job["job_id"], None)
 
 
 def test_generate_with_severity_meta():

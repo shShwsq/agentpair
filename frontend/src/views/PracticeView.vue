@@ -11,9 +11,10 @@
  * 组卷由后端 selector 完成(到期复习 > 薄弱点 > 难度匹配 > 新题),答案不下发。
  * 题目来源:审计任务详情页「生成练习题」产出并确认入库。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import AppHeader from '@/components/AppHeader.vue'
+import PracticeGenerateSidebar from '@/components/PracticeGenerateSidebar.vue'
 import PracticeSettingsDialog from '@/components/PracticeSettingsDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
@@ -24,6 +25,7 @@ import {
   getSessionDetail,
   getPracticeStats,
   getPracticeTrend,
+  listGenerateJobs,
   listPracticeSessions,
   listQuestions,
   startSession,
@@ -31,6 +33,7 @@ import {
 } from '@/api/practice'
 import { extractErrorMessage } from '@/utils/error'
 import type {
+  GenerateJobSummary,
   PracticeStats,
   QuestionListItem,
   SessionDetail,
@@ -48,6 +51,42 @@ const workspaceCollapsed = ref(true)
 
 function toggleWorkspace(): void {
   workspaceCollapsed.value = !workspaceCollapsed.value
+}
+
+// ============================================================
+// 出题进度侧栏(右侧):轮询 job 列表发现运行中出题(手动/自动),
+// 实时进度与 LLM 流式输出由 PracticeGenerateSidebar 内部订阅 SSE 展示
+// ============================================================
+const genSidebarOpen = ref(false)
+const generateJobs = ref<GenerateJobSummary[]>([])
+let genPollTimer: ReturnType<typeof setInterval> | null = null
+/** 已见过的 job id(新运行中 job 首次出现时自动展开侧栏) */
+const seenJobIds = new Set<string>()
+
+const hasRunningGenJob = computed(() =>
+  generateJobs.value.some((j) => j.status === 'pending' || j.status === 'running'),
+)
+
+async function pollGenerateJobs(): Promise<void> {
+  try {
+    const res = await listGenerateJobs()
+    generateJobs.value = res.jobs
+    // 新运行中 job 首次出现 → 自动展开侧栏一次(后续由用户控制)
+    for (const job of res.jobs) {
+      if (!seenJobIds.has(job.job_id)) {
+        seenJobIds.add(job.job_id)
+        if (job.status === 'pending' || job.status === 'running') {
+          genSidebarOpen.value = true
+        }
+      }
+    }
+  } catch {
+    // 静默失败(如 PRACTICE_ENABLED=false 时路由未注册),保持空列表
+  }
+}
+
+function toggleGenSidebar(): void {
+  genSidebarOpen.value = !genSidebarOpen.value
 }
 
 // ============================================================
@@ -510,6 +549,16 @@ onMounted(() => {
   loadMistakes()
   loadTrend()
   loadPracticeSettings()
+  // 出题进度:进页先拉一次,之后每 5 秒轮询发现运行中 job
+  pollGenerateJobs()
+  genPollTimer = setInterval(pollGenerateJobs, 5000)
+})
+
+onBeforeUnmount(() => {
+  if (genPollTimer) {
+    clearInterval(genPollTimer)
+    genPollTimer = null
+  }
 })
 </script>
 
@@ -523,6 +572,20 @@ onMounted(() => {
           collapse-title="折叠历史任务"
           @toggle="toggleWorkspace"
         />
+      </template>
+      <template #trailing>
+        <button
+          :class="['gen-toggle-btn', { 'gen-toggle-active': genSidebarOpen }]"
+          :title="genSidebarOpen ? '收起出题进度' : '查看出题进度'"
+          @click="toggleGenSidebar"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 20h9" />
+            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+          </svg>
+          出题进度
+          <span v-if="hasRunningGenJob" class="gen-pulse-dot" aria-hidden="true" />
+        </button>
       </template>
     </AppHeader>
 
@@ -931,6 +994,12 @@ onMounted(() => {
         </template>
       </template>
       </main>
+
+      <PracticeGenerateSidebar
+        v-if="genSidebarOpen"
+        :jobs="generateJobs"
+        @close="genSidebarOpen = false"
+      />
     </div>
 
     <!-- ============ 练习设置弹窗 ============ -->
@@ -1028,6 +1097,51 @@ onMounted(() => {
   color: var(--color-primary);
   border-color: var(--color-primary);
   background: var(--color-primary-light);
+}
+
+/* 顶栏右侧「出题进度」切换按钮(有运行中 job 时带呼吸小红点) */
+.gen-toggle-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.gen-toggle-btn:hover {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+.gen-toggle-active {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+.gen-pulse-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  animation: gen-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes gen-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.7); }
 }
 
 .page-head p {

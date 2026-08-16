@@ -212,15 +212,36 @@ def _execute_practice_tool(task_id: str, repo_path: str, name: str, args: dict) 
         return f"工具执行失败: {e}"
 
 
+def _tool_event_summary(name: str, args: dict) -> str:
+    """工具事件的简短描述(侧栏展示用,如 read_file: src/x.py)"""
+    if name == "read_file":
+        return f"read_file: {args.get('file_path') or '?'}"
+    if name == "search_code":
+        return f"search_code: {args.get('pattern') or '?'}"
+    if name == "find_files":
+        return f"find_files: {args.get('pattern') or '?'}"
+    return name
+
+
 def _stream_one_round(
     client: LLMClient, messages: list[dict], tools: list[dict] | None,
+    on_event: Callable[[str, dict], None] | None = None,
 ) -> tuple[str, list[dict]]:
-    """一轮 chat_stream:累积正式回复与工具调用增量(参数跨 chunk 拼接)"""
+    """一轮 chat_stream:累积正式回复与工具调用增量(参数跨 chunk 拼接)
+
+    on_event(可选):content 增量实时回调 token 事件(出题进度侧栏流式展示用);
+    不含 reasoning_delta(思考链噪音大)。
+    """
     content_parts: list[str] = []
     tool_calls_acc: dict[int, dict] = {}
     for chunk in client.chat_stream(messages, max_tokens=4096, tools=tools):
         if chunk.content_delta:
             content_parts.append(chunk.content_delta)
+            if on_event:
+                try:
+                    on_event("token", {"delta": chunk.content_delta})
+                except Exception:
+                    pass  # 事件回调失败不影响出题主流程
         for d in chunk.tool_call_deltas or []:
             slot = tool_calls_acc.setdefault(
                 d.index, {"id": "", "name": "", "arguments_str": ""},
@@ -238,6 +259,7 @@ def _stream_one_round(
 def _call_llm(
     client: LLMClient, system_prompt: str, finding_text: str,
     task_id: str, repo_path: str,
+    on_event: Callable[[str, dict], None] | None = None,
 ) -> str:
     """出题 LLM 调用:工作区可用 → 有界工具循环;否则单次直出"""
     tools = _PRACTICE_TOOL_DEFINITIONS if repo_path else None
@@ -246,7 +268,7 @@ def _call_llm(
         {"role": "user", "content": finding_text},
     ]
     for _ in range(MAX_TOOL_ROUNDS):
-        content, tool_calls = _stream_one_round(client, messages, tools)
+        content, tool_calls = _stream_one_round(client, messages, tools, on_event)
         if not tool_calls:
             return content
         assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
@@ -264,6 +286,14 @@ def _call_llm(
                 args = json.loads(tc["arguments_str"]) if tc["arguments_str"] else {}
             except json.JSONDecodeError:
                 args = {}
+            if on_event:
+                try:
+                    on_event("tool", {
+                        "name": tc["name"],
+                        "summary": _tool_event_summary(tc["name"], args),
+                    })
+                except Exception:
+                    pass
             result_str = _execute_practice_tool(task_id, repo_path, tc["name"], args)
             messages.append({
                 "role": "tool",
@@ -271,7 +301,7 @@ def _call_llm(
                 "content": result_str,
             })
     # 超工具轮数:去掉工具强制收口出题
-    content, _ = _stream_one_round(client, messages, None)
+    content, _ = _stream_one_round(client, messages, None, on_event)
     return content
 
 
@@ -495,11 +525,14 @@ def generate_questions_for_task(
     max_findings: int = 10,
     client: LLMClient | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
+    event_callback: Callable[[str, dict], None] | None = None,
 ) -> tuple[list[Question], int]:
     """为任务的 Results 生成 draft 题目
 
     返回 (新建题目列表, 被跳过的 finding 数)。
     progress_callback(done, total):每处理完一条 finding 回调(异步生成进度展示用)。
+    event_callback(type, data):流式事件回调(finding/token/tool,
+    出题进度侧栏 SSE 展示用),异常不影响出题主流程。
     """
     if client is None:
         client = resolve_llm_client(db, task)
@@ -534,6 +567,15 @@ def generate_questions_for_task(
     skipped = 0
     for idx, finding in enumerate(findings):
         meta = finding.metadata_ or {}
+        if event_callback:
+            try:
+                event_callback("finding", {
+                    "index": idx + 1,
+                    "total": total_findings,
+                    "title": finding.title,
+                })
+            except Exception:
+                pass
         prompt = _FINDING_TEMPLATE.format(
             title=finding.title,
             content=(finding.content or "")[:4000],
@@ -543,7 +585,10 @@ def generate_questions_for_task(
         questions: list[dict] = []
         for attempt in range(PARSE_RETRY + 1):
             try:
-                content = _call_llm(client, system_prompt, prompt, task_id_str, repo_path)
+                content = _call_llm(
+                    client, system_prompt, prompt, task_id_str, repo_path,
+                    on_event=event_callback,
+                )
             except Exception as e:
                 logger.warning(
                     "[practice] finding=%s LLM 调用失败(第 %d 次): %s",

@@ -4,17 +4,20 @@
 题目来源为审计任务的真实发现(Result),经 LLM 改编为客观题;
 选题策略见 services/practice/selector.py(SM-2 到期复习 + 薄弱点 + 难度匹配)。
 """
+import json
 import logging
 import threading
 from datetime import datetime, timedelta, timezone
+from collections.abc import Generator
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import Integer, cast, func as sa_func
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal, get_db
-from app.deps import get_current_user
+from app.deps import get_current_user, get_current_user_sse
 from app.models.practice import (
     Attempt,
     KnowledgePoint,
@@ -32,7 +35,9 @@ from app.schemas.practice import (
     ConfirmQuestionsResponse,
     DraftQuestionResponse,
     GenerateJobResponse,
+    GenerateJobsResponse,
     GenerateJobStatusResponse,
+    GenerateJobSummary,
     GenerateRequest,
     KnowledgeStateResponse,
     PracticeSummaryResponse,
@@ -117,7 +122,12 @@ def generate_questions(
     if not result_count:
         raise HTTPException(status_code=400, detail="该任务还没有审计发现,无法生成练习题")
 
-    job_id = gen_jobs.create_job(current_user.id)
+    job_id = gen_jobs.create_job(
+        current_user.id,
+        source="manual",
+        task_id=str(task.id),
+        task_title=task.title or task.user_input[:60],
+    )
     gen_jobs.set_total(job_id, total=min(result_count, req.max_findings))
     thread = threading.Thread(
         target=_run_generate_job,
@@ -130,7 +140,7 @@ def generate_questions(
 
 
 def _run_generate_job(job_id: str, task_id: UUID, user_id: UUID, max_findings: int) -> None:
-    """后台线程:独立 Session 执行生成,进度/结果写回 job"""
+    """后台线程:独立 Session 执行生成,进度/结果写回 job,流式事件写事件日志"""
     db = SessionLocal()
     try:
         task = db.query(Task).filter(
@@ -143,6 +153,9 @@ def _run_generate_job(job_id: str, task_id: UUID, user_id: UUID, max_findings: i
             db, task, user_id, max_findings=max_findings,
             progress_callback=lambda done, total: gen_jobs.update_job(
                 job_id, done=done, total=total
+            ),
+            event_callback=lambda etype, data: gen_jobs.append_event(
+                job_id, etype, data
             ),
         )
         kp_by_id = {
@@ -175,6 +188,88 @@ def _run_generate_job(job_id: str, task_id: UUID, user_id: UUID, max_findings: i
         gen_jobs.update_job(job_id, status="error", error=str(e)[:500])
     finally:
         db.close()
+
+
+@router.get("/generate/jobs", response_model=GenerateJobsResponse)
+def list_generate_jobs(
+    current_user: User = Depends(get_current_user),
+) -> GenerateJobsResponse:
+    """当前用户的出题 job 列表(运行中优先,限最近 10 条)
+
+    练习页侧栏轮询发现正在运行的出题 job(手动与自动来源都含)。
+    注意:必须注册在 /generate/{job_id} 之前,否则 "jobs" 会被当成 job_id。
+    """
+    return GenerateJobsResponse(
+        jobs=[GenerateJobSummary(**s) for s in gen_jobs.list_jobs(current_user.id)],
+    )
+
+
+def _sse_pack(etype: str, data: dict) -> str:
+    """打包 SSE 事件(data 直接是事件载荷,前端按 event 类型分发)"""
+    return f"event: {etype}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+
+
+def _client_disconnected(request: Request) -> bool:
+    """同步生成器内检查客户端是否断开(同 tasks.await_request_disconnect)"""
+    try:
+        import anyio
+        return anyio.from_thread.run(request.is_disconnected)
+    except Exception:
+        return False
+
+
+@router.get("/generate/{job_id}/stream")
+def stream_generate_job(
+    job_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user_sse),
+) -> StreamingResponse:
+    """SSE:实时推送出题进度与大模型流式输出
+
+    事件类型:
+    - snapshot: 连接建立的初始快照(含 recent_text,中途接入兜底)
+    - finding: 开始处理某条发现 / token: LLM 输出增量 /
+      tool: 工具调用记录 / progress: 进度计数
+    - done / error: 终止事件
+
+    鉴权:EventSource 不能自定义 header,用 ?token=XXX 查询参数。
+    """
+    if gen_jobs.get_job(job_id, current_user.id) is None:
+        raise HTTPException(status_code=404, detail="生成任务不存在或已过期")
+
+    user_id = current_user.id
+
+    def event_generator() -> Generator[str, None, None]:
+        snap = gen_jobs.snapshot(job_id, user_id)
+        if snap is None:
+            return  # 连接建立瞬间 job 已被清理
+        yield _sse_pack("snapshot", snap)
+        after_seq = 0
+        while True:
+            if _client_disconnected(request):
+                return
+            res = gen_jobs.read_events(job_id, user_id, after_seq, timeout=15.0)
+            if res is None:
+                return  # job 过期/被清理
+            for ev in res["events"]:
+                yield _sse_pack(ev["type"], ev["data"])
+                after_seq = ev["seq"]
+                if ev["type"] in ("done", "error"):
+                    return
+            if not res["events"]:
+                if res["job"]["status"] in ("done", "error"):
+                    return  # 已终态且事件已全部送达
+                yield ": keep-alive\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Nginx:禁用缓冲,确保实时推送
+        },
+    )
 
 
 @router.get("/generate/{job_id}", response_model=GenerateJobStatusResponse)

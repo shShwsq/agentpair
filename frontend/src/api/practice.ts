@@ -12,6 +12,7 @@ import type {
   ConfirmQuestionsResponse,
   DraftQuestion,
   GenerateJobResponse,
+  GenerateJobsResponse,
   GenerateJobStatus,
   GenerateRequest,
   PracticeStats,
@@ -38,6 +39,16 @@ export function generateQuestions(req: GenerateRequest): Promise<GenerateJobResp
 /** 轮询出题进度与结果 */
 export function getGenerateJob(jobId: string): Promise<GenerateJobStatus> {
   return client.get(`/practice/generate/${jobId}`).then((r) => r.data)
+}
+
+/**
+ * 当前用户的出题 job 列表(运行中优先,限最近 10 条)
+ *
+ * 练习页侧栏轮询发现正在运行的出题 job(手动与自动来源都含);
+ * 实时进度与流式输出另走 SSE,见 api/practiceStream.ts。
+ */
+export function listGenerateJobs(): Promise<GenerateJobsResponse> {
+  return client.get('/practice/generate/jobs').then((r) => r.data)
 }
 
 /** 待确认候选题完整内容(可按来源任务过滤) */

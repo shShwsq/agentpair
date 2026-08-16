@@ -5,13 +5,16 @@
 - 守卫条件:登录用户、开关开启、存在结构化 finding(metadata 非空);
   单 agent 模式的纯摘要 Result 无元信息,自动跳过避免低质量题
 - 同一任务已生成过(任何状态的题目)则跳过,避免追问/重试后重复出题
+- 生成过程创建 job 追踪(source=auto),练习页出题进度侧栏可实时查看
 """
 import logging
 
+from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
 from app.models.practice import PracticeSettings, Question
 from app.models.task import Result, Task
+from app.services.practice import jobs as gen_jobs
 from app.services.practice.generator import generate_questions_for_task
 
 logger = logging.getLogger(__name__)
@@ -63,7 +66,39 @@ def auto_generate_practice_for_task(task: Task, db: Session) -> int:
         logger.info("[task=%s] 无结构化审计发现(元信息为空),跳过自动生成", task.id)
         return 0
 
-    created, skipped = generate_questions_for_task(db, task, task.user_id)
+    # 5) 创建 job 追踪(source=auto):练习页侧栏轮询 jobs 列表可发现,
+    #    并可通过 SSE 实时看到进度与大模型流式输出
+    result_count = (
+        db.query(sa_func.count(Result.id))
+        .filter(Result.task_id == task.id)
+        .scalar()
+        or 0
+    )
+    job_id = gen_jobs.create_job(
+        task.user_id,
+        source="auto",
+        task_id=str(task.id),
+        task_title=task.title or (task.user_input or "")[:60],
+    )
+    # generator 内部最多处理 10 条 finding,与默认 max_findings 对齐
+    gen_jobs.set_total(job_id, total=min(result_count, 10))
+    try:
+        created, skipped = generate_questions_for_task(
+            db, task, task.user_id,
+            progress_callback=lambda done, total: gen_jobs.update_job(
+                job_id, done=done, total=total,
+            ),
+            event_callback=lambda etype, data: gen_jobs.append_event(
+                job_id, etype, data,
+            ),
+        )
+    except Exception as e:
+        gen_jobs.update_job(job_id, status="error", error=str(e)[:500])
+        raise  # 保持原有语义:由调用方 try/except 兜底,不影响任务完成
+    gen_jobs.update_job(
+        job_id, status="done",
+        created_count=len(created), skipped_findings=skipped,
+    )
     logger.info(
         "[task=%s] 自动生成练习题 draft: %d 题(%d 条发现未能出题)",
         task.id, len(created), skipped,
