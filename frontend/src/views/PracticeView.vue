@@ -14,6 +14,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import AppHeader from '@/components/AppHeader.vue'
+import PracticeCodeSidebar from '@/components/PracticeCodeSidebar.vue'
 import PracticeGenerateSidebar from '@/components/PracticeGenerateSidebar.vue'
 import PracticeSettingsDialog from '@/components/PracticeSettingsDialog.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
@@ -89,6 +90,54 @@ async function pollGenerateJobs(): Promise<void> {
 
 function toggleGenSidebar(): void {
   genSidebarOpen.value = !genSidebarOpen.value
+}
+
+// ============================================================
+// 源码查阅侧栏(右侧,仅答题会话):按当前题的 source_task_id 浏览工作区
+// ============================================================
+const codeSidebarOpen = ref(false)
+/** 用户手动切换过的来源任务(切题时重置,默认跟随当前题) */
+const codeTaskOverride = ref<string | null>(null)
+
+/** 本局涉及的来源任务清单(去重,供侧栏下拉切换) */
+const sessionTaskOptions = computed(() => {
+  const seen = new Map<string, string>()
+  for (const q of sessionQuestions.value) {
+    if (q.source_task_id && !seen.has(q.source_task_id)) {
+      seen.set(q.source_task_id, `任务 ${q.source_task_id.slice(0, 8)}`)
+    }
+  }
+  return [...seen.entries()].map(([id, label]) => ({ id, label }))
+})
+
+/** 侧栏当前浏览的任务(手动切换优先,否则跟随当前题) */
+const codeTaskId = computed<string | null>(
+  () => codeTaskOverride.value ?? currentQuestion.value?.source_task_id ?? null,
+)
+
+/** 当前题的源码定位行号(取 source_lines 起始行) */
+const locateLine = computed<number | null>(() => {
+  const raw = currentQuestion.value?.source_lines
+  if (!raw) return null
+  const m = raw.match(/\d+/)
+  return m ? Number(m[0]) : null
+})
+
+function toggleCodeSidebar(): void {
+  codeSidebarOpen.value = !codeSidebarOpen.value
+  // 同侧互斥:打开代码栏时收起出题进度栏
+  if (codeSidebarOpen.value) genSidebarOpen.value = false
+}
+
+/** 点题目上的源码标签:打开侧栏并跟随当前题定位 */
+function openCodeAtSource(): void {
+  codeTaskOverride.value = null
+  codeSidebarOpen.value = true
+  genSidebarOpen.value = false
+}
+
+function handleSwitchCodeTask(taskId: string): void {
+  codeTaskOverride.value = taskId
 }
 
 // ============================================================
@@ -280,6 +329,7 @@ async function handleStartPractice(
     chosenIdx.value = null
     feedback.value = null
     submitting.value = false
+    codeTaskOverride.value = null
     mode.value = 'session'
   } catch (err) {
     startError.value = extractErrorMessage(err)
@@ -327,6 +377,8 @@ function handleNext(): void {
   currentIndex.value += 1
   chosenIdx.value = null
   feedback.value = null
+  // 切题后侧栏重新跟随当前题的来源任务
+  codeTaskOverride.value = null
 }
 
 /** 提前结束本局(未完成全部题目) */
@@ -345,6 +397,8 @@ function backToHome(): void {
   sessionQuestions.value = []
   sessionResults.value = []
   feedback.value = null
+  codeSidebarOpen.value = false
+  codeTaskOverride.value = null
   loadStats()
   loadQuestionBank()
   loadMistakes()
@@ -618,6 +672,20 @@ onBeforeUnmount(() => {
       <template v-if="mode === 'session' && currentQuestion">
         <div class="session-bar">
           <button class="btn-ghost" @click="handleQuitSession">退出练习</button>
+          <button
+            :class="['btn-ghost', 'code-toggle-btn', { 'code-toggle-active': codeSidebarOpen }]"
+            :disabled="sessionTaskOptions.length === 0"
+            :title="sessionTaskOptions.length === 0
+              ? '本局题目无来源任务,无法浏览代码'
+              : (codeSidebarOpen ? '收起源码查阅' : '打开源码查阅,边看代码边答题')"
+            @click="toggleCodeSidebar"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="16 18 22 12 16 6" />
+              <polyline points="8 6 2 12 8 18" />
+            </svg>
+            源码查阅
+          </button>
           <div class="session-progress">
             <span class="session-progress-text">
               第 {{ currentIndex + 1 }} / {{ sessionQuestions.length }} 题
@@ -638,6 +706,15 @@ onBeforeUnmount(() => {
             </span>
             <span class="tag">{{ currentQuestion.qtype === 'true_false' ? '判断题' : '单选题' }}</span>
             <span class="tag">难度 {{ formatDifficulty(currentQuestion.difficulty) }}</span>
+            <button
+              v-if="currentQuestion.source_file"
+              type="button"
+              class="tag tag-source"
+              :title="`打开右侧源码查阅并定位到 ${currentQuestion.source_file}`"
+              @click="openCodeAtSource"
+            >
+              {{ currentQuestion.source_file }}<template v-if="currentQuestion.source_lines">:{{ currentQuestion.source_lines }}</template>
+            </button>
           </div>
 
           <h2 class="question-stem">{{ currentQuestion.stem }}</h2>
@@ -1030,8 +1107,18 @@ onBeforeUnmount(() => {
       </template>
       </main>
 
+      <PracticeCodeSidebar
+        v-if="mode === 'session' && codeSidebarOpen"
+        :task-id="codeTaskId"
+        :task-options="sessionTaskOptions"
+        :locate-file="currentQuestion?.source_file ?? null"
+        :locate-line="locateLine"
+        @close="codeSidebarOpen = false"
+        @switch-task="handleSwitchCodeTask"
+      />
+
       <PracticeGenerateSidebar
-        v-if="genSidebarOpen"
+        v-if="genSidebarOpen && !(mode === 'session' && codeSidebarOpen)"
         :jobs="generateJobs"
         @close="genSidebarOpen = false"
       />
@@ -1649,6 +1736,40 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: var(--space-3);
+}
+
+/* 会话顶栏「源码查阅」切换按钮(打开时高亮;无来源任务时置灰) */
+.code-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--fs-xs);
+}
+
+.code-toggle-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.code-toggle-active {
+  color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+/* 题目上的源码定位标签(可点击,打开代码栏并定位) */
+.tag-source {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  color: var(--color-primary);
+  background: var(--color-primary-light);
+  border: none;
+  cursor: pointer;
+}
+
+.tag-source:hover {
+  text-decoration: underline;
 }
 
 .session-progress-text {

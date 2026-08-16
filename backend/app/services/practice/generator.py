@@ -4,12 +4,14 @@
 1. 取任务 Results(上限 max_findings 条,防 LLM 成本失控)
 2. 逐条 finding 调 LLM 生成 1~3 题:
    - system prompt 按用户学习主题切换(security/architecture/coding)
-   - 工作区可用时挂只读迷你工具循环(read_file / search_code / find_files),
-     LLM 自主补全源码上下文提高出题质量;沙箱已清理且用户开启
-     「出题前恢复工作区」时先重新 clone 恢复
-3. json_repair 容错解析 + 字段校验,失败重试 1 次,仍失败丢弃该 finding
+   - 提示词强制题目必须阅读真实代码才能作答(禁止常识题);
+     工作区可用时挂只读迷你工具循环(read_file / search_code / find_files),
+     要求出题前先读源码并记录 source_file/source_lines;
+     沙箱已清理且用户开启「出题前恢复工作区」时先重新 clone 恢复
+3. json_repair 容错解析 + 字段校验,失败重试 1 次,仍失败丢弃该 finding;
+   工作区可用时无 code_snippet 的题判为不合格,带质量反馈重试 1 次后丢弃
 4. 知识点 get_or_create(优先 CWE 编号)+ 同用户 sha256 去重
-5. 落库为 draft(记录出题时主题),前端预览确认后转 active
+5. 落库为 draft(记录出题时主题与源码定位),前端预览确认后转 active
 
 出题模型解析:task.llm_config_id > 用户级默认出题模型
 (practice_settings.default_llm_config_id) > env 默认,逐级回退。
@@ -47,7 +49,7 @@ MAX_QUESTIONS_PER_FINDING = 3
 # 解析失败重试次数
 PARSE_RETRY = 1
 # 出题工具循环最大轮次(每轮可含多次并行工具调用;超限后强制无工具出题)
-MAX_TOOL_ROUNDS = 4
+MAX_TOOL_ROUNDS = 6
 # 单次工具结果回传 LLM 的截断阈值(防上下文爆炸)
 _MAX_TOOL_RESULT_CHARS = 3000
 
@@ -87,29 +89,36 @@ _TOPIC_PROMPT_HEADS = {
 }
 
 # 工作区可用时注入的工具说明段(工具实际可用与否与 sandbox 存活状态一致)
-_TOOL_SECTION = """## 源码查阅工具(仓库已 clone,可调用)
-发现描述里代码不完整时,你可以先调工具查阅真实源码再出题:
+_TOOL_SECTION = """## 源码查阅工具(仓库已 clone,必须使用)
+出题前必须先调工具查阅真实源码,禁止跳过直接出题:
 - read_file(file_path, max_lines?, offset?):读仓库文件(带行号,分页)
 - search_code(pattern, file_glob?, output_mode?):正则搜索代码;
   output_mode="files_with_matches" 可快速定位含关键词的文件
 - find_files(pattern):按 glob 递归查文件路径(如 **/*.py)
-工具轮数有限,查不到就基于现有信息出题。凡提供或读到源码的,
-题干与 code_snippet 必须引用真实源码,不得虚构。"""
+要求:
+1. 每道题出题前至少 read_file 一次相关源文件,确认代码真实存在
+2. 题干与 code_snippet 必须引用读到的真实源码,不得虚构
+3. 每题在输出中给出 source_file(仓库内相对路径)与
+   source_lines(行区间如 "120-150" 或单行号 "42",取自 read_file 结果)
+确实在仓库中找不到相关代码时,才退回基于发现描述出题(此时不给 source_file)。"""
 
 # 三主题共享的输出规则段
 _COMMON_RULES = """## 通用要求
 1. 出 1~3 道题,题型限定:
    - single_choice(单选):如「该代码片段存在哪种问题」「正确的改进方式是」
    - true_false(判断):选项固定为 ["正确", "错误"],题干为一个可判定真伪的陈述
-2. 题干必须引用发现中的真实代码/场景,不要泛泛而谈;代码片段单独放 code_snippet
-3. 干扰项要有迷惑性但明确错误,正确答案唯一
-4. explanation 讲清原理与改进要点,100 字以内
-5. difficulty 评估难度(1-5 整数):1=概念识别,3=需理解代码逻辑,5=需深入细节
-6. knowledge_name:知识点中文展示名(如 "SQL 注入")
-7. 元信息中若标注 verified: false 或判定为误报的发现,不要出题,直接返回空数组 []
+2. 题目必须阅读真实代码才能作答:题干要落到具体代码细节(函数名、调用关系、
+   变量/字面量、分支逻辑等),禁止不看代码也能答对的通用概念题、常识题
+3. 题干必须引用发现中的真实代码/场景,不要泛泛而谈;代码片段单独放 code_snippet
+4. 干扰项要有迷惑性但明确错误,正确答案唯一
+5. explanation 讲清原理与改进要点,100 字以内
+6. difficulty 评估难度(1-5 整数):1=概念识别,3=需理解代码逻辑,5=需深入细节
+7. knowledge_name:知识点中文展示名(如 "SQL 注入")
+8. 元信息中若标注 verified: false 或判定为误报的发现,不要出题,直接返回空数组 []
 
 只输出 JSON 数组,不要任何其他文字。每个元素结构:
-{"qtype": "single_choice|true_false", "stem": "...", "code_snippet": "..."或null,
+{"qtype": "single_choice|true_false", "stem": "...", "code_snippet": "...",
+ "source_file": "仓库内相对路径"或null, "source_lines": "120-150"或null,
  "options": ["...", "..."], "answer_idx": 0, "explanation": "...",
  "difficulty": 3, "knowledge_key": "...", "knowledge_name": "..."}"""
 
@@ -490,6 +499,10 @@ def _normalize_raw_question(raw: Any, finding_meta: dict) -> dict | None:
     code_snippet = raw.get("code_snippet")
     code_snippet = str(code_snippet).strip() if code_snippet else None
 
+    # 源码定位(工作区可用时 LLM 应给出;老输出无此字段时为 None)
+    source_file = str(raw.get("source_file") or "").strip()[:512] or None
+    source_lines = str(raw.get("source_lines") or "").strip()[:32] or None
+
     return {
         "qtype": qtype,
         "stem": stem,
@@ -500,6 +513,8 @@ def _normalize_raw_question(raw: Any, finding_meta: dict) -> dict | None:
         "difficulty": difficulty,
         "knowledge_key": knowledge_key,
         "knowledge_name": str(raw.get("knowledge_name") or "").strip(),
+        "source_file": source_file,
+        "source_lines": source_lines,
     }
 
 
@@ -534,6 +549,13 @@ _FINDING_TEMPLATE = """以下是代码审计任务的一条真实发现:
 【元信息】{metadata}
 
 请基于这条发现出题(1~3 道)。"""
+
+# 工作区可用但生成的题目全部缺代码上下文时,追加到 user prompt 重试的质量反馈
+_NO_CODE_FEEDBACK = (
+    "\n\n【质量反馈】上一轮生成的题目缺少真实代码上下文,不看代码也能作答,不合格。"
+    "请先用源码查阅工具(read_file 等)读取相关源文件,再基于实际源码重新出题:"
+    "题干必须落到具体代码细节,每题必须带 code_snippet,并给出 source_file 与 source_lines。"
+)
 
 
 def generate_questions_for_task(
@@ -601,10 +623,11 @@ def generate_questions_for_task(
         )
 
         questions: list[dict] = []
+        user_prompt = prompt
         for attempt in range(PARSE_RETRY + 1):
             try:
                 content = _call_llm(
-                    client, system_prompt, prompt, task_id_str, repo_path,
+                    client, system_prompt, user_prompt, task_id_str, repo_path,
                     on_event=event_callback,
                 )
             except Exception as e:
@@ -614,6 +637,14 @@ def generate_questions_for_task(
                 )
                 content = ""
             questions = _parse_llm_questions(content, meta)
+            # 质量关卡:工作区可用时无 code_snippet 的题不合格(常识题拦截)
+            if repo_path and questions:
+                qualified = [q for q in questions if q["code_snippet"]]
+                if not qualified and attempt < PARSE_RETRY:
+                    # 全部缺代码上下文:带质量反馈重试一次
+                    user_prompt = prompt + _NO_CODE_FEEDBACK
+                    continue
+                questions = qualified
             if questions:
                 break
 
@@ -647,6 +678,8 @@ def generate_questions_for_task(
                 status=QuestionStatus.DRAFT,
                 dedup_hash=dedup_hash,
                 learning_topic=topic,
+                source_file=q["source_file"],
+                source_lines=q["source_lines"],
             )
             db.add(question)
             created.append(question)

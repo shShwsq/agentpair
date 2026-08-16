@@ -510,6 +510,9 @@ def start_session(
                 options=c.question.options,
                 difficulty=c.question.difficulty,
                 knowledge_name=kps[c.kp_id].name if c.kp_id in kps else None,
+                source_task_id=c.question.source_task_id,
+                source_file=c.question.source_file,
+                source_lines=c.question.source_lines,
             )
             for c in picked
         ],
@@ -546,6 +549,9 @@ def _start_session_from_pool(
                 difficulty=q.difficulty,
                 knowledge_name=kps[q.knowledge_point_id].name
                 if q.knowledge_point_id in kps else None,
+                source_task_id=q.source_task_id,
+                source_file=q.source_file,
+                source_lines=q.source_lines,
             )
             for q in picked
         ],

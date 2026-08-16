@@ -5,15 +5,19 @@
 - 字段校验:qtype 白名单、选项数、answer_idx 越界、全同选项
 - true_false 强制选项 ["正确","错误"]
 - CWE 元信息优先于 LLM 输出的 knowledge_key(含纯数字补前缀)
+- source_file/source_lines 源码定位字段解析(含超长截断)
 - 单条 finding 最多 3 题截断
 - dedup_hash 稳定性
 - 主题提示词切换(build_system_prompt)与工具说明段注入
+- 提示词强制读码要求(禁止常识题 / 必须给源码定位)
+- 质量关卡过滤(工作区可用时无 code_snippet 的题被丢弃 + 反馈重试)
 - 迷你工具循环(_call_llm / _execute_practice_tool)
 - 出题前工作区保障(_ensure_workspace 重新 clone 恢复)
 """
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import app.models.task_artifact  # noqa: F401  让 Task mapper 能解析 TaskArtifact 关联
 import app.services.practice.generator as gen
 from app.services.practice.generator import (
     _MAX_TOOL_RESULT_CHARS,
@@ -161,6 +165,133 @@ def test_fallback_to_llm_key_then_general():
 
 
 # ============================================================
+# source_file / source_lines 源码定位字段
+# ============================================================
+
+
+def test_source_fields_parsed():
+    q = _normalize_raw_question(
+        _raw(source_file="src/db.py", source_lines="120-150"), {},
+    )
+    assert q["source_file"] == "src/db.py"
+    assert q["source_lines"] == "120-150"
+
+
+def test_source_fields_missing_default_none():
+    q = _normalize_raw_question(_raw(), {})
+    assert q["source_file"] is None
+    assert q["source_lines"] is None
+
+
+def test_source_fields_truncated():
+    q = _normalize_raw_question(
+        _raw(source_file="x" * 600, source_lines="y" * 60), {},
+    )
+    assert len(q["source_file"]) == 512
+    assert len(q["source_lines"]) == 32
+
+
+# ============================================================
+# 质量关卡:工作区可用时无 code_snippet 的题被过滤,
+# 全部不合格时带质量反馈重试一次
+# ============================================================
+
+
+def _gen_db():
+    """构造 mock db:按查询目标返回不同链(单条 finding、无已有题目)"""
+    db = MagicMock()
+    finding = SimpleNamespace(
+        id="r1",
+        title="SQL 注入风险",
+        content="cursor.execute(sql) 直接拼接用户输入构造查询",
+        metadata_={"cwe": "CWE-89"},
+    )
+
+    def _query(model):
+        q = MagicMock()
+        if model is gen.PracticeSettings:
+            q.filter.return_value.first.return_value = None
+        elif model is gen.Result:
+            q.filter.return_value.order_by.return_value.all.return_value = [finding]
+        elif model is gen.KnowledgePoint:
+            q.filter.return_value.first.return_value = None
+        else:  # Question.dedup_hash 列查询:无已入库题目
+            q.filter.return_value.all.return_value = []
+        return q
+
+    db.query.side_effect = _query
+    return db
+
+
+def _gen_task():
+    return SimpleNamespace(
+        id="t1", params={"repo_url": "https://example.com/r.git"},
+    )
+
+
+def test_quality_gate_filters_snippetless_questions(monkeypatch):
+    """repo_path 非空:带 snippet 的题保留,无 snippet 的丢弃"""
+    import json
+
+    monkeypatch.setattr(
+        gen.sandbox_tools, "get_workspace_info",
+        lambda tid: {"repo_path": "/repo"},
+    )
+    with_snippet = _raw(stem="有代码的题")
+    no_snippet = _raw(stem="常识题", code_snippet=None)
+    client = _FakeClient([
+        [_chunk(content=json.dumps([with_snippet, no_snippet], ensure_ascii=False))],
+    ])
+    monkeypatch.setattr(gen, "_call_llm", lambda *a, **k: client.rounds[0][0].content_delta)
+    created, skipped = gen.generate_questions_for_task(
+        _gen_db(), _gen_task(), "u1", client=client,
+    )
+    assert len(created) == 1
+    assert created[0].stem == "有代码的题"
+
+
+def test_quality_gate_feedback_retry_then_drop(monkeypatch):
+    """全部无 snippet → 追加质量反馈重试一次;仍不合格则整条 finding 跳过"""
+    import json
+
+    monkeypatch.setattr(
+        gen.sandbox_tools, "get_workspace_info",
+        lambda tid: {"repo_path": "/repo"},
+    )
+    no_snippet = json.dumps([_raw(code_snippet=None)], ensure_ascii=False)
+    prompts_seen = []
+
+    def fake_call_llm(client, system_prompt, finding_text, task_id, repo_path, on_event=None):
+        prompts_seen.append(finding_text)
+        return no_snippet
+
+    monkeypatch.setattr(gen, "_call_llm", fake_call_llm)
+    created, skipped = gen.generate_questions_for_task(
+        _gen_db(), _gen_task(), "u1", client=MagicMock(),
+    )
+    assert not created
+    assert skipped == 1
+    # 第一次是原始 prompt,第二次追加了质量反馈
+    assert len(prompts_seen) == 2
+    assert "质量反馈" not in prompts_seen[0]
+    assert "质量反馈" in prompts_seen[1]
+
+
+def test_quality_gate_skipped_without_workspace(monkeypatch):
+    """工作区不可用(repo_path 空):无 snippet 的题也照常保留(纯 prompt 模式)"""
+    import json
+
+    no_snippet = json.dumps([_raw(code_snippet=None)], ensure_ascii=False)
+    monkeypatch.setattr(gen, "_call_llm", lambda *a, **k: no_snippet)
+    monkeypatch.setattr(gen.sandbox_tools, "get_workspace_info", lambda tid: None)
+    created, skipped = gen.generate_questions_for_task(
+        _gen_db(), _gen_task(), "u1", client=MagicMock(),
+    )
+    assert len(created) == 1
+    assert skipped == 0
+
+
+# ============================================================
 # 去重哈希
 # ============================================================
 
@@ -201,6 +332,22 @@ def test_build_system_prompt_common_rules_always_present():
         prompt = build_system_prompt(topic, True)
         assert "只输出 JSON 数组" in prompt
         assert "verified: false" in prompt  # 误报发现不出题提示
+
+
+def test_build_system_prompt_requires_code_reading_questions():
+    """通用规则强制题目必须阅读真实代码才能作答(禁常识题)"""
+    for topic in ("security", "architecture", "coding"):
+        prompt = build_system_prompt(topic, False)
+        assert "必须阅读真实代码才能作答" in prompt
+        assert "常识题" in prompt
+
+
+def test_build_system_prompt_workspace_requires_source_location():
+    """工作区可用时:强制先读源码 + 输出要求 source_file/source_lines"""
+    prompt = build_system_prompt("security", True)
+    assert "必须使用" in prompt  # 工具段从可选变强制
+    assert "source_file" in prompt
+    assert "source_lines" in prompt
 
 
 # ============================================================

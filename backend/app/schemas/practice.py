@@ -87,6 +87,9 @@ class DraftQuestionResponse(BaseModel):
     difficulty: float
     knowledge_key: str | None = None
     knowledge_name: str | None = None
+    # 题目引用的源码定位(预览时校对出处用;老题为 None)
+    source_file: str | None = None
+    source_lines: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -143,7 +146,11 @@ class StartSessionRequest(BaseModel):
 
 
 class SessionQuestionResponse(BaseModel):
-    """组卷下发的题面(不含 answer_idx / explanation,防作弊)"""
+    """组卷下发的题面(不含 answer_idx / explanation,防作弊)
+
+    source_task_id/source_file/source_lines 供做题页右侧代码栏
+    打开题目来源工作区并自动定位(不含答案,无作弊风险)。
+    """
 
     id: uuid.UUID
     qtype: str
@@ -152,6 +159,9 @@ class SessionQuestionResponse(BaseModel):
     options: list[str]
     difficulty: float
     knowledge_name: str | None = None
+    source_task_id: uuid.UUID | None = None
+    source_file: str | None = None
+    source_lines: str | None = None
 
     model_config = {"from_attributes": True}
 

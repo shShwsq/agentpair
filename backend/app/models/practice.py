@@ -113,6 +113,10 @@ class Question(Base):
     difficulty: Mapped[float] = mapped_column(Float, nullable=False, default=3.0)
     # 出题时使用的学习主题(security/architecture/coding;老数据为 NULL)
     learning_topic: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 题目引用的源码定位(仓库内相对路径 + 行区间,如 "120-150";老题为 NULL),
+    # 做题页右侧代码栏据此自动打开并滚动定位
+    source_file: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    source_lines: Mapped[str | None] = mapped_column(String(32), nullable=True)
     status: Mapped[QuestionStatus] = mapped_column(
         Enum(QuestionStatus), default=QuestionStatus.DRAFT, nullable=False, index=True
     )
@@ -364,7 +368,8 @@ def migrate_practice_learning_columns() -> None:
     背景:项目用 Base.metadata.create_all(无 Alembic),已存在的表不会自动加新列。
     - practice_settings 加 learning_topic / restore_workspace_for_practice /
       default_llm_config_id
-    - practice_questions 加 learning_topic(可空,老题不补)
+    - practice_questions 加 learning_topic(可空,老题不补)与
+      source_file / source_lines(源码定位,可空)
     全新库(create_all 已建好新列)或已迁过 → 直接返回。
     """
     import logging
@@ -405,4 +410,16 @@ def migrate_practice_learning_columns() -> None:
                     "learning_topic VARCHAR(32)"
                 ))
                 log.info("practice_questions.learning_topic 列迁移完成")
+            if "source_file" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE practice_questions ADD COLUMN "
+                    "source_file VARCHAR(512)"
+                ))
+                log.info("practice_questions.source_file 列迁移完成")
+            if "source_lines" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE practice_questions ADD COLUMN "
+                    "source_lines VARCHAR(32)"
+                ))
+                log.info("practice_questions.source_lines 列迁移完成")
         conn.commit()

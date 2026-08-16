@@ -21,6 +21,9 @@ export interface DraftQuestion {
   difficulty: number
   knowledge_key: string | null
   knowledge_name: string | null
+  /** 题目引用的源码定位(工作区可用时出题产生;老题为 null) */
+  source_file: string | null
+  source_lines: string | null
 }
 
 export interface GenerateResponse {
@@ -143,6 +146,12 @@ export interface SessionQuestion {
   options: string[]
   difficulty: number
   knowledge_name: string | null
+  /** 题目来源任务(右侧代码栏据此打开对应工作区;老题为 null) */
+  source_task_id: string | null
+  /** 题目引用的源码文件(仓库内相对路径;无则不自动定位) */
+  source_file: string | null
+  /** 题目引用的行区间(如 "120-150" 或 "42") */
+  source_lines: string | null
 }
 
 export interface StartSessionResponse {
