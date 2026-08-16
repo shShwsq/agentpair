@@ -55,6 +55,12 @@ const busy = computed(() => props.loading || props.clearing)
 const confirmMode = ref<'none' | 'records' | 'all'>('none')
 /** 清空全部数据的输入确认(输入「清空」后方可执行) */
 const confirmText = ref('')
+/** 当前打开的说明气泡(点问号展开,再点或点别处收起) */
+const helpOpen = ref<'none' | 'records' | 'all'>('none')
+
+function toggleHelp(which: 'records' | 'all'): void {
+  helpOpen.value = helpOpen.value === which ? 'none' : which
+}
 
 watch(
   () => props.open,
@@ -62,6 +68,7 @@ watch(
     if (open) {
       confirmMode.value = 'none'
       confirmText.value = ''
+      helpOpen.value = 'none'
     }
   },
 )
@@ -119,7 +126,7 @@ function handleCancel(loading: boolean): void {
             >×</button>
           </header>
 
-          <div class="dialog-body">
+          <div class="dialog-body" @click="helpOpen = 'none'">
             <div class="setting-row" @click="handleToggle(busy)">
               <div class="setting-info">
                 <span class="setting-title">自动生成练习题</span>
@@ -213,13 +220,19 @@ function handleCancel(loading: boolean): void {
             <div class="danger-block">
               <span class="setting-title danger-title">危险操作</span>
 
-              <!-- 清空练习记录:进度归零,保留题库 -->
+              <!-- 清空练习记录:进度归零,保留题库;说明由问号气泡展示 -->
               <div class="danger-row">
-                <div class="setting-info">
+                <div class="danger-row-head">
                   <span class="danger-name">清空练习记录</span>
-                  <span class="setting-desc">
+                  <button
+                    class="help-btn"
+                    :aria-expanded="helpOpen === 'records'"
+                    aria-label="查看「清空练习记录」说明"
+                    @click.stop="toggleHelp('records')"
+                  >?</button>
+                  <div v-if="helpOpen === 'records'" class="help-bubble" @click.stop>
                     清除历史会话与作答记录,重置知识点掌握度与复习计划;题库保留,题目难度重置
-                  </span>
+                  </div>
                 </div>
                 <button
                   v-if="confirmMode !== 'records'"
@@ -236,13 +249,19 @@ function handleCancel(loading: boolean): void {
                 </div>
               </div>
 
-              <!-- 清空全部数据:连题库一并删除,需输入「清空」 -->
+              <!-- 清空全部数据:连题库一并删除,需输入「清空」;说明由问号气泡展示 -->
               <div class="danger-row danger-row-col">
-                <div class="setting-info">
+                <div class="danger-row-head">
                   <span class="danger-name">清空全部数据</span>
-                  <span class="setting-desc">
-                    在上面基础上连题库(含待确认候选题)与知识点一并删除,回到全新状态
-                  </span>
+                  <button
+                    class="help-btn"
+                    :aria-expanded="helpOpen === 'all'"
+                    aria-label="查看「清空全部数据」说明"
+                    @click.stop="toggleHelp('all')"
+                  >?</button>
+                  <div v-if="helpOpen === 'all'" class="help-bubble help-bubble-up" @click.stop>
+                    在「清空练习记录」基础上,连题库(含待确认候选题)与知识点一并删除,回到全新状态
+                  </div>
                 </div>
                 <button
                   v-if="confirmMode !== 'all'"
@@ -661,6 +680,60 @@ function handleCancel(loading: boolean): void {
   font-size: var(--fs-base);
   font-weight: var(--fw-medium);
   color: var(--color-text);
+}
+
+/* 问号帮助:点击弹出说明气泡,再点或点别处收起 */
+.danger-row-head {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.help-btn {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--color-text-muted);
+  background: transparent;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 50%;
+  cursor: pointer;
+  padding: 0;
+  transition: all var(--transition-fast);
+}
+
+.help-btn:hover,
+.help-btn[aria-expanded='true'] {
+  color: var(--color-text);
+  border-color: var(--color-text-muted);
+}
+
+.help-bubble {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 10;
+  width: 248px;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-relaxed);
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+}
+
+/* 底部行向上弹出,避免被滚动容器裁剪 */
+.help-bubble-up {
+  top: auto;
+  bottom: calc(100% + 6px);
 }
 
 .danger-confirm {
