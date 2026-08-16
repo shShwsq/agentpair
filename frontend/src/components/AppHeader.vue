@@ -95,6 +95,7 @@ function handleCloseHelp(): void {
             <RouterLink to="/cli">CLI 设置</RouterLink>
             <RouterLink to="/agent-policy">协作策略</RouterLink>
             <RouterLink to="/skills">技能管理</RouterLink>
+            <RouterLink to="/practice">自适应练习</RouterLink>
             <RouterLink to="/memory">记忆管理</RouterLink>
           </slot>
         </nav>
