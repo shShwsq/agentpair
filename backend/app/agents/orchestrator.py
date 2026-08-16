@@ -230,6 +230,13 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             except Exception as mem_err:
                 logger.warning(f"[task={task.id}] 归纳写入记忆失败(忽略): {mem_err}")
 
+            # 自动生成练习题 draft(失败兜底,不影响任务完成;产出仍需用户确认)
+            try:
+                from app.services.practice.auto_generate import auto_generate_practice_for_task
+                auto_generate_practice_for_task(task, db)
+            except Exception as practice_err:
+                logger.warning(f"[task={task.id}] 自动生成练习题失败(忽略): {practice_err}")
+
             # 捕获工作区 diff(失败兜底,不影响任务完成)
             try:
                 from app.services.workspace_diff import (
@@ -484,6 +491,13 @@ def run_dual_agent_audit(task: Task, db: Session) -> None:
             summarize_and_save_memory(task, db, llm_client)
         except Exception as mem_err:
             logger.warning(f"[task={task.id}] 归纳写入记忆失败(忽略): {mem_err}")
+
+        # 自动生成练习题 draft(失败兜底,不影响任务完成;产出仍需用户确认)
+        try:
+            from app.services.practice.auto_generate import auto_generate_practice_for_task
+            auto_generate_practice_for_task(task, db)
+        except Exception as practice_err:
+            logger.warning(f"[task={task.id}] 自动生成练习题失败(忽略): {practice_err}")
 
         # 捕获工作区 diff(失败兜底,不影响任务完成;容器仍存活)
         try:

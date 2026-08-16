@@ -11,11 +11,35 @@ from pydantic import BaseModel, Field
 
 
 class GenerateRequest(BaseModel):
-    """从审计任务的真实发现生成练习题(POST /practice/generate)"""
+    """从审计任务的真实发现生成练习题(POST /practice/generate)
+
+    异步执行:立即返回 job_id,前端轮询 GET /practice/generate/{job_id}。
+    """
 
     task_id: uuid.UUID
     # 参与生成的 finding 数上限(防 LLM 成本失控)
     max_findings: int = Field(default=10, ge=1, le=20)
+
+
+class GenerateJobResponse(BaseModel):
+    """异步生成任务句柄(POST /practice/generate 立即返回)"""
+
+    job_id: str
+
+
+class GenerateJobStatusResponse(BaseModel):
+    """生成进度与结果(GET /practice/generate/{job_id})
+
+    status: pending(排队) / running(出题中) / done(完成) / error(失败)
+    done/total: 已处理/总 finding 数;done 时 questions 为新 draft 列表。
+    """
+
+    status: str
+    done: int = 0
+    total: int = 0
+    error: str = ""
+    questions: list["DraftQuestionResponse"] = []
+    skipped_findings: int = 0
 
 
 class DraftQuestionResponse(BaseModel):
@@ -61,6 +85,19 @@ class ConfirmQuestionsResponse(BaseModel):
     discarded: int = 0
 
 
+class ActivateQuestionsRequest(BaseModel):
+    """转正指定 draft 题目(POST /practice/questions/activate)
+
+    与 confirm 不同:只把传入 id 转 active,不影响其余 draft(题库管理页逐条操作用)。
+    """
+
+    question_ids: list[uuid.UUID] = []
+
+
+class ActivateQuestionsResponse(BaseModel):
+    activated: int = 0
+
+
 # ============================================================
 # 练习会话(按需即时组卷)
 # ============================================================
@@ -72,6 +109,8 @@ class StartSessionRequest(BaseModel):
     count: int = Field(default=8, ge=1, le=30)
     # 限定知识点 key(如只看 "CWE-89"),为空表示全部
     topic_filter: str | None = None
+    # 限定题目白名单(如错题重练):非空时只从这些 active 题中组卷
+    question_ids: list[uuid.UUID] | None = None
 
 
 class SessionQuestionResponse(BaseModel):
@@ -176,3 +215,64 @@ class QuestionListItem(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ============================================================
+# 导航徽章 / 历史会话 / 趋势 / 错题
+# ============================================================
+
+
+class PracticeSummaryResponse(BaseModel):
+    """轻量汇总(GET /practice/summary,导航徽章用)"""
+
+    due_count: int = 0
+    draft_count: int = 0
+
+
+class SessionListItem(BaseModel):
+    """历史练习会话列表项(GET /practice/sessions)"""
+
+    id: uuid.UUID
+    started_at: datetime
+    finished_at: datetime | None = None
+    question_count: int
+    answered_count: int = 0
+    correct_count: int = 0
+    accuracy: float | None = None
+
+
+class SessionAttemptItem(BaseModel):
+    """会话明细中的单次作答(GET /practice/sessions/{id})"""
+
+    question_id: uuid.UUID
+    stem: str
+    qtype: str
+    knowledge_name: str | None = None
+    chosen_idx: int
+    correct_idx: int
+    is_correct: bool
+    answered_at: datetime
+
+
+class SessionDetailResponse(BaseModel):
+    """历史会话明细"""
+
+    id: uuid.UUID
+    started_at: datetime
+    finished_at: datetime | None = None
+    question_count: int
+    attempts: list[SessionAttemptItem] = []
+
+
+class TrendPoint(BaseModel):
+    """按周聚合的学习趋势点(GET /practice/trend)"""
+
+    week_start: datetime
+    attempts: int = 0
+    correct: int = 0
+
+
+class TrendResponse(BaseModel):
+    """最近 N 周作答趋势(旧到新)"""
+
+    weeks: list[TrendPoint] = []

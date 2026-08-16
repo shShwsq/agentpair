@@ -5,14 +5,15 @@
 选题策略见 services/practice/selector.py(SM-2 到期复习 + 薄弱点 + 难度匹配)。
 """
 import logging
-from datetime import datetime, timezone
+import threading
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Integer, cast, func as sa_func
 from sqlalchemy.orm import Session
 
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.deps import get_current_user
 from app.models.practice import (
     Attempt,
@@ -25,21 +26,31 @@ from app.models.practice import (
 from app.models.task import Result, Task
 from app.models.user import User
 from app.schemas.practice import (
+    ActivateQuestionsRequest,
+    ActivateQuestionsResponse,
     ConfirmQuestionsRequest,
     ConfirmQuestionsResponse,
     DraftQuestionResponse,
+    GenerateJobResponse,
+    GenerateJobStatusResponse,
     GenerateRequest,
-    GenerateResponse,
     KnowledgeStateResponse,
+    PracticeSummaryResponse,
     QuestionListItem,
+    SessionAttemptItem,
+    SessionDetailResponse,
+    SessionListItem,
     SessionQuestionResponse,
     StartSessionRequest,
     StartSessionResponse,
     StatsResponse,
     SubmitAnswerRequest,
     SubmitAnswerResponse,
+    TrendPoint,
+    TrendResponse,
     WeakPointItem,
 )
+from app.services.practice import jobs as gen_jobs
 from app.services.practice.difficulty import (
     ABILITY_WINDOW,
     adjust_question_difficulty,
@@ -86,13 +97,17 @@ def _estimate_user_ability(db: Session, user_id: UUID) -> float:
 # ============================================================
 
 
-@router.post("/generate", response_model=GenerateResponse)
+@router.post("/generate", response_model=GenerateJobResponse)
 def generate_questions(
     req: GenerateRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> GenerateResponse:
-    """从审计任务的真实发现生成候选题(draft)"""
+) -> GenerateJobResponse:
+    """从审计任务的真实发现生成候选题(draft,异步)
+
+    立即返回 job_id,后台线程逐条 finding 调 LLM 出题,
+    前端轮询 GET /practice/generate/{job_id} 拿进度与结果。
+    """
     task = _get_task_owned(db, req.task_id, current_user.id)
     result_count = (
         db.query(sa_func.count(Result.id))
@@ -102,20 +117,107 @@ def generate_questions(
     if not result_count:
         raise HTTPException(status_code=400, detail="该任务还没有审计发现,无法生成练习题")
 
-    created, skipped = generate_questions_for_task(
-        db, task, current_user.id, max_findings=req.max_findings
+    job_id = gen_jobs.create_job(current_user.id)
+    gen_jobs.set_total(job_id, total=min(result_count, req.max_findings))
+    thread = threading.Thread(
+        target=_run_generate_job,
+        args=(job_id, task.id, current_user.id, req.max_findings),
+        daemon=True,
+        name=f"practice-generate-{job_id[:8]}",
     )
-    if not created:
-        raise HTTPException(status_code=502, detail="题目生成失败,请稍后重试")
+    thread.start()
+    return GenerateJobResponse(job_id=job_id)
 
+
+def _run_generate_job(job_id: str, task_id: UUID, user_id: UUID, max_findings: int) -> None:
+    """后台线程:独立 Session 执行生成,进度/结果写回 job"""
+    db = SessionLocal()
+    try:
+        task = db.query(Task).filter(
+            Task.id == task_id, Task.user_id == user_id
+        ).first()
+        if not task:
+            gen_jobs.update_job(job_id, status="error", error="任务不存在或无权访问")
+            return
+        created, skipped = generate_questions_for_task(
+            db, task, user_id, max_findings=max_findings,
+            progress_callback=lambda done, total: gen_jobs.update_job(
+                job_id, done=done, total=total
+            ),
+        )
+        kp_by_id = {
+            kp.id: kp
+            for kp in db.query(KnowledgePoint).filter(
+                KnowledgePoint.id.in_([q.knowledge_point_id for q in created])
+            ).all()
+        } if created else {}
+        items = []
+        for q in created:
+            kp = kp_by_id.get(q.knowledge_point_id)
+            items.append(DraftQuestionResponse(
+                id=q.id,
+                qtype=q.qtype.value,
+                stem=q.stem,
+                code_snippet=q.code_snippet,
+                options=q.options,
+                answer_idx=q.answer_idx,
+                explanation=q.explanation,
+                difficulty=q.difficulty,
+                knowledge_key=kp.key if kp else None,
+                knowledge_name=kp.name if kp else None,
+            ))
+        # done/total 由进度回调维护,此处不覆盖
+        gen_jobs.update_job(
+            job_id, status="done", questions=items, skipped_findings=skipped
+        )
+    except Exception as e:
+        logger.exception("[practice] 异步出题失败 job=%s", job_id)
+        gen_jobs.update_job(job_id, status="error", error=str(e)[:500])
+    finally:
+        db.close()
+
+
+@router.get("/generate/{job_id}", response_model=GenerateJobStatusResponse)
+def get_generate_job(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+) -> GenerateJobStatusResponse:
+    """轮询出题进度与结果"""
+    job = gen_jobs.get_job(job_id, current_user.id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="生成任务不存在或已过期")
+    return GenerateJobStatusResponse(
+        status=job["status"],
+        done=job["done"],
+        total=job["total"],
+        error=job["error"],
+        questions=job["questions"],
+        skipped_findings=job["skipped_findings"],
+    )
+
+
+@router.get("/drafts", response_model=list[DraftQuestionResponse])
+def list_drafts(
+    task_id: UUID | None = Query(default=None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[DraftQuestionResponse]:
+    """待确认候选题完整内容(预览勾选/确认入库用;可按来源任务过滤)"""
+    query = db.query(Question).filter(
+        Question.user_id == current_user.id,
+        Question.status == QuestionStatus.DRAFT,
+    )
+    if task_id is not None:
+        query = query.filter(Question.source_task_id == task_id)
+    drafts = query.order_by(Question.created_at).all()
     kp_by_id = {
         kp.id: kp
         for kp in db.query(KnowledgePoint).filter(
-            KnowledgePoint.id.in_([q.knowledge_point_id for q in created])
+            KnowledgePoint.id.in_([q.knowledge_point_id for q in drafts])
         ).all()
-    }
+    } if drafts else {}
     items = []
-    for q in created:
+    for q in drafts:
         kp = kp_by_id.get(q.knowledge_point_id)
         items.append(DraftQuestionResponse(
             id=q.id,
@@ -129,7 +231,7 @@ def generate_questions(
             knowledge_key=kp.key if kp else None,
             knowledge_name=kp.name if kp else None,
         ))
-    return GenerateResponse(questions=items, skipped_findings=skipped)
+    return items
 
 
 @router.post("/questions/confirm", response_model=ConfirmQuestionsResponse)
@@ -160,6 +262,30 @@ def confirm_questions(
             discarded += 1
     db.commit()
     return ConfirmQuestionsResponse(confirmed=confirmed, discarded=discarded)
+
+
+@router.post("/questions/activate", response_model=ActivateQuestionsResponse)
+def activate_questions(
+    req: ActivateQuestionsRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ActivateQuestionsResponse:
+    """只把传入 id 的 draft 转 active,不影响其余 draft(题库管理页逐条转正用)"""
+    if not req.question_ids:
+        raise HTTPException(status_code=400, detail="未选择任何题目")
+    drafts = (
+        db.query(Question)
+        .filter(
+            Question.user_id == current_user.id,
+            Question.id.in_(req.question_ids),
+            Question.status == QuestionStatus.DRAFT,
+        )
+        .all()
+    )
+    for q in drafts:
+        q.status = QuestionStatus.ACTIVE
+    db.commit()
+    return ActivateQuestionsResponse(activated=len(drafts))
 
 
 # ============================================================
@@ -194,6 +320,13 @@ def start_session(
         if not kps:
             raise HTTPException(status_code=404, detail=f"题库中没有知识点 {req.topic_filter} 的题目")
         questions = [q for q in questions if q.knowledge_point_id in kps]
+    if req.question_ids:
+        # 白名单组卷(错题重练):只从传入 id 中选题,跳过复习/多样性约束
+        allow = set(req.question_ids)
+        questions = [q for q in questions if q.id in allow]
+        if not questions:
+            raise HTTPException(status_code=400, detail="指定题目中没有可用的 active 题目")
+        return _start_session_from_pool(db, current_user, questions, kps, req.count)
 
     states = {
         s.knowledge_point_id: s
@@ -259,6 +392,42 @@ def start_session(
                 knowledge_name=kps[c.kp_id].name if c.kp_id in kps else None,
             )
             for c in picked
+        ],
+    )
+
+
+def _start_session_from_pool(
+    db: Session,
+    current_user: User,
+    questions: list[Question],
+    kps: dict,
+    count: int,
+) -> StartSessionResponse:
+    """白名单组卷:直接按创建顺序取前 count 题,不走选题策略(错题重练用)"""
+    picked = questions[:count]
+    session = PracticeSession(
+        user_id=current_user.id,
+        question_count=len(picked),
+        question_ids=[str(q.id) for q in picked],
+        stats={"mode": "question_ids"},
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return StartSessionResponse(
+        session_id=session.id,
+        questions=[
+            SessionQuestionResponse(
+                id=q.id,
+                qtype=q.qtype.value,
+                stem=q.stem,
+                code_snippet=q.code_snippet,
+                options=q.options,
+                difficulty=q.difficulty,
+                knowledge_name=kps[q.knowledge_point_id].name
+                if q.knowledge_point_id in kps else None,
+            )
+            for q in picked
         ],
     )
 
@@ -400,6 +569,166 @@ def submit_answer(
 # ============================================================
 
 
+@router.get("/summary", response_model=PracticeSummaryResponse)
+def get_practice_summary(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> PracticeSummaryResponse:
+    """轻量汇总(导航徽章用):到期待复习知识点数 + 待确认 draft 数"""
+    now = _now()
+    due_count = (
+        db.query(sa_func.count(UserKnowledgeState.id))
+        .filter(
+            UserKnowledgeState.user_id == current_user.id,
+            UserKnowledgeState.due_at.isnot(None),
+            UserKnowledgeState.due_at <= now,
+        )
+        .scalar()
+        or 0
+    )
+    draft_count = (
+        db.query(sa_func.count(Question.id))
+        .filter(
+            Question.user_id == current_user.id,
+            Question.status == QuestionStatus.DRAFT,
+        )
+        .scalar()
+        or 0
+    )
+    return PracticeSummaryResponse(due_count=due_count, draft_count=draft_count)
+
+
+@router.get("/trend", response_model=TrendResponse)
+def get_trend(
+    weeks: int = Query(default=8, ge=1, le=26),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> TrendResponse:
+    """按周聚合的作答趋势(旧到新,含无作答的零值周)"""
+    now = _now()
+    # 对齐到本周一 00:00 UTC,往前推 weeks-1 周作为首格
+    monday = (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    start = monday - timedelta(weeks=weeks - 1)
+    rows = (
+        db.query(Attempt.answered_at, Attempt.is_correct)
+        .filter(Attempt.user_id == current_user.id, Attempt.answered_at >= start)
+        .all()
+    )
+    buckets = {start + timedelta(weeks=i): [0, 0] for i in range(weeks)}
+    for answered_at, is_correct in rows:
+        offset = (answered_at - start).days // 7
+        if 0 <= offset < weeks:
+            ws = start + timedelta(weeks=offset)
+            buckets[ws][0] += 1
+            if is_correct:
+                buckets[ws][1] += 1
+    return TrendResponse(
+        weeks=[
+            TrendPoint(week_start=ws, attempts=n[0], correct=n[1])
+            for ws, n in sorted(buckets.items())
+        ]
+    )
+
+
+@router.get("/sessions", response_model=list[SessionListItem])
+def list_sessions(
+    limit: int = Query(default=20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[SessionListItem]:
+    """历史练习会话(新到旧,含作答数/正确率)"""
+    sessions = (
+        db.query(PracticeSession)
+        .filter(PracticeSession.user_id == current_user.id)
+        .order_by(PracticeSession.started_at.desc())
+        .limit(limit)
+        .all()
+    )
+    if not sessions:
+        return []
+    stats = {
+        sid: (cnt or 0, corr or 0)
+        for sid, cnt, corr in db.query(
+            Attempt.session_id,
+            sa_func.count(Attempt.id),
+            sa_func.sum(cast(Attempt.is_correct, Integer)),
+        )
+        .filter(Attempt.session_id.in_([s.id for s in sessions]))
+        .group_by(Attempt.session_id)
+        .all()
+    }
+    items = []
+    for s in sessions:
+        answered, correct = stats.get(s.id, (0, 0))
+        items.append(SessionListItem(
+            id=s.id,
+            started_at=s.started_at,
+            finished_at=s.finished_at,
+            question_count=s.question_count,
+            answered_count=answered or 0,
+            correct_count=correct or 0,
+            accuracy=(correct / answered) if answered else None,
+        ))
+    return items
+
+
+@router.get("/sessions/{session_id}", response_model=SessionDetailResponse)
+def get_session_detail(
+    session_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> SessionDetailResponse:
+    """会话逐题作答明细(错题回顾用)"""
+    session = db.query(PracticeSession).filter(
+        PracticeSession.id == session_id,
+        PracticeSession.user_id == current_user.id,
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="练习会话不存在")
+    attempts = (
+        db.query(Attempt)
+        .filter(Attempt.session_id == session.id)
+        .order_by(Attempt.answered_at)
+        .all()
+    )
+    questions = {
+        q.id: q
+        for q in db.query(Question).filter(
+            Question.id.in_([a.question_id for a in attempts])
+        ).all()
+    } if attempts else {}
+    kp_ids = list({q.knowledge_point_id for q in questions.values()})
+    kps = {
+        kp.id: kp
+        for kp in db.query(KnowledgePoint).filter(KnowledgePoint.id.in_(kp_ids)).all()
+    } if kp_ids else {}
+    items = []
+    for a in attempts:
+        q = questions.get(a.question_id)
+        if q is None:
+            continue  # 题目已被删除
+        kp = kps.get(q.knowledge_point_id)
+        items.append(SessionAttemptItem(
+            question_id=q.id,
+            stem=q.stem,
+            qtype=q.qtype.value,
+            knowledge_name=kp.name if kp else None,
+            chosen_idx=a.chosen_idx,
+            correct_idx=q.answer_idx,
+            is_correct=a.is_correct,
+            answered_at=a.answered_at,
+        ))
+    return SessionDetailResponse(
+        id=session.id,
+        started_at=session.started_at,
+        finished_at=session.finished_at,
+        question_count=session.question_count,
+        attempts=items,
+    )
+
+
 @router.get("/stats", response_model=StatsResponse)
 def get_stats(
     current_user: User = Depends(get_current_user),
@@ -472,12 +801,30 @@ def get_stats(
 def list_questions(
     status: str | None = Query(default=None, pattern="^(draft|active|archived)$"),
     knowledge_point: str | None = Query(default=None),
+    mistake: bool = Query(default=False),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[QuestionListItem]:
     query = db.query(Question).filter(Question.user_id == current_user.id)
     if status:
         query = query.filter(Question.status == QuestionStatus(status))
+    if mistake:
+        # 错题本:答错过的 active 题(去重)
+        wrong_ids = [
+            qid for (qid,) in db.query(Attempt.question_id)
+            .filter(
+                Attempt.user_id == current_user.id,
+                Attempt.is_correct.is_(False),
+            )
+            .distinct()
+            .all()
+        ]
+        if not wrong_ids:
+            return []
+        query = query.filter(
+            Question.status == QuestionStatus.ACTIVE,
+            Question.id.in_(wrong_ids),
+        )
     questions = query.order_by(Question.created_at.desc()).all()
 
     if knowledge_point:

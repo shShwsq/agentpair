@@ -12,7 +12,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -38,6 +38,10 @@ class UserPreference(Base):
     # agent 策略配置(评估频率、打断权限、验证权限),作为检查点评估的用户级默认
     # 结构见 agent_checkpoint.DEFAULT_AGENT_POLICY
     agent_policy: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # 任务完成后是否自动生成练习题 draft(默认开启;产出仍需用户预览确认才转 active)
+    auto_generate_practice: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true", default=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -52,7 +56,7 @@ class UserPreference(Base):
 
 def migrate_user_preference_columns() -> None:
     """幂等迁移 user_preferences:删遗留 preferences 列,custom_prompt 改名 user_profile,
-    新增 agent_policy JSONB 列。
+    新增 agent_policy JSONB 列、auto_generate_practice 布尔列。
 
     背景:项目用 Base.metadata.create_all(无 Alembic),已存在的表不会自动改列。
     启动时检查并 ALTER TABLE,保证老库平滑升级。
@@ -95,4 +99,13 @@ def migrate_user_preference_columns() -> None:
                 text("ALTER TABLE user_preferences ADD COLUMN agent_policy JSONB")
             )
             log.info("user_preferences 加列: agent_policy")
+        # 4) 新增 auto_generate_practice 布尔列(任务完成自动生成练习题开关,默认开)
+        if "auto_generate_practice" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE user_preferences "
+                    "ADD COLUMN auto_generate_practice BOOLEAN NOT NULL DEFAULT TRUE"
+                )
+            )
+            log.info("user_preferences 加列: auto_generate_practice")
         conn.commit()

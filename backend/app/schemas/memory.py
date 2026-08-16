@@ -26,6 +26,8 @@ class UserPreferenceOut(BaseModel):
     # agent 策略配置(检查点评估频率、打断权限、验证权限)
     # None 表示未配置(用系统默认),dict 表示用户自定义的覆盖值
     agent_policy: dict[str, Any] | None = None
+    # 任务完成后是否自动生成练习题 draft(默认开)
+    auto_generate_practice: bool = True
     # 最后更新时间(可空 — 未配置时为 None;FastAPI 序列化为 ISO 字符串)
     updated_at: datetime | None = None
 
@@ -36,6 +38,15 @@ class SaveUserPreferenceRequest(BaseModel):
     """保存 User Profile 请求(PUT /memory/preferences)"""
 
     user_profile: str = Field(default="", max_length=2000)
+
+
+class SavePracticeSettingsRequest(BaseModel):
+    """保存练习设置请求(PUT /memory/preferences/practice)
+
+    任务完成后是否自动生成练习题 draft(产出仍需用户在预览对话框确认才转 active)。
+    """
+
+    auto_generate_practice: bool = True
 
 
 class SaveAgentPolicyRequest(BaseModel):

@@ -35,6 +35,7 @@ from app.schemas.memory import (
     ProjectListResponse,
     ProjectOut,
     SaveAgentPolicyRequest,
+    SavePracticeSettingsRequest,
     SaveProjectRequest,
     SaveUserMemoryRequest,
     SaveUserPreferenceRequest,
@@ -91,6 +92,37 @@ def save_preferences(
     db.commit()
     db.refresh(row)
     logger.info("用户 %s 更新了偏好", current_user.id)
+    return UserPreferenceOut.model_validate(row)
+
+
+@router.put("/preferences/practice", response_model=UserPreferenceOut)
+def save_practice_settings(
+    req: SavePracticeSettingsRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> UserPreferenceOut:
+    """保存/更新练习设置(任务完成后自动生成练习题开关)
+
+    get_or_create:若用户无 UserPreference 行,自动创建(user_profile 为空)。
+    """
+    row = (
+        db.query(UserPreference)
+        .filter(UserPreference.user_id == current_user.id)
+        .first()
+    )
+    if row is None:
+        row = UserPreference(
+            user_id=current_user.id,
+            user_profile="",
+            auto_generate_practice=req.auto_generate_practice,
+        )
+        db.add(row)
+    else:
+        row.auto_generate_practice = req.auto_generate_practice
+    db.commit()
+    db.refresh(row)
+    logger.info("用户 %s 更新练习设置: auto_generate_practice=%s",
+                current_user.id, req.auto_generate_practice)
     return UserPreferenceOut.model_validate(row)
 
 

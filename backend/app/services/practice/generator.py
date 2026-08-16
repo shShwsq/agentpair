@@ -11,6 +11,7 @@
 """
 import hashlib
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from json_repair import repair_json
@@ -210,10 +211,12 @@ def generate_questions_for_task(
     user_id,
     max_findings: int = 10,
     client: LLMClient | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> tuple[list[Question], int]:
     """为任务的 Results 生成 draft 题目
 
     返回 (新建题目列表, 被跳过的 finding 数)。
+    progress_callback(done, total):每处理完一条 finding 回调(异步生成进度展示用)。
     """
     if client is None:
         client = resolve_llm_client(db, task)
@@ -221,6 +224,7 @@ def generate_questions_for_task(
     findings = (
         db.query(Result).filter(Result.task_id == task.id).order_by(Result.created_at).all()
     )[:max_findings]
+    total_findings = len(findings)
 
     # 已有 dedup_hash(同用户),避免重复入库
     existing_hashes = {
@@ -231,7 +235,7 @@ def generate_questions_for_task(
 
     created: list[Question] = []
     skipped = 0
-    for finding in findings:
+    for idx, finding in enumerate(findings):
         meta = finding.metadata_ or {}
         prompt = _FINDING_TEMPLATE.format(
             title=finding.title,
@@ -255,6 +259,8 @@ def generate_questions_for_task(
 
         if not questions:
             skipped += 1
+            if progress_callback:
+                progress_callback(idx + 1, total_findings)
             continue
 
         for q in questions:
@@ -283,6 +289,9 @@ def generate_questions_for_task(
             )
             db.add(question)
             created.append(question)
+
+        if progress_callback:
+            progress_callback(idx + 1, total_findings)
 
     db.commit()
     for q in created:
