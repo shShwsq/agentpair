@@ -176,6 +176,13 @@ bash scripts/build-sandbox-image.sh --cn-mirror
 # 注意:国内服务器直连 GitHub 22 端口可能被墙,此时 SSH 会 fallback 到 HTTPS(功能不受影响)
 bash scripts/build-sandbox-image.sh --ssh --ssh-key ~/.ssh/id_ed25519
 
+# 国内服务器 GitHub 直连不稳时,用镜像加速(ghproxy 风格前缀,如 ghfast.top):
+#   --github-mirror <base>   把 github.com 的 HTTPS/SSH clone 重写到 <base>/https://github.com/...
+#   --hermes-clone-url <url> 先 git clone 到 /usr/local/lib/hermes-agent 再跑 install.sh
+#                           (install.sh 检测到已有 git 仓库会跳过 clone,直接装依赖)
+# 两者可叠加;预克隆的 URL 会成为 origin remote(install.sh 的 fetch 也走它),建议给镜像 URL
+bash scripts/build-sandbox-image.sh --hermes-clone-url https://ghfast.top/https://github.com/NousResearch/hermes-agent.git --cn-mirror
+
 # 或仅换 Docker 基础镜像源(apt/npm 仍用官方源)
 bash scripts/build-sandbox-image.sh --registry docker.m.daocloud.io
 ```

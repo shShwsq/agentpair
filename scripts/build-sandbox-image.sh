@@ -57,6 +57,16 @@ WITH_SEMGREP=1
 WITH_SSH=0
 # --ssh-key 指定 key 文件路径(如 ~/.ssh/id_ed25519);不指定则走 SSH agent(docker build --ssh default 语义)
 SSH_KEY=""
+# GitHub 加速镜像前缀(ghproxy 风格,如 https://ghfast.top):把 install.sh 的 github.com HTTPS/SSH clone
+# 重写为 <base>/https://github.com/...,并给 uv 的 Python 下载配同源镜像。适合国内服务器直连 GitHub 超时。
+# 留空 = 直连 GitHub。仅在 Hermes install.sh 所在 RUN 内临时生效,不写入最终镜像。
+GITHUB_MIRROR=""
+# Hermes 源码预克隆 URL:非空时先 git clone 到 /usr/local/lib/hermes-agent(与 install.sh 的 FHS root 布局一致),
+# 再跑 install.sh —— install.sh 检测到目录已存在且是 git 仓库会跳过 SSH/HTTPS clone,直接装依赖。
+# 适合镜像 clone 能通但 install.sh 内部 clone 不稳定的场景。URL 会成为 origin remote(install.sh 的 fetch 也走它),
+# 建议直接给镜像 URL(如 https://ghfast.top/https://github.com/NousResearch/hermes-agent.git)。
+# 分支必须 main(install.sh 写死 BRANCH=main),否则 checkout 失败。
+HERMES_CLONE_URL=""
 # 镜像源(国内加速),默认空 = 用官方源
 # - REGISTRY:Docker 基础镜像源前缀,如 docker.m.daocloud.io(非空时 FROM $REGISTRY/ubuntu:24.04)
 # - APT_MIRROR:apt 源,目前支持 aliyun(空 = 不换)
@@ -131,6 +141,24 @@ while [ $# -gt 0 ]; do
             SSH_KEY="$2"
             shift 2
             ;;
+        --github-mirror)
+            # 下一个参数为镜像前缀(ghproxy 风格,不带尾斜杠)
+            if [ $# -lt 2 ]; then
+                echo "[FAIL] --github-mirror 需要一个参数(如 --github-mirror https://ghfast.top)"
+                exit 1
+            fi
+            GITHUB_MIRROR="$2"
+            shift 2
+            ;;
+        --hermes-clone-url)
+            # 下一个参数为预克隆 URL(建议镜像 URL)
+            if [ $# -lt 2 ]; then
+                echo "[FAIL] --hermes-clone-url 需要一个参数(如 --hermes-clone-url https://ghfast.top/https://github.com/NousResearch/hermes-agent.git)"
+                exit 1
+            fi
+            HERMES_CLONE_URL="$2"
+            shift 2
+            ;;
         --registry)
             # 下一个参数为镜像源前缀
             if [ $# -lt 2 ]; then
@@ -166,6 +194,14 @@ while [ $# -gt 0 ]; do
             echo "  --no-semgrep           不装 semgrep(不预装时 run_semgrep 首次运行会兜底自动安装,但耗时长)"
             echo "  --ssh                  Hermes install.sh clone 源码时启用 SSH 转发(docker build --ssh),用宿主机 SSH key 免 HTTPS fallback"
             echo "  --ssh-key <path>       配合 --ssh 指定 key 文件(如 ~/.ssh/id_ed25519);不指定则走 SSH agent"
+            echo "  --github-mirror <base>  GitHub 加速:把 github.com 的 HTTPS/SSH clone 重写到镜像前缀"
+            echo "                          (ghproxy 风格:<base>/https://github.com/...,如 https://ghfast.top),"
+            echo "                          并给 uv 的 Python 下载配同源镜像;适合国内直连 GitHub 超时"
+            echo "                          (用了它就不用 --ssh;仅 Hermes 安装段临时生效,不进最终镜像)"
+            echo "  --hermes-clone-url <url> Hermes 源码预克隆:先 git clone 到 /usr/local/lib/hermes-agent 再跑"
+            echo "                          install.sh(它检测到已有 git 仓库会跳过 clone 直接装依赖);"
+            echo "                          URL 即 origin remote(install.sh 的 fetch 也走它),建议给镜像 URL;"
+            echo "                          分支必须 main。与 --github-mirror/--ssh 可叠加"
             echo ""
             echo "镜像源(服务器在国内时推荐,避免 docker.io 拉取超时):"
             echo "  --cn-mirror            一键国内加速(Docker DaoCloud + apt 阿里云 + npm npmmirror + PyPI 阿里云)"
@@ -235,6 +271,8 @@ expect_hermes_cli_marker=$([ "$WITH_HERMES_CLI" -eq 1 ] && echo "yes" || echo "n
 expect_codex_cli_marker=$([ "$WITH_CODEX_CLI" -eq 1 ] && echo "yes" || echo "no")
 expect_semgrep_marker=$([ "$WITH_SEMGREP" -eq 1 ] && echo "yes" || echo "no")
 expect_ssh_marker=$([ "$WITH_SSH" -eq 1 ] && echo "yes" || echo "no")
+expect_github_mirror_marker="${GITHUB_MIRROR:-default}"
+expect_hermes_clone_url_marker="${HERMES_CLONE_URL:-default}"
 
 if [ ! -f "$DOCKERFILE" ]; then
     NEED_REGEN=1
@@ -247,6 +285,8 @@ else
     cur_codex_cli=$(grep -E "^# @codex-cli:" "$DOCKERFILE" | head -1 | sed 's/.*://' || echo "")
     cur_semgrep=$(grep -E "^# @semgrep:" "$DOCKERFILE" | head -1 | sed 's/.*://' || echo "")
     cur_ssh=$(grep -E "^# @ssh:" "$DOCKERFILE" | head -1 | sed 's/.*://' || echo "")
+    cur_github_mirror=$(grep -E "^# @github-mirror:" "$DOCKERFILE" | head -1 | sed 's/^# @github-mirror://' || echo "")
+    cur_hermes_clone_url=$(grep -E "^# @hermes-clone-url:" "$DOCKERFILE" | head -1 | sed 's/^# @hermes-clone-url://' || echo "")
     cur_registry=$(grep -E "^# @registry:" "$DOCKERFILE" | head -1 | sed 's/^# @registry://' || echo "")
     cur_pypi_mirror=$(grep -E "^# @pypi-mirror:" "$DOCKERFILE" | head -1 | sed 's/^# @pypi-mirror://' || echo "")
     if [ "$cur_registry" != "$expect_registry_marker" ]; then
@@ -278,6 +318,14 @@ else
         # 旧版 Dockerfile 无 @ssh marker(cur_ssh 为空)也会命中这里,自动重生成补上/去掉 SSH 挂载
         NEED_REGEN=1
         REGEN_REASON="SSH 配置变更(${cur_ssh:-无标记} → $expect_ssh_marker)"
+    elif [ "$cur_github_mirror" != "$expect_github_mirror_marker" ]; then
+        # 旧版 Dockerfile 无 @github-mirror marker(cur_github_mirror 为空)也会命中这里,自动重生成
+        NEED_REGEN=1
+        REGEN_REASON="GitHub 镜像配置变更(${cur_github_mirror:-无标记} → $expect_github_mirror_marker)"
+    elif [ "$cur_hermes_clone_url" != "$expect_hermes_clone_url_marker" ]; then
+        # 旧版 Dockerfile 无 @hermes-clone-url marker(cur_hermes_clone_url 为空)也会命中这里,自动重生成
+        NEED_REGEN=1
+        REGEN_REASON="Hermes 预克隆配置变更(${cur_hermes_clone_url:-无标记} → $expect_hermes_clone_url_marker)"
     elif [ "$WITH_QODER_CLI" -eq 1 ] && ! grep -q "qodercli" "$DOCKERFILE"; then
         NEED_REGEN=1
         REGEN_REASON="标记为含国际版但缺 qodercli 安装行,需重新生成"
@@ -318,6 +366,8 @@ if [ "$NEED_REGEN" -eq 1 ]; then
 # @codex-cli:__CODEX_CLI_MARKER__
 # @semgrep:__SEMGREP_MARKER__
 # @ssh:__SSH_MARKER__
+# @github-mirror:__GITHUB_MIRROR_MARKER__
+# @hermes-clone-url:__HERMES_CLONE_URL_MARKER__
 # @registry:__REGISTRY_MARKER__
 # @pypi-mirror:__PYPI_MIRROR_MARKER__
 FROM __BASE_IMAGE__
@@ -473,27 +523,44 @@ EOF
 USER root
 EOF
         fi
+        # ---- Hermes RUN:前置配置按开关动态生成(SSH known_hosts / GitHub 镜像加速)----
+        # 镜像加速用 GIT_CONFIG_GLOBAL 指向临时配置文件,只在本 RUN 内生效,
+        # 不写进最终镜像(避免运行时沙箱 clone 私有仓库被镜像劫持,认证走不了)。
+        HERMES_RUN_PREFIX=""
+        if [ -n "$HERMES_CLONE_URL" ]; then
+            # 预克隆到 FHS root 布局的代码目录(与 install.sh 解析结果一致):
+            # - 目录已存在(层缓存/重跑)时跳过 clone,install.sh 会走已有仓库的更新流程
+            # - 分支固定 main(install.sh 写死 BRANCH=main)
+            # - clone URL 即 origin remote,install.sh 的 fetch/pull 也走它,所以给镜像 URL 才能全程避开直连
+            HERMES_RUN_PREFIX="if [ ! -d /usr/local/lib/hermes-agent/.git ]; then git clone --depth 1 --branch main \"${HERMES_CLONE_URL}\" /usr/local/lib/hermes-agent; fi && "
+        fi
+        if [ "$WITH_SSH" -eq 1 ]; then
+            HERMES_RUN_PREFIX="${HERMES_RUN_PREFIX}mkdir -p /root/.ssh && (ssh-keyscan -T 5 github.com >> /root/.ssh/known_hosts 2>/dev/null || true) && "
+        fi
+        if [ -n "$GITHUB_MIRROR" ]; then
+            # HTTPS 与 SSH 两种 URL 都重写到镜像前缀(ghproxy 风格:<base>/<原URL>);
+            # install.sh 的 SSH clone 也会被重写为镜像 HTTPS,直接跳过 SSH 尝试
+            HERMES_RUN_PREFIX="${HERMES_RUN_PREFIX}export GIT_CONFIG_GLOBAL=/tmp/git-github-mirror.conf && git config --global url.\"${GITHUB_MIRROR}/https://github.com/\".insteadOf \"https://github.com/\" && git config --global url.\"${GITHUB_MIRROR}/https://github.com/\".insteadOf \"git@github.com:\" && export UV_PYTHON_INSTALL_MIRROR=${GITHUB_MIRROR}/https://github.com/astral-sh/python-build-standalone/releases/download && "
+        fi
+        # RUN 指令头(--ssh 时挂 SSH agent)
         if [ "$WITH_SSH" -eq 1 ]; then
             cat >> "$DOCKERFILE" <<'EOF'
 # SSH 转发(--ssh):BuildKit 把宿主机 SSH agent/key 挂进构建容器,install.sh 的 GitHub SSH clone 直接成功。
 # 预写 known_hosts:install.sh 用 GIT_SSH_COMMAND="ssh -o BatchMode=yes" 克隆,
 # BatchMode 禁止交互确认,host key 未知会直接失败,必须提前写入。
-RUN --mount=type=ssh \
-    mkdir -p /root/.ssh \
-    && (ssh-keyscan -T 5 github.com >> /root/.ssh/known_hosts 2>/dev/null || true) \
-    && curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh \
-    && bash /tmp/hermes-install.sh --skip-setup --skip-browser --non-interactive \
-    && rm -f /tmp/hermes-install.sh \
-    && hermes --version \
-    # install.sh 默认不装 [anthropic] extra;anthropic_messages 模式的 provider
-    # (anthropic/minimax)需要 anthropic Python 包,这里补装(版本与 pyproject.toml 对齐)
-    # uv venv 默认不含 pip,先 ensurepip 引导
-    && /usr/local/lib/hermes-agent/venv/bin/python -m ensurepip \
-    && /usr/local/lib/hermes-agent/venv/bin/python -m pip install 'anthropic==0.87.0'
 EOF
+            echo "RUN --mount=type=ssh \\" >> "$DOCKERFILE"
         else
             cat >> "$DOCKERFILE" <<'EOF'
-RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh \
+EOF
+            echo "RUN \\" >> "$DOCKERFILE"
+        fi
+        if [ -n "$HERMES_RUN_PREFIX" ]; then
+            # 去掉末尾 " && " 再补续行符
+            printf '    %s \\n' "${HERMES_RUN_PREFIX% && }" >> "$DOCKERFILE"
+        fi
+        cat >> "$DOCKERFILE" <<'EOF'
+    curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh \
     && bash /tmp/hermes-install.sh --skip-setup --skip-browser --non-interactive \
     && rm -f /tmp/hermes-install.sh \
     && hermes --version \
@@ -503,7 +570,6 @@ RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-i
     && /usr/local/lib/hermes-agent/venv/bin/python -m ensurepip \
     && /usr/local/lib/hermes-agent/venv/bin/python -m pip install 'anthropic==0.87.0'
 EOF
-        fi
     fi
 
     # ---- 追加 Codex CLI(OpenAI 官方,npm 安装)----
@@ -538,6 +604,8 @@ EOF
         -e "s/__CODEX_CLI_MARKER__/$expect_codex_cli_marker/" \
         -e "s/__SEMGREP_MARKER__/$expect_semgrep_marker/" \
         -e "s/__SSH_MARKER__/$expect_ssh_marker/" \
+        -e "s|__GITHUB_MIRROR_MARKER__|$expect_github_mirror_marker|" \
+        -e "s|__HERMES_CLONE_URL_MARKER__|$expect_hermes_clone_url_marker|" \
         -e "s/__REGISTRY_MARKER__/$expect_registry_marker/" \
         -e "s/__PYPI_MIRROR_MARKER__/$expect_pypi_mirror_marker/" \
         -e "s#__BASE_IMAGE__#$BASE_IMAGE#" \
@@ -551,6 +619,8 @@ EOF
     echo "     Codex(codex):$([ "$WITH_CODEX_CLI" -eq 1 ] && echo '装' || echo '不装')"
     echo "     Semgrep(semgrep):$([ "$WITH_SEMGREP" -eq 1 ] && echo '装' || echo '不装')"
     echo "     SSH 转发:$([ "$WITH_SSH" -eq 1 ] && echo '启用(--ssh)' || echo '关闭')"
+    echo "     GitHub 镜像:${GITHUB_MIRROR:-关闭(直连)}"
+    echo "     Hermes 预克隆:${HERMES_CLONE_URL:-关闭(install.sh 自 clone)}"
     echo "     镜像源:${REGISTRY:-默认(docker.io)}${APT_MIRROR:+ / apt=$APT_MIRROR}${NPM_MIRROR:+ / npm=$NPM_MIRROR}${PYPI_MIRROR:+ / pypi=$PYPI_MIRROR}"
 else
     echo "[INFO] $DOCKERFILE 已存在且符合要求,直接使用(如需重新生成请先删除)"
@@ -565,6 +635,8 @@ echo "       Hermes(hermes):$([ "$WITH_HERMES_CLI" -eq 1 ] && echo '含' || echo
 echo "       Codex(codex):$([ "$WITH_CODEX_CLI" -eq 1 ] && echo '含' || echo '不含')"
 echo "       Semgrep(semgrep):$([ "$WITH_SEMGREP" -eq 1 ] && echo '含' || echo '不含')"
 echo "       SSH 转发:$([ "$WITH_SSH" -eq 1 ] && echo '启用' || echo '关闭')"
+echo "       GitHub 镜像:${GITHUB_MIRROR:-关闭(直连)}"
+echo "       Hermes 预克隆:${HERMES_CLONE_URL:-关闭(install.sh 自 clone)}"
 echo "       镜像源:${REGISTRY:-默认(docker.io)}${APT_MIRROR:+ / apt=$APT_MIRROR}${NPM_MIRROR:+ / npm=$NPM_MIRROR}${PYPI_MIRROR:+ / pypi=$PYPI_MIRROR}"
 
 # --ssh 启用时把宿主机 SSH key/agent 传进构建(RUN --mount=type=ssh 才能用)
