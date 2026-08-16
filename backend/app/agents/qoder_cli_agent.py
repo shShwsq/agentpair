@@ -43,12 +43,12 @@ logger = logging.getLogger(__name__)
 AGENT_TYPE = "qoder_cli"
 
 # 测试连接时强制使用的最便宜模型配置(最小化 credits 消耗)
-# Qwen3.6-Flash:Flash 系列轻量模型,credits 最低
+# DeepSeek-V4-Flash:Flash 系列轻量模型,credits 最低
 # low:最少思考强度,几乎不思考
 # 注:文档 https://docs.qoder.cn/cli/model 称可用 --model efficient 切换经济分级,
 # 但实测 CLI 报 "Invalid model 'efficient'",分级模型只能通过 TUI /model 切换,
 # --model 仅接受具体模型名(Auto/Qwen3.x-*/DeepSeek-V4-*/GLM-5.2 等)
-_TEST_ACP_ARGS = ["--model", "Qwen3.6-Flash", "--reasoning-effort", "low"]
+_TEST_ACP_ARGS = ["--model", "DeepSeek-V4-Flash", "--reasoning-effort", "low"]
 
 
 # ============================================================
@@ -171,7 +171,7 @@ def test_credential_streaming(
 ) -> Generator[dict, None, None]:
     """流式版测试凭证:yield SSE 事件 dict(供路由层格式化为 SSE)
 
-    Qoder 特有:测试时强制用 Qwen3.6-Flash + low 思考强度,最小化 credits 消耗。
+    Qoder 特有:测试时强制用 DeepSeek-V4-Flash + low 思考强度,最小化 credits 消耗。
     """
     yield from _base_test_streaming(
         db, user_id, agent_type,
