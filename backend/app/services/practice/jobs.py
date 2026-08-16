@@ -13,10 +13,16 @@ POST /practice/generate 立即返回 job_id,后台线程执行生成,
 - job 完成/失败后保留 TTL 秒供轮询取结果,过期或超量时清理
 - job 记录 user_id,读取时校验,防跨用户窥探
 """
+import logging
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
+
+# [诊断] 锁等待超过该阈值(秒)时告警,定位全局锁竞争/后端卡死
+_LOCK_WAIT_THRESHOLD = 0.25
 
 # job 完成后保留时长(秒),供前端取结果
 _JOB_TTL_SECONDS = 3600
@@ -123,7 +129,10 @@ def append_event(job_id: str, etype: str, data: dict) -> None:
     """
     if etype not in ("finding", "token", "tool"):
         return
+    # [诊断] 测量获取全局锁的等待耗时(不含锁内处理),超阈值告警
+    _t = time.perf_counter()
     with _COND:
+        _w = time.perf_counter() - _t
         job = _JOBS.get(job_id)
         if job is None or job["status"] in ("done", "error"):
             return
@@ -135,6 +144,10 @@ def append_event(job_id: str, etype: str, data: dict) -> None:
             job["recent_text"] = (job["recent_text"] + delta)[-(_RECENT_TEXT_CHARS):]
         _append_locked(job, etype, data)
         _COND.notify_all()
+    if _w > _LOCK_WAIT_THRESHOLD:
+        logger.warning(
+            "[gen-jobs] append_event(%s) 锁等待 %.3fs(job=%s)", etype, _w, job_id,
+        )
 
 
 def _append_locked(job: dict, etype: str, data: dict) -> None:
@@ -168,7 +181,12 @@ def read_events(
       (timeout<=0 不等待)
     返回 {"job": 摘要快照, "events": [{"seq","type","data"}]}。
     """
+    # [诊断] SSE 读端锁等待耗时,超阈值说明与写端(token 洪流)严重竞争
+    _t = time.perf_counter()
     with _COND:
+        _w = time.perf_counter() - _t
+        if _w > _LOCK_WAIT_THRESHOLD:
+            logger.warning("[gen-jobs] read_events 锁等待 %.3fs(job=%s)", _w, job_id)
         job = _JOBS.get(job_id)
         if job is None or job["user_id"] != user_id:
             return None

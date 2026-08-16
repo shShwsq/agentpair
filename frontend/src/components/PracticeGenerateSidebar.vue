@@ -120,6 +120,30 @@ function appendOutput(text: string): void {
   scheduleScroll()
 }
 
+// [诊断] 重放/直播事件是否被 snapshotTerminal 正确拦截:
+// skip 应远大于 render;若终态 job 的 render 持续增长,说明拦截失效
+const diagCounters = { tokenRendered: 0, tokenSkipped: 0, findingRendered: 0, findingSkipped: 0 }
+let diagLogTimer: ReturnType<typeof setInterval> | null = null
+
+function ensureDiagLog(): void {
+  if (diagLogTimer) return
+  diagLogTimer = setInterval(() => {
+    const { tokenRendered, tokenSkipped, findingRendered, findingSkipped } = diagCounters
+    if (tokenRendered || tokenSkipped || findingRendered || findingSkipped) {
+      console.warn('[gen-sidebar] 事件处理计数', {
+        tokenRendered, tokenSkipped, findingRendered, findingSkipped,
+        streamTextLen: streamText.value.length,
+        snapshotTerminal: snapshotTerminal.value,
+        status: status.value,
+      })
+    }
+    diagCounters.tokenRendered = 0
+    diagCounters.tokenSkipped = 0
+    diagCounters.findingRendered = 0
+    diagCounters.findingSkipped = 0
+  }, 2000)
+}
+
 function resetStreamState(): void {
   status.value = 'pending'
   done.value = 0
@@ -141,6 +165,11 @@ function closeStream(): void {
 
 /** 切换订阅目标:重置展示状态并建立 SSE */
 function subscribeToJob(job: GenerateJobSummary): void {
+  // [诊断] 订阅目标与当前列表规模
+  console.warn('[gen-sidebar] 订阅 job', job.job_id, {
+    status: job.status, done: job.done, total: job.total, jobsLen: props.jobs.length,
+  })
+  ensureDiagLog()
   closeStream()
   selectedJobId.value = job.job_id
   resetStreamState()
@@ -165,6 +194,13 @@ function subscribeToJob(job: GenerateJobSummary): void {
 // ---- SSE 事件处理 ----
 
 function handleSnapshot(data: GenerateSnapshotData): void {
+  // [诊断] snapshot 状态决定后续重放事件是否被跳过,异常时重点排查这里
+  console.warn('[gen-sidebar] snapshot', {
+    status: data.status,
+    done: data.done,
+    total: data.total,
+    recentLen: data.recent_text?.length ?? 0,
+  })
   status.value = data.status
   done.value = data.done
   total.value = data.total
@@ -182,13 +218,21 @@ function handleSnapshot(data: GenerateSnapshotData): void {
 }
 
 function handleFinding(data: GenerateFindingData): void {
-  if (snapshotTerminal.value) return
+  if (snapshotTerminal.value) {
+    diagCounters.findingSkipped++
+    return
+  }
+  diagCounters.findingRendered++
   currentFinding.value = data.title
   appendOutput(`\n\n━━ 发现 ${data.index}/${data.total}:${data.title} ━━\n`)
 }
 
 function handleToken(data: GenerateTokenData): void {
-  if (snapshotTerminal.value) return
+  if (snapshotTerminal.value) {
+    diagCounters.tokenSkipped++
+    return
+  }
+  diagCounters.tokenRendered++
   appendOutput(data.delta)
 }
 
@@ -217,6 +261,12 @@ function handleError(data: GenerateErrorData): void {
 
 onBeforeUnmount(() => {
   closeStream()
+  // [诊断] 清理汇总定时器,并输出最终计数
+  if (diagLogTimer) {
+    clearInterval(diagLogTimer)
+    diagLogTimer = null
+  }
+  console.warn('[gen-sidebar] 组件卸载,累计计数', { ...diagCounters, streamTextLen: streamText.value.length })
 })
 
 // ============================================================

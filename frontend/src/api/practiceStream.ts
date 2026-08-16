@@ -55,16 +55,30 @@ export function subscribeGenerateStream(
   if (token) params.set('token', token)
 
   const url = `/api/practice/generate/${jobId}/stream?${params.toString()}`
+  console.log('[gen-sse] 发起订阅', jobId)
+  const t0 = performance.now()
   const es = new EventSource(url)
+
+  // [诊断] 事件到达计数,每 2 秒汇总一次,定位事件风暴
+  const counts: Record<string, number> = {}
+  const countTimer = setInterval(() => {
+    if (Object.keys(counts).length === 0) return
+    console.warn('[gen-sse] 近 2 秒事件量', { ...counts })
+    for (const k of Object.keys(counts)) delete counts[k]
+  }, 2000)
 
   const register = <T>(type: string, cb?: (data: T) => void, terminal = false) => {
     es.addEventListener(type, (e: MessageEvent) => {
+      counts[type] = (counts[type] ?? 0) + 1
       try {
         cb?.(JSON.parse(e.data) as T)
       } catch (err) {
         console.error('出题进度 SSE 事件解析失败:', err, e.data)
       }
-      if (terminal) es.close()
+      if (terminal) {
+        clearInterval(countTimer)
+        es.close()
+      }
     })
   }
 
@@ -75,6 +89,16 @@ export function subscribeGenerateStream(
   register('progress', callbacks.onProgress)
   register('done', callbacks.onDone, true)
   register('error', callbacks.onError, true)
+
+  // [诊断] 原生连接错误(e.data 为 undefined)与业务 error 事件区分;
+  // 同时记录连接耗时与断开原因,排查连接反复建立/中断
+  es.onerror = () => {
+    console.warn('[gen-sse] 连接错误/关闭', jobId, {
+      readyState: es.readyState,
+      sinceOpenMs: Math.round(performance.now() - t0),
+    })
+    clearInterval(countTimer)
+  }
 
   return es
 }

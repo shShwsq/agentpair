@@ -7,6 +7,7 @@
 import json
 import logging
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from collections.abc import Generator
 from uuid import UUID
@@ -237,29 +238,53 @@ def stream_generate_job(
     if gen_jobs.get_job(job_id, current_user.id) is None:
         raise HTTPException(status_code=404, detail="生成任务不存在或已过期")
 
+    # [诊断] SSE 连接生命周期:谁在什么时候订阅了哪个 job
+    logger.info("[practice-sse] 建立连接 job=%s user=%s", job_id, current_user.id)
+
     user_id = current_user.id
 
     def event_generator() -> Generator[str, None, None]:
-        snap = gen_jobs.snapshot(job_id, user_id)
-        if snap is None:
-            return  # 连接建立瞬间 job 已被清理
-        yield _sse_pack("snapshot", snap)
-        after_seq = 0
-        while True:
-            if _client_disconnected(request):
-                return
-            res = gen_jobs.read_events(job_id, user_id, after_seq, timeout=15.0)
-            if res is None:
-                return  # job 过期/被清理
-            for ev in res["events"]:
-                yield _sse_pack(ev["type"], ev["data"])
-                after_seq = ev["seq"]
-                if ev["type"] in ("done", "error"):
+        _t0 = time.monotonic()
+        _sent = 0
+        _reason = "unknown"
+        try:
+            snap = gen_jobs.snapshot(job_id, user_id)
+            if snap is None:
+                _reason = "job 已被清理"
+                return  # 连接建立瞬间 job 已被清理
+            # [诊断] snapshot 时的 job 状态(决定后续是否需要重放事件)
+            logger.info(
+                "[practice-sse] snapshot job=%s status=%s", job_id, snap["status"],
+            )
+            yield _sse_pack("snapshot", snap)
+            after_seq = 0
+            while True:
+                if _client_disconnected(request):
+                    _reason = "客户端断开"
                     return
-            if not res["events"]:
-                if res["job"]["status"] in ("done", "error"):
-                    return  # 已终态且事件已全部送达
-                yield ": keep-alive\n\n"
+                res = gen_jobs.read_events(job_id, user_id, after_seq, timeout=15.0)
+                if res is None:
+                    _reason = "job 过期/被清理"
+                    return  # job 过期/被清理
+                for ev in res["events"]:
+                    yield _sse_pack(ev["type"], ev["data"])
+                    after_seq = ev["seq"]
+                    _sent += 1
+                    if ev["type"] in ("done", "error"):
+                        _reason = f"终止事件 {ev['type']}"
+                        return
+                if not res["events"]:
+                    if res["job"]["status"] in ("done", "error"):
+                        _reason = "终态事件已送达"
+                        return  # 已终态且事件已全部送达
+                    yield ": keep-alive\n\n"
+        finally:
+            # [诊断] 连接结束原因 + 总推送事件数 + 存活时长;
+            # 若冻结期间这里不再输出且请求堆积,说明后端卡死
+            logger.info(
+                "[practice-sse] 结束 job=%s 原因=%s 推送事件=%d 时长=%.1fs",
+                job_id, _reason, _sent, time.monotonic() - _t0,
+            )
 
     return StreamingResponse(
         event_generator(),
