@@ -8,7 +8,7 @@ LLM 调用 —— Qoder CLI 内部自主完成 ReAct 循环(思考→工具→�
 事件翻译 / plan 提取)在 acp_base.py 中实现,本模块仅包含 Qoder 特有逻辑:
 - --yolo 启动参数(经 registry acp_args 配置,无需 post_session_setup)
 - print 模式快速 PAT 诊断(ACP 认证失败时的补充诊断)
-- 测试连接用 Qwen3.6-Flash + low 思考强度(最小化 credits 消耗)
+- 测试连接用 DeepSeek-V4-Flash + low 思考强度(最小化 credits 消耗)
 
 工作流程详见 acp_base.py 文档。
 """

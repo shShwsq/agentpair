@@ -23,7 +23,7 @@ bridge 不在每轮结束时停止:进程随沙箱会话存活,供后续轮次/r
 - post_session_setup(client, session_id, task):session/new 之后、prompt 之前执行
   (kimi 用此回调调 set_config_option 设置 yolo 模式)
 - test_acp_args:测试连接时额外的 CLI 参数
-  (qoder 用 ["--model","Qwen3.6-Flash","--reasoning-effort","low"])
+  (qoder 用 ["--model","DeepSeek-V4-Flash","--reasoning-effort","low"])
 """
 from __future__ import annotations
 
@@ -2786,7 +2786,7 @@ def test_credential_streaming(
         {"type": "error",    "data": {"ok": False, "message": "..."}}
 
     post_session_setup: 测试场景的 session/new 后回调(kimi 用此设置 yolo 模式)
-    test_acp_args: 测试时额外的 CLI 参数(qoder 用 ["--model","Qwen3.6-Flash",...])
+    test_acp_args: 测试时额外的 CLI 参数(qoder 用 ["--model","DeepSeek-V4-Flash",...])
     credential_env_builder: 动态构建凭证环境变量的回调(hermes 用此按 provider 映射);
         task=None(测试场景),wrapper 应默认 always_approve。
     pre_bridge_hook: bridge 启动前的沙箱准备回调(hermes 用此写 ~/.hermes/config.yaml);
