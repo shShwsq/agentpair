@@ -326,6 +326,14 @@ else
         # 旧版 Dockerfile 无 @hermes-clone-url marker(cur_hermes_clone_url 为空)也会命中这里,自动重生成
         NEED_REGEN=1
         REGEN_REASON="Hermes 预克隆配置变更(${cur_hermes_clone_url:-无标记} → $expect_hermes_clone_url_marker)"
+    elif [ "$cur_hermes_local" != "$expect_hermes_local_marker" ]; then
+        # 旧版 Dockerfile 无 @hermes-local marker(cur_hermes_local 为空)也会命中这里,自动重生成
+        NEED_REGEN=1
+        REGEN_REASON="Hermes 本地目录配置变更(${cur_hermes_local:-无标记} → $expect_hermes_local_marker)"
+    elif grep -q '\\n' "$DOCKERFILE" 2>/dev/null; then
+        # 旧版生成的 RUN 续行用 printf '\\n' 输出了字面 \n(sh 报 bad variable name),兜底重生成
+        NEED_REGEN=1
+        REGEN_REASON="检测到 RUN 续行 bug(字面 \\n),需重新生成"
     elif [ "$WITH_QODER_CLI" -eq 1 ] && ! grep -q "qodercli" "$DOCKERFILE"; then
         NEED_REGEN=1
         REGEN_REASON="标记为含国际版但缺 qodercli 安装行,需重新生成"
@@ -543,6 +551,16 @@ EOF
             HERMES_RUN_PREFIX="${HERMES_RUN_PREFIX}export GIT_CONFIG_GLOBAL=/tmp/git-github-mirror.conf && git config --global url.\"${GITHUB_MIRROR}/https://github.com/\".insteadOf \"https://github.com/\" && git config --global url.\"${GITHUB_MIRROR}/https://github.com/\".insteadOf \"git@github.com:\" && export UV_PYTHON_INSTALL_MIRROR=${GITHUB_MIRROR}/https://github.com/astral-sh/python-build-standalone/releases/download && "
         fi
         # RUN 指令头(--ssh 时挂 SSH agent)
+        cat >> "$DOCKERFILE" <<'EOF'
+# install.sh 默认不装 [anthropic] extra;anthropic_messages 模式的 provider
+# (anthropic/minimax)需要 anthropic Python 包,这里补装(版本与 pyproject.toml 对齐)。
+# uv venv 默认不含 pip,先 ensurepip 引导。本 RUN 内不写 # 注释行(续行合并后 # 会吞后续命令)。
+#
+# sed 容忍 npm 失败:install.sh 的 install_node_deps 给 hermes-agent monorepo 跑 npm install
+# (含 electron/agent-browser 等浏览器工具依赖,二进制从 github releases 下载,国内必挂),
+# 且新版 install.sh 中 npm 失败会直接退出(--skip-browser 只管 Playwright 不管 npm install)。
+# AgentPair 用 hermes acp(纯 Python ACP)不需要浏览器工具,改成 || true 容忍失败继续安装。
+EOF
         if [ "$WITH_SSH" -eq 1 ]; then
             cat >> "$DOCKERFILE" <<'EOF'
 # SSH 转发(--ssh):BuildKit 把宿主机 SSH agent/key 挂进构建容器,install.sh 的 GitHub SSH clone 直接成功。
@@ -556,17 +574,15 @@ EOF
             echo "RUN \\" >> "$DOCKERFILE"
         fi
         if [ -n "$HERMES_RUN_PREFIX" ]; then
-            # 去掉末尾 " && " 再补续行符
-            printf '    %s \\n' "${HERMES_RUN_PREFIX% && }" >> "$DOCKERFILE"
+            # 末尾已带 " && ",直接续行连接下一条命令(curl 行);echo 输出行尾续行符 "\"
+            echo "    ${HERMES_RUN_PREFIX}\\" >> "$DOCKERFILE"
         fi
         cat >> "$DOCKERFILE" <<'EOF'
     curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh \
-    && bash /tmp/hermes-install.sh --skip-setup --skip-browser --non-interactive \
+    && sed -i 's/install_node_deps || return/install_node_deps || true/g' /tmp/hermes-install.sh \
+    && bash /tmp/hermes-install.sh --skip-setup --skip-browser --skip-computer-use --non-interactive \
     && rm -f /tmp/hermes-install.sh \
     && hermes --version \
-    # install.sh 默认不装 [anthropic] extra;anthropic_messages 模式的 provider
-    # (anthropic/minimax)需要 anthropic Python 包,这里补装(版本与 pyproject.toml 对齐)
-    # uv venv 默认不含 pip,先 ensurepip 引导
     && /usr/local/lib/hermes-agent/venv/bin/python -m ensurepip \
     && /usr/local/lib/hermes-agent/venv/bin/python -m pip install 'anthropic==0.87.0'
 EOF

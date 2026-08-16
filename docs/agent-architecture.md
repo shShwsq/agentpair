@@ -514,7 +514,7 @@ ExecutorAgent (ABC)
 
 | wrapper | 文件 | 特有逻辑 |
 |---------|------|---------|
-| `qoder_cli_agent` | [qoder_cli_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/qoder_cli_agent.py) | `--yolo` 在 acp_args 中，仅 `always_approve` 模式注入；`per_command` 模式过滤掉 `--yolo` 让 Qoder 进入审批模式发 `request_permission`；模型经 `--model` CLI 参数；测试时强制 `Qwen3.6-Flash + low` 最小化 credits |
+| `qoder_cli_agent` | [qoder_cli_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/qoder_cli_agent.py) | `--yolo` 在 acp_args 中，仅 `always_approve` 模式注入；`per_command` 模式过滤掉 `--yolo` 让 Qoder 进入审批模式发 `request_permission`；模型经 `--model` CLI 参数；测试时强制 `DeepSeek-V4-Flash + low` 最小化 credits |
 | `kimi_cli_agent` | [kimi_cli_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/kimi_cli_agent.py) | `_kimi_post_session_setup`：session/new 后调 `set_config_option(mode=yolo/auto, thinking=effort)`；`per_command` 模式设 `mode=default` 让 Kimi 发 `request_permission` |
 | `hermes_cli_agent` | [hermes_cli_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/hermes_cli_agent.py) | `_hermes_credential_env_builder`：按 provider 动态映射 API Key 环境变量名；`_hermes_pre_bridge_hook`：写 `~/.hermes/config.yaml`（模型/provider/base_url）；仅 `always_approve` 模式注入 `HERMES_YOLO_MODE=1`，`per_command` 模式不注入让 Hermes 进入审批模式 |
 | `codex_cli_agent` | [codex_cli_agent.py](file:///c:/Users/njwjx/Desktop/coding/AgentPair/backend/app/agents/codex_cli_agent.py) | `_codex_pre_bridge_hook`：写 `~/.codex/config.toml`（模型/provider/approval_policy=never/sandbox_mode=danger-full-access）；使用 `codex_bridge.py`（非默认 `acp_bridge`）；**`per_command` 模式不被 `codex exec --json` 支持（非交互模式），自动降级为 `always_approve` 并警告** |
