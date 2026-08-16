@@ -326,6 +326,29 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 For production, consider `gunicorn -k uvicorn.workers.UvicornWorker` (Linux) or containerized deployment.
 
+> **Note**: The backend holds in-process state (practice generation jobs, task SSE event streams). **Do not run multiple workers**; use `--workers 1` with gunicorn, or the Docker deployment below.
+
+### Docker one-click deployment (recommended)
+
+Use the Docker Compose setup under `deploy/`: 2 containers (`backend` + `frontend/nginx`). External dependencies (Alibaba Cloud RDS PostgreSQL, OpenSandbox on another server) stay outside the compose stack and are connected via environment variables.
+
+```bash
+# On a Linux server (Docker + Compose plugin required)
+git clone <repo-url> AgentPair && cd AgentPair/deploy
+cp .env.production.example .env.production   # fill in DB / secrets / sandbox URL / OAuth
+bash deploy.sh                               # build + start
+```
+
+Key points:
+
+- **Backend is forced to a single worker** (uvicorn `--workers 1`): practice jobs and task SSE streams are in-process state; multiple workers break event delivery
+- **nginx disables `proxy_buffering`**: task/practice streams are realtime SSE, buffering freezes the frontend
+- **`/api` prefix is stripped when proxying**: frontend baseURL is `/api`, nginx proxies to the backend without the prefix
+- **Persistent volumes**: `backend/logs` (practice_generate.log / perf.log / acp), `user_skills` (user-uploaded skills), `_repos`
+- After changing `VITE_*` variables (e.g. OAuth callbacks), re-run `bash deploy.sh` (build-time injection)
+
+See [deploy/.env.production.example](deploy/.env.production.example) for per-variable comments.
+
 ## Documentation
 
 - [Specification](docs/spec.md) — Full product spec and architecture design (in Chinese)
