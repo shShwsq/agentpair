@@ -100,6 +100,10 @@ const resumingRef = ref(false)
 let unmountedFlag = false
 /** 对话流容器引用,用于自动滚动到底部 */
 const conversationRef = ref<HTMLElement | null>(null)
+/** 自动跟随底部开关:用户手动上滚时暂停,滚回底部附近自动恢复
+ *  (参考 PracticeGenerateSidebar 的 followBottom 模式;流式期间高频
+ *  thinking_delta 不再无条件覆盖用户的滚动位置) */
+const followBottom = ref(true)
 
 /** 工作区侧栏是否折叠(默认折叠,完全隐藏) */
 const workspaceCollapsed = ref(true)
@@ -639,6 +643,8 @@ async function initTask(): Promise<void> {
     task.value = taskData
     error.value = ''
     loading.value = false
+    // 初始加载完成:强制置底并重置跟随开关(语义上的"应跳转"时机)
+    forceScrollToBottom()
     // [诊断] 任务快照拉取:记录后端返回的状态(与前端显示对拍)
     clientLog(taskId, 'task_fetch', {
       status: taskData.status,
@@ -1193,10 +1199,30 @@ function extractPlanFromHistory(conversations: Conversation[]): void {
   }
 }
 
+/** 对话流滚动监听:用户离开底部 → 暂停跟随;滚回底部附近 → 恢复跟随。
+ * 程序化置底总是恰好停在底部,proximity 判断天然不会误判。 */
+function handleConversationScroll(): void {
+  const el = conversationRef.value
+  if (!el) return
+  followBottom.value = el.scrollTop + el.clientHeight >= el.scrollHeight - 12
+}
+
+/** 仅在跟随状态下置底(SSE 增量事件调用;用户上滚回看时不打扰) */
 function scrollToBottom(): void {
+  if (!followBottom.value) return
   if (conversationRef.value) {
     conversationRef.value.scrollTop = conversationRef.value.scrollHeight
   }
+}
+
+/** 强制置底并重置跟随开关(初始加载/发送消息/重试等语义上的"应跳转"时机) */
+function forceScrollToBottom(): void {
+  followBottom.value = true
+  nextTick(() => {
+    if (conversationRef.value) {
+      conversationRef.value.scrollTop = conversationRef.value.scrollHeight
+    }
+  })
 }
 
 onMounted(initTask)
@@ -2242,7 +2268,7 @@ function handleMessageSent(_resp: SendMessageResponse): void {
     resumingRef.value = true
     connectSSE(String(task.value.id))
   }
-  nextTick(scrollToBottom)
+  forceScrollToBottom()
 }
 
 /** 用户消息发送失败:展示错误提示 */
@@ -2289,7 +2315,7 @@ async function handleRetry(): Promise<void> {
       // 标记 resume 窗口(同 handleMessageSent:onDone 校验竞态误推)
       resumingRef.value = true
       connectSSE(String(task.value.id))
-      nextTick(scrollToBottom)
+      forceScrollToBottom()
     } else {
       error.value = resp.message || '重试启动失败'
     }
@@ -2727,7 +2753,7 @@ function toggleResult(id: string): void {
           </button>
         </template>
       </div>
-      <div ref="conversationRef" class="main-scroll">
+      <div ref="conversationRef" class="main-scroll" @scroll="handleConversationScroll">
       <!-- 加载中 -->
       <div v-if="loading" class="loading-state">
         <div class="spinner-lg" />
