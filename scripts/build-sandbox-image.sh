@@ -67,11 +67,6 @@ GITHUB_MIRROR=""
 # 建议直接给镜像 URL(如 https://ghfast.top/https://github.com/NousResearch/hermes-agent.git)。
 # 分支必须 main(install.sh 写死 BRANCH=main),否则 checkout 失败。
 HERMES_CLONE_URL=""
-# Hermes 源码本地目录(--hermes-local-dir):直接用宿主机已 clone 的仓库(如 /usr/local/lib/hermes-agent),
-# 构建时 COPY 进容器(含 .git,install.sh 检测到已有 git 仓库会跳过 clone,直接装依赖)。
-# 注意:install.sh 的 update 流程会 git fetch origin(走 origin URL),容器内必须可达——
-# 建议搭配 --github-mirror(把 SSH/HTTPS clone 都重写到镜像)。与 --hermes-clone-url 互斥。
-HERMES_LOCAL_DIR=""
 # 镜像源(国内加速),默认空 = 用官方源
 # - REGISTRY:Docker 基础镜像源前缀,如 docker.m.daocloud.io(非空时 FROM $REGISTRY/ubuntu:24.04)
 # - APT_MIRROR:apt 源,目前支持 aliyun(空 = 不换)
@@ -164,15 +159,6 @@ while [ $# -gt 0 ]; do
             HERMES_CLONE_URL="$2"
             shift 2
             ;;
-        --hermes-local-dir)
-            # 下一个参数为宿主机已 clone 的 Hermes 源码目录
-            if [ $# -lt 2 ]; then
-                echo "[FAIL] --hermes-local-dir 需要一个参数(如 --hermes-local-dir /usr/local/lib/hermes-agent)"
-                exit 1
-            fi
-            HERMES_LOCAL_DIR="$2"
-            shift 2
-            ;;
         --registry)
             # 下一个参数为镜像源前缀
             if [ $# -lt 2 ]; then
@@ -216,10 +202,6 @@ while [ $# -gt 0 ]; do
             echo "                          install.sh(它检测到已有 git 仓库会跳过 clone 直接装依赖);"
             echo "                          URL 即 origin remote(install.sh 的 fetch 也走它),建议给镜像 URL;"
             echo "                          分支必须 main。与 --github-mirror/--ssh 可叠加"
-            echo "  --hermes-local-dir <dir> 直接用宿主机已 clone 的 Hermes 源码目录(如 /usr/local/lib/hermes-agent),"
-            echo "                          构建时 COPY 进容器(保留 .git,install.sh 跳过 clone 直接装依赖);"
-            echo "                          install.sh 的 fetch 仍走 origin URL,建议搭配 --github-mirror;"
-            echo "                          与 --hermes-clone-url 互斥"
             echo ""
             echo "镜像源(服务器在国内时推荐,避免 docker.io 拉取超时):"
             echo "  --cn-mirror            一键国内加速(Docker DaoCloud + apt 阿里云 + npm npmmirror + PyPI 阿里云)"
@@ -237,25 +219,6 @@ while [ $# -gt 0 ]; do
             ;;
     esac
 done
-
-# ---------- Hermes 源码来源校验 ----------
-# --hermes-local-dir 与 --hermes-clone-url 互斥(一个用本地目录,一个容器内 clone)
-if [ -n "$HERMES_LOCAL_DIR" ] && [ -n "$HERMES_CLONE_URL" ]; then
-    echo "[FAIL] --hermes-local-dir 与 --hermes-clone-url 互斥,只能选一个"
-    exit 1
-fi
-if [ -n "$HERMES_LOCAL_DIR" ]; then
-    if [ ! -d "$HERMES_LOCAL_DIR/.git" ]; then
-        echo "[FAIL] $HERMES_LOCAL_DIR 不是 git 仓库(缺 .git),install.sh 需要它识别已有安装"
-        exit 1
-    fi
-    # 分支提示(install.sh 写死 BRANCH=main;fetch 成功后 checkout 也能自动建 main,这里仅提醒)
-    CUR_BRANCH=$(git -C "$HERMES_LOCAL_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "detached")
-    if [ "$CUR_BRANCH" != "main" ]; then
-        echo "[WARN] $HERMES_LOCAL_DIR 当前分支是 $CUR_BRANCH(install.sh 写死 BRANCH=main)"
-        echo "       建议先执行:git -C $HERMES_LOCAL_DIR checkout main"
-    fi
-fi
 
 # ---------- 前置检查 ----------
 if ! command -v docker >/dev/null 2>&1; then
@@ -310,7 +273,6 @@ expect_semgrep_marker=$([ "$WITH_SEMGREP" -eq 1 ] && echo "yes" || echo "no")
 expect_ssh_marker=$([ "$WITH_SSH" -eq 1 ] && echo "yes" || echo "no")
 expect_github_mirror_marker="${GITHUB_MIRROR:-default}"
 expect_hermes_clone_url_marker="${HERMES_CLONE_URL:-default}"
-expect_hermes_local_marker=$([ -n "$HERMES_LOCAL_DIR" ] && echo "yes" || echo "no")
 
 if [ ! -f "$DOCKERFILE" ]; then
     NEED_REGEN=1
@@ -325,7 +287,6 @@ else
     cur_ssh=$(grep -E "^# @ssh:" "$DOCKERFILE" | head -1 | sed 's/.*://' || echo "")
     cur_github_mirror=$(grep -E "^# @github-mirror:" "$DOCKERFILE" | head -1 | sed 's/^# @github-mirror://' || echo "")
     cur_hermes_clone_url=$(grep -E "^# @hermes-clone-url:" "$DOCKERFILE" | head -1 | sed 's/^# @hermes-clone-url://' || echo "")
-    cur_hermes_local=$(grep -E "^# @hermes-local:" "$DOCKERFILE" | head -1 | sed 's/.*://' || echo "")
     cur_registry=$(grep -E "^# @registry:" "$DOCKERFILE" | head -1 | sed 's/^# @registry://' || echo "")
     cur_pypi_mirror=$(grep -E "^# @pypi-mirror:" "$DOCKERFILE" | head -1 | sed 's/^# @pypi-mirror://' || echo "")
     if [ "$cur_registry" != "$expect_registry_marker" ]; then
@@ -415,7 +376,6 @@ if [ "$NEED_REGEN" -eq 1 ]; then
 # @ssh:__SSH_MARKER__
 # @github-mirror:__GITHUB_MIRROR_MARKER__
 # @hermes-clone-url:__HERMES_CLONE_URL_MARKER__
-# @hermes-local:__HERMES_LOCAL_MARKER__
 # @registry:__REGISTRY_MARKER__
 # @pypi-mirror:__PYPI_MIRROR_MARKER__
 FROM __BASE_IMAGE__
@@ -571,19 +531,6 @@ EOF
 USER root
 EOF
         fi
-        # ---- 宿主机预克隆源码(--hermes-local-dir):COPY 进容器,install.sh 跳过 clone ----
-        if [ -n "$HERMES_LOCAL_DIR" ]; then
-            cat >> "$DOCKERFILE" <<'EOF'
-# ---- Hermes 源码(宿主机预克隆目录,--hermes-local-dir)----
-# 直接把宿主机 clone 好的仓库 COPY 进镜像(含 .git),install.sh 检测到已有 git 仓库会跳过 clone,
-# 走 update 流程(stash → fetch → checkout → pull → 装依赖)。
-# 注意:update 的 git fetch origin 走 origin URL,容器内必须可达——建议搭配 --github-mirror
-# (insteadOf 会把 SSH/HTTPS 都重写到镜像,见下方 RUN)。
-# .git 单独 COPY:构建上下文里改名 hermes-git-meta,绕开 .dockerignore 的 .git 排除规则。
-COPY hermes-local/ /usr/local/lib/hermes-agent/
-COPY hermes-git-meta/ /usr/local/lib/hermes-agent/.git/
-EOF
-        fi
         # ---- Hermes RUN:前置配置按开关动态生成(SSH known_hosts / GitHub 镜像加速)----
         # 镜像加速用 GIT_CONFIG_GLOBAL 指向临时配置文件,只在本 RUN 内生效,
         # 不写进最终镜像(避免运行时沙箱 clone 私有仓库被镜像劫持,认证走不了)。
@@ -675,7 +622,6 @@ EOF
         -e "s/__SSH_MARKER__/$expect_ssh_marker/" \
         -e "s|__GITHUB_MIRROR_MARKER__|$expect_github_mirror_marker|" \
         -e "s|__HERMES_CLONE_URL_MARKER__|$expect_hermes_clone_url_marker|" \
-        -e "s/__HERMES_LOCAL_MARKER__/$expect_hermes_local_marker/" \
         -e "s/__REGISTRY_MARKER__/$expect_registry_marker/" \
         -e "s/__PYPI_MIRROR_MARKER__/$expect_pypi_mirror_marker/" \
         -e "s#__BASE_IMAGE__#$BASE_IMAGE#" \
@@ -691,7 +637,6 @@ EOF
     echo "     SSH 转发:$([ "$WITH_SSH" -eq 1 ] && echo '启用(--ssh)' || echo '关闭')"
     echo "     GitHub 镜像:${GITHUB_MIRROR:-关闭(直连)}"
     echo "     Hermes 预克隆:${HERMES_CLONE_URL:-关闭(install.sh 自 clone)}"
-    echo "     Hermes 本地目录:${HERMES_LOCAL_DIR:-关闭(install.sh 自 clone)}"
     echo "     镜像源:${REGISTRY:-默认(docker.io)}${APT_MIRROR:+ / apt=$APT_MIRROR}${NPM_MIRROR:+ / npm=$NPM_MIRROR}${PYPI_MIRROR:+ / pypi=$PYPI_MIRROR}"
 else
     echo "[INFO] $DOCKERFILE 已存在且符合要求,直接使用(如需重新生成请先删除)"
@@ -708,7 +653,6 @@ echo "       Semgrep(semgrep):$([ "$WITH_SEMGREP" -eq 1 ] && echo '含' || echo 
 echo "       SSH 转发:$([ "$WITH_SSH" -eq 1 ] && echo '启用' || echo '关闭')"
 echo "       GitHub 镜像:${GITHUB_MIRROR:-关闭(直连)}"
 echo "       Hermes 预克隆:${HERMES_CLONE_URL:-关闭(install.sh 自 clone)}"
-echo "       Hermes 本地目录:${HERMES_LOCAL_DIR:-关闭(install.sh 自 clone)}"
 echo "       镜像源:${REGISTRY:-默认(docker.io)}${APT_MIRROR:+ / apt=$APT_MIRROR}${NPM_MIRROR:+ / npm=$NPM_MIRROR}${PYPI_MIRROR:+ / pypi=$PYPI_MIRROR}"
 
 # --ssh 启用时把宿主机 SSH key/agent 传进构建(RUN --mount=type=ssh 才能用)
@@ -722,21 +666,7 @@ if [ "$WITH_SSH" -eq 1 ]; then
     fi
     echo "[INFO] SSH 转发已启用($SSH_BUILD_ARGS),Hermes install.sh 将用宿主机 SSH key clone"
 fi
-if [ -n "$HERMES_LOCAL_DIR" ]; then
-    # 复制到构建上下文(上下文是脚本运行目录):hermes-local 装源码,hermes-git-meta 装 .git
-    # (改名的原因:.dockerignore 的 .git 规则会排除构建上下文里所有 .git 目录)
-    echo "[INFO] 复制 Hermes 源码到构建上下文(hermes-local/ + hermes-git-meta/,保留 .git)..."
-    rm -rf hermes-local hermes-git-meta
-    cp -a "$HERMES_LOCAL_DIR" hermes-local
-    cp -a "$HERMES_LOCAL_DIR/.git" hermes-git-meta
-    SRC_SIZE=$(du -sh "$HERMES_LOCAL_DIR" 2>/dev/null | cut -f1)
-    echo "       源码体积: ${SRC_SIZE:-?}(上下文打包会多花一些时间)"
-fi
 DOCKER_BUILDKIT=1 docker build $SSH_BUILD_ARGS -f "$DOCKERFILE" -t "$IMAGE_NAME:$IMAGE_TAG" .
-if [ -n "$HERMES_LOCAL_DIR" ]; then
-    # 清理上下文中的临时副本(避免下次构建把大目录打进上下文)
-    rm -rf hermes-local hermes-git-meta
-fi
 echo "[OK] 镜像构建完成"
 
 # ---------- 验证镜像内工具 ----------
