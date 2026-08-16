@@ -15,6 +15,8 @@ from typing import Any
 
 from app.tools import sandbox_tools
 from app.tools.cve_tools import query_cve
+from app.tools.dependency_tools import list_dependencies
+from app.tools.quality_tools import run_coverage, run_lint
 from app.tools.skill_tool import (
     list_available_skills,
     run_skill,
@@ -93,9 +95,13 @@ TOOL_FUNCTIONS: dict[str, Any] = {
     "run_python_code": sandbox_tools.run_python_code,
     "git_log": sandbox_tools.git_log,
     "git_blame": sandbox_tools.git_blame,
+    "git_diff": sandbox_tools.git_diff,
     "run_command": sandbox_tools.run_command,
     "str_replace_editor": sandbox_tools.str_replace_editor,
     "query_cve": query_cve,
+    "list_dependencies": list_dependencies,
+    "run_lint": run_lint,
+    "run_coverage": run_coverage,
     "list_skills": list_available_skills,
     "skill": run_skill,
 }
@@ -393,6 +399,41 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "git_diff",
+            "description": (
+                "查看两个 ref(提交/分支/标签)之间的结构化 diff(增量审查/演化分析用)。"
+                "默认看最近一次提交的变更(base=HEAD~1 head=HEAD);"
+                "也可比较分支(如 base='main' head='feature')。"
+                "大区间先用 stat_only=true 看每文件增删行数总览,再针对重点文件拉全量 diff。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string", "description": "clone_repo 返回的 path"},
+                    "base": {
+                        "type": "string",
+                        "description": "起始 ref,默认 HEAD~1。可传提交哈希/分支名/标签",
+                    },
+                    "head": {
+                        "type": "string",
+                        "description": "结束 ref,默认 HEAD",
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "可选,只看某文件的 diff(仓库内相对路径)",
+                    },
+                    "stat_only": {
+                        "type": "boolean",
+                        "description": "True=只返回每文件增删行数(不含 patch),默认 False",
+                    },
+                },
+                "required": ["repo_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_command",
             "description": (
                 "在沙箱里执行任意 shell 命令(与 CLI 的 bash 工具对齐)。"
@@ -470,6 +511,64 @@ _ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "ecosystem": {"type": "string", "description": "包管理系统,默认 python"},
                 },
                 "required": ["package_name", "version"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_dependencies",
+            "description": (
+                "扫描仓库清单文件(requirements*.txt/pyproject.toml/package.json/"
+                "package-lock.json/go.mod/pom.xml),返回结构化依赖清单。"
+                "依赖漏洞审计时先调它拿清单,再对 version 非空的依赖逐个调 query_cve。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string", "description": "clone_repo 返回的 path"},
+                },
+                "required": ["repo_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_lint",
+            "description": (
+                "运行静态 lint 检查,返回结构化问题清单(file/line/code/message)。"
+                "Python 走 ruff(local 模式需宿主机已装,sandbox 模式自动安装);"
+                "JS/TS 仅在仓库自带 eslint 配置时尝试,否则建议改用 run_semgrep。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string", "description": "clone_repo 返回的 path"},
+                    "language": {
+                        "type": "string",
+                        "description": "auto(默认,按清单文件探测)/ python / javascript",
+                    },
+                },
+                "required": ["repo_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_coverage",
+            "description": (
+                "跑测试并解析覆盖率,返回总覆盖率 + 未覆盖行数 top 文件。"
+                "Python 项目走 pytest --cov(沙箱自动安装);检测到 vitest 的 JS 项目尝试 vitest。"
+                "测试覆盖度审查时优先用它,拿不到结果再降级 run_command 手跑。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string", "description": "clone_repo 返回的 path"},
+                },
+                "required": ["repo_path"],
             },
         },
     },

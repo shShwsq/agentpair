@@ -65,8 +65,9 @@ REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行�
 你通过"思考-行动-观察"循环工作:
 1. **思考**:分析当前状态,决定下一步该做什么
 2. **行动**:调用工具(clone_repo / list_files / find_files / read_file /
-   search_code / run_semgrep / query_cve / write_file / run_python_code /
-   git_log / git_blame / run_command / str_replace_editor / list_skills / skill 等)
+   search_code / run_semgrep / query_cve / list_dependencies / write_file /
+   run_python_code / git_log / git_blame / git_diff / run_command / run_lint /
+   run_coverage / str_replace_editor / list_skills / skill 等)
 3. **观察**:查看工具返回的结果
 4. 重复以上步骤,直到完成分析
 
@@ -78,12 +79,16 @@ REACT_AGENT_SYSTEM_PROMPT = """你是 react_agent(执行智能体),负责执行�
 - search_code:正则搜索代码,支持 content/files_with_matches/count 三种输出模式
 - run_semgrep:运行 Semgrep 静态分析(local 模式需宿主机已装 semgrep,sandbox 模式自动安装)
 - query_cve:查询指定包+版本的已知 CVE 漏洞(OSV API,按依赖逐个查)
+- list_dependencies:扫描仓库清单文件返回结构化依赖清单(依赖审计先调它,再逐个 query_cve)
 - write_file:在工作区写产物(PoC 脚本、报告等);改仓库代码用 str_replace_editor
 - run_python_code:在沙箱执行 Python 代码,验证 PoC / 跑分析脚本 / 执行测试
 - run_command:在沙箱执行任意 shell 命令(构建/测试/脚本,如 pytest、npm test),与 CLI 的 bash 对齐
+- run_lint:静态 lint 检查返回结构化问题清单(Python 走 ruff;JS 需仓库自带 eslint 配置)
+- run_coverage:跑测试并解析覆盖率(总覆盖率 + 未覆盖 top 文件),测试覆盖度审查优先用它
 - str_replace_editor:对仓库文件做精准编辑(create/str_replace/insert),就地改代码(git diff/checkout 可逆)
 - git_log:查看仓库提交历史(默认 --oneline),理解代码演化、定位改动何时引入(需完整克隆,默认即完整)
 - git_blame:追溯某文件每行的最后修改提交/作者,定位"这行是谁/哪次提交改的"(需完整克隆)
+- git_diff:查看两个 ref 间的结构化 diff(增量审查;默认最近一次提交,大区间先用 stat_only 总览)
 - list_skills / skill:查看并加载专家技能(获取 SKILL.md 指令后按其指引执行)
 
 ## 工作原则
@@ -919,6 +924,12 @@ def _build_tool_intent(fn_name: str, fn_args: dict) -> str:
             f"查询 {fn_args.get('package_name', '?')}@"
             f"{fn_args.get('version', '?')} 的已知漏洞"
         )
+    elif fn_name == "list_dependencies":
+        intent = "解析依赖清单"
+    elif fn_name == "run_lint":
+        intent = "运行 lint 静态检查"
+    elif fn_name == "run_coverage":
+        intent = "运行测试并解析覆盖率"
     elif fn_name == "write_file":
         mode = fn_args.get("mode", "write")
         intent = f"{mode == 'append' and '追加' or '写入'}文件 {fn_args.get('file_path', '?')}"
@@ -932,6 +943,10 @@ def _build_tool_intent(fn_name: str, fn_args: dict) -> str:
     elif fn_name == "git_blame":
         fp = fn_args.get("file_path", "?")
         intent = f"追溯文件来源: {fp}"
+    elif fn_name == "git_diff":
+        base = fn_args.get("base", "HEAD~1")
+        head = fn_args.get("head", "HEAD")
+        intent = f"查看变更 diff: {base}..{head}"
     elif fn_name == "run_command":
         cmd = (fn_args.get("command", "") or "")[:40]
         intent = f"执行命令: {cmd}" if cmd else "执行 shell 命令"
@@ -1118,13 +1133,17 @@ _TOOL_STEP_KEYWORDS: dict[str, list[str]] = {
     "find_files":      ["查找", "定位", "文件", "find"],
     "read_file":       ["读取", "依赖", "清单", "read"],
     "query_cve":       ["依赖", "cve", "漏洞"],
+    "list_dependencies": ["依赖", "清单", "dependency", "锁文件", "lockfile"],
     "write_file":      ["写入", "补丁", "poc", "报告", "生成", "write"],
     "run_python_code": ["执行", "运行", "验证", "测试", "poc", "run"],
     "search_code":     ["注入", "密钥", "反序列化", "ssrf", "路径", "认证", "授权",
                          "审计", "代码审计", "search"],
     "run_semgrep":     ["semgrep", "sast", "静态分析"],
+    "run_lint":        ["lint", "风格", "规范", "静态检查", "ruff", "eslint"],
+    "run_coverage":    ["覆盖率", "覆盖", "测试", "coverage"],
     "git_log":         ["历史", "提交", "log", "演进"],
     "git_blame":       ["追溯", "blame", "来源", "谁改"],
+    "git_diff":        ["diff", "变更", "增量", "改动", "对比"],
     "run_command":     ["执行", "运行", "跑", "测试", "构建", "build", "test", "run", "shell"],
     "str_replace_editor": ["编辑", "修改", "替换", "插入", "补丁", "patch", "edit", "create"],
     "list_skills":     ["skill", "技能"],
