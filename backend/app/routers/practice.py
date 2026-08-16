@@ -843,8 +843,9 @@ def list_questions(
             KnowledgePoint.user_id == current_user.id
         ).all()
     }
-    attempt_stats = dict(
-        db.query(
+    attempt_stats = {
+        qid: (cnt or 0, corr or 0)
+        for qid, cnt, corr in db.query(
             Attempt.question_id,
             sa_func.count(Attempt.id),
             sa_func.sum(cast(Attempt.is_correct, Integer)),
@@ -852,13 +853,11 @@ def list_questions(
         .filter(Attempt.user_id == current_user.id)
         .group_by(Attempt.question_id)
         .all()
-    ) if questions else {}
+    } if questions else {}
 
     items = []
     for q in questions:
-        stats = attempt_stats.get(q.id)
-        attempts = stats[1] if stats else 0
-        correct = stats[2] if stats else 0
+        attempts, correct = attempt_stats.get(q.id, (0, 0))
         kp = kps.get(q.knowledge_point_id)
         items.append(QuestionListItem(
             id=q.id,

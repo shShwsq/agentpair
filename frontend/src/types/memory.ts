@@ -20,6 +20,8 @@ export interface UserPreferenceOut {
   user_profile: string
   /** agent 策略配置(检查点评估频率、打断权限等),null=未配置(用系统默认) */
   agent_policy: SaveAgentPolicyRequest | null
+  /** 任务完成后是否自动生成练习题 draft(默认开;产出仍需预览确认) */
+  auto_generate_practice: boolean
   /** 最后更新时间(ISO 字符串,未配置时为 null) */
   updated_at: string | null
 }
@@ -27,6 +29,11 @@ export interface UserPreferenceOut {
 /** 保存 User Profile 请求(PUT /memory/preferences body) */
 export interface SaveUserPreferenceRequest {
   user_profile: string
+}
+
+/** 保存练习设置请求(PUT /memory/preferences/practice body) */
+export interface SavePracticeSettingsRequest {
+  auto_generate_practice: boolean
 }
 
 /**

@@ -2,13 +2,18 @@
 /**
  * 练习题生成预览对话框(TaskDetailView「生成练习题」入口)
  *
- * 打开时调 POST /practice/generate 逐条 finding 出题(秒级~分钟级);
- * 生成的候选题(draft)逐题预览(题干/代码片段/选项/答案/解析),
+ * 打开时先查该任务已有的待确认 draft(含任务完成后自动生成的):
+ * 有 → 直接进预览勾选;无 → 才发起异步生成(轮询进度)。
  * 用户勾选保留后确认入库(转 active),未勾选的一并丢弃。
  */
 import { computed, reactive, ref, watch } from 'vue'
 
-import { confirmQuestions, generateQuestions } from '@/api/practice'
+import {
+  confirmQuestions,
+  generateQuestions,
+  getGenerateJob,
+  listDrafts,
+} from '@/api/practice'
 import { extractErrorMessage } from '@/utils/error'
 import type { DraftQuestion } from '@/types/practice'
 
@@ -29,10 +34,17 @@ const phase = ref<Phase>('generating')
 const errorMsg = ref('')
 const drafts = ref<DraftQuestion[]>([])
 const skippedFindings = ref(0)
+/** draft 来自之前的(自动)生成而非本次出题 */
+const fromExisting = ref(false)
+/** 异步出题进度(已处理/总 finding 数) */
+const genDone = ref(0)
+const genTotal = ref(0)
 /** 勾选保留的题 id */
 const selected = reactive<Set<string>>(new Set())
 /** 确认结果(done 阶段展示) */
 const confirmedCount = ref(0)
+/** 轮询令牌:关闭对话框后中止未完成的轮询 */
+let pollToken = 0
 
 function resetState(): void {
   phase.value = 'generating'
@@ -41,32 +53,89 @@ function resetState(): void {
   selected.clear()
   skippedFindings.value = 0
   confirmedCount.value = 0
+  fromExisting.value = false
+  genDone.value = 0
+  genTotal.value = 0
 }
 
-async function generate(): Promise<void> {
+function enterPreview(questions: DraftQuestion[]): void {
+  drafts.value = questions
+  selected.clear()
+  // 默认全部保留
+  for (const q of questions) selected.add(q.id)
+  phase.value = 'preview'
+}
+
+/** 打开入口:先查已有 draft,没有才发起生成 */
+async function loadDraftsOrGenerate(): Promise<void> {
   phase.value = 'generating'
   errorMsg.value = ''
   try {
-    const res = await generateQuestions({ task_id: props.taskId })
-    drafts.value = res.questions
-    skippedFindings.value = res.skipped_findings
-    // 默认全部保留
-    selected.clear()
-    for (const q of res.questions) selected.add(q.id)
-    phase.value = 'preview'
+    const existing = await listDrafts(props.taskId)
+    if (existing.length > 0) {
+      fromExisting.value = true
+      enterPreview(existing)
+      return
+    }
+    await generate()
   } catch (err) {
     errorMsg.value = extractErrorMessage(err)
     phase.value = 'error'
   }
 }
 
-// open 变 true 时重新生成;关闭不做请求(未确认的 draft 保留,下次打开重新生成会因去重而减少)
+/** 发起异步出题并轮询进度 */
+async function generate(): Promise<void> {
+  phase.value = 'generating'
+  errorMsg.value = ''
+  fromExisting.value = false
+  genDone.value = 0
+  genTotal.value = 0
+  const token = ++pollToken
+  try {
+    const { job_id: jobId } = await generateQuestions({ task_id: props.taskId })
+    // 轮询直到 done/error;对话框关闭(token 失效)则中止
+    for (;;) {
+      if (token !== pollToken) return
+      await new Promise((r) => setTimeout(r, 1500))
+      if (token !== pollToken) return
+      const job = await getGenerateJob(jobId)
+      if (token !== pollToken) return
+      genDone.value = job.done
+      genTotal.value = job.total
+      if (job.status === 'error') {
+        errorMsg.value = job.error || '出题失败'
+        phase.value = 'error'
+        return
+      }
+      if (job.status === 'done') {
+        skippedFindings.value = job.skipped_findings
+        if (job.questions.length === 0) {
+          errorMsg.value = '未能生成任何题目(发现内容可能不适合出题或已全部去重)'
+          phase.value = 'error'
+          return
+        }
+        enterPreview(job.questions)
+        return
+      }
+    }
+  } catch (err) {
+    if (token !== pollToken) return
+    errorMsg.value = extractErrorMessage(err)
+    phase.value = 'error'
+  }
+}
+
+// open 变 true 时加载;关闭时中止轮询(未确认的 draft 保留,下次打开直接进预览)
 watch(
   () => props.open,
   (isOpen) => {
-    if (!isOpen) return
-    resetState()
-    generate()
+    if (isOpen) {
+      resetState()
+      loadDraftsOrGenerate()
+    } else {
+      pollToken++  // 使进行中的轮询失效
+    }
   },
   { immediate: true },
 )
@@ -132,10 +201,13 @@ function formatDifficulty(d: number): string {
           </header>
 
           <div class="dialog-body">
-            <!-- 生成中 -->
+            <!-- 生成中(异步出题,展示进度) -->
             <div v-if="phase === 'generating'" class="phase-block">
               <span class="status-spinner" />
-              <p>正在基于审计发现出题,通常需要 1 分钟以内,请稍候...</p>
+              <p>
+                正在基于审计发现出题<template v-if="genTotal > 0">(已处理 {{ genDone }} / {{ genTotal }} 条发现)</template>,
+                通常需要 1 分钟以内,请稍候...
+              </p>
             </div>
 
             <!-- 失败 -->
@@ -160,7 +232,7 @@ function formatDifficulty(d: number): string {
                   全选
                 </label>
                 <span class="preview-count">
-                  共 {{ drafts.length }} 题<template v-if="skippedFindings > 0"> · {{ skippedFindings }} 条发现未能出题</template>
+                  共 {{ drafts.length }} 题<template v-if="skippedFindings > 0"> · {{ skippedFindings }} 条发现未能出题</template><template v-if="fromExisting"> · 来自之前的生成</template>
                 </span>
                 <p v-if="errorMsg" class="error-text">{{ errorMsg }}</p>
               </div>

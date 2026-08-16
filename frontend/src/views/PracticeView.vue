@@ -14,6 +14,8 @@
 import { computed, onMounted, ref } from 'vue'
 
 import AppHeader from '@/components/AppHeader.vue'
+import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
+import WorkspaceToggleButton from '@/components/WorkspaceToggleButton.vue'
 import {
   archiveQuestion,
   getPracticeStats,
@@ -28,6 +30,16 @@ import type {
   SessionQuestion,
   SubmitAnswerResponse,
 } from '@/types/practice'
+
+// ============================================================
+// 历史任务侧栏(与首页/其他视图一致的折叠模式)
+// ============================================================
+/** 历史任务侧栏是否折叠(默认折叠) */
+const workspaceCollapsed = ref(true)
+
+function toggleWorkspace(): void {
+  workspaceCollapsed.value = !workspaceCollapsed.value
+}
 
 // ============================================================
 // Toast(与其他视图一致的本地实现)
@@ -252,9 +264,21 @@ onMounted(() => {
 
 <template>
   <div class="page">
-    <AppHeader />
+    <AppHeader>
+      <template #leading>
+        <WorkspaceToggleButton
+          :collapsed="workspaceCollapsed"
+          expand-title="展开历史任务"
+          collapse-title="折叠历史任务"
+          @toggle="toggleWorkspace"
+        />
+      </template>
+    </AppHeader>
 
-    <main class="main">
+    <div class="page-body">
+      <WorkspaceSidebar v-if="!workspaceCollapsed" />
+
+      <main class="main">
       <!-- ============ 答题会话 ============ -->
       <template v-if="mode === 'session' && currentQuestion">
         <div class="session-bar">
@@ -518,7 +542,8 @@ onMounted(() => {
           </section>
         </template>
       </template>
-    </main>
+      </main>
+    </div>
 
     <!-- ============ 浮动提示 ============ -->
     <Teleport to="body">
@@ -545,10 +570,18 @@ onMounted(() => {
   background: var(--color-bg);
 }
 
+.page-body {
+  flex: 1;
+  display: flex;
+  align-items: stretch;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .main {
   flex: 1;
   min-height: 0;
-  width: 100%;
+  min-width: 0;
   max-width: 860px;
   margin: 0 auto;
   overflow-y: auto;

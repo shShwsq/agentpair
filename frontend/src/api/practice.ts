@@ -6,26 +6,44 @@
  */
 import client from './client'
 import type {
+  ActivateQuestionsRequest,
+  ActivateQuestionsResponse,
   ConfirmQuestionsRequest,
   ConfirmQuestionsResponse,
+  DraftQuestion,
+  GenerateJobResponse,
+  GenerateJobStatus,
   GenerateRequest,
-  GenerateResponse,
   PracticeStats,
+  PracticeSummary,
   QuestionListItem,
+  SessionDetail,
+  SessionListItem,
   StartSessionRequest,
   StartSessionResponse,
   SubmitAnswerRequest,
   SubmitAnswerResponse,
+  TrendResponse,
 } from '@/types/practice'
 
 /**
- * 从审计任务生成候选题(draft)
+ * 从审计任务生成候选题(draft,异步)
  *
- * 逐条 finding 调 LLM 出题,耗时较长(秒级~分钟级),放宽超时。
+ * 立即返回 job_id,轮询 getGenerateJob 拿进度与结果。
  */
-export function generateQuestions(req: GenerateRequest): Promise<GenerateResponse> {
+export function generateQuestions(req: GenerateRequest): Promise<GenerateJobResponse> {
+  return client.post('/practice/generate', req).then((r) => r.data)
+}
+
+/** 轮询出题进度与结果 */
+export function getGenerateJob(jobId: string): Promise<GenerateJobStatus> {
+  return client.get(`/practice/generate/${jobId}`).then((r) => r.data)
+}
+
+/** 待确认候选题完整内容(可按来源任务过滤) */
+export function listDrafts(taskId?: string): Promise<DraftQuestion[]> {
   return client
-    .post('/practice/generate', req, { timeout: 300_000 })
+    .get('/practice/drafts', { params: taskId ? { task_id: taskId } : {} })
     .then((r) => r.data)
 }
 
@@ -34,6 +52,13 @@ export function confirmQuestions(
   req: ConfirmQuestionsRequest,
 ): Promise<ConfirmQuestionsResponse> {
   return client.post('/practice/questions/confirm', req).then((r) => r.data)
+}
+
+/** 只转正指定 draft(不影响其余 draft) */
+export function activateQuestions(
+  req: ActivateQuestionsRequest,
+): Promise<ActivateQuestionsResponse> {
+  return client.post('/practice/questions/activate', req).then((r) => r.data)
 }
 
 /** 按需即时组卷(答案不下发) */
@@ -54,12 +79,33 @@ export function getPracticeStats(): Promise<PracticeStats> {
   return client.get('/practice/stats').then((r) => r.data)
 }
 
-/** 题库列表(可按状态 / 知识点筛选) */
+/** 题库列表(可按状态 / 知识点筛选;mistake=true 只返回答错过的 active 题) */
 export function listQuestions(params?: {
   status?: string
   knowledge_point?: string
+  mistake?: boolean
 }): Promise<QuestionListItem[]> {
   return client.get('/practice/questions', { params }).then((r) => r.data)
+}
+
+/** 轻量汇总(导航徽章用):到期复习数 + 待确认 draft 数 */
+export function getPracticeSummary(): Promise<PracticeSummary> {
+  return client.get('/practice/summary').then((r) => r.data)
+}
+
+/** 按周聚合的学习趋势(默认最近 8 周) */
+export function getPracticeTrend(weeks = 8): Promise<TrendResponse> {
+  return client.get('/practice/trend', { params: { weeks } }).then((r) => r.data)
+}
+
+/** 历史练习会话列表(新到旧) */
+export function listPracticeSessions(limit = 20): Promise<SessionListItem[]> {
+  return client.get('/practice/sessions', { params: { limit } }).then((r) => r.data)
+}
+
+/** 会话逐题作答明细 */
+export function getSessionDetail(sessionId: string): Promise<SessionDetail> {
+  return client.get(`/practice/sessions/${sessionId}`).then((r) => r.data)
 }
 
 /** 归档题目(不再参与组卷) */
