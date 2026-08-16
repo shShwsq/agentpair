@@ -3149,17 +3149,6 @@ function toggleResult(id: string): void {
 
         <!-- 任务详情(扁平化,无卡片外框):状态徽标与下载/打印按钮已移至标题行,用户意图卡片已移除 -->
         <section class="overview-section">
-          <!-- 出题进度跳转:本任务关联的出题 job(手动/自动)运行中时,跳去练习页看实时进度 -->
-          <button
-            v-if="runningGenJob && !practiceDialogOpen"
-            class="gen-progress-entry"
-            title="跳转到自适应练习查看出题进度"
-            @click="goToPracticeProgress"
-          >
-            <span class="gen-pulse-dot" aria-hidden="true" />
-            正在出题<template v-if="runningGenJob.total">({{ runningGenJob.done }}/{{ runningGenJob.total }})</template>
-            · 查看进度
-          </button>
           <dl class="overview-meta">
             <div>
               <dt>场景</dt>
@@ -3240,8 +3229,19 @@ function toggleResult(id: string): void {
         >
           <h2>
             结果清单 <span class="count">({{ task.results.length }})</span>
+            <!-- 本任务的出题 job 运行中时,隐藏「生成练习题」入口,改为展示跳转练习页看实时进度 -->
             <button
-              v-if="task.status === 'completed' && practiceEnabled"
+              v-if="runningGenJob"
+              class="gen-progress-entry"
+              title="跳转到自适应练习查看出题进度"
+              @click="goToPracticeProgress"
+            >
+              <span class="gen-pulse-dot" aria-hidden="true" />
+              正在出题<template v-if="runningGenJob.total">({{ runningGenJob.done }}/{{ runningGenJob.total }})</template>
+              · 查看进度
+            </button>
+            <button
+              v-else-if="task.status === 'completed' && practiceEnabled"
               class="practice-generate-btn"
               :title="pendingDraftCount > 0 ? '存在待确认的候选题,点击预览入库' : '把审计发现改编为自适应练习题'"
               @click="openPracticeGenerate"
@@ -3609,13 +3609,13 @@ function toggleResult(id: string): void {
   padding: var(--space-2) 0;
 }
 
-/* 出题进度跳转入口(风格对齐练习页 gen-toggle-btn;呼吸红点提示运行中) */
+/* 出题进度跳转入口(位于结果清单标题行,与「生成练习题」按钮互斥;呼吸红点提示运行中) */
 .gen-progress-entry {
   position: relative;
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
-  margin-bottom: var(--space-3);
+  margin-left: auto;
   padding: var(--space-1) var(--space-3);
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
