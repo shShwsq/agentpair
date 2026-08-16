@@ -14,6 +14,18 @@ import DOMPurify from 'dompurify'
 
 // 以 raw 字符串形式导入 help.md(vite ?raw 后缀,构建期 inline)
 import helpMarkdown from '@/data/help.md?raw'
+import { ensureFeaturesLoaded, practiceEnabled } from '@/composables/useFeatures'
+
+/**
+ * 练习专属章节的包裹注释标记(help.md 中成对出现,练习功能关闭时整段移除)。
+ * 在 marked 解析前裁剪,注释不会进入渲染结果。
+ */
+const PRACTICE_SECTION_RE = /<!--\s*practice-section-start\s*-->[\s\S]*?<!--\s*practice-section-end\s*-->/g
+
+/** 按练习功能开关裁剪后的 Markdown(关闭部署移除全部练习专属章节) */
+const effectiveMarkdown = computed(() =>
+  practiceEnabled.value ? helpMarkdown : helpMarkdown.replace(PRACTICE_SECTION_RE, ''),
+)
 
 const props = defineProps<{
   /** 是否显示弹窗 */
@@ -28,12 +40,12 @@ const emit = defineEmits<{
 /** 缓存渲染后的 HTML(避免每次 open 都重新解析) */
 const renderedHtml = ref('')
 
-// 组件加载时渲染一次(帮助文档是静态内容,不会动态变化)
+// 内容或练习开关变化时重新渲染(开关异步拉取,变化后自动重渲染)
 watch(
-  () => helpMarkdown,
-  () => {
+  () => effectiveMarkdown.value,
+  (md) => {
     // marked.parse 在 async:false 下同步返回 string
-    const raw = marked.parse(helpMarkdown, { async: false }) as string
+    const raw = marked.parse(md, { async: false }) as string
     renderedHtml.value = DOMPurify.sanitize(raw)
   },
   { immediate: true },
@@ -41,7 +53,7 @@ watch(
 
 /** 弹窗标题(从 Markdown 第一行 h1 提取,作为 header 显示) */
 const title = computed(() => {
-  const match = helpMarkdown.match(/^#\s+(.+)$/m)
+  const match = effectiveMarkdown.value.match(/^#\s+(.+)$/m)
   return match?.[1] ?? '帮助文档'
 })
 
@@ -57,6 +69,8 @@ watch(
   () => props.open,
   (isOpen) => {
     if (isOpen) {
+      // 帮助文案按练习功能开关区分,打开前先确保开关已拉取(避免短暂显示默认开启版)
+      void ensureFeaturesLoaded()
       window.addEventListener('keydown', handleKeydown)
       document.body.style.overflow = 'hidden'
     } else {
