@@ -8,6 +8,9 @@
  * - 会话:逐题作答(单选/判断),提交后即时判分 + 解析 + 知识点掌握度反馈;
  *   结束时显示本局统计
  *
+ * 历史练习会话与学习趋势拆到独立路由页(/practice/history,见 PracticeHistoryView),
+ * 首页顶部「历史记录」按钮进入。
+ *
  * 组卷由后端 selector 完成(到期复习 > 薄弱点 > 难度匹配 > 新题),答案不下发。
  * 题目来源:审计任务详情页「生成练习题」产出并确认入库。
  */
@@ -26,11 +29,8 @@ import {
   activateQuestions,
   archiveQuestion,
   clearPracticeRecords,
-  getSessionDetail,
   getPracticeStats,
-  getPracticeTrend,
   listGenerateJobs,
-  listPracticeSessions,
   listQuestions,
   startSession,
   submitAnswer,
@@ -42,11 +42,8 @@ import type {
   GenerateJobSummary,
   PracticeStats,
   QuestionListItem,
-  SessionDetail,
-  SessionListItem,
   SessionQuestion,
   SubmitAnswerResponse,
-  TrendPoint,
 } from '@/types/practice'
 
 // ============================================================
@@ -352,7 +349,7 @@ async function handleClearPractice(includeQuestions: boolean): Promise<void> {
   settingsError.value = ''
   try {
     await clearPracticeRecords(includeQuestions)
-    // 进行中的会话与明细缓存均已失效,退回首页
+    // 进行中的会话已失效,退回首页
     mode.value = 'home'
     sessionId.value = ''
     sessionQuestions.value = []
@@ -360,7 +357,6 @@ async function handleClearPractice(includeQuestions: boolean): Promise<void> {
     feedback.value = null
     codeSidebarOpen.value = false
     codeTaskOverride.value = null
-    sessionDetails.value = {}
     settingsOpen.value = false
     showToast(
       includeQuestions ? '已清空全部练习数据' : '已清空练习记录',
@@ -369,8 +365,6 @@ async function handleClearPractice(includeQuestions: boolean): Promise<void> {
     loadStats()
     loadQuestionBank()
     loadMistakes()
-    loadSessions()
-    loadTrend()
   } catch (err) {
     settingsError.value = extractErrorMessage(err)
   } finally {
@@ -515,8 +509,6 @@ function backToHome(): void {
   loadStats()
   loadQuestionBank()
   loadMistakes()
-  loadSessions()
-  loadTrend()
 }
 
 /** 本局正确率(summary 页展示) */
@@ -599,105 +591,6 @@ function handleStartMistakeSession(): void {
 }
 
 // ============================================================
-// 历史练习(会话列表 + 逐题明细,折叠区懒加载)
-// ============================================================
-const sessions = ref<SessionListItem[]>([])
-const sessionsLoaded = ref(false)
-const sessionsLoading = ref(false)
-
-async function loadSessions(): Promise<void> {
-  sessionsLoading.value = true
-  try {
-    sessions.value = await listPracticeSessions()
-    sessionsLoaded.value = true
-  } catch {
-    sessions.value = []
-  } finally {
-    sessionsLoading.value = false
-  }
-}
-
-/** 首次展开历史区时拉取列表 */
-function handleSessionsToggle(e: Event): void {
-  if ((e.target as HTMLDetailsElement).open && !sessionsLoaded.value) {
-    loadSessions()
-  }
-}
-
-/** 已展开过的会话明细(session_id → detail) */
-const sessionDetails = ref<Record<string, SessionDetail>>({})
-const sessionDetailLoading = ref<Record<string, boolean>>({})
-
-/** 展开某场会话时按需拉取逐题明细 */
-async function handleSessionDetailToggle(s: SessionListItem, e: Event): Promise<void> {
-  if (!(e.target as HTMLDetailsElement).open) return
-  if (sessionDetails.value[s.id] || sessionDetailLoading.value[s.id]) return
-  sessionDetailLoading.value[s.id] = true
-  try {
-    sessionDetails.value[s.id] = await getSessionDetail(s.id)
-  } catch (err) {
-    showToast(extractErrorMessage(err), 'error')
-  } finally {
-    sessionDetailLoading.value[s.id] = false
-  }
-}
-
-// ============================================================
-// 学习趋势(按周聚合,纯 SVG 迷你折线图)
-// ============================================================
-const trendWeeks = ref<TrendPoint[]>([])
-
-async function loadTrend(): Promise<void> {
-  try {
-    const res = await getPracticeTrend()
-    trendWeeks.value = res.weeks
-  } catch {
-    trendWeeks.value = []
-  }
-}
-
-/** 折线图几何参数(纯 SVG 手绘,不引图表库) */
-const TREND_W = 560
-const TREND_H = 84
-const TREND_PAD_X = 14
-const TREND_PAD_Y = 10
-
-/** 有作答记录的周(无数据周不连线) */
-const trendActive = computed(() => trendWeeks.value.filter((w) => w.attempts > 0))
-
-function trendX(i: number): number {
-  const n = trendActive.value.length
-  if (n <= 1) return TREND_W / 2
-  return TREND_PAD_X + (i * (TREND_W - TREND_PAD_X * 2)) / (n - 1)
-}
-
-function trendY(w: TrendPoint): number {
-  const acc = w.correct / w.attempts
-  return TREND_PAD_Y + (1 - acc) * (TREND_H - TREND_PAD_Y * 2)
-}
-
-const trendPath = computed(() =>
-  trendActive.value
-    .map((w, i) => `${i === 0 ? 'M' : 'L'}${trendX(i).toFixed(1)},${trendY(w).toFixed(1)}`)
-    .join(' '),
-)
-
-/** 60% 正确率参考线 */
-const trendGuideY = TREND_PAD_Y + 0.4 * (TREND_H - TREND_PAD_Y * 2)
-
-function trendTip(w: TrendPoint): string {
-  return `${formatWeekLabel(w.week_start)} · 作答 ${w.attempts} · 正确率 ${formatPercent(
-    w.correct / w.attempts,
-  )}`
-}
-
-function formatWeekLabel(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  return `${d.getMonth() + 1}/${d.getDate()}`
-}
-
-// ============================================================
 // 展示辅助
 // ============================================================
 function formatPercent(v: number | null | undefined, digits = 0): string {
@@ -711,23 +604,6 @@ function formatDate(iso: string | null | undefined): string {
     const d = new Date(iso)
     if (Number.isNaN(d.getTime())) return iso
     return d.toLocaleDateString('zh-CN')
-  } catch {
-    return iso
-  }
-}
-
-/** 日期时间(历史会话列表用,含时分) */
-function formatDateTime(iso: string | null | undefined): string {
-  if (!iso) return '—'
-  try {
-    const d = new Date(iso)
-    if (Number.isNaN(d.getTime())) return iso
-    return d.toLocaleString('zh-CN', {
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    })
   } catch {
     return iso
   }
@@ -749,7 +625,6 @@ onMounted(() => {
   loadStats()
   loadQuestionBank()
   loadMistakes()
-  loadTrend()
   loadPracticeSettings()
   // 出题进度:进页先拉一次,之后每 5 秒轮询发现运行中 job
   pollGenerateJobs()
@@ -953,6 +828,17 @@ onBeforeUnmount(() => {
                 出题进度
                 <span v-if="hasRunningGenJob" class="gen-pulse-dot" aria-hidden="true" />
               </button>
+              <RouterLink
+                class="gen-toggle-btn"
+                title="查看历史练习会话与学习趋势"
+                :to="{ name: 'practice-history' }"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="10" />
+                  <polyline points="12 6 12 12 16 14" />
+                </svg>
+                历史记录
+              </RouterLink>
               <button
                 class="practice-settings-btn"
                 title="练习设置"
@@ -1104,87 +990,6 @@ onBeforeUnmount(() => {
                 >重练</button>
               </div>
             </div>
-          </section>
-
-          <!-- 学习趋势(按周聚合正确率,纯 SVG 迷你折线) -->
-          <section class="panel">
-            <h2>学习趋势(最近 8 周)</h2>
-            <p v-if="trendActive.length === 0" class="panel-empty">
-              暂无作答记录 — 完成练习后这里会按周展示正确率走势
-            </p>
-            <div v-else class="trend-wrap">
-              <svg
-                :viewBox="`0 0 ${TREND_W} ${TREND_H}`"
-                class="trend-svg"
-                preserveAspectRatio="none"
-                role="img"
-                aria-label="每周正确率趋势折线图"
-              >
-                <!-- 60% 正确率参考线 -->
-                <line
-                  :x1="TREND_PAD_X"
-                  :x2="TREND_W - TREND_PAD_X"
-                  :y1="trendGuideY"
-                  :y2="trendGuideY"
-                  class="trend-guide"
-                />
-                <path v-if="trendActive.length > 1" :d="trendPath" class="trend-line" />
-                <circle
-                  v-for="(w, i) in trendActive"
-                  :key="w.week_start"
-                  :cx="trendX(i)"
-                  :cy="trendY(w)"
-                  r="3.5"
-                  class="trend-dot"
-                >
-                  <title>{{ trendTip(w) }}</title>
-                </circle>
-              </svg>
-              <div class="trend-axis">
-                <span v-for="w in trendActive" :key="w.week_start" class="trend-axis-label">
-                  {{ formatWeekLabel(w.week_start) }}
-                </span>
-              </div>
-            </div>
-          </section>
-
-          <!-- 历史练习(折叠区,首次展开懒加载;逐题明细按需拉取) -->
-          <section class="panel panel-collapse">
-            <details class="collapse" @toggle="handleSessionsToggle">
-              <summary class="collapse-summary">历史练习</summary>
-              <div v-if="sessionsLoading" class="placeholder"><span class="status-spinner" /> 加载中...</div>
-              <p v-else-if="sessions.length === 0" class="panel-empty">暂无练习记录</p>
-              <div v-else class="history-list">
-                <details
-                  v-for="s in sessions"
-                  :key="s.id"
-                  class="history-item"
-                  @toggle="(e) => handleSessionDetailToggle(s, e)"
-                >
-                  <summary class="history-summary">
-                    <span class="history-date">{{ formatDateTime(s.started_at) }}</span>
-                    <span>作答 {{ s.answered_count }}/{{ s.question_count }} 题</span>
-                    <span class="history-acc">正确率 {{ formatPercent(s.accuracy) }}</span>
-                  </summary>
-                  <div v-if="sessionDetailLoading[s.id]" class="placeholder">
-                    <span class="status-spinner" /> 加载明细...
-                  </div>
-                  <div v-else-if="sessionDetails[s.id]" class="attempt-list">
-                    <div
-                      v-for="(a, idx) in sessionDetails[s.id].attempts"
-                      :key="idx"
-                      :class="['attempt-row', a.is_correct ? 'attempt-correct' : 'attempt-wrong']"
-                    >
-                      <span class="attempt-mark">{{ a.is_correct ? '✓' : '✗' }}</span>
-                      <span class="attempt-stem">{{ a.stem }}</span>
-                      <span class="attempt-answer">
-                        你选 {{ String.fromCharCode(65 + a.chosen_idx) }} · 正确答案 {{ String.fromCharCode(65 + a.correct_idx) }}
-                      </span>
-                    </div>
-                  </div>
-                </details>
-              </div>
-            </details>
           </section>
 
           <!-- 题库管理 -->
@@ -1384,7 +1189,7 @@ onBeforeUnmount(() => {
   background: var(--color-primary-light);
 }
 
-/* 页头右侧「出题进度」切换按钮(有运行中 job 时带呼吸小红点) */
+/* 页头右侧「出题进度」切换按钮(有运行中 job 时带呼吸小红点);「历史记录」RouterLink 复用同款样式 */
 .gen-toggle-btn {
   position: relative;
   display: inline-flex;
@@ -1398,6 +1203,7 @@ onBeforeUnmount(() => {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   cursor: pointer;
+  text-decoration: none;
   transition: all var(--transition-fast);
 }
 
@@ -1405,6 +1211,7 @@ onBeforeUnmount(() => {
   color: var(--color-primary);
   border-color: var(--color-primary);
   background: var(--color-primary-light);
+  text-decoration: none;
 }
 
 .gen-toggle-active {
@@ -1719,161 +1526,6 @@ onBeforeUnmount(() => {
 
 .bank-date {
   margin-left: auto;
-}
-
-/* ============ 学习趋势(纯 SVG 折线) ============ */
-.trend-wrap {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.trend-svg {
-  width: 100%;
-  height: 84px;
-  display: block;
-}
-
-.trend-guide {
-  stroke: var(--color-border);
-  stroke-width: 1;
-  stroke-dasharray: 4 4;
-}
-
-.trend-line {
-  fill: none;
-  stroke: var(--color-primary);
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.trend-dot {
-  fill: var(--color-primary);
-}
-
-.trend-axis {
-  display: flex;
-  justify-content: space-between;
-  padding: 0 var(--space-2);
-}
-
-.trend-axis-label {
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-}
-
-/* ============ 历史练习(折叠区) ============ */
-.panel-collapse {
-  padding: 0;
-}
-
-.collapse-summary {
-  padding: var(--space-5);
-  font-size: var(--fs-base);
-  font-weight: var(--fw-semibold);
-  color: var(--color-text);
-  cursor: pointer;
-  list-style: none;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.collapse-summary::-webkit-details-marker {
-  display: none;
-}
-
-.collapse-summary::before {
-  content: '▸';
-  font-size: var(--fs-xs);
-  color: var(--color-text-muted);
-  transition: transform var(--transition-fast);
-}
-
-.collapse[open] > .collapse-summary::before {
-  transform: rotate(90deg);
-}
-
-.collapse > :not(summary) {
-  margin: 0 var(--space-5) var(--space-5);
-}
-
-.history-list {
-  display: flex;
-  flex-direction: column;
-}
-
-.history-item {
-  border-top: 1px solid var(--color-border);
-}
-
-.history-summary {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  padding: var(--space-3) 0;
-  font-size: var(--fs-sm);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  list-style: none;
-}
-
-.history-summary::-webkit-details-marker {
-  display: none;
-}
-
-.history-date {
-  color: var(--color-text);
-  font-weight: var(--fw-medium);
-  white-space: nowrap;
-}
-
-.history-acc {
-  margin-left: auto;
-  font-size: var(--fs-xs);
-}
-
-.attempt-list {
-  display: flex;
-  flex-direction: column;
-  padding-bottom: var(--space-2);
-}
-
-.attempt-row {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-  padding: var(--space-1) 0 var(--space-1) var(--space-4);
-  font-size: var(--fs-xs);
-  color: var(--color-text-secondary);
-}
-
-.attempt-mark {
-  flex-shrink: 0;
-  font-weight: var(--fw-semibold);
-}
-
-.attempt-correct .attempt-mark {
-  color: var(--color-success);
-}
-
-.attempt-wrong .attempt-mark {
-  color: var(--color-danger);
-}
-
-.attempt-stem {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 1;
-  -webkit-box-orient: vertical;
-}
-
-.attempt-answer {
-  flex-shrink: 0;
-  color: var(--color-text-muted);
 }
 
 /* ============ 会话 ============ */

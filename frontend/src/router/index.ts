@@ -78,6 +78,13 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
   },
   {
+    // 练习记录页(历史练习会话 + 学习趋势),从练习页「历史记录」入口进入
+    path: '/practice/history',
+    name: 'practice-history',
+    component: () => import('@/views/PracticeHistoryView.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/login',
     name: 'login',
     component: () => import('@/views/LoginView.vue'),
@@ -147,8 +154,8 @@ router.beforeEach(async (to, from) => {
     }
   }
 
-  // 练习功能开关:后端关闭时直连 /practice 回首页(入口已隐藏,此处兜底)
-  if (to.name === 'practice') {
+  // 练习功能开关:后端关闭时直连 /practice(含记录页)回首页(入口已隐藏,此处兜底)
+  if (to.name === 'practice' || to.name === 'practice-history') {
     await ensureFeaturesLoaded()
     if (!practiceEnabled.value) return { name: 'home' }
   }
