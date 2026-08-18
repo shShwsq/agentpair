@@ -303,6 +303,8 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* 手机地址栏伸缩兜底 */
+  height: 100dvh;
   overflow: hidden;
   background: var(--color-bg);
 }
@@ -600,5 +602,20 @@ onMounted(() => {
 .toast-slide-leave-to {
   opacity: 0;
   transform: translate(-50%, -12px);
+}
+
+/* ---- 响应式:窄屏(手机) ---- */
+@media (max-width: 640px) {
+  .main {
+    padding: var(--space-4) var(--space-3) var(--space-6);
+  }
+
+  .page-head-row {
+    flex-wrap: wrap;
+  }
+
+  .toast-popup {
+    max-width: calc(100vw - var(--space-6));
+  }
 }
 </style>

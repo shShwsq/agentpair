@@ -80,6 +80,8 @@ onMounted(async () => {
   align-items: center;
   justify-content: center;
   min-height: 100vh;
+  /* 手机地址栏伸缩兜底 */
+  min-height: 100dvh;
   background: var(--color-bg);
 }
 

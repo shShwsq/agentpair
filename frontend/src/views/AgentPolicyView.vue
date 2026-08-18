@@ -695,6 +695,8 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* 手机地址栏伸缩兜底 */
+  height: 100dvh;
   overflow: hidden;
   background: var(--color-bg);
 }
@@ -727,6 +729,20 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: var(--space-4);
   margin-bottom: var(--space-5);
+}
+
+/* ---- 响应式:窄屏(手机) ---- */
+@media (max-width: 640px) {
+  .main-col {
+    padding: var(--space-4) var(--space-3) var(--space-6);
+  }
+
+  /* 页头标题与操作按钮上下堆叠 */
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-2);
+  }
 }
 
 .page-header h1 {

@@ -1120,6 +1120,8 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* 手机地址栏伸缩兜底 */
+  height: 100dvh;
   overflow: hidden;
   background: var(--color-bg);
 }
@@ -1992,5 +1994,68 @@ onBeforeUnmount(() => {
 .toast-slide-leave-to {
   opacity: 0;
   transform: translate(-50%, -12px);
+}
+
+/* ---- 响应式:窄屏(手机) ---- */
+@media (max-width: 640px) {
+  .main {
+    padding: var(--space-4) var(--space-3) var(--space-6);
+  }
+
+  /* 页头标题与操作区允许换行 */
+  .page-head-row {
+    flex-wrap: wrap;
+  }
+
+  /* 统计卡 4→2 列 */
+  .stat-cards {
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-2);
+  }
+
+  /* 薄弱点行:四列 grid 改为上下两行(名称+统计 / 进度条独占) */
+  .weak-item {
+    grid-template-columns: 1fr auto;
+    gap: var(--space-2);
+  }
+
+  .weak-bar-wrap {
+    grid-column: 1 / -1;
+  }
+
+  .weak-key {
+    display: none; /* 窄屏隐藏 mono 键名,避免挤压 */
+  }
+
+  /* 会话顶栏允许换行 */
+  .session-bar {
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .question-card,
+  .summary-card {
+    padding: var(--space-4) var(--space-3);
+  }
+
+  /* 题目标签行允许换行(源码路径标签较长) */
+  .question-tags {
+    flex-wrap: wrap;
+  }
+
+  .tag-source {
+    max-width: 100%;
+  }
+
+  /* 本局统计 4→2 列 */
+  .summary-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-2);
+  }
+
+  /* toast 不超出视口 */
+  .toast-popup {
+    max-width: calc(100vw - var(--space-6));
+  }
 }
 </style>

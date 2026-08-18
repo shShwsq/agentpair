@@ -3498,6 +3498,8 @@ function toggleResult(id: string): void {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* 手机地址栏伸缩兜底 */
+  height: 100dvh;
   overflow: hidden;
   background: var(--color-bg);
 }
@@ -3638,6 +3640,17 @@ function toggleResult(id: string): void {
     z-index: 20;
     width: min(420px, 85vw);
     box-shadow: var(--shadow-xl);
+  }
+}
+
+/* ---- 手机档:抽屉更宽、主区滚动内边距收紧 ---- */
+@media (max-width: 640px) {
+  .detail-sidebar {
+    width: min(420px, 92vw);
+  }
+
+  .main-scroll {
+    padding: var(--space-4) var(--space-3) var(--space-8);
   }
 }
 

@@ -456,4 +456,63 @@ function handleCloseHelp(): void {
   border-radius: var(--radius-full);
   pointer-events: none;
 }
+
+/* ---- 响应式:中等宽度先隐藏邮箱腾出空间 ---- */
+@media (max-width: 1280px) {
+  .user-email {
+    display: none;
+  }
+
+  .user-area {
+    gap: var(--space-2);
+  }
+}
+
+/* ---- 响应式:窄屏/手机两行布局 ----
+   第一行:侧栏开关 + 品牌 + 右侧按钮区;
+   第二行:导航整行横向滚动(项多不截断,滑动可达)。 */
+@media (max-width: 1080px) {
+  .header-inner {
+    flex-wrap: wrap;
+    row-gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+  }
+
+  /* 允许品牌与导航换行:导航 flex-basis:100% 强制独占第二行 */
+  .header-left {
+    flex: 1 1 auto;
+    min-width: 0;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-4);
+  }
+
+  .nav {
+    flex: 1 0 100%;
+    overflow-x: auto;
+    /* 隐藏滚动条但保留滑动能力(触屏上直接手指滑动) */
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+
+  .nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  :deep(.nav a) {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  /* 触屏目标增大:图标按钮 32→36px */
+  .btn-settings,
+  .btn-help,
+  .btn-theme {
+    width: 36px;
+    height: 36px;
+  }
+
+  .btn-logout {
+    padding: var(--space-2) var(--space-3);
+  }
+}
 </style>

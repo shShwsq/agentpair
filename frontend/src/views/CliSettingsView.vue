@@ -391,6 +391,8 @@ async function handleTest(type: string): Promise<void> {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* 手机地址栏伸缩兜底 */
+  height: 100dvh;
   overflow: hidden;
   background: var(--color-bg);
 }
@@ -480,6 +482,33 @@ async function handleTest(type: string): Promise<void> {
 .page-header h1 {
   font-size: var(--fs-xl);
   margin: 0;
+}
+
+/* ---- 响应式:窄屏(手机) ---- */
+@media (max-width: 640px) {
+  .main-inner {
+    padding: var(--space-4) var(--space-3) 0;
+  }
+
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-2);
+  }
+
+  /* 选项卡项多时横向滑动,不挤压换行 */
+  .tab-bar {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .tab-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .panels-col {
+    padding: 0 var(--space-3) var(--space-6);
+  }
 }
 
 /* ---- 选项卡栏(固定,不随内容滚动) ---- */

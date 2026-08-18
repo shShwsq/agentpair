@@ -97,6 +97,8 @@ function toggleWorkspace(): void {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* 手机浏览器地址栏伸缩:用 dvh 保证底部不被遮挡(vh 兜底旧浏览器) */
+  height: 100dvh;
   overflow: hidden;
   background: var(--color-bg);
 }
@@ -194,5 +196,29 @@ function toggleWorkspace(): void {
   font-size: var(--fs-sm);
   color: var(--color-text-secondary);
   line-height: var(--lh-relaxed);
+}
+
+/* ---- 响应式:窄屏(手机) ---- */
+@media (max-width: 640px) {
+  .main {
+    padding: var(--space-6) var(--space-3);
+  }
+
+  .welcome-card {
+    padding: var(--space-6) var(--space-4);
+  }
+
+  .welcome-card h1 {
+    font-size: var(--fs-xl);
+  }
+
+  .cta-area {
+    margin: var(--space-6) 0;
+  }
+
+  .feature-grid {
+    margin-top: var(--space-6);
+    gap: var(--space-3);
+  }
 }
 </style>
