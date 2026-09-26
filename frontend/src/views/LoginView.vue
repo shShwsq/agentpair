@@ -291,6 +291,8 @@ function handleOAuth(provider: GitProvider): void {
   align-items: center;
   justify-content: center;
   min-height: 100vh;
+  /* 手机地址栏伸缩兜底 */
+  min-height: 100dvh;
   padding: var(--space-4);
   background: linear-gradient(135deg, #f0f4ff 0%, #f8fafc 50%, #faf5ff 100%);
 }

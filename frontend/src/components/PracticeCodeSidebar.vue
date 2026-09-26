@@ -508,6 +508,19 @@ watch(
   overflow: hidden;
 }
 
+/* 手机窄屏:代码侧栏改为右侧覆盖式抽屉(定位基准为宿主 .page-body) */
+@media (max-width: 640px) {
+  .code-sidebar {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    width: min(420px, 92vw);
+    box-shadow: var(--shadow-xl);
+  }
+}
+
 .cs-head {
   display: flex;
   align-items: center;

@@ -265,4 +265,17 @@ async function handleSend(): Promise<void> {
   margin: 0;
   padding: 0 var(--space-2);
 }
+
+/* 手机档:输入区满宽 + 发送按钮触控目标增大 */
+@media (max-width: 640px) {
+  .msg-input-wrapper {
+    width: 100%;
+    margin-bottom: var(--space-3);
+  }
+
+  .msg-send-btn {
+    width: 40px;
+    height: 40px;
+  }
+}
 </style>

@@ -786,6 +786,8 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* 手机地址栏伸缩兜底 */
+  height: 100dvh;
   overflow: hidden;
   background: var(--color-bg);
 }
@@ -997,6 +999,29 @@ onMounted(() => {
   padding: var(--space-3) var(--space-5);
   border-bottom: 1px solid var(--color-border);
   background: var(--color-surface);
+}
+
+/* ---- 响应式:窄屏(手机) ---- */
+@media (max-width: 640px) {
+  .editor-toolbar {
+    flex-wrap: wrap;
+    padding: var(--space-2) var(--space-3);
+    gap: var(--space-2);
+  }
+
+  .toolbar-right {
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  /* 副标题等宽截断宽度改为相对上限,避免窄屏溢出 */
+  .subtitle.mono {
+    max-width: 100%;
+  }
+
+  .title-input {
+    max-width: 100%;
+  }
 }
 
 /* 模板提示条:当前显示默认模板(未改动)时出现 */

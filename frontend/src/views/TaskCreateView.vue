@@ -1616,6 +1616,8 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* 手机地址栏伸缩兜底 */
+  height: 100dvh;
   overflow: hidden;
   background: var(--color-bg);
 }
@@ -2186,6 +2188,11 @@ onUnmounted(() => {
 }
 
 @media (max-width: 640px) {
+  /* 内容列内边距收紧 */
+  .main-col {
+    padding: var(--space-4) var(--space-3) var(--space-6);
+  }
+
   /* 窄屏每行标签与控件上下排列 */
   .config-row {
     align-items: flex-start;

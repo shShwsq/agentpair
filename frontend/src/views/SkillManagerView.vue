@@ -765,6 +765,8 @@ onMounted(loadSkills)
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* 手机地址栏伸缩兜底 */
+  height: 100dvh;
   overflow: hidden;
   background: var(--color-bg);
 }
@@ -1111,6 +1113,43 @@ onMounted(loadSkills)
   background: var(--color-surface);
   border-left: 1px solid var(--color-border);
   overflow: hidden;
+}
+
+/* ---- 响应式:窄屏 ---- */
+/* 中宽屏:右栏改为覆盖式抽屉(定位基准为 .page-body) */
+@media (max-width: 1024px) {
+  .detail-panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    width: min(700px, 85vw);
+    box-shadow: var(--shadow-xl);
+  }
+}
+
+/* 手机档:抽屉近全屏 + 中栏内边距收紧 + 上传行堆叠 */
+@media (max-width: 640px) {
+  .detail-panel {
+    width: 100vw;
+  }
+
+  .main-col {
+    padding: var(--space-4) var(--space-3) var(--space-6);
+    gap: var(--space-4);
+  }
+
+  .upload-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  /* 列表项删除按钮触控目标增大 */
+  .btn-delete {
+    width: 36px;
+    height: 36px;
+  }
 }
 
 .panel-header {

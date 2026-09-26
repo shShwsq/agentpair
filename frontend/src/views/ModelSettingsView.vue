@@ -644,6 +644,8 @@ function modelLabel(row: TableRow): string {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* 手机地址栏伸缩兜底 */
+  height: 100dvh;
   overflow: hidden;
   background: var(--color-bg);
 }
@@ -700,6 +702,20 @@ function modelLabel(row: TableRow): string {
   justify-content: space-between;
   gap: var(--space-4);
   margin-bottom: var(--space-6);
+}
+
+/* ---- 响应式:窄屏(手机) ---- */
+@media (max-width: 640px) {
+  .main {
+    padding: var(--space-4) var(--space-3) var(--space-8);
+  }
+
+  /* 页头标题与「新增模型」按钮上下堆叠 */
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-2);
+  }
 }
 
 .page-header h1 {

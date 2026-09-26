@@ -26,7 +26,9 @@ body {
   line-height: var(--lh-base);
   color: var(--color-text);
   background-color: var(--color-bg);
+  /* 100vh 兜底 + 100dvh 适配手机浏览器地址栏伸缩后的真实可视高度 */
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 /* ---- 链接 ---- */
@@ -74,6 +76,27 @@ h1, h2, h3, h4, h5, h6 {
 .text-center { text-align: center; }
 .text-secondary { color: var(--color-text-secondary); }
 .text-muted { color: var(--color-text-muted); }
+
+/* 各视图 .page-body 统一作为窄屏覆盖式侧栏的定位基准;
+   单独 position:relative 不产生可见副作用 */
+.page-body {
+  position: relative;
+}
+
+/* ---- 手机基础 ---- */
+@media (max-width: 640px) {
+  /* 触控目标:主按钮统一最小高度(各视图 scoped .btn 未设 min-height,不冲突) */
+  .btn {
+    min-height: 40px;
+  }
+
+  /* iOS 聚焦 font-size<16px 的输入框会自动缩放页面,窄屏下统一抬到 16px */
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
+}
 
 /* ---- 滚动条(无背景 + 圆角,鼠标进入区域时才显示) ---- */
 /* WebKit (Chrome / Edge / Safari) */

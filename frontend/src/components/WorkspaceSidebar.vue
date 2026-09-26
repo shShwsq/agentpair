@@ -1657,6 +1657,20 @@ defineExpose({ openTaskFile })
   overflow: hidden;
 }
 
+/* 手机窄屏:侧栏改为左侧覆盖式抽屉,避免挤压主内容;
+   定位基准为宿主页 .page-body(global.css 统一 position:relative) */
+@media (max-width: 640px) {
+  .workspace-sidebar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 30;
+    width: min(300px, 85vw);
+    box-shadow: var(--shadow-xl);
+  }
+}
+
 .sidebar-header {
   display: flex;
   align-items: center;

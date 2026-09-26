@@ -550,6 +550,8 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* 手机地址栏伸缩兜底 */
+  height: 100dvh;
   overflow: hidden;
   background: var(--color-bg);
 }
@@ -583,6 +585,26 @@ onMounted(() => {
 .page-header h1 {
   font-size: var(--fs-xl);
   margin: 0;
+}
+
+/* ---- 响应式:窄屏(手机) ---- */
+@media (max-width: 640px) {
+  .main {
+    padding: var(--space-4) var(--space-3) var(--space-6);
+  }
+
+  /* 页头标题与操作按钮上下堆叠 */
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-2);
+  }
+
+  /* toast 不超出视口 */
+  .toast-popup {
+    min-width: 0;
+    max-width: calc(100vw - var(--space-6));
+  }
 }
 
 /* ---- 浮动提示弹窗(顶部居中,5s 自动消失) ---- */
